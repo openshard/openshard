@@ -2034,9 +2034,10 @@ def mcp_group() -> None:
 def mcp_serve(repo_path: Path | None) -> None:
     """Start the local read-only OpenShard MCP server over stdio.
 
-    Exposes recent_shards, get_shard, get_receipt, and search_history to any
-    MCP-compatible client (e.g. Claude Code) so it can read this
-    repository's OpenShard run history. Read-only; no config is written.
+    Exposes recent_shards, get_shard, get_receipt, search_history, and
+    relevant_context to any MCP-compatible client (e.g. Claude Code) so it
+    can read this repository's OpenShard run history. Read-only; no config
+    is written.
     Speaks MCP over stdio only -- do not print to stdout once this starts.
     """
     try:
@@ -2046,6 +2047,70 @@ def mcp_serve(repo_path: Path | None) -> None:
 
     click.echo("[openshard] starting MCP server (stdio)...", err=True)
     serve_stdio(repo_path=repo_path)
+
+
+@mcp_group.group("install")
+def mcp_install_group() -> None:
+    """Configure a coding agent to launch the local OpenShard MCP server."""
+
+
+@mcp_install_group.command("claude")
+@click.option(
+    "--repo-path",
+    "repo_path",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository to bind the MCP server to (default: current directory).",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def mcp_install_claude(repo_path: Path | None, as_json: bool) -> None:
+    """Configure Claude Code to launch the local OpenShard MCP server for this repository.
+
+    Uses `claude mcp add` (local scope: private to you, bound to this one
+    repository, never committed to git) so Claude Code can call OpenShard's
+    read-only history tools. Restart Claude Code afterwards if it is already
+    running. Safe to re-run; never creates a duplicate entry.
+    """
+    from openshard.adapters.claude_mcp_install import install_claude_mcp
+
+    result = install_claude_mcp(repo_path=repo_path)
+
+    if as_json:
+        payload = {
+            "status": result.status,
+            "repo_root": str(result.repo_root) if result.repo_root else None,
+            "repo_identity": result.repo_identity,
+            "command": result.command,
+            "message": result.message,
+            "warnings": result.warnings,
+        }
+        click.echo(json.dumps(payload, indent=2))
+        if result.status == "error":
+            raise SystemExit(1)
+        return
+
+    if result.status == "error":
+        raise click.ClickException(result.message)
+
+    from openshard.adapters.claude_mcp_install import MCP_TOOLS
+
+    label = None
+    if result.repo_identity:
+        parts = result.repo_identity.split("/", 1)
+        label = parts[1] if len(parts) == 2 else result.repo_identity
+    elif result.repo_root is not None:
+        label = result.repo_root.name
+
+    click.echo("OpenShard MCP installed for Claude Code.")
+    if result.status == "already_installed":
+        click.echo("(already configured; no changes made)")
+    elif result.status == "updated":
+        click.echo("(updated existing configuration for this repository)")
+    click.echo(f"Repository: {label}")
+    click.echo(f"Tools: {', '.join(MCP_TOOLS)}")
+    for w in result.warnings:
+        click.echo(f"  ! {w}")
+    click.echo("\nRestart Claude Code if it is already running.")
 
 
 @cli.group("reflect")
