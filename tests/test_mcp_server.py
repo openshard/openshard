@@ -96,7 +96,9 @@ class TestToolRegistration:
     def test_exposes_exactly_the_expected_tools(self, server):
         tools = asyncio.run(server.list_tools())
         names = {t.name for t in tools}
-        assert names == {"recent_shards", "get_shard", "get_receipt", "search_history"}
+        assert names == {
+            "recent_shards", "get_shard", "get_receipt", "search_history", "relevant_context",
+        }
 
     def test_each_tool_has_a_description(self, server):
         tools = asyncio.run(server.list_tools())
