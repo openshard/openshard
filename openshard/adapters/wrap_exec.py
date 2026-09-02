@@ -152,6 +152,9 @@ def build_wrap_entry(
     pre_state: dict[str, Any],
     exit_code: int,
     repo_path: Path,
+    shard_id: str | None = None,
+    attempt_number: int = 1,
+    run_index: int | None = None,
 ) -> dict:
     """Build a coerced Shard entry for a wrapped Claude Code subprocess run.
 
@@ -159,6 +162,13 @@ def build_wrap_entry(
     approval.  All free text is scrubbed before use.  The returned dict
     has already passed through ``coerce_shard_entry`` (blocked fields
     stripped, content_hash stamped).
+
+    ``shard_id``, when given, must already be a validated, existing Shard
+    id (see ``openshard.history.run_attempt.resolve_shard_for_attempt`` —
+    validation is the caller's responsibility so this function keeps its
+    never-raises contract); the entry is then stamped as another attempt
+    on that Shard. When omitted, a fresh shard_id is minted from this
+    entry's own timestamp and ``run_index`` — a new Shard, attempt 1.
     """
     from openshard.history.shard_schema import SHARD_SCHEMA_VERSION, coerce_shard_entry
 
@@ -205,6 +215,14 @@ def build_wrap_entry(
 
     if metadata:
         entry["metadata"] = metadata
+
+    entry["run_id"] = entry["timestamp"]
+    if shard_id:
+        entry["shard_id"] = shard_id
+    else:
+        from openshard.history.shard_contract import _make_shard_id
+        entry["shard_id"] = _make_shard_id(entry["timestamp"], run_index)
+    entry["attempt_number"] = attempt_number
 
     return coerce_shard_entry(entry)
 

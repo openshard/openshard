@@ -301,10 +301,14 @@ def _log_run(
     provider_enforcement_result=None,
     routable_pool=None,
     model_policy_summary: dict | None = None,
+    shard_id: str | None = None,
+    attempt_number: int = 1,
 ) -> None:
+    _timestamp_val = run_id if run_id else datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
     entry: dict = {
         "schema_version": SHARD_SCHEMA_VERSION,
-        "timestamp": run_id if run_id else datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
+        "timestamp": _timestamp_val,
+        "run_id": _timestamp_val,
         "task": task,
         "execution_model": model or generator.model,
         "retry_triggered": retry_triggered,
@@ -531,8 +535,12 @@ def _log_run(
         _tl.append(make_timeline_event("receipt_saved", "Saved Shard receipt", kind="receipt").to_dict())
         entry["run_timeline"] = _tl
 
-    from openshard.history.shard_contract import _make_shard_id as _msi
-    entry["shard_id"] = _msi(entry["timestamp"], run_index)
+    if shard_id:
+        entry["shard_id"] = shard_id
+    else:
+        from openshard.history.shard_contract import _make_shard_id as _msi
+        entry["shard_id"] = _msi(entry["timestamp"], run_index)
+    entry["attempt_number"] = attempt_number
 
     # Record model policy summary when policy was active this run.
     if model_policy_summary is not None:

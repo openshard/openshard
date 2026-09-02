@@ -11,8 +11,8 @@ _LOG_PATH = Path(".openshard") / "runs.jsonl"
 ALL_PROFILES = ("native_light", "native_deep", "native_swarm")
 
 
-def load_runs() -> list[dict]:
-    log_path = Path.cwd() / _LOG_PATH
+def load_runs(repo_path: Path | None = None) -> list[dict]:
+    log_path = (repo_path or Path.cwd()) / _LOG_PATH
     if not log_path.exists():
         return []
     runs: list[dict] = []
