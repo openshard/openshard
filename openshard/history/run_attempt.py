@@ -45,10 +45,12 @@ def build_run_attempt(entry: dict, shard: Shard) -> RunAttempt:
     Reuses the Shard already built for this entry (via ``build_shard``) so
     agent/origin/capture_depth stay in sync between the two.
     """
+    raw_attempt_number = entry.get("attempt_number")
+    attempt_number = raw_attempt_number if isinstance(raw_attempt_number, int) else 1
     return RunAttempt(
         run_id=entry.get("run_id") or entry.get("timestamp") or "",
         shard_id=shard.shard_id,
-        attempt_number=entry.get("attempt_number") if isinstance(entry.get("attempt_number"), int) else 1,
+        attempt_number=attempt_number,
         created_at=shard.created_at,
         retry_triggered=bool(entry.get("retry_triggered")),
         agent=shard.agent,
