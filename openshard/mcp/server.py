@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Any
 
 from openshard.history import query as history_query
-from openshard.history.query import SearchHit, UnknownRunError, UnknownShardError
+from openshard.history.query import (
+    DEFAULT_CONTEXT_LIMIT,
+    RelevantAttempt,
+    RelevantMatch,
+    SearchHit,
+    UnknownRunError,
+    UnknownShardError,
+)
 from openshard.history.shard import Shard
 from openshard.history.shard_contract import ShardFinding, ShardReceipt
 
@@ -33,6 +40,9 @@ SERVER_INSTRUCTIONS = (
     "Read-only access to this repository's local OpenShard engineering history "
     "(.openshard/runs.jsonl). Use recent_shards or search_history to find past "
     "tasks (Shards), then get_shard / get_receipt for details on one of them. "
+    "Before starting a new coding task, call relevant_context(task) to get a "
+    "compact, ranked summary of prior Shards likely to help — including past "
+    "failures, retries, and verification results for similar work. "
     "Repository filtering is best-effort: older or externally-observed entries "
     "may not carry a stable repository identity."
 )
@@ -153,6 +163,41 @@ def _receipt_dict(receipt: ShardReceipt) -> dict[str, Any]:
     }
 
 
+def _relevant_attempt_dict(attempt: RelevantAttempt) -> dict[str, Any]:
+    return {
+        "run_id": attempt.run_id,
+        "attempt_number": attempt.attempt_number,
+        "status": attempt.status,
+        "verification_status": attempt.verification_status or None,
+        "verification_reason": _truncate(attempt.verification_reason) or None,
+    }
+
+
+def _relevant_match_dict(match: RelevantMatch) -> dict[str, Any]:
+    """Canonical RelevantMatch -> bounded, privacy-safe dict.
+
+    Same privacy boundary as ``_receipt_dict``: no raw prompts/transcripts/
+    diffs/stdout/stderr/absolute paths. Additionally excludes every
+    Note-severity finding (see ``history.query`` module docstring) — only
+    Critical/High/Medium/Low findings, which come from actual review/
+    verification results rather than free-form agent notes, are included.
+    """
+    d = _shard_dict(match.shard)
+    d.update({
+        "score": match.score,
+        "why_relevant": list(match.signals),
+        "status": match.status,
+        "verification_status": match.verification_status or None,
+        "verification_reason": _truncate(match.verification_reason) or None,
+        "result": _truncate(match.result),
+        "repo": match.repo,
+        "files": list(match.files[:MAX_FILES]),
+        "findings": [_finding_dict(f) for f in match.findings[:MAX_FINDINGS]],
+        "attempts": [_relevant_attempt_dict(a) for a in match.attempts],
+    })
+    return d
+
+
 def build_server(*, repo_path: Path | None = None) -> FastMCP:
     """Build the OpenShard MCP server, scoped to one repository's history.
 
@@ -225,6 +270,31 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
             query, limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
         )
         return [_search_hit_dict(h) for h in hits]
+
+    @mcp.tool()
+    def relevant_context(
+        task: str, limit: int = DEFAULT_CONTEXT_LIMIT, repo: str | None = None
+    ) -> dict[str, Any]:
+        """Get compact, deterministic OpenShard context relevant to a coding
+        task before starting it: ranked prior Shards whose task text, shard
+        id, or agent overlaps ``task``, each with its status, verification
+        result, non-Note findings, changed files, and — for retried Shards —
+        a per-attempt history (e.g. attempt 1 failed, attempt 2 passed).
+        Ranking is local keyword-overlap scoring only (no embeddings or model
+        calls); a recorded verification failure or multiple attempts add a
+        small bonus but never pull in an unrelated Shard on their own.
+        Returns ``matches`` (bounded, structured) and ``context_text`` (a
+        compact block suitable for pasting into another agent's context) —
+        both honestly empty/explanatory when no prior Shard is relevant.
+        ``repo`` optionally filters by repository identity."""
+        ctx = history_query.relevant_context(
+            task, limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
+        )
+        return {
+            "task": ctx.task,
+            "matches": [_relevant_match_dict(m) for m in ctx.matches],
+            "context_text": ctx.context_text,
+        }
 
     return mcp
 
