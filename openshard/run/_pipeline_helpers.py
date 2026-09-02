@@ -268,6 +268,148 @@ def _populate_execution_span_metadata(extra_metadata: dict | None) -> None:
         pass
 
 
+def _build_native_events(
+    entry: dict,
+    files: list[ChangedFile],
+    verification_attempted: bool,
+    verification_passed: bool | None,
+    retry_triggered: bool,
+) -> list[dict]:
+    """Build this native (OSN) run's canonical Events at observation time (Migration 6).
+
+    Mirrors ``wrap_exec._build_wrap_events`` in shape and never-raises
+    contract, but the native run pipeline genuinely controls execution --
+    it dispatches its own tools, applies its own sandbox diff, and runs its
+    own verification commands -- so every event here legitimately uses
+    EVIDENCE_DIRECTLY_OBSERVED rather than the agent_reported/git_observed
+    evidence the external-observer adapters are limited to. Never raises;
+    returns [] on any internal failure.
+    """
+    try:
+        from openshard.history.event import (
+            EVENT_FILE_CHANGED,
+            EVENT_RETRY_STARTED,
+            EVENT_RUN_COMPLETED,
+            EVENT_RUN_FAILED,
+            EVENT_RUN_STARTED,
+            EVENT_TOOL_INVOKED,
+            EVENT_VERIFICATION_FAILED,
+            EVENT_VERIFICATION_PASSED,
+            EVENT_VERIFICATION_SKIPPED,
+            EVENT_VERIFICATION_STARTED,
+            EVIDENCE_DIRECTLY_OBSERVED,
+            SOURCE_NATIVE_RUN,
+            STATUS_FAILED,
+            STATUS_PASSED,
+            STATUS_SKIPPED,
+            STATUS_STARTED,
+            STATUS_UNKNOWN,
+            make_event,
+        )
+
+        common = {
+            "run_id": entry.get("run_id"),
+            "shard_id": entry.get("shard_id"),
+            "attempt_number": entry.get("attempt_number"),
+            "occurred_at": entry.get("timestamp"),
+            "evidence": EVIDENCE_DIRECTLY_OBSERVED,
+        }
+
+        events = [
+            make_event(
+                event_type=EVENT_RUN_STARTED,
+                source=SOURCE_NATIVE_RUN,
+                action="native run started",
+                status=STATUS_STARTED,
+                **common,
+            )
+        ]
+
+        tool_trace = entry.get("tool_trace")
+        if isinstance(tool_trace, list):
+            for call in tool_trace:
+                if not isinstance(call, dict):
+                    continue
+                events.append(
+                    make_event(
+                        event_type=EVENT_TOOL_INVOKED,
+                        source=SOURCE_NATIVE_RUN,
+                        action=f"tool {call.get('tool', 'unknown')}",
+                        status=STATUS_PASSED if call.get("ok") else STATUS_FAILED,
+                        metadata={
+                            "approved": call.get("approved"),
+                            "output_chars": call.get("output_chars"),
+                        },
+                        **common,
+                    )
+                )
+
+        # File-change status stays unknown: a changed file is an observed
+        # fact, not a pass/fail outcome.
+        for f in files:
+            events.append(
+                make_event(
+                    event_type=EVENT_FILE_CHANGED,
+                    source=SOURCE_NATIVE_RUN,
+                    action=f"file {f.change_type}",
+                    target=f.path,
+                    status=STATUS_UNKNOWN,
+                    **common,
+                )
+            )
+
+        if retry_triggered:
+            events.append(
+                make_event(
+                    event_type=EVENT_RETRY_STARTED,
+                    source=SOURCE_NATIVE_RUN,
+                    action="retry started",
+                    status=STATUS_STARTED,
+                    **common,
+                )
+            )
+
+        if verification_attempted:
+            if verification_passed is True:
+                v_type, v_status = EVENT_VERIFICATION_PASSED, STATUS_PASSED
+            elif verification_passed is False:
+                v_type, v_status = EVENT_VERIFICATION_FAILED, STATUS_FAILED
+            else:
+                # Attempted but outcome unknown -- honestly represent as
+                # started/unknown rather than fabricating pass or fail.
+                v_type, v_status = EVENT_VERIFICATION_STARTED, STATUS_UNKNOWN
+        else:
+            v_type, v_status = EVENT_VERIFICATION_SKIPPED, STATUS_SKIPPED
+        events.append(
+            make_event(
+                event_type=v_type,
+                source=SOURCE_NATIVE_RUN,
+                action="verification",
+                status=v_status,
+                **common,
+            )
+        )
+
+        run_failed = verification_attempted and verification_passed is False
+        events.append(
+            make_event(
+                event_type=EVENT_RUN_FAILED if run_failed else EVENT_RUN_COMPLETED,
+                source=SOURCE_NATIVE_RUN,
+                action="native run finished",
+                status=(
+                    STATUS_FAILED
+                    if run_failed
+                    else (STATUS_PASSED if verification_passed else STATUS_UNKNOWN)
+                ),
+                **common,
+            )
+        )
+
+        return [e.to_dict() for e in events]
+    except Exception:
+        return []
+
+
 def _log_run(
     start: float,
     task: str,
@@ -541,6 +683,11 @@ def _log_run(
         from openshard.history.shard_contract import _make_shard_id as _msi
         entry["shard_id"] = _msi(entry["timestamp"], run_index)
     entry["attempt_number"] = attempt_number
+
+    if effective_executor == "native":
+        entry["events"] = _build_native_events(
+            entry, files, verification_attempted, verification_passed, retry_triggered,
+        )
 
     # Record model policy summary when policy was active this run.
     if model_policy_summary is not None:

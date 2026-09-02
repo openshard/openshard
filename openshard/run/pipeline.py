@@ -1733,6 +1733,11 @@ class RunPipeline:
                 if _dr_extra is None:
                     _dr_extra = {}
                 _dr_extra.update(_findings_extra)
+            if effective_executor == "native" and hasattr(generator, "native_meta"):
+                if _dr_extra is None:
+                    _dr_extra = {}
+                _dr_extra["executor"] = generator.native_meta.executor
+                _dr_extra["tool_trace"] = generator.native_meta.tool_trace
             try:
                 _log_run(start, _task_display, generator, retry_triggered, final_files,
                          verification_attempted=False, verification_passed=None,
@@ -2088,6 +2093,11 @@ class RunPipeline:
                         if _vf_extra is None:
                             _vf_extra = {}
                         _vf_extra.update(_findings_extra)
+                    if effective_executor == "native" and hasattr(generator, "native_meta"):
+                        if _vf_extra is None:
+                            _vf_extra = {}
+                        _vf_extra["executor"] = generator.native_meta.executor
+                        _vf_extra["tool_trace"] = generator.native_meta.tool_trace
                     _log_run(start, _task_display, generator, retry_triggered, final_files,
                              verification_attempted=True, verification_passed=False,
                              workspace=workspace, usage=usage, retry_usage=retry_usage, model=_routed_model,
