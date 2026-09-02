@@ -300,6 +300,16 @@ def build_wrap_entry(
     if metadata:
         entry["metadata"] = metadata
 
+    # Additive stable repository identity from the origin remote (no network,
+    # credentials stripped, never raises). Omitted when there is no remote.
+    try:
+        from openshard.history.repo_identity import REPO_IDENTITY_FIELD, capture_repo_identity
+        _repo_identity = capture_repo_identity(repo_path)
+        if _repo_identity:
+            entry[REPO_IDENTITY_FIELD] = _repo_identity
+    except Exception:
+        pass
+
     entry["run_id"] = entry["timestamp"]
     if shard_id:
         entry["shard_id"] = shard_id

@@ -151,6 +151,15 @@ def _safe_git_info(path: Path) -> dict[str, object]:
         branch = branch_raw.split("...")[0].split(" ")[0] or None
         dirty = any(ln for ln in lines if not ln.startswith("##"))
         result: dict[str, object] = {"repo_name": repo_name, "git_branch": branch, "git_dirty": dirty}
+        # Additive stable identity from the origin remote (never raises, no
+        # network, credentials stripped). Absent when there is no remote.
+        try:
+            from openshard.history.repo_identity import REPO_IDENTITY_FIELD, capture_repo_identity
+            identity = capture_repo_identity(path)
+            if identity:
+                result[REPO_IDENTITY_FIELD] = identity
+        except Exception:
+            pass
         try:
             rev = subprocess.run(
                 ["git", "rev-parse", "--short", "HEAD"],
