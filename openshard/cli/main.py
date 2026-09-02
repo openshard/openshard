@@ -3438,8 +3438,10 @@ def _export_run_entry(entry: dict, include_notes: bool = False, include_timeline
     if receipt is not None:
         from dataclasses import asdict as _asdict
         row["provenance"] = [_asdict(p) for p in receipt.provenance]
+        row["events"] = [_asdict(e) for e in receipt.events]
     else:
         row["provenance"] = []
+        row["events"] = []
     return row
 
 
