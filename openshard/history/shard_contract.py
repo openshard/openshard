@@ -456,6 +456,10 @@ class ShardReceipt:
     evidence_capsules: list[EvidenceCapsule] = field(default_factory=list)
     # Provenance records — derived at read-time from evidence_capsules and review_checks; not persisted
     provenance: list = field(default_factory=list)
+    # Canonical Events — derived at read-time via Migration 3's conversion seam
+    # (events_from_entry); not persisted. Empty list for legacy entries or when
+    # no canonical Events can be derived.
+    events: list = field(default_factory=list)
     # Policy decisions — structured gate/policy outcomes; empty until populated branches
     policy_decisions: list[dict] = field(default_factory=list)
     # Adapter execution metadata — optional; only set for explicit external adapter runs
@@ -955,6 +959,12 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     except Exception:
         _provenance = []
 
+    from openshard.history.event import events_from_entry as _build_events
+    try:
+        _events = _build_events(entry)
+    except Exception:
+        _events = []
+
     _shard_id_val = entry.get("shard_id") or _make_shard_id(timestamp, index)
     _task_short_val = _trunc(task, 70)
     _run_id_val = entry.get("run_id") or timestamp or None
@@ -1017,6 +1027,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         execution_spans=_execution_spans,
         evidence_capsules=_evidence_capsules,
         provenance=_provenance,
+        events=_events,
         policy_decisions=_policy_decisions,
         adapter=entry.get("adapter") or None,
         adapter_available=entry.get("adapter_available") if isinstance(entry.get("adapter_available"), bool) else None,
