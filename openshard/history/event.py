@@ -15,16 +15,24 @@ never conflated:
   Events from those traces at *read* time, on every call — nothing is
   cached or written back. This closed the "v1.3 concern" left open at
   ``shard_schema.TIMELINE_EVENT_FIELDS``.
-* Embedded canonical Events (Migration 5): a producer that knows how to
-  build its own Events at *observation* time — currently the Claude Code
-  import/wrap adapters (``adapters/claude_code_import.py``,
-  ``adapters/wrap_exec.py``) — calls ``make_event`` directly while the facts
+* Embedded canonical Events (Migration 5, extended by Migration 6): a
+  producer that knows how to build its own Events at *observation* time —
+  the Claude Code import/wrap adapters (``adapters/claude_code_import.py``,
+  ``adapters/wrap_exec.py``) and, since Migration 6, the OpenShard Native
+  (OSN) run pipeline itself (``run/_pipeline_helpers.py::_build_native_events``,
+  called from ``_log_run``) — calls ``make_event`` directly while the facts
   are still live, and stores the result as a plain ``events: list[dict]``
   field (via ``Event.to_dict()``) on the same run entry it is already
   writing. This is still not a separate store: it is one more field on the
   existing record, coerced and content-hashed exactly like ``files_detail``
   or ``run_timeline`` already are. ``events_from_entry`` reads it back with
-  ``Event.from_dict()``, unchanged.
+  ``Event.from_dict()``, unchanged. Unlike the two adapters — external
+  observers that can never claim stronger evidence than ``agent_reported``/
+  ``git_observed`` for most facts — the native run pipeline genuinely
+  controls execution (see ``shard.derive_shard_identity``: any
+  ``executor == "native"`` entry earns ``ORIGIN_OPENSHARD_ROUTED``/
+  ``CAPTURE_FULL``), so its embedded Events legitimately use
+  ``EVIDENCE_DIRECTLY_OBSERVED`` throughout.
 
 ``events_from_entry`` is the single place that decides which of the two
 applies to a given record, using **presence of the ``"events"`` key** —
@@ -207,6 +215,7 @@ SOURCE_REVIEW_CHECKS = "review_checks"
 SOURCE_POLICY_DECISIONS = "policy_decisions"
 SOURCE_CLAUDE_CODE_IMPORT = "claude_code_import"
 SOURCE_CLAUDE_CODE_WRAP = "claude_code_wrap"
+SOURCE_NATIVE_RUN = "native_run"
 
 _ACTION_LIMIT = 120
 _TARGET_LIMIT = 80
@@ -1063,16 +1072,21 @@ def events_for_run(run_id: str, *, entry: dict | None = None) -> list[Event]:
     if not isinstance(run_id, str) or not run_id:
         return []
     events: list[Event] = []
+    _owns_embedded_events = isinstance(entry, dict) and "events" in entry
     if entry is not None:
         events.extend(events_from_entry(entry))
-    try:
-        events.extend(build_events_from_native_steps(native_step_events_for_run(run_id)))
-    except Exception:
-        pass
-    try:
-        events.extend(build_events_from_checkpoints(run_checkpoints_for_run(run_id)))
-    except Exception:
-        pass
+    # A producer that already embeds its own Events (Migration 5/6) owns the
+    # facts native_steps/checkpoints would otherwise be projected from --
+    # extending with those legacy projectors here would double-count them.
+    if not _owns_embedded_events:
+        try:
+            events.extend(build_events_from_native_steps(native_step_events_for_run(run_id)))
+        except Exception:
+            pass
+        try:
+            events.extend(build_events_from_checkpoints(run_checkpoints_for_run(run_id)))
+        except Exception:
+            pass
     try:
         events.extend(build_events_from_interactions(interaction_events_for_run(run_id)))
     except Exception:
