@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 
+from openshard.history.shard import (
+    ORIGIN_EXTERNAL_OBSERVED,
+    Shard,
+    build_shard,
+    derive_shard_identity,
+)
 from openshard.run.timeline import normalize_timeline
 
 _PROFILE_TO_STRATEGY: dict[str, str] = {
@@ -471,6 +477,10 @@ class ShardReceipt:
     verification_returncode: int | None = None
     verification_duration_seconds: float | None = None
     verification_raw_output_stored: bool = False
+    # Canonical Shard identity — durable task + honest origin/capture-depth.
+    # See openshard/history/shard.py. None only for receipts built without
+    # going through build_shard_receipt (e.g. some hand-built test fixtures).
+    shard: Shard | None = None
 
 
 def _verification_from_osn_contract(
@@ -593,18 +603,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     timestamp = entry.get("timestamp") or ""
     task = entry.get("task") or ""
 
-    is_native = entry.get("workflow") == "native" or entry.get("executor") == "native"
-    is_opencode = (
-        entry.get("workflow") == "opencode"
-        or entry.get("executor") == "opencode"
-        or entry.get("adapter") == "opencode"
-    )
-    if is_native:
-        agent = "OpenShard Native"
-    elif is_opencode:
-        agent = "OpenCode"
-    else:
-        agent = "OpenShard"
+    agent, _, _ = derive_shard_identity(entry)
 
     profile = entry.get("execution_profile")
     strategy = _PROFILE_TO_STRATEGY.get(profile) if profile else None
@@ -949,10 +948,13 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     except Exception:
         _provenance = []
 
+    _shard_id_val = entry.get("shard_id") or _make_shard_id(timestamp, index)
+    _task_short_val = _trunc(task, 70)
+
     return ShardReceipt(
-        shard_id=entry.get("shard_id") or _make_shard_id(timestamp, index),
+        shard_id=_shard_id_val,
         created_at=timestamp,
-        task_short=_trunc(task, 70),
+        task_short=_task_short_val,
         task_full=task,
         agent=agent,
         strategy=strategy,
@@ -1021,6 +1023,13 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         verification_returncode=_v_returncode,
         verification_duration_seconds=_v_duration,
         verification_raw_output_stored=_v_raw_stored,
+        shard=build_shard(
+            entry,
+            shard_id=_shard_id_val,
+            created_at=timestamp,
+            task_short=_task_short_val,
+            task_full=task,
+        ),
     )
 
 
@@ -1081,6 +1090,13 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         _SEP,
         _row("Task", receipt.task_short),
         _row("Executor", receipt.agent),
+    ]
+    if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
+        lines.append(_row(
+            "Capture",
+            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
+        ))
+    lines += [
         _row(model_label, model_value),
         _row("Risk", receipt.risk),
         _row("Sandbox", receipt.sandbox),
@@ -1306,6 +1322,11 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     dur = f"{receipt.duration_seconds:.1f}s" if receipt.duration_seconds is not None else "-"
     lines.append(_row("Duration", dur))
     lines.append(_row("Status", receipt.status))
+    if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
+        lines.append(_row(
+            "Capture",
+            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
+        ))
     lines.append("")
 
     if receipt.adapter:
