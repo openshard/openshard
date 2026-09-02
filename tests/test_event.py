@@ -790,3 +790,99 @@ class TestEventsFromEntry(unittest.TestCase):
         }
         events = events_from_entry(entry)
         _assert_no_unsafe(json.dumps([e.to_dict() for e in events]))
+
+
+# ---------------------------------------------------------------------------
+# 7. Embedded canonical Events (Migration 5) -- presence-of-key semantics
+# ---------------------------------------------------------------------------
+
+def _embedded_event_dict(**kwargs) -> dict:
+    defaults = dict(
+        event_type=EVENT_RUN_COMPLETED,
+        source=SOURCE_CLAUDE_CODE_IMPORT,
+        action="external run observed",
+        actor="claude_code",
+        status=STATUS_UNKNOWN,
+        evidence=EVIDENCE_AGENT_REPORTED,
+    )
+    defaults.update(kwargs)
+    return make_event(**defaults).to_dict()
+
+
+class TestEmbeddedEventsPresenceOfKey(unittest.TestCase):
+    def test_events_key_absent_uses_legacy_projection(self):
+        entry = _adapter_entry()
+        self.assertNotIn("events", entry)
+        events = events_from_entry(entry)
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0].event_id.startswith("evt-"))  # legacy _stable_event_id shape
+
+    def test_events_key_present_is_used_verbatim(self):
+        embedded = _embedded_event_dict(event_id="fixed-embedded-id")
+        entry = {**_adapter_entry(), "events": [embedded]}
+        events = events_from_entry(entry)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_id, "fixed-embedded-id")
+
+    def test_present_key_skips_legacy_adapter_derivation(self):
+        # If legacy derivation also ran, this would produce 2 events (the
+        # embedded one plus a re-derived adapter event) -- it must not.
+        embedded = _embedded_event_dict(event_id="only-this-one")
+        entry = {**_adapter_entry(), "events": [embedded]}
+        events = events_from_entry(entry)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_id, "only-this-one")
+
+    def test_present_key_skips_timeline_and_review_derivation_too(self):
+        # A producer that embeds "events" owns Events for the whole record --
+        # other embedded traces on the same entry must not also be projected.
+        embedded = _embedded_event_dict(event_id="the-only-event")
+        entry = {
+            **_adapter_entry(),
+            "events": [embedded],
+            "run_timeline": [_timeline_event()],
+            "review_checks": [_check()],
+            "policy_decisions": [_policy_decision()],
+        }
+        events = events_from_entry(entry)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_id, "the-only-event")
+
+    def test_empty_events_list_means_producer_owns_zero_events(self):
+        # Presence, not non-emptiness, is the switch: [] must NOT fall back
+        # to deriving an adapter event.
+        entry = {**_adapter_entry(), "events": []}
+        events = events_from_entry(entry)
+        self.assertEqual(events, [])
+
+    def test_non_list_events_value_fails_closed_not_legacy(self):
+        entry = {**_adapter_entry(), "events": "not-a-list"}
+        events = events_from_entry(entry)
+        self.assertEqual(events, [])
+
+    def test_malformed_items_dropped_valid_items_kept(self):
+        embedded = _embedded_event_dict(event_id="the-valid-one")
+        entry = {**_adapter_entry(), "events": [embedded, "garbage", 123, None]}
+        events = events_from_entry(entry)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_id, "the-valid-one")
+
+    def test_dict_item_with_bad_field_values_degrades_to_unknown_not_dropped(self):
+        # A dict item that IS a dict but has an invalid event_type/status
+        # should still surface (via Event.from_dict's own coercion) rather
+        # than being silently discarded -- "fail closed" means "no
+        # fabrication", not "no Event at all" for a structurally-valid item.
+        embedded = _embedded_event_dict(event_type="bogus.type", status="bogus-status")
+        entry = {**_adapter_entry(), "events": [embedded]}
+        events = events_from_entry(entry)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, EVENT_UNKNOWN)
+        self.assertEqual(events[0].status, STATUS_UNKNOWN)
+
+    def test_embedded_event_never_reissues_a_new_id(self):
+        embedded = _embedded_event_dict(event_id="stable-across-reads")
+        entry = {**_adapter_entry(), "events": [embedded]}
+        ids_a = [e.event_id for e in events_from_entry(entry)]
+        ids_b = [e.event_id for e in events_from_entry(entry)]
+        self.assertEqual(ids_a, ["stable-across-reads"])
+        self.assertEqual(ids_a, ids_b)
