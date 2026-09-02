@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,7 +16,18 @@ from openshard.adapters.claude_code_import import (
     build_claude_code_import_entry,
     write_import_entry,
 )
+from openshard.history.event import (
+    EVENT_FILE_CHANGED,
+    EVENT_RUN_COMPLETED,
+    EVIDENCE_GIT_OBSERVED,
+    SOURCE_CLAUDE_CODE_IMPORT,
+    STATUS_UNKNOWN,
+    events_from_entry,
+)
 from openshard.history.metrics import load_runs
+from openshard.history.shard_contract import build_shard_receipt
+
+_UUID4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -429,6 +442,152 @@ class TestWriteImportEntry(unittest.TestCase):
             self.assertIn("content_hash", runs[0])
         finally:
             os.chdir(orig)
+
+
+# ---------------------------------------------------------------------------
+# Embedded canonical Events (Migration 5) — producer at observation time
+# ---------------------------------------------------------------------------
+
+class TestEmbeddedEvents(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_events_key_present_on_entry(self):
+        entry = _make_entry(self.repo)
+        self.assertIn("events", entry)
+        self.assertIsInstance(entry["events"], list)
+
+    def test_run_level_event_present(self):
+        entry = _make_entry(self.repo)
+        run_events = [e for e in entry["events"] if e["event_type"] == EVENT_RUN_COMPLETED]
+        self.assertEqual(len(run_events), 1)
+
+    def test_run_level_event_source_and_actor(self):
+        entry = _make_entry(self.repo)
+        run_event = next(e for e in entry["events"] if e["event_type"] == EVENT_RUN_COMPLETED)
+        self.assertEqual(run_event["source"], SOURCE_CLAUDE_CODE_IMPORT)
+        self.assertEqual(run_event["actor"], "claude_code")
+
+    def test_run_level_event_status_unknown_when_verification_never_attempted(self):
+        entry = _make_entry(self.repo)
+        run_event = next(e for e in entry["events"] if e["event_type"] == EVENT_RUN_COMPLETED)
+        self.assertEqual(run_event["status"], STATUS_UNKNOWN)
+
+    def test_run_level_event_linkage_matches_entry(self):
+        entry = _make_entry(self.repo)
+        run_event = next(e for e in entry["events"] if e["event_type"] == EVENT_RUN_COMPLETED)
+        self.assertEqual(run_event["run_id"], entry["run_id"])
+        self.assertEqual(run_event["shard_id"], entry["shard_id"])
+        self.assertEqual(run_event["attempt_number"], entry["attempt_number"])
+
+    def test_event_id_is_a_genuine_uuid4_not_a_stable_hash(self):
+        entry = _make_entry(self.repo)
+        run_event = next(e for e in entry["events"] if e["event_type"] == EVENT_RUN_COMPLETED)
+        self.assertRegex(run_event["event_id"], _UUID4_RE)
+        self.assertFalse(run_event["event_id"].startswith("evt-"))
+
+    def test_no_file_events_when_git_diff_not_available(self):
+        # self.repo is not a git repository, so files_source is "not_available".
+        entry = _make_entry(self.repo)
+        self.assertEqual(entry["files_source"], "not_available")
+        file_events = [e for e in entry["events"] if e["event_type"] == EVENT_FILE_CHANGED]
+        self.assertEqual(file_events, [])
+
+    def test_file_events_created_from_files_detail(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "M\tsrc/foo.py\nA\tsrc/bar.py\n"
+        with patch("subprocess.run", return_value=mock_result):
+            entry = _make_entry(self.repo)
+        file_events = [e for e in entry["events"] if e["event_type"] == EVENT_FILE_CHANGED]
+        self.assertEqual(len(file_events), 2)
+        self.assertEqual({e["target"] for e in file_events}, {"src/foo.py", "src/bar.py"})
+
+    def test_file_event_status_stays_unknown(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "M\tsrc/foo.py\n"
+        with patch("subprocess.run", return_value=mock_result):
+            entry = _make_entry(self.repo)
+        file_event = next(e for e in entry["events"] if e["event_type"] == EVENT_FILE_CHANGED)
+        self.assertEqual(file_event["status"], STATUS_UNKNOWN)
+
+    def test_file_event_evidence_is_git_observed(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "M\tsrc/foo.py\n"
+        with patch("subprocess.run", return_value=mock_result):
+            entry = _make_entry(self.repo)
+        file_event = next(e for e in entry["events"] if e["event_type"] == EVENT_FILE_CHANGED)
+        self.assertEqual(file_event["evidence"], EVIDENCE_GIT_OBSERVED)
+
+    def test_events_never_expose_openshard_as_actor(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "M\tsrc/foo.py\n"
+        with patch("subprocess.run", return_value=mock_result):
+            entry = _make_entry(self.repo)
+        for e in entry["events"]:
+            self.assertNotEqual((e.get("actor") or "").lower(), "openshard")
+
+    def test_events_all_json_serializable(self):
+        entry = _make_entry(self.repo)
+        json.dumps(entry["events"])  # must not raise
+
+    def test_no_raw_content_stored_flag_set(self):
+        entry = _make_entry(self.repo)
+        for e in entry["events"]:
+            self.assertFalse(e["raw_content_stored"])
+
+    def test_secret_in_task_does_not_leak_into_events(self):
+        entry = _make_entry(
+            self.repo, task="Use sk-ant-api03-SECRETSECRET12345678901234 to authenticate",
+        )
+        raw = json.dumps(entry["events"])
+        self.assertNotIn("sk-ant-api03-SECRETSECRET12345678901234", raw)
+
+    def test_events_from_entry_uses_embedded_events_verbatim(self):
+        # events_from_entry must return exactly what was embedded -- same
+        # ids, no re-derivation -- once the "events" key is present.
+        entry = _make_entry(self.repo)
+        embedded_ids = {e["event_id"] for e in entry["events"]}
+        derived = events_from_entry(entry)
+        self.assertEqual({e.event_id for e in derived}, embedded_ids)
+
+    def test_events_survive_write_and_load_round_trip(self):
+        import os
+        orig = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            entry = _make_entry(self.repo)
+            embedded_ids = {e["event_id"] for e in entry["events"]}
+            write_import_entry(entry, self.repo)
+            runs = load_runs()
+            self.assertEqual(len(runs), 1)
+            self.assertEqual({e["event_id"] for e in runs[0]["events"]}, embedded_ids)
+        finally:
+            os.chdir(orig)
+
+    def test_shard_receipt_events_match_embedded_events(self):
+        entry = _make_entry(self.repo)
+        embedded_ids = {e["event_id"] for e in entry["events"]}
+        receipt = build_shard_receipt(entry)
+        self.assertEqual({e.event_id for e in receipt.events}, embedded_ids)
+
+    def test_shard_receipt_events_linkage_matches_run_shard_attempt(self):
+        entry = _make_entry(self.repo)
+        receipt = build_shard_receipt(entry)
+        self.assertGreater(len(receipt.events), 0)
+        for e in receipt.events:
+            self.assertEqual(e.run_id, receipt.run_id)
+            self.assertEqual(e.shard_id, receipt.shard_id)
+            self.assertEqual(e.attempt_number, receipt.attempt_number)
 
 
 if __name__ == "__main__":
