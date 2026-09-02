@@ -2018,6 +2018,36 @@ def shard_attempts(shard_id: str, as_json: bool) -> None:
         )
 
 
+@cli.group("mcp")
+def mcp_group() -> None:
+    """Model Context Protocol (MCP) server commands."""
+
+
+@mcp_group.command("serve")
+@click.option(
+    "--repo-path",
+    "repo_path",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository whose .openshard/runs.jsonl to read (default: current directory).",
+)
+def mcp_serve(repo_path: Path | None) -> None:
+    """Start the local read-only OpenShard MCP server over stdio.
+
+    Exposes recent_shards, get_shard, get_receipt, and search_history to any
+    MCP-compatible client (e.g. Claude Code) so it can read this
+    repository's OpenShard run history. Read-only; no config is written.
+    Speaks MCP over stdio only -- do not print to stdout once this starts.
+    """
+    try:
+        from openshard.mcp.server import serve_stdio
+    except ImportError as exc:
+        raise click.ClickException(str(exc))
+
+    click.echo("[openshard] starting MCP server (stdio)...", err=True)
+    serve_stdio(repo_path=repo_path)
+
+
 @cli.group("reflect")
 def reflect_group() -> None:
     """Post-run reflection and advisory review."""
