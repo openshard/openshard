@@ -305,8 +305,10 @@ class RunPipeline:
         native_loop: str | None = None,
         model_policy: str | None = None,
         candidates: int = 1,
+        shard_id: str | None = None,
     ) -> None:
         self._config = config
+        self._shard_id = shard_id
         self._write = write
         self._verify = verify
         self._dry_run = dry_run
@@ -528,6 +530,21 @@ class RunPipeline:
                 generator = ExecutionGenerator(provider=_provider_instance)
         except (ValueError, RuntimeError) as exc:
             raise click.ClickException(str(exc))
+
+        # Resolve Shard/Attempt identity before any generation happens, so an
+        # unknown --shard fails fast instead of after spending a model call.
+        _receipt_index: int | None = None
+        try:
+            _log_p = Path.cwd() / _LOG_PATH
+            if _log_p.exists():
+                with _log_p.open("r", encoding="utf-8") as _lf:
+                    _receipt_index = sum(1 for _ in _lf)
+        except Exception:
+            pass
+        from openshard.history.run_attempt import resolve_shard_for_attempt
+        _resolved_shard_id, _resolved_attempt_number = resolve_shard_for_attempt(
+            self._shard_id, load_runs(), _run_id, _receipt_index,
+        )
 
         opencode_mode = (effective_executor == "opencode")
         routing_decision: RoutingDecision | None = route(task) if not opencode_mode else None
@@ -1644,14 +1661,9 @@ class RunPipeline:
             _receipt_risk = "High"
         _receipt_sandbox = "Off" if (_readonly_task or _is_review_task) else "Not recorded"
         _receipt_approval = "Not required" if _readonly_task else "Not recorded"
-        _receipt_index: int | None = None
-        try:
-            _log_p = Path.cwd() / _LOG_PATH
-            if _log_p.exists():
-                with _log_p.open("r", encoding="utf-8") as _lf:
-                    _receipt_index = sum(1 for _ in _lf)
-        except Exception:
-            pass
+        # _receipt_index / _resolved_shard_id / _resolved_attempt_number were
+        # already resolved before generation started (see above) — nothing
+        # appends to runs.jsonl between there and here.
         if _is_review_task:
             _timeline.append(make_timeline_event(
                 "review_memo_rendered", "Generated review memo",
@@ -1738,7 +1750,9 @@ class RunPipeline:
                          effective_executor=effective_executor,
                          provider_enforcement_result=_provider_enforcement_result,
                          routable_pool=_routable_pool_cache,
-                         model_policy_summary=_model_policy_summary)
+                         model_policy_summary=_model_policy_summary,
+                         shard_id=_resolved_shard_id,
+                         attempt_number=_resolved_attempt_number)
             except Exception as exc:
                 click.echo(f"  [log] warning: {exc}")
             result_obj.exit_code = 0
@@ -2090,7 +2104,9 @@ class RunPipeline:
                              effective_executor=effective_executor,
                              provider_enforcement_result=_provider_enforcement_result,
                              routable_pool=_routable_pool_cache,
-                             model_policy_summary=_model_policy_summary)
+                             model_policy_summary=_model_policy_summary,
+                             shard_id=_resolved_shard_id,
+                             attempt_number=_resolved_attempt_number)
                 except Exception as exc:
                     click.echo(f"  [log] warning: {exc}")
                 result_obj.exit_code = code
@@ -2687,7 +2703,9 @@ class RunPipeline:
                      effective_executor=effective_executor,
                      provider_enforcement_result=_provider_enforcement_result,
                      routable_pool=_routable_pool_cache,
-                     model_policy_summary=_model_policy_summary)
+                     model_policy_summary=_model_policy_summary,
+                     shard_id=_resolved_shard_id,
+                     attempt_number=_resolved_attempt_number)
         except Exception as exc:
             click.echo(f"  [log] warning: {exc}")
 

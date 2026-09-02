@@ -253,7 +253,17 @@ def plan(task: str):
     hidden=True,
     help="Run multiple native candidate agents and select the best verified result (1–3, native --write only).",
 )
-def run(task: str, write: bool, verify: bool, dry_run: bool, more: bool, full: bool, no_shrink: bool, workflow: str | None, profile: str | None, executor: str | None, native_backend: str | None, experimental_deepagents_run: bool, experimental_tier_dispatch: bool, native_loop: str | None, plan_flag: bool, approval: str | None, provider: str | None, history_scoring: bool, eval_scoring: bool, feedback_scoring: bool, model_policy: str | None, candidates: int):
+@click.option(
+    "--shard",
+    "shard_id",
+    default=None,
+    help=(
+        "Attach this run as another attempt on an existing Shard, rather than "
+        "starting a new one. Must reference a Shard ID from a previous run "
+        "(see 'openshard shard attempts' or a prior receipt's Shard ID)."
+    ),
+)
+def run(task: str, write: bool, verify: bool, dry_run: bool, more: bool, full: bool, no_shrink: bool, workflow: str | None, profile: str | None, executor: str | None, native_backend: str | None, experimental_deepagents_run: bool, experimental_tier_dispatch: bool, native_loop: str | None, plan_flag: bool, approval: str | None, provider: str | None, history_scoring: bool, eval_scoring: bool, feedback_scoring: bool, model_policy: str | None, candidates: int, shard_id: str | None):
     """Execute TASK and return a structured result."""
     if native_loop is not None and workflow != "native":
         raise click.UsageError("--native-loop experimental requires --workflow native")
@@ -286,8 +296,13 @@ def run(task: str, write: bool, verify: bool, dry_run: bool, more: bool, full: b
         native_loop=native_loop,
         model_policy=model_policy,
         candidates=candidates,
+        shard_id=shard_id,
     )
-    result = pipeline.run(task)
+    from openshard.history.run_attempt import UnknownShardError
+    try:
+        result = pipeline.run(task)
+    except UnknownShardError as exc:
+        raise click.UsageError(str(exc))
     if result.exit_code != 0:
         sys.exit(result.exit_code)
 
@@ -1951,6 +1966,56 @@ def shard_verify_last(as_json: bool) -> None:
     Lower-level alias for 'openshard proof last'; identical output and exit code.
     """
     _proof_verify_last(as_json)
+
+
+@shard_group.command("attempts")
+@click.argument("shard_id")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Machine-readable output (valid JSON only).")
+def shard_attempts(shard_id: str, as_json: bool) -> None:
+    """List all Run/Attempts recorded under a Shard, in attempt order."""
+    from openshard.history.metrics import load_runs
+    from openshard.history.run_attempt import build_run_attempt
+    from openshard.history.shard_contract import build_shard
+
+    entries = [e for e in load_runs() if e.get("shard_id") == shard_id]
+    if not entries:
+        if as_json:
+            click.echo(json.dumps(_machine_envelope(
+                "shard attempts", "not_found", shard_id=shard_id, attempts=[],
+            ), indent=2))
+        else:
+            click.echo(f"No attempts found for Shard '{shard_id}'.")
+        return
+
+    attempts = []
+    for entry in entries:
+        shard = build_shard(
+            entry,
+            shard_id=shard_id,
+            created_at=entry.get("timestamp") or "",
+            task_short=(entry.get("task") or "")[:70],
+            task_full=entry.get("task") or "",
+        )
+        attempts.append(build_run_attempt(entry, shard))
+    attempts.sort(key=lambda a: a.attempt_number)
+
+    if as_json:
+        from dataclasses import asdict
+        payload = _machine_envelope(
+            "shard attempts", "ok", shard_id=shard_id,
+            attempts=[asdict(a) for a in attempts],
+        )
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    click.echo(f"Shard: {shard_id}")
+    for a in attempts:
+        click.echo(
+            f"  Attempt {a.attempt_number} - {a.agent} - {a.created_at} "
+            f"- {a.origin}/{a.capture_depth}"
+            f"{' (retry)' if a.retry_triggered else ''}"
+        )
 
 
 @cli.group("reflect")
@@ -4590,6 +4655,15 @@ def import_group() -> None:
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Print the Shard without writing it.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@click.option(
+    "--shard",
+    "shard_id",
+    default=None,
+    help=(
+        "Attach this import as another attempt on an existing Shard. Must "
+        "reference a Shard ID from a previous run."
+    ),
+)
 def import_claude(
     task: str,
     model: str | None,
@@ -4597,6 +4671,7 @@ def import_claude(
     repo_path: str | None,
     dry_run: bool,
     as_json: bool,
+    shard_id: str | None,
 ) -> None:
     """Import a Claude Code session as an OpenShard receipt.
 
@@ -4608,6 +4683,8 @@ def import_claude(
         build_claude_code_import_entry,
         write_import_entry,
     )
+    from openshard.history.metrics import load_runs
+    from openshard.history.run_attempt import UnknownShardError, resolve_shard_for_attempt
 
     cwd = Path(repo_path) if repo_path else Path.cwd()
     notes_path = Path(notes_file) if notes_file else None
@@ -4618,11 +4695,29 @@ def import_claude(
             param_hint="--notes",
         )
 
+    attempt_number = 1
+    if shard_id:
+        try:
+            shard_id, attempt_number = resolve_shard_for_attempt(
+                shard_id, load_runs(cwd), "", None,
+            )
+        except UnknownShardError as exc:
+            raise click.UsageError(str(exc))
+
+    runs_path = cwd / ".openshard" / "runs.jsonl"
+    try:
+        run_index = sum(1 for _ in runs_path.open(encoding="utf-8")) if runs_path.exists() else 0
+    except Exception:
+        run_index = None
+
     entry = build_claude_code_import_entry(
         task,
         model=model,
         notes_file=notes_path,
         repo_path=cwd,
+        shard_id=shard_id,
+        attempt_number=attempt_number,
+        run_index=run_index,
     )
 
     if dry_run or as_json:
@@ -4632,16 +4727,9 @@ def import_claude(
 
     if not dry_run:
         write_import_entry(entry, cwd)
-        runs_path = cwd / ".openshard" / "runs.jsonl"
-        try:
-            line_count = sum(1 for _ in runs_path.open(encoding="utf-8"))
-        except Exception:
-            line_count = 1
-        from openshard.history.shard_contract import _make_shard_id
-        shard_id = _make_shard_id(entry.get("timestamp", ""), line_count - 1)
 
     if not as_json:
-        click.echo(f"Imported Claude Code receipt. Shard: {shard_id}")
+        click.echo(f"Imported Claude Code receipt. Shard: {entry.get('shard_id')}")
         click.echo("OpenShard did not control this run.")
 
 
@@ -4659,6 +4747,15 @@ def wrap_group() -> None:
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Print the Shard without writing it. Does NOT run the subprocess.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output after run.")
+@click.option(
+    "--shard",
+    "shard_id",
+    default=None,
+    help=(
+        "Attach this wrap as another attempt on an existing Shard. Must "
+        "reference a Shard ID from a previous run."
+    ),
+)
 @click.argument("command", nargs=-1, required=True)
 def wrap_claude(
     task: str,
@@ -4666,6 +4763,7 @@ def wrap_claude(
     repo_path: str | None,
     dry_run: bool,
     as_json: bool,
+    shard_id: str | None,
     command: tuple[str, ...],
 ) -> None:
     """Wrap a Claude Code command and record an OpenShard receipt automatically.
@@ -4685,9 +4783,26 @@ def wrap_claude(
         run_wrapped_command,
         write_wrap_entry,
     )
+    from openshard.history.metrics import load_runs
+    from openshard.history.run_attempt import UnknownShardError, resolve_shard_for_attempt
 
     cwd = Path(repo_path) if repo_path else Path.cwd()
     cmd = list(command)
+
+    attempt_number = 1
+    if shard_id:
+        try:
+            shard_id, attempt_number = resolve_shard_for_attempt(
+                shard_id, load_runs(cwd), "", None,
+            )
+        except UnknownShardError as exc:
+            raise click.UsageError(str(exc))
+
+    runs_path = cwd / ".openshard" / "runs.jsonl"
+    try:
+        run_index = sum(1 for _ in runs_path.open(encoding="utf-8")) if runs_path.exists() else 0
+    except Exception:
+        run_index = None
 
     if dry_run:
         # Build a fake pre-state without running the subprocess.
@@ -4703,6 +4818,9 @@ def wrap_claude(
             pre_state=pre_state,
             exit_code=0,
             repo_path=cwd,
+            shard_id=shard_id,
+            attempt_number=attempt_number,
+            run_index=run_index,
         )
         click.echo(json.dumps(entry, indent=2))
         return
@@ -4720,6 +4838,9 @@ def wrap_claude(
         pre_state=pre_state,
         exit_code=exit_code,
         repo_path=cwd,
+        shard_id=shard_id,
+        attempt_number=attempt_number,
+        run_index=run_index,
     )
 
     write_wrap_entry(entry, cwd)
@@ -4727,8 +4848,7 @@ def wrap_claude(
     if as_json:
         click.echo(json.dumps(entry, indent=2))
     else:
-        shard_id = entry.get("shard_id") or entry.get("timestamp", "")
-        click.echo(f"Wrapped Claude Code receipt. Shard: {shard_id}")
+        click.echo(f"Wrapped Claude Code receipt. Shard: {entry.get('shard_id')}")
         click.echo("OpenShard did not control this run.")
 
     if exit_code != 0:

@@ -481,6 +481,13 @@ class ShardReceipt:
     # See openshard/history/shard.py. None only for receipts built without
     # going through build_shard_receipt (e.g. some hand-built test fixtures).
     shard: Shard | None = None
+    # Run/Attempt identity (Migration 2). run_id is populated from the entry's
+    # own run_id/timestamp and is never None once built via build_shard_receipt.
+    # attempt_number is only set for entries written with explicit attempt
+    # tracking; None for legacy/Claude-import entries that predate it — never
+    # fabricated.
+    run_id: str | None = None
+    attempt_number: int | None = None
 
 
 def _verification_from_osn_contract(
@@ -950,6 +957,8 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
 
     _shard_id_val = entry.get("shard_id") or _make_shard_id(timestamp, index)
     _task_short_val = _trunc(task, 70)
+    _run_id_val = entry.get("run_id") or timestamp or None
+    _attempt_number_val = entry.get("attempt_number") if isinstance(entry.get("attempt_number"), int) else None
 
     return ShardReceipt(
         shard_id=_shard_id_val,
@@ -1023,6 +1032,8 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         verification_returncode=_v_returncode,
         verification_duration_seconds=_v_duration,
         verification_raw_output_stored=_v_raw_stored,
+        run_id=_run_id_val,
+        attempt_number=_attempt_number_val,
         shard=build_shard(
             entry,
             shard_id=_shard_id_val,
@@ -1322,6 +1333,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     dur = f"{receipt.duration_seconds:.1f}s" if receipt.duration_seconds is not None else "-"
     lines.append(_row("Duration", dur))
     lines.append(_row("Status", receipt.status))
+    if receipt.attempt_number is not None:
+        lines.append(_row("Attempt", f"{receipt.attempt_number} (Shard {receipt.shard_id})"))
     if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
         lines.append(_row(
             "Capture",
