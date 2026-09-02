@@ -10,7 +10,16 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from openshard.history.event import EVENT_UNKNOWN, SOURCE_POLICY_DECISIONS
+from openshard.history.event import (
+    EVENT_FILE_CHANGED,
+    EVENT_RUN_COMPLETED,
+    EVENT_UNKNOWN,
+    EVIDENCE_AGENT_REPORTED,
+    SOURCE_CLAUDE_CODE_IMPORT,
+    SOURCE_POLICY_DECISIONS,
+    STATUS_UNKNOWN,
+    make_event,
+)
 from openshard.history.shard_contract import build_shard_receipt
 
 # ---------------------------------------------------------------------------
@@ -266,6 +275,121 @@ class TestEventHonestyPreservedThroughReceipt(unittest.TestCase):
         self.assertEqual(receipt.events, [])
         self.assertEqual(receipt.provenance, [])
         self.assertEqual(receipt.task_full, "legacy task")
+
+
+# ---------------------------------------------------------------------------
+# TestClaudeCodeEventsThroughReceiptAndCli (Migration 5)
+# ---------------------------------------------------------------------------
+
+
+def _legacy_claude_import_entry() -> dict:
+    """A pre-Migration-5-shaped Claude import entry: no "events" key at all."""
+    return {
+        "executor": "claude_code_import",
+        "import_source": "claude_code",
+        "files_source": "git_diff_inferred",
+        "verification_attempted": False,
+        "verification_passed": None,
+        "run_id": "2026-06-01T00:00:00Z",
+        "shard_id": "shard-20260601-0005",
+        "attempt_number": 1,
+        "summary": "legacy imported run",
+    }
+
+
+def _modern_claude_import_entry() -> dict:
+    """A post-Migration-5 producer entry: embeds its own canonical Events."""
+    run_event = make_event(
+        event_type=EVENT_RUN_COMPLETED,
+        source=SOURCE_CLAUDE_CODE_IMPORT,
+        action="external run observed",
+        run_id="2026-06-01T00:00:00Z",
+        shard_id="shard-20260601-0006",
+        attempt_number=1,
+        actor="claude_code",
+        status=STATUS_UNKNOWN,
+        evidence=EVIDENCE_AGENT_REPORTED,
+    )
+    file_event = make_event(
+        event_type=EVENT_FILE_CHANGED,
+        source=SOURCE_CLAUDE_CODE_IMPORT,
+        action="file update",
+        target="src/foo.py",
+        run_id="2026-06-01T00:00:00Z",
+        shard_id="shard-20260601-0006",
+        attempt_number=1,
+        actor="claude_code",
+        status=STATUS_UNKNOWN,
+        evidence=EVIDENCE_AGENT_REPORTED,
+    )
+    return {
+        "executor": "claude_code_import",
+        "import_source": "claude_code",
+        "run_id": "2026-06-01T00:00:00Z",
+        "shard_id": "shard-20260601-0006",
+        "attempt_number": 1,
+        "events": [run_event.to_dict(), file_event.to_dict()],
+    }
+
+
+class TestLegacyClaudeEntryStillProjects(unittest.TestCase):
+    """No "events" key -- must keep using the Migration 3 legacy path unchanged."""
+
+    def test_receipt_events_derived_for_legacy_entry(self):
+        entry = _legacy_claude_import_entry()
+        self.assertNotIn("events", entry)
+        receipt = build_shard_receipt(entry)
+        self.assertEqual(len(receipt.events), 1)
+        self.assertEqual(receipt.events[0].event_type, EVENT_RUN_COMPLETED)
+        self.assertEqual(receipt.events[0].source, SOURCE_CLAUDE_CODE_IMPORT)
+
+    def test_legacy_entry_linkage_preserved(self):
+        entry = _legacy_claude_import_entry()
+        receipt = build_shard_receipt(entry)
+        self.assertEqual(receipt.run_id, entry["run_id"])
+        self.assertEqual(receipt.shard_id, entry["shard_id"])
+        self.assertEqual(receipt.events[0].run_id, entry["run_id"])
+        self.assertEqual(receipt.events[0].shard_id, entry["shard_id"])
+
+    def test_legacy_entry_through_last_json(self):
+        result = _invoke_last_json([{**_BASE_ENTRY, **_legacy_claude_import_entry()}])
+        self.assertEqual(result.exit_code, 0)
+        data = json.loads(result.output)
+        self.assertEqual(len(data["run"]["events"]), 1)
+
+
+class TestEmbeddedProducerEntryThroughReceiptAndCli(unittest.TestCase):
+    """"events" key present -- embedded Events used verbatim, not re-derived."""
+
+    def test_receipt_events_match_embedded_exactly(self):
+        entry = _modern_claude_import_entry()
+        embedded_ids = {e["event_id"] for e in entry["events"]}
+        receipt = build_shard_receipt(entry)
+        self.assertEqual({e.event_id for e in receipt.events}, embedded_ids)
+        self.assertEqual(len(receipt.events), 2)
+
+    def test_receipt_events_linkage_matches_run_shard_attempt(self):
+        entry = _modern_claude_import_entry()
+        receipt = build_shard_receipt(entry)
+        for e in receipt.events:
+            self.assertEqual(e.run_id, receipt.run_id)
+            self.assertEqual(e.shard_id, receipt.shard_id)
+            self.assertEqual(e.attempt_number, receipt.attempt_number)
+
+    def test_embedded_events_through_last_json_match_ids(self):
+        entry = {**_BASE_ENTRY, **_modern_claude_import_entry()}
+        embedded_ids = {e["event_id"] for e in entry["events"]}
+        result = _invoke_last_json([entry])
+        self.assertEqual(result.exit_code, 0)
+        data = json.loads(result.output)
+        self.assertEqual({e["event_id"] for e in data["run"]["events"]}, embedded_ids)
+
+    def test_no_unsafe_values_for_embedded_events_in_last_json(self):
+        entry = {**_BASE_ENTRY, **_modern_claude_import_entry()}
+        result = _invoke_last_json([entry])
+        self.assertEqual(result.exit_code, 0)
+        data = json.loads(result.output)
+        _assert_no_unsafe(json.dumps(data["run"]["events"]))
 
 
 if __name__ == "__main__":

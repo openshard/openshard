@@ -12,6 +12,11 @@ Design constraints:
 - All free text passes through secret scrubbing before storage.
 - Wrapped Shards are always clearly marked with import_source = "claude_code"
   and import_method = "openshard_wrap_v0".
+- Builds its own canonical Events (see openshard.history.event) at
+  observation time and embeds them as entry["events"] -- this adapter is a
+  canonical Event producer (Migration 5), not just a later read-time
+  projection. No separate Event store: events are one more field on the
+  same runs.jsonl record.
 """
 
 from __future__ import annotations
@@ -145,6 +150,80 @@ def run_wrapped_command(cmd: list[str]) -> int:
         return 1
 
 
+def _build_wrap_events(
+    entry: dict, changed_files: list[dict], files_source: str, exit_code: int,
+) -> list[dict]:
+    """Build this wrap run's canonical Events at observation time (Migration 5).
+
+    Mirrors ``claude_code_import._build_import_events`` with one difference:
+    the run-level event is keyed off ``exit_code`` -- a fact OpenShard
+    directly observed by running the subprocess itself (``run_wrapped_command``),
+    not one reported by Claude Code -- so that one event alone gets
+    EVIDENCE_DIRECTLY_OBSERVED and EVENT_RUN_COMPLETED/EVENT_RUN_FAILED
+    accordingly. Every file-level event still reflects only what git diff
+    showed (EVIDENCE_GIT_OBSERVED/EVIDENCE_AGENT_REPORTED, same as import) --
+    OpenShard observed that the wrapped process exited a certain way, not
+    that any specific file changed for that reason. Never raises; returns
+    [] on any internal failure.
+    """
+    try:
+        from openshard.history.event import (
+            EVENT_FILE_CHANGED,
+            EVENT_RUN_COMPLETED,
+            EVENT_RUN_FAILED,
+            EVIDENCE_AGENT_REPORTED,
+            EVIDENCE_DIRECTLY_OBSERVED,
+            EVIDENCE_GIT_OBSERVED,
+            SOURCE_CLAUDE_CODE_WRAP,
+            STATUS_FAILED,
+            STATUS_PASSED,
+            STATUS_UNKNOWN,
+            make_event,
+        )
+
+        file_evidence = EVIDENCE_GIT_OBSERVED if files_source == "git_diff_inferred" else EVIDENCE_AGENT_REPORTED
+        run_event_type = EVENT_RUN_COMPLETED if exit_code == 0 else EVENT_RUN_FAILED
+        run_status = STATUS_PASSED if exit_code == 0 else STATUS_FAILED
+
+        actor = entry.get("import_source") if isinstance(entry.get("import_source"), str) else None
+        summary = entry.get("summary") or entry.get("import_note") or "external run observed"
+        common = {
+            "run_id": entry.get("run_id"),
+            "shard_id": entry.get("shard_id"),
+            "attempt_number": entry.get("attempt_number"),
+            "actor": actor,
+            "occurred_at": entry.get("timestamp"),
+        }
+
+        events = [
+            make_event(
+                event_type=run_event_type,
+                source=SOURCE_CLAUDE_CODE_WRAP,
+                action=str(summary),
+                status=run_status,
+                evidence=EVIDENCE_DIRECTLY_OBSERVED,
+                **common,
+            )
+        ]
+        # File-change status stays unknown: a changed file is an observed
+        # fact, not a pass/fail outcome.
+        for f in changed_files:
+            events.append(
+                make_event(
+                    event_type=EVENT_FILE_CHANGED,
+                    source=SOURCE_CLAUDE_CODE_WRAP,
+                    action=f"file {f.get('change_type', 'update')}",
+                    target=f.get("path"),
+                    status=STATUS_UNKNOWN,
+                    evidence=file_evidence,
+                    **common,
+                )
+            )
+        return [e.to_dict() for e in events]
+    except Exception:
+        return []
+
+
 def build_wrap_entry(
     task: str,
     *,
@@ -169,6 +248,11 @@ def build_wrap_entry(
     never-raises contract); the entry is then stamped as another attempt
     on that Shard. When omitted, a fresh shard_id is minted from this
     entry's own timestamp and ``run_index`` — a new Shard, attempt 1.
+
+    Also embeds this run's own canonical Events under ``entry["events"]``
+    (see ``_build_wrap_events``) — this entry is a Migration 5 producer
+    record, so ``events_from_entry`` will use those directly instead of
+    projecting one from the other fields at read time.
     """
     from openshard.history.shard_schema import SHARD_SCHEMA_VERSION, coerce_shard_entry
 
@@ -223,6 +307,8 @@ def build_wrap_entry(
         from openshard.history.shard_contract import _make_shard_id
         entry["shard_id"] = _make_shard_id(entry["timestamp"], run_index)
     entry["attempt_number"] = attempt_number
+
+    entry["events"] = _build_wrap_events(entry, changed_files, files_source, exit_code)
 
     return coerce_shard_entry(entry)
 

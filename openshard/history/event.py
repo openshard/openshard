@@ -4,14 +4,39 @@ An Event describes one observed fact/action/state transition. It belongs
 primarily to a Run/Attempt and, where known, its parent Shard — it is not a
 replacement for Shard, RunAttempt, or Receipt.
 
-Like ``ProvenanceRecord`` (see ``provenance.py``), an Event is a read/
-conversion-time model: it is derived from existing stored structures
-(``run_timeline``, ``review_checks``, ``policy_decisions``, native step/
-checkpoint/session/interaction records, adapter entries) and is never
-persisted to its own JSONL file. No existing producer is rewritten by this
-module — it is purely the conversion seam between what already exists and
-one common shape. This closes the "v1.3 concern" left open at
-``shard_schema.TIMELINE_EVENT_FIELDS``.
+An Event is never persisted to its own JSONL file or store — there is still
+only ``runs.jsonl``. Two ways an Event reaches a caller now coexist, and are
+never conflated:
+
+* Legacy projection (Migration 3): most producers only ever leave behind
+  loosely-typed traces (``run_timeline``, ``review_checks``,
+  ``policy_decisions``, native step/checkpoint/session/interaction records,
+  or an adapter entry with no Events of its own). This module derives
+  Events from those traces at *read* time, on every call — nothing is
+  cached or written back. This closed the "v1.3 concern" left open at
+  ``shard_schema.TIMELINE_EVENT_FIELDS``.
+* Embedded canonical Events (Migration 5): a producer that knows how to
+  build its own Events at *observation* time — currently the Claude Code
+  import/wrap adapters (``adapters/claude_code_import.py``,
+  ``adapters/wrap_exec.py``) — calls ``make_event`` directly while the facts
+  are still live, and stores the result as a plain ``events: list[dict]``
+  field (via ``Event.to_dict()``) on the same run entry it is already
+  writing. This is still not a separate store: it is one more field on the
+  existing record, coerced and content-hashed exactly like ``files_detail``
+  or ``run_timeline`` already are. ``events_from_entry`` reads it back with
+  ``Event.from_dict()``, unchanged.
+
+``events_from_entry`` is the single place that decides which of the two
+applies to a given record, using **presence of the ``"events"`` key** —
+never whether the list is non-empty — as the switch: absent means legacy
+projection; present means the producer owns Events for this record, and
+legacy derivation (``build_event_from_adapter_entry`` and the other
+``build_events_from_*`` projectors) is skipped entirely for it, so the same
+fact is never counted twice. A present-but-malformed ``events`` value fails
+closed — non-list becomes ``[]``, non-dict items are dropped — rather than
+silently falling back to projection: a producer that claims ownership of
+Events for a record and gets it wrong should surface as "no Events", not as
+a second, differently-computed set.
 
 Honesty rules (see ``shard.derive_shard_identity`` for the model this
 mirrors):
@@ -842,6 +867,15 @@ def build_event_from_adapter_entry(
     """Project one external-adapter run entry (Claude Code import/wrap) into a
     canonical Event. Returns None for any entry that is not adapter-sourced.
 
+    Legacy-projection path only (Migration 3) -- ``events_from_entry`` calls
+    this solely for adapter entries with no ``"events"`` key of their own.
+    Since Migration 5, ``adapters/claude_code_import.py`` and
+    ``adapters/wrap_exec.py`` build their own Events at observation time and
+    embed them directly on the entry; this function exists purely for
+    entries written before that (or by any future adapter that hasn't
+    adopted embedding yet) and is never called once an entry embeds
+    ``"events"``, to avoid computing the same fact twice.
+
     ``actor`` is read directly from the entry's own explicit
     ``import_source`` field (e.g. "claude_code") when present -- an explicit
     signal on the record itself, never inferred via origin-classification
@@ -891,18 +925,51 @@ def build_event_from_adapter_entry(
 # ---------------------------------------------------------------------------
 
 
+def _embedded_events_from_entry(raw: object) -> list[Event]:
+    """Deserialize Events a modern producer already embedded on its own entry.
+
+    Caller (``events_from_entry``) checks ``"events" in entry`` first; this
+    function only decides how to interpret the *value*. Fails closed rather
+    than falling back to legacy projection: a non-list value yields ``[]``,
+    and a non-dict item is dropped rather than repaired or guessed at. Each
+    dict item still goes through ``Event.from_dict``'s own coercion (unknown
+    enum values fall back to their ``*_unknown`` sentinel), so a partially
+    malformed dict degrades to an honestly-unknown Event instead of being
+    silently dropped.
+    """
+    if not isinstance(raw, list):
+        return []
+    events: list[Event] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            events.append(Event.from_dict(item))
+        except Exception:
+            continue
+    return events
+
+
 def events_from_entry(entry: object) -> list[Event]:
     """Derive all canonical Events embedded in one raw run-history entry.
 
     Mirrors ``provenance.build_provenance_from_entry``: dict-type-checks the
     input, never raises, returns [] for anything that doesn't fit.
-    ``derive_shard_identity`` is called once here to source ``evidence``
-    (via origin/capture_depth) only -- its returned ``agent`` value is
-    deliberately discarded, never used for ``actor``.
+
+    Presence of the ``"events"`` key (not whether its value is a non-empty
+    list) decides the path: a key that is *absent* falls through to legacy
+    projection (below); a key that is *present* means this entry's producer
+    already built its own canonical Events at observation time (Migration 5)
+    and owns them exclusively -- ``_embedded_events_from_entry`` is used and
+    nothing else in this function runs, so the same underlying fact is never
+    derived twice.
     """
     if not isinstance(entry, dict):
         return []
     try:
+        if "events" in entry:
+            return _embedded_events_from_entry(entry.get("events"))
+
         run_ref = entry.get("shard_id") or entry.get("timestamp") or "unknown-run"
         if not isinstance(run_ref, str) or not run_ref.strip():
             run_ref = "unknown-run"
@@ -912,6 +979,9 @@ def events_from_entry(entry: object) -> list[Event]:
         raw_attempt = entry.get("attempt_number")
         attempt_number = raw_attempt if isinstance(raw_attempt, int) and not isinstance(raw_attempt, bool) else None
 
+        # derive_shard_identity is only needed to source legacy timeline
+        # evidence (via origin/capture_depth) below -- its returned ``agent``
+        # value is deliberately discarded, never used for ``actor``.
         _, origin, capture_depth = derive_shard_identity(entry)
 
         events: list[Event] = []
