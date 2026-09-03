@@ -31,7 +31,14 @@ from pathlib import Path
 # for each git.exe child. Output is always captured via PIPE here regardless,
 # so no window is ever needed; harmless for every other (already-consoled)
 # caller of this module.
-_NO_WINDOW_KW: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+# subprocess.CREATE_NO_WINDOW only exists in typeshed's Windows stubs, so a
+# bare attribute access fails mypy on this cross-platform module even inside
+# a sys.platform guard (the guard narrows reachability, not module-attribute
+# existence) -- getattr sidesteps the static lookup; the fallback is never
+# used since the whole expression is a no-op off Windows anyway.
+_NO_WINDOW_KW: dict = (
+    {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
+)
 
 _MAX_FILES = 20
 _MAX_NOTES_READ_CHARS = 4_000
