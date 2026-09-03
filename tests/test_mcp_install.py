@@ -1,9 +1,11 @@
-"""Tests for `openshard mcp install claude` (Demo v1 PR4).
+"""Tests for `openshard mcp install claude` (Demo v1 PR4, extended by PR5).
 
 Covers both the adapter (openshard.adapters.claude_mcp_install) directly and
-the CLI wiring. All `claude` CLI invocations are mocked via
-subprocess.run/shutil.which -- the real Claude Code configuration on the
-machine running these tests is never touched.
+the CLI wiring, plus the PR5 auto-capture hook installer
+(openshard.adapters.claude_hooks_install). All `claude` CLI invocations are
+mocked via subprocess.run/shutil.which, and hook settings are only ever
+written under a throw-away temporary repository -- the real Claude Code
+configuration on the machine running these tests is never touched.
 """
 
 from __future__ import annotations
@@ -16,6 +18,19 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
+from openshard.adapters.claude_hooks_install import (
+    HOOK_COMMAND,
+    HOOK_EVENTS,
+    SETTINGS_RELPATH,
+    SYNC_EVENTS,
+    TOOL_MATCHER,
+    build_hook_config,
+    ensure_local_settings_ignored,
+    install_claude_hooks,
+    installed_events,
+    is_openshard_hook,
+    merge_openshard_hooks,
+)
 from openshard.adapters.claude_mcp_install import (
     MCP_TOOLS,
     _extract_repo_path,
@@ -30,10 +45,26 @@ from openshard.adapters.claude_mcp_install import (
 from openshard.cli.main import cli
 
 _MODULE = "openshard.adapters.claude_mcp_install"
+_HOOKS_MODULE = "openshard.adapters.claude_hooks_install"
 
 
 def _completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _git_ignored_router(ignored: bool = True):
+    """subprocess.run side_effect for the hook installer's git calls."""
+    def _run(argv, **kwargs):
+        if "check-ignore" in argv:
+            return _completed(returncode=0 if ignored else 1)
+        if "rev-parse" in argv:
+            return _completed(returncode=0, stdout=".git/info/exclude\n")
+        raise AssertionError(f"unexpected git call: {argv}")
+    return _run
+
+
+def _read_settings(root: Path) -> dict:
+    return json.loads((root / SETTINGS_RELPATH).read_text(encoding="utf-8"))
 
 
 # Claude Code always echoes paths with forward slashes, even on Windows,
@@ -346,6 +377,13 @@ class TestCliInstall(unittest.TestCase):
     def _which(self, name):
         return {"claude": "/usr/local/bin/claude", "openshard": "/usr/local/bin/openshard"}.get(name)
 
+    def setUp(self):
+        # The hook installer shells out to git for the ignore check; keep it
+        # deterministic (and never touching a real repository) in every test.
+        self._git_patch = patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=_git_ignored_router())
+        self._git_patch.start()
+        self.addCleanup(self._git_patch.stop)
+
     def test_successful_install_output(self):
         runner = CliRunner()
         with runner.isolated_filesystem() as tmp:
@@ -360,6 +398,10 @@ class TestCliInstall(unittest.TestCase):
             self.assertIn("Restart Claude Code", result.output)
             for tool in MCP_TOOLS:
                 self.assertIn(tool, result.output)
+            # PR5: hooks are installed alongside MCP by default.
+            self.assertIn("Auto-capture hooks: installed", result.output)
+            self.assertTrue((root / SETTINGS_RELPATH).exists())
+            self.assertEqual(installed_events(_read_settings(root)), list(HOOK_EVENTS))
 
     def test_json_output_is_valid(self):
         runner = CliRunner()
@@ -374,6 +416,68 @@ class TestCliInstall(unittest.TestCase):
             data = json.loads(result.output)
             self.assertEqual(data["status"], "installed")
             self.assertTrue(data["command"][0].endswith("openshard"))
+            self.assertEqual(data["hooks"]["status"], "installed")
+            self.assertEqual(set(data["hooks"]["events"]), set(HOOK_EVENTS))
+            self.assertTrue(data["hooks"]["settings_path"].endswith("settings.local.json"))
+
+    def test_no_hooks_flag_skips_hook_installation(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            run = _subprocess_run_router(existing_repo_path=None)
+            with patch(f"{_MODULE}.shutil.which", side_effect=self._which), \
+                 patch(f"{_MODULE}.subprocess.run", side_effect=run):
+                result = runner.invoke(cli, ["mcp", "install", "claude", "--no-hooks"])
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("skipped", result.output)
+            self.assertFalse((root / SETTINGS_RELPATH).exists())
+            with patch(f"{_MODULE}.shutil.which", side_effect=self._which), \
+                 patch(f"{_MODULE}.subprocess.run", side_effect=run):
+                as_json = runner.invoke(cli, ["mcp", "install", "claude", "--no-hooks", "--json"])
+            self.assertEqual(json.loads(as_json.output)["hooks"], {"status": "skipped"})
+
+    def test_second_install_reports_hooks_already_configured(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            run = _subprocess_run_router(existing_repo_path=None)
+            with patch(f"{_MODULE}.shutil.which", side_effect=self._which), \
+                 patch(f"{_MODULE}.subprocess.run", side_effect=run):
+                runner.invoke(cli, ["mcp", "install", "claude"])
+                first = (root / SETTINGS_RELPATH).read_text(encoding="utf-8")
+                result = runner.invoke(cli, ["mcp", "install", "claude"])
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("Auto-capture hooks: already configured", result.output)
+            self.assertEqual((root / SETTINGS_RELPATH).read_text(encoding="utf-8"), first)
+
+    def test_hook_install_failure_is_reported_nonzero_after_mcp_success(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            (root / ".claude").mkdir()
+            (root / SETTINGS_RELPATH).write_text("{ broken json", encoding="utf-8")
+            run = _subprocess_run_router(existing_repo_path=None)
+            with patch(f"{_MODULE}.shutil.which", side_effect=self._which), \
+                 patch(f"{_MODULE}.subprocess.run", side_effect=run):
+                result = runner.invoke(cli, ["mcp", "install", "claude"])
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("OpenShard MCP installed for Claude Code.", result.output)
+            self.assertIn("NOT configured", result.output)
+            # The unparsable file was left exactly as it was.
+            self.assertEqual((root / SETTINGS_RELPATH).read_text(encoding="utf-8"), "{ broken json")
+
+    def test_mcp_failure_does_not_write_hooks(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            with patch(f"{_MODULE}.shutil.which", return_value=None):
+                result = runner.invoke(cli, ["mcp", "install", "claude"])
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertFalse((root / SETTINGS_RELPATH).exists())
 
     def test_claude_missing_exits_nonzero_with_actionable_message(self):
         runner = CliRunner()
@@ -432,6 +536,258 @@ class TestCliInstall(unittest.TestCase):
                  patch(f"{_MODULE}.subprocess.run", side_effect=run) as mock_run:
                 runner.invoke(cli, ["mcp", "install", "claude"])
             self.assertTrue(mock_run.called)
+
+
+# ---------------------------------------------------------------------------
+# PR5: Claude Code auto-capture hook installer
+# ---------------------------------------------------------------------------
+
+class TestHookConfigShape(unittest.TestCase):
+    def test_config_covers_every_supported_event_with_the_hook_command(self):
+        config = build_hook_config()
+        self.assertEqual(set(config), set(HOOK_EVENTS))
+        for event, groups in config.items():
+            self.assertEqual(len(groups), 1, event)
+            hooks = groups[0]["hooks"]
+            self.assertEqual(len(hooks), 1)
+            self.assertEqual(hooks[0]["type"], "command")
+            self.assertEqual(hooks[0]["command"], HOOK_COMMAND)
+            self.assertIsInstance(hooks[0]["timeout"], int)
+
+    def test_tool_events_carry_matcher_others_do_not(self):
+        config = build_hook_config()
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            self.assertEqual(config[event][0]["matcher"], TOOL_MATCHER)
+        for event in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"):
+            self.assertNotIn("matcher", config[event][0])
+
+    def test_snapshot_hooks_are_synchronous_staging_hooks_async(self):
+        # Stop/SessionEnd write the runs.jsonl snapshot and must finish before
+        # Claude Code moves on; the per-tool/per-prompt hooks only stage.
+        config = build_hook_config()
+        self.assertEqual(SYNC_EVENTS, {"Stop", "SessionEnd"})
+        for event in HOOK_EVENTS:
+            hook = config[event][0]["hooks"][0]
+            if event in SYNC_EVENTS:
+                self.assertNotIn("async", hook, event)
+            else:
+                self.assertTrue(hook["async"], event)
+
+    def test_command_contains_no_machine_specific_path(self):
+        blob = json.dumps(build_hook_config())
+        self.assertNotIn("\\", blob)
+        self.assertNotIn("/Users/", blob)
+        self.assertNotIn("C:", blob)
+        self.assertNotIn(str(Path.cwd()), blob)
+
+    def test_is_openshard_hook(self):
+        self.assertTrue(is_openshard_hook({"type": "command", "command": HOOK_COMMAND}))
+        self.assertTrue(is_openshard_hook({"type": "command", "command": HOOK_COMMAND + " --event Stop"}))
+        self.assertFalse(is_openshard_hook({"type": "command", "command": "openshard hooks claudette"}))
+        self.assertFalse(is_openshard_hook({"type": "command", "command": "echo hi"}))
+        self.assertFalse(is_openshard_hook({"type": "prompt", "command": HOOK_COMMAND}))
+        self.assertFalse(is_openshard_hook("openshard hooks claude"))
+
+
+class TestMergeOpenshardHooks(unittest.TestCase):
+    def test_fresh_settings(self):
+        merged, changes = merge_openshard_hooks({})
+        self.assertEqual(merged["hooks"], build_hook_config())
+        self.assertTrue(all(v == "added" for v in changes.values()))
+
+    def test_idempotent(self):
+        once, _ = merge_openshard_hooks({})
+        twice, changes = merge_openshard_hooks(once)
+        self.assertEqual(once, twice)
+        self.assertTrue(all(v == "unchanged" for v in changes.values()))
+
+    def test_input_not_mutated(self):
+        original = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo hi"}]}]}}
+        snapshot = json.loads(json.dumps(original))
+        merge_openshard_hooks(original)
+        self.assertEqual(original, snapshot)
+
+    def test_unrelated_hooks_and_settings_preserved(self):
+        settings = {
+            "permissions": {"allow": ["Bash(pytest)"]},
+            "model": "opus",
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "notify-send done"}]}],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "./guard.sh"}]}],
+                "PostToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": "prettier"}]}],
+            },
+        }
+        merged, changes = merge_openshard_hooks(settings)
+        self.assertEqual(merged["permissions"], settings["permissions"])
+        self.assertEqual(merged["model"], "opus")
+        self.assertEqual(merged["hooks"]["PreToolUse"], settings["hooks"]["PreToolUse"])
+        self.assertEqual(merged["hooks"]["Stop"][0], settings["hooks"]["Stop"][0])
+        self.assertEqual(merged["hooks"]["PostToolUse"][0], settings["hooks"]["PostToolUse"][0])
+        self.assertEqual(len(merged["hooks"]["Stop"]), 2)
+        self.assertEqual(len(merged["hooks"]["PostToolUse"]), 2)
+        self.assertTrue(all(v == "added" for v in changes.values()))
+
+    def test_existing_openshard_hook_not_duplicated(self):
+        once, _ = merge_openshard_hooks({})
+        for _ in range(3):
+            once, _ = merge_openshard_hooks(once)
+        for event in HOOK_EVENTS:
+            ours = [
+                h for g in once["hooks"][event] for h in g["hooks"] if is_openshard_hook(h)
+            ]
+            self.assertEqual(len(ours), 1, event)
+
+    def test_stale_openshard_hook_updated_in_place(self):
+        stale = {"hooks": {"PostToolUse": [{"matcher": "Edit", "hooks": [
+            {"type": "command", "command": HOOK_COMMAND, "timeout": 99}]}]}}
+        merged, changes = merge_openshard_hooks(stale)
+        self.assertEqual(changes["PostToolUse"], "updated")
+        self.assertEqual(len(merged["hooks"]["PostToolUse"]), 1)
+        self.assertEqual(merged["hooks"]["PostToolUse"][0]["matcher"], TOOL_MATCHER)
+        self.assertEqual(merged["hooks"]["PostToolUse"][0]["hooks"], build_hook_config()["PostToolUse"][0]["hooks"])
+
+    def test_our_hook_inside_a_shared_user_group_is_rehomed_without_touching_theirs(self):
+        shared = {"hooks": {"PostToolUse": [{"matcher": "Write", "hooks": [
+            {"type": "command", "command": "prettier"},
+            {"type": "command", "command": HOOK_COMMAND},
+        ]}]}}
+        merged, changes = merge_openshard_hooks(shared)
+        self.assertEqual(changes["PostToolUse"], "updated")
+        groups = merged["hooks"]["PostToolUse"]
+        self.assertEqual(groups[0], {"matcher": "Write", "hooks": [{"type": "command", "command": "prettier"}]})
+        self.assertEqual(groups[1], build_hook_config()["PostToolUse"][0])
+
+    def test_duplicate_openshard_groups_collapse_to_one(self):
+        dup = {"hooks": {"Stop": [
+            {"hooks": [{"type": "command", "command": HOOK_COMMAND}]},
+            {"hooks": [{"type": "command", "command": HOOK_COMMAND}]},
+        ]}}
+        merged, changes = merge_openshard_hooks(dup)
+        self.assertEqual(changes["Stop"], "updated")
+        self.assertEqual(merged["hooks"]["Stop"], build_hook_config()["Stop"])
+
+    def test_unexpected_layout_is_refused(self):
+        with self.assertRaises(ValueError):
+            merge_openshard_hooks({"hooks": []})
+        with self.assertRaises(ValueError):
+            merge_openshard_hooks({"hooks": {"Stop": {"not": "a list"}}})
+
+    def test_installed_events(self):
+        self.assertEqual(installed_events({}), [])
+        self.assertEqual(installed_events("nope"), [])
+        merged, _ = merge_openshard_hooks({})
+        self.assertEqual(installed_events(merged), list(HOOK_EVENTS))
+        partial = {"hooks": {"Stop": build_hook_config()["Stop"]}}
+        self.assertEqual(installed_events(partial), ["Stop"])
+
+
+class TestInstallClaudeHooks(unittest.TestCase):
+    def _root(self, tmp: str) -> Path:
+        root = Path(tmp) / "repo with spaces"
+        root.mkdir()
+        (root / ".git").mkdir()
+        return root
+
+    def test_fresh_install_writes_local_settings(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            with patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=_git_ignored_router()):
+                result = install_claude_hooks(repo_root=root)
+            self.assertEqual(result.status, "installed", result.message)
+            self.assertEqual(result.settings_path, root / SETTINGS_RELPATH)
+            self.assertEqual(result.warnings, [])
+            self.assertEqual(_read_settings(root)["hooks"], build_hook_config())
+            text = (root / SETTINGS_RELPATH).read_text(encoding="utf-8")
+            self.assertTrue(text.endswith("\n"))
+            self.assertNotIn(str(root), text)
+
+    def test_repeated_install_is_idempotent_and_does_not_rewrite(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            with patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=_git_ignored_router()):
+                install_claude_hooks(repo_root=root)
+                path = root / SETTINGS_RELPATH
+                before = path.read_text(encoding="utf-8")
+                mtime = path.stat().st_mtime_ns
+                again = install_claude_hooks(repo_root=root)
+            self.assertEqual(again.status, "already_installed")
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            self.assertEqual(path.stat().st_mtime_ns, mtime)
+
+    def test_existing_unrelated_hooks_preserved(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            (root / ".claude").mkdir()
+            existing = {
+                "permissions": {"allow": ["Bash(ls)"]},
+                "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]},
+            }
+            (root / SETTINGS_RELPATH).write_text(json.dumps(existing), encoding="utf-8")
+            with patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=_git_ignored_router()):
+                result = install_claude_hooks(repo_root=root)
+            self.assertEqual(result.status, "installed")
+            data = _read_settings(root)
+            self.assertEqual(data["permissions"], existing["permissions"])
+            self.assertEqual(data["hooks"]["Stop"][0], existing["hooks"]["Stop"][0])
+            self.assertEqual(installed_events(data), list(HOOK_EVENTS))
+
+    def test_stale_config_reports_updated(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            (root / ".claude").mkdir()
+            stale = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 1}]}]}}
+            (root / SETTINGS_RELPATH).write_text(json.dumps(stale), encoding="utf-8")
+            with patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=_git_ignored_router()):
+                result = install_claude_hooks(repo_root=root)
+            self.assertEqual(result.status, "updated")
+            self.assertEqual(result.events["Stop"], "updated")
+            self.assertEqual(result.events["SessionEnd"], "added")
+
+    def test_invalid_json_left_untouched(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            (root / ".claude").mkdir()
+            (root / SETTINGS_RELPATH).write_text("{ nope", encoding="utf-8")
+            with patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=_git_ignored_router()):
+                result = install_claude_hooks(repo_root=root)
+            self.assertEqual(result.status, "error")
+            self.assertIn("not valid JSON", result.message)
+            self.assertEqual((root / SETTINGS_RELPATH).read_text(encoding="utf-8"), "{ nope")
+
+    def test_empty_file_treated_as_empty_settings(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            (root / ".claude").mkdir()
+            (root / SETTINGS_RELPATH).write_text("", encoding="utf-8")
+            with patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=_git_ignored_router()):
+                result = install_claude_hooks(repo_root=root)
+            self.assertEqual(result.status, "installed")
+
+    def test_not_ignored_adds_git_info_exclude(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            with patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=_git_ignored_router(ignored=False)):
+                result = install_claude_hooks(repo_root=root)
+                warning = ensure_local_settings_ignored(root)
+            self.assertEqual(result.status, "installed")
+            self.assertEqual(result.warnings, [])
+            self.assertIsNone(warning)
+            exclude = (root / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+            self.assertEqual(exclude.count(SETTINGS_RELPATH.as_posix()), 1)  # appended once
+
+    def test_git_unavailable_yields_warning_not_failure(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            with patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=FileNotFoundError("git")):
+                result = install_claude_hooks(repo_root=root)
+            self.assertEqual(result.status, "installed")
+            self.assertTrue(any("ignored" in w for w in result.warnings))
+
+    def test_never_raises(self):
+        with patch(f"{_HOOKS_MODULE}._read_settings", side_effect=RuntimeError("boom")):
+            result = install_claude_hooks(repo_root=Path("does-not-matter"))
+        self.assertEqual(result.status, "error")
+        self.assertNotIn("boom", result.message)
 
 
 if __name__ == "__main__":

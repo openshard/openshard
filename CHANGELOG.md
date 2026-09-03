@@ -4,6 +4,21 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Added
+
+- Claude Code auto capture: `openshard mcp install claude` now also installs
+  OpenShard's Claude Code lifecycle hooks (`SessionStart`, `UserPromptSubmit`,
+  `PostToolUse`, `PostToolUseFailure`, `Stop`, `SessionEnd`) into the
+  repository's `.claude/settings.local.json`, so normal `claude` sessions are
+  recorded automatically as Shards/Receipts with canonical Events — no
+  `openshard import claude` / `openshard wrap claude` step. Pass `--no-hooks`
+  to configure MCP only.
+- `openshard hooks claude` — the non-interactive hook entrypoint Claude Code
+  invokes (hook JSON on stdin, silent stdout, always exit 0).
+- Untracked new files are now reported by the hook capture (`git ls-files
+  --others`); work committed during a session is diffed against the HEAD
+  snapshotted at session start.
+
 ## 0.3.0 - 2026-06-06
 
 First-class Claude Code session receipt import, skills list command, and tooling hardening.

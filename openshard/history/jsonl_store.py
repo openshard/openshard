@@ -6,13 +6,18 @@ or tear each other's lines. Locking is stdlib-only: ``fcntl`` on Unix-like
 systems and ``msvcrt`` on Windows, applied to a sidecar ``<file>.lock`` so we
 never tangle with append-mode seek semantics on the data file descriptor.
 
-Two helpers are exposed:
+Helpers exposed:
 
 - ``append_jsonl(path, record)`` — append one record as a single JSON line.
 - ``write_jsonl(path, records)`` — crash-safe whole-file rewrite (temp + replace).
+- ``upsert_jsonl(path, record, match)`` — replace the first line whose record
+  satisfies ``match`` in place, else append; other lines are preserved
+  byte-for-byte (malformed lines included).
+- ``history_file_lock(path)`` — the same sidecar lock, for callers that need to
+  read-modify-write a small companion file next to the history store.
 
-Both derive the same lock path from the data file, so an append and a rewrite of
-the same history file mutually exclude.
+All derive the same lock path from the data file, so an append, an upsert and a
+rewrite of the same history file mutually exclude.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -68,6 +74,78 @@ def _lock_path_for(path: Path) -> Path:
     return path.with_name(path.name + ".lock")
 
 
+@contextmanager
+def history_file_lock(path: Path) -> Iterator[None]:
+    """Hold the exclusive sidecar lock that guards *path*.
+
+    Public wrapper over ``_file_lock`` for callers that must read-modify-write
+    a small JSON companion file (not a JSONL history) atomically across
+    concurrent OpenShard processes -- e.g. the per-session staging buffer the
+    Claude Code hook adapter keeps while a session is live. Not re-entrant:
+    never call ``append_jsonl``/``write_jsonl``/``upsert_jsonl`` on the same
+    *path* while holding it.
+    """
+    with _file_lock(_lock_path_for(Path(path))):
+        yield
+
+
+def _atomic_replace(path: Path, blob: str) -> None:
+    """Write *blob* to a sibling temp file, fsync, then rename over *path*."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(blob)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def upsert_jsonl(path: Path, record: dict, match: Callable[[dict], bool]) -> str:
+    """Replace the first record satisfying *match* with *record*, else append it.
+
+    Returns ``"replaced"`` or ``"appended"``. Lines that are blank, malformed,
+    or do not match are preserved verbatim -- this never re-serializes or
+    re-coerces any record other than the one being written. A replace is a
+    crash-safe temp+rename rewrite; an append is a plain locked append. Both
+    happen under the same sidecar lock as :func:`append_jsonl`, and the whole
+    read-decide-write sequence is one critical section, so two concurrent
+    upserts for the same key can never both append.
+    """
+    path = Path(path)
+    line = json.dumps(record) + "\n"  # serialize BEFORE locking
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _file_lock(_lock_path_for(path)):
+        existing: list[str] = []
+        if path.exists():
+            with path.open("r", encoding="utf-8") as fh:
+                existing = fh.read().splitlines(keepends=True)
+        for i, raw in enumerate(existing):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and match(parsed):
+                existing[i] = line
+                _atomic_replace(path, "".join(existing))
+                return "replaced"
+        with path.open("a", encoding="utf-8") as fh:
+            if existing and not existing[-1].endswith("\n"):
+                fh.write("\n")
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return "appended"
+
+
 def append_jsonl(path: Path, record: dict) -> None:
     """Append one record to *path* as a single locked, fsync'd JSON line.
 
@@ -97,16 +175,4 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
     blob = "".join(json.dumps(r) + "\n" for r in records)  # serialize BEFORE locking
     path.parent.mkdir(parents=True, exist_ok=True)
     with _file_lock(_lock_path_for(path)):
-        tmp = path.with_name(path.name + ".tmp")
-        try:
-            with tmp.open("w", encoding="utf-8") as fh:
-                fh.write(blob)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, path)  # atomic rename over target
-        except BaseException:
-            try:
-                tmp.unlink()  # best-effort cleanup on failure
-            except OSError:
-                pass
-            raise
+        _atomic_replace(path, blob)  # atomic rename over target

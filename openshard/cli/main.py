@@ -2063,17 +2063,41 @@ def mcp_install_group() -> None:
     help="Repository to bind the MCP server to (default: current directory).",
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
-def mcp_install_claude(repo_path: Path | None, as_json: bool) -> None:
-    """Configure Claude Code to launch the local OpenShard MCP server for this repository.
+@click.option(
+    "--no-hooks",
+    "no_hooks",
+    is_flag=True,
+    default=False,
+    help="Configure the MCP server only; skip the Claude Code auto-capture hooks.",
+)
+def mcp_install_claude(repo_path: Path | None, as_json: bool, no_hooks: bool) -> None:
+    """Configure Claude Code for this repository: OpenShard MCP server + auto-capture hooks.
 
-    Uses `claude mcp add` (local scope: private to you, bound to this one
-    repository, never committed to git) so Claude Code can call OpenShard's
-    read-only history tools. Restart Claude Code afterwards if it is already
-    running. Safe to re-run; never creates a duplicate entry.
+    MCP: uses `claude mcp add` (local scope: private to you, bound to this
+    one repository, never committed to git) so Claude Code can call
+    OpenShard's read-only history tools.
+
+    Hooks: merges `openshard hooks claude` into this repository's
+    `.claude/settings.local.json` (Claude Code's documented, project-local,
+    not-shared settings file) so normal Claude Code sessions are recorded
+    automatically as Shards/Receipts -- no `openshard import claude` needed.
+    Unrelated hooks and settings are preserved. Pass --no-hooks to skip.
+
+    Restart Claude Code afterwards if it is already running. Safe to re-run;
+    never creates duplicate entries.
     """
+    from openshard.adapters.claude_hooks_install import (
+        ClaudeHooksInstallResult,
+        install_claude_hooks,
+    )
     from openshard.adapters.claude_mcp_install import install_claude_mcp
 
     result = install_claude_mcp(repo_path=repo_path)
+    hooks_result: ClaudeHooksInstallResult | None = None
+    if result.status != "error" and not no_hooks and result.repo_root is not None:
+        hooks_result = install_claude_hooks(repo_root=result.repo_root)
+
+    hooks_failed = hooks_result is not None and hooks_result.status == "error"
 
     if as_json:
         payload = {
@@ -2083,9 +2107,20 @@ def mcp_install_claude(repo_path: Path | None, as_json: bool) -> None:
             "command": result.command,
             "message": result.message,
             "warnings": result.warnings,
+            "hooks": (
+                {
+                    "status": hooks_result.status,
+                    "settings_path": str(hooks_result.settings_path) if hooks_result.settings_path else None,
+                    "events": hooks_result.events,
+                    "message": hooks_result.message,
+                    "warnings": hooks_result.warnings,
+                }
+                if hooks_result is not None
+                else {"status": "skipped"}
+            ),
         }
         click.echo(json.dumps(payload, indent=2))
-        if result.status == "error":
+        if result.status == "error" or hooks_failed:
             raise SystemExit(1)
         return
 
@@ -2110,7 +2145,54 @@ def mcp_install_claude(repo_path: Path | None, as_json: bool) -> None:
     click.echo(f"Tools: {', '.join(MCP_TOOLS)}")
     for w in result.warnings:
         click.echo(f"  ! {w}")
+
+    if hooks_result is None:
+        click.echo("Auto-capture hooks: skipped (--no-hooks).")
+    elif hooks_failed:
+        click.echo(f"Auto-capture hooks: NOT configured. {hooks_result.message}")
+    else:
+        from openshard.adapters.claude_hooks_install import HOOK_EVENTS, SETTINGS_RELPATH
+
+        state = {
+            "installed": "installed",
+            "updated": "updated",
+            "already_installed": "already configured",
+        }.get(hooks_result.status, hooks_result.status)
+        click.echo(f"Auto-capture hooks: {state} ({SETTINGS_RELPATH.as_posix()})")
+        click.echo(f"Hook events: {', '.join(HOOK_EVENTS)}")
+        click.echo("Claude Code sessions in this repository are now recorded as Shards automatically.")
+        for w in hooks_result.warnings:
+            click.echo(f"  ! {w}")
+
     click.echo("\nRestart Claude Code if it is already running.")
+    if hooks_failed:
+        raise SystemExit(1)
+
+
+@cli.group("hooks")
+def hooks_group() -> None:
+    """Non-interactive hook entrypoints for coding agents (installed by `openshard mcp install claude`)."""
+
+
+@hooks_group.command("claude")
+@click.option(
+    "--event",
+    "event_override",
+    default=None,
+    help="Hook event name to assume when the payload carries no hook_event_name.",
+)
+def hooks_claude(event_override: str | None) -> None:
+    """Claude Code hook entrypoint: read one hook payload (JSON) from stdin and record it.
+
+    Observational only. Never prompts, never blocks Claude Code, never
+    prints to stdout (Claude Code injects hook stdout into the model's
+    context for some events); diagnostics go to stderr. Always exits 0.
+    Evidence lands in this repository's .openshard/runs.jsonl as normal
+    Shard records readable via `openshard last`, `openshard mcp serve`, etc.
+    """
+    from openshard.adapters.claude_hooks import run_hook_from_stream
+
+    run_hook_from_stream(sys.stdin, env=os.environ, event_override=event_override)
 
 
 @cli.group("reflect")
