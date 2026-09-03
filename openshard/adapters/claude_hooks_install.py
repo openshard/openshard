@@ -57,14 +57,16 @@ class HookSpec:
     matcher: str | None
     timeout: int
     # ``async: true`` -> Claude Code does not wait for the hook and ignores
-    # its output, so the ~1s Python start-up never delays the user or the
-    # model on the frequent, purely-staging hooks (per tool call, per
-    # prompt, session start). Stop and SessionEnd stay synchronous: they are
-    # the points that snapshot staged evidence into runs.jsonl, and a
-    # background hook can be torn down with the Claude process before it
-    # writes (observed in `claude -p` smoke testing). Roughly one second per
-    # turn is the price of a guaranteed per-turn snapshot; SessionEnd's
-    # timeout also raises Claude Code's default 1.5s SessionEnd budget.
+    # its output, so Python start-up never delays the user or the model on
+    # the frequent, purely-staging hooks (per tool call, per prompt, session
+    # start). Stop and SessionEnd stay synchronous: they are the points that
+    # snapshot staged evidence into runs.jsonl, and a background hook can be
+    # torn down with the Claude process before it writes (observed in
+    # `claude -p` smoke testing). See docs/capture-performance.md (PR7) for
+    # what this synchronous per-turn cost actually measures -- the console
+    # script now fast-paths around the full CLI's import graph specifically
+    # because of this tradeoff; SessionEnd's timeout also raises Claude
+    # Code's default 1.5s SessionEnd budget.
     run_async: bool
 
 
