@@ -162,3 +162,50 @@ class TestEndToEnd:
             _invoke(repo, _payload("Stop", repo))
         assert len(_lines(repo)) == 1
         assert _lines(repo)[0]["capture"]["prompt_count"] == 3
+
+
+def _status_json(repo: Path, **fields) -> str:
+    data = {"session_id": SID, "cwd": str(repo)}
+    data.update(fields)
+    return json.dumps(data)
+
+
+def _invoke_status(stdin: str, env: dict | None = None):
+    runner = CliRunner()
+    with patch.dict(os.environ, env or {}, clear=False):
+        return runner.invoke(cli, ["hooks", "claude-status"], input=stdin)
+
+
+class TestStatusLineCli:
+    def test_status_line_help(self):
+        result = CliRunner().invoke(cli, ["hooks", "claude-status", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "status" in result.output.lower()
+
+    def test_prints_status_text_and_exits_zero(self, repo: Path):
+        payload = _status_json(repo, model={"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"})
+        result = _invoke_status(payload, {"CLAUDE_PROJECT_DIR": str(repo)})
+        assert result.exit_code == 0, result.output
+        assert "Claude Sonnet 5" in result.output
+
+    def test_empty_stdin_is_harmless(self):
+        result = _invoke_status("")
+        assert result.exit_code == 0
+        assert result.output == "\n"  # click.echo("") still emits the trailing newline
+
+    def test_malformed_stdin_is_harmless(self):
+        result = _invoke_status("{not json")
+        assert result.exit_code == 0
+
+    def test_status_feeds_model_into_next_fold(self, repo: Path):
+        assert _invoke(repo, _payload("UserPromptSubmit", repo, prompt="task")).exit_code == 0
+        payload = _status_json(repo, model={"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"})
+        assert _invoke_status(payload, {"CLAUDE_PROJECT_DIR": str(repo)}).exit_code == 0
+        assert _invoke(repo, _payload("Stop", repo)).exit_code == 0
+        entry = _lines(repo)[0]
+        assert entry["execution_model"] == "claude-sonnet-5"
+
+    def test_no_absolute_path_in_output_or_store(self, repo: Path):
+        payload = _status_json(repo, model={"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"})
+        result = _invoke_status(payload, {"CLAUDE_PROJECT_DIR": str(repo)})
+        assert str(repo) not in result.output

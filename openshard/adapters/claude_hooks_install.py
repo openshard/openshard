@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HOOK_COMMAND = "openshard hooks claude"
+STATUS_COMMAND = "openshard hooks claude-status"
 SETTINGS_RELPATH = Path(".claude") / "settings.local.json"
 _GIT_TIMEOUT_SECONDS = 5.0
 
@@ -199,7 +200,7 @@ def installed_events(settings: object) -> list[str]:
 
 @dataclass
 class ClaudeHooksInstallResult:
-    status: str  # "installed" | "updated" | "already_installed" | "error"
+    status: str  # "installed" | "updated" | "already_installed" | "skipped_existing" | "error"
     settings_path: Path | None
     events: dict[str, str] = field(default_factory=dict)
     message: str = ""
@@ -330,3 +331,65 @@ def install_claude_hooks(*, repo_root: Path) -> ClaudeHooksInstallResult:
         )
     except Exception as exc:
         return _error(f"Failed to configure Claude Code hooks: {type(exc).__name__}")
+
+
+def _desired_statusline_entry() -> dict:
+    return {"type": "command", "command": STATUS_COMMAND}
+
+
+def is_openshard_statusline(value: object) -> bool:
+    """True for a ``statusLine`` config object that runs OpenShard's status command."""
+    if not isinstance(value, dict) or value.get("type") != "command":
+        return False
+    command = value.get("command")
+    if not isinstance(command, str):
+        return False
+    stripped = command.strip()
+    return stripped == STATUS_COMMAND or stripped.startswith(STATUS_COMMAND + " ")
+
+
+def install_claude_statusline(*, repo_root: Path) -> ClaudeHooksInstallResult:
+    """Configure ``<repo_root>/.claude/settings.local.json``'s ``statusLine`` for capture.
+
+    Claude Code's status line is the only documented, local, no-network
+    surface that carries model id, cumulative session cost, and token
+    counts (see ``adapters/claude_hooks.py`` module docstring) -- hooks never
+    do. Only one ``statusLine`` command can be configured at a time, so this
+    is deliberately conservative: it is installed only when the project has
+    no ``statusLine`` of its own yet. An existing, different command is left
+    completely untouched (status is ``"skipped_existing"``) rather than
+    wrapped or replaced -- OpenShard never risks breaking a user's status
+    line to capture metadata. Never raises.
+    """
+    try:
+        root = Path(repo_root)
+        settings_path = root / SETTINGS_RELPATH
+        settings, err = _read_settings(settings_path)
+        if err or settings is None:
+            return _error(err or "Could not read Claude Code settings.", settings_path)
+
+        existing = settings.get("statusLine")
+        if is_openshard_statusline(existing):
+            return ClaudeHooksInstallResult(
+                status="already_installed", settings_path=settings_path,
+                message="Status line already configured for OpenShard capture.",
+            )
+        if existing is not None:
+            return ClaudeHooksInstallResult(
+                status="skipped_existing", settings_path=settings_path,
+                message=(
+                    "A custom status line is already configured for this repository; OpenShard will not "
+                    "replace it. Model/cost/token capture will stay Unknown/Not recorded until this is "
+                    "resolved (remove the existing statusLine entry and re-run install to enable it)."
+                ),
+            )
+
+        merged = copy.deepcopy(settings)
+        merged["statusLine"] = _desired_statusline_entry()
+        _write_settings(settings_path, merged)
+        return ClaudeHooksInstallResult(
+            status="installed", settings_path=settings_path,
+            message="Status line configured for model/cost/token capture.",
+        )
+    except Exception as exc:
+        return _error(f"Failed to configure Claude Code status line: {type(exc).__name__}")

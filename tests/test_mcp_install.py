@@ -22,13 +22,16 @@ from openshard.adapters.claude_hooks_install import (
     HOOK_COMMAND,
     HOOK_EVENTS,
     SETTINGS_RELPATH,
+    STATUS_COMMAND,
     SYNC_EVENTS,
     TOOL_MATCHER,
     build_hook_config,
     ensure_local_settings_ignored,
     install_claude_hooks,
+    install_claude_statusline,
     installed_events,
     is_openshard_hook,
+    is_openshard_statusline,
     merge_openshard_hooks,
 )
 from openshard.adapters.claude_mcp_install import (
@@ -437,6 +440,33 @@ class TestCliInstall(unittest.TestCase):
                 as_json = runner.invoke(cli, ["mcp", "install", "claude", "--no-hooks", "--json"])
             self.assertEqual(json.loads(as_json.output)["hooks"], {"status": "skipped"})
 
+    def test_statusline_configured_alongside_hooks_by_default(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            run = _subprocess_run_router(existing_repo_path=None)
+            with patch(f"{_MODULE}.shutil.which", side_effect=self._which), \
+                 patch(f"{_MODULE}.subprocess.run", side_effect=run):
+                result = runner.invoke(cli, ["mcp", "install", "claude"])
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("Status line: installed", result.output)
+            self.assertEqual(_read_settings(root)["statusLine"], {"type": "command", "command": STATUS_COMMAND})
+
+    def test_no_statusline_flag_skips_only_statusline(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            run = _subprocess_run_router(existing_repo_path=None)
+            with patch(f"{_MODULE}.shutil.which", side_effect=self._which), \
+                 patch(f"{_MODULE}.subprocess.run", side_effect=run):
+                result = runner.invoke(cli, ["mcp", "install", "claude", "--no-statusline"])
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("Auto-capture hooks: installed", result.output)
+            self.assertIn("Status line (model/cost/token capture): skipped.", result.output)
+            self.assertNotIn("statusLine", _read_settings(root))
+
     def test_second_install_reports_hooks_already_configured(self):
         runner = CliRunner()
         with runner.isolated_filesystem() as tmp:
@@ -786,6 +816,76 @@ class TestInstallClaudeHooks(unittest.TestCase):
     def test_never_raises(self):
         with patch(f"{_HOOKS_MODULE}._read_settings", side_effect=RuntimeError("boom")):
             result = install_claude_hooks(repo_root=Path("does-not-matter"))
+        self.assertEqual(result.status, "error")
+
+
+class TestInstallClaudeStatusline(unittest.TestCase):
+    """PR6: status-line install -- the only surface that carries model/cost/tokens."""
+
+    def _root(self, tmp: str) -> Path:
+        root = Path(tmp) / "repo with spaces"
+        root.mkdir()
+        (root / ".git").mkdir()
+        return root
+
+    def test_fresh_install_writes_statusline(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            result = install_claude_statusline(repo_root=root)
+            self.assertEqual(result.status, "installed", result.message)
+            data = _read_settings(root)
+            self.assertEqual(data["statusLine"], {"type": "command", "command": STATUS_COMMAND})
+
+    def test_repeated_install_is_idempotent_and_does_not_rewrite(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            install_claude_statusline(repo_root=root)
+            path = root / SETTINGS_RELPATH
+            before = path.read_text(encoding="utf-8")
+            again = install_claude_statusline(repo_root=root)
+            self.assertEqual(again.status, "already_installed")
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_existing_foreign_statusline_is_never_touched(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            (root / ".claude").mkdir()
+            foreign = {"statusLine": {"type": "command", "command": "~/.claude/my-statusline.sh"}}
+            (root / SETTINGS_RELPATH).write_text(json.dumps(foreign), encoding="utf-8")
+            result = install_claude_statusline(repo_root=root)
+            self.assertEqual(result.status, "skipped_existing")
+            data = _read_settings(root)
+            self.assertEqual(data["statusLine"], foreign["statusLine"])
+
+    def test_unrelated_settings_preserved(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            (root / ".claude").mkdir()
+            existing = {"permissions": {"allow": ["Bash(ls)"]}}
+            (root / SETTINGS_RELPATH).write_text(json.dumps(existing), encoding="utf-8")
+            result = install_claude_statusline(repo_root=root)
+            self.assertEqual(result.status, "installed")
+            data = _read_settings(root)
+            self.assertEqual(data["permissions"], existing["permissions"])
+
+    def test_invalid_json_left_untouched(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            (root / ".claude").mkdir()
+            (root / SETTINGS_RELPATH).write_text("{ nope", encoding="utf-8")
+            result = install_claude_statusline(repo_root=root)
+            self.assertEqual(result.status, "error")
+            self.assertEqual((root / SETTINGS_RELPATH).read_text(encoding="utf-8"), "{ nope")
+
+    def test_is_openshard_statusline(self):
+        self.assertTrue(is_openshard_statusline({"type": "command", "command": STATUS_COMMAND}))
+        self.assertFalse(is_openshard_statusline({"type": "command", "command": "other"}))
+        self.assertFalse(is_openshard_statusline("not-a-dict"))
+        self.assertFalse(is_openshard_statusline(None))
+
+    def test_never_raises(self):
+        with patch(f"{_HOOKS_MODULE}._read_settings", side_effect=RuntimeError("boom")):
+            result = install_claude_statusline(repo_root=Path("does-not-matter"))
         self.assertEqual(result.status, "error")
         self.assertNotIn("boom", result.message)
 

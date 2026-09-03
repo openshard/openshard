@@ -92,7 +92,9 @@ CAPTURE_SOURCE = "claude_code_hooks"
 IMPORT_NOTE = (
     "Captured automatically from Claude Code lifecycle hooks. "
     "Tool/file facts are as reported by Claude Code; files are inferred from git diff. "
-    "Model, cost, and verification not recorded by OpenShard."
+    "Model/cost/tokens are read from Claude Code's status line when one is configured "
+    "(see `openshard mcp install claude`); otherwise they stay Unknown/Not recorded. "
+    "Verification is never recorded by OpenShard for this capture path."
 )
 
 SESSIONS_DIRNAME = "claude_sessions"
@@ -271,12 +273,96 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
 
 
 # ---------------------------------------------------------------------------
+# Status-line payload parsing -- Claude Code's *status line* is a separate,
+# documented mechanism from hooks (a single `statusLine` command Claude Code
+# invokes with JSON on stdin, whose stdout becomes the rendered status line).
+# It is the only official, local, no-network surface that carries model id,
+# cumulative session cost, and token counts -- no hook payload ever does (see
+# module docstring). OpenShard reads it opportunistically, in addition to
+# hooks, never in place of them.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StatusPayload:
+    session_id: str | None
+    cwd: str | None
+    model_id: str | None = None
+    cost_total_usd: float | None = None
+    tokens_input: int | None = None
+    tokens_output: int | None = None
+    tokens_cache_creation: int | None = None
+    tokens_cache_read: int | None = None
+
+
+def _number_or_none(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _int_or_none(value: object) -> int | None:
+    n = _number_or_none(value)
+    return int(n) if n is not None else None
+
+
+def extract_status_payload(data: Mapping[str, Any]) -> StatusPayload | None:
+    """Pick the supported fields out of a decoded status-line payload.
+
+    Unknown keys (rate limits, prompt cache stats, vim mode, workspace repo
+    details, ...) are never read. Returns None only when the payload has no
+    usable session id -- unlike hooks, a status payload has no event name to
+    validate.
+    """
+    session_id = data.get("session_id")
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+        return None
+    model = data.get("model")
+    model_id = _str_or_none(model.get("id"), 200) if isinstance(model, dict) else None
+    cost = data.get("cost")
+    cost_total_usd = _number_or_none(cost.get("total_cost_usd")) if isinstance(cost, dict) else None
+    ctx = data.get("context_window")
+    usage = ctx.get("current_usage") if isinstance(ctx, dict) else None
+    usage = usage if isinstance(usage, dict) else {}
+    return StatusPayload(
+        session_id=session_id,
+        cwd=_str_or_none(data.get("cwd"), 1_000),
+        model_id=model_id,
+        cost_total_usd=cost_total_usd,
+        tokens_input=_int_or_none(usage.get("input_tokens")),
+        tokens_output=_int_or_none(usage.get("output_tokens")),
+        tokens_cache_creation=_int_or_none(usage.get("cache_creation_input_tokens")),
+        tokens_cache_read=_int_or_none(usage.get("cache_read_input_tokens")),
+    )
+
+
+def _status_line_text(data: Mapping[str, Any]) -> str:
+    """A minimal, honest replacement status line: folder name + model, if known.
+
+    Runs even when the payload can't be attributed to a repo/session -- the
+    status line must always show *something* reasonable. Never raises.
+    """
+    try:
+        cwd = data.get("cwd")
+        folder = None
+        if isinstance(cwd, str) and cwd:
+            folder = (PureWindowsPath(cwd) if "\\" in cwd else PurePosixPath(cwd)).name or None
+        model = data.get("model")
+        display = model.get("display_name") if isinstance(model, dict) else None
+        display = display if isinstance(display, str) and display else None
+        parts = [p for p in (folder, display) if p]
+        return " · ".join(parts)
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Repository resolution and path privacy
 # ---------------------------------------------------------------------------
 
 
-def resolve_repo_root(payload: HookPayload, env: Mapping[str, str] | None = None) -> Path | None:
-    """Locate the repository this hook belongs to. Never raises.
+def resolve_repo_root(payload: HookPayload | StatusPayload, env: Mapping[str, str] | None = None) -> Path | None:
+    """Locate the repository this hook/status payload belongs to. Never raises.
 
     ``CLAUDE_PROJECT_DIR`` (the project root whose ``.claude/settings.local.json``
     fired this hook) wins, then the payload's ``cwd``. The nearest enclosing
@@ -411,6 +497,20 @@ def _new_buffer(session_id: str, repo_root: Path, first_hook: str) -> dict:
         "git_file_event_ids": {},  # "path|change_type" -> stable event_id across folds
         "record": None,  # {run_id, shard_id, attempt_number, timestamp}
         "ended": None,  # {reason, at}
+        # Turn-boundary timestamps (Requirement: task completion must not
+        # require SessionEnd) -- first_prompt_at/last_stop_at bound the task's
+        # actual work, never the whole (possibly much longer-lived) session.
+        "first_prompt_at": None,
+        "last_stop_at": None,
+        # Model/cost/token capture -- populated opportunistically by the
+        # Claude Code *status line* channel (see handle_claude_status), never
+        # by hooks (no hook payload carries this data; see module docstring).
+        "model_current": None,
+        "models_seen": [],  # distinct model ids, first-seen order, bounded
+        "cost_total_usd": None,  # latest cumulative session cost observed
+        "cost_baseline_usd": None,  # cost observed at the first status ping
+        "tokens_current": None,  # {"input", "output", "cache_creation", "cache_read"}
+        "status_last_seen_at": None,
     }
     _append_event(
         buf,
@@ -542,6 +642,25 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
             "timestamp": entry.get("timestamp"),
         },
         "ended": ended,
+        "first_prompt_at": capture.get("first_prompt_at"),
+        "last_stop_at": capture.get("last_turn_completed_at"),
+        "model_current": entry.get("execution_model") if entry.get("execution_model") not in (None, "unknown") else None,
+        "models_seen": [m for m in (capture.get("models_seen") or []) if isinstance(m, str)],
+        "cost_total_usd": capture.get("cost_total_usd") if isinstance(capture.get("cost_total_usd"), (int, float)) else None,
+        "cost_baseline_usd": (
+            capture.get("cost_baseline_usd") if isinstance(capture.get("cost_baseline_usd"), (int, float)) else None
+        ),
+        "tokens_current": (
+            {
+                "input": entry.get("prompt_tokens") or 0,
+                "output": entry.get("completion_tokens") or 0,
+                "cache_creation": entry.get("cache_creation_tokens") or 0,
+                "cache_read": entry.get("cache_read_tokens") or 0,
+            }
+            if isinstance(entry.get("prompt_tokens"), int)
+            else None
+        ),
+        "status_last_seen_at": capture.get("last_status_ping_at"),
     }
 
 
@@ -709,6 +828,42 @@ def _hook_file_events(buf: dict) -> list[dict]:
     return events
 
 
+def _turn_duration_seconds(buf: dict) -> float | None:
+    """Task-boundary duration: first prompt -> most recent Stop. Never the whole session.
+
+    None until at least one turn has completed (Stop observed) -- an
+    in-progress session has no honest end boundary yet, so no number is
+    fabricated for it.
+    """
+    start = buf.get("first_prompt_at")
+    end = buf.get("last_stop_at")
+    if not isinstance(start, str) or not isinstance(end, str):
+        return None
+    try:
+        t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0.0, round((t1 - t0).total_seconds(), 2))
+
+
+def _task_status(buf: dict, ended: dict | None) -> str:
+    """Turn-completion status -- independent of SessionEnd (Requirement 1).
+
+    ``turn_completed`` as soon as one Stop has fired, regardless of whether
+    the Claude session itself is still open; SessionEnd never has to happen
+    first. Never a stronger claim than "the turn finished" -- OpenShard
+    cannot see whether Claude considered the result successful (that would
+    require reading the assistant's message, which this adapter never
+    stores), so this is deliberately not "verified" or "succeeded".
+    """
+    if int(buf.get("turn_count") or 0) > 0:
+        return "turn_completed"
+    if ended:
+        return "ended_no_turn"
+    return "in_progress"
+
+
 def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     """Build the coerced runs.jsonl record for a session's current state.
 
@@ -736,24 +891,65 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     prompt_count = int(buf.get("prompt_count") or 0)
     tool_calls = int(buf.get("tool_call_count") or 0)
     turn_count = int(buf.get("turn_count") or 0)
-    end_text = (
-        f"Session end observed (reason={ended.get('reason') or 'unknown'})"
-        if ended else "Session end not observed"
-    )
+    task_status = _task_status(buf, ended)
+    # The turn/task outcome is reported independently of SessionEnd: a
+    # completed turn already reads as "completed" even while the underlying
+    # Claude session is still open. Session-end is appended as a trailing,
+    # separate fact -- it never gates or qualifies the turn status above.
+    _task_status_text = {
+        "turn_completed": f"{turn_count} turn(s) completed",
+        "in_progress": "in progress (no turn completed yet)",
+        "ended_no_turn": "session ended before any turn completed",
+    }[task_status]
+    end_text = f" Session ended (reason={ended.get('reason') or 'unknown'})." if ended else ""
     # First sentence kept short: the receipt's Result line shows the first
     # complete sentence (see shard_contract._result_display).
     summary = (
         f"Claude Code session: {len(changed_files)} file(s) changed, {tool_calls} tool call(s). "
-        f"{prompt_count} prompt(s), {turn_count} turn(s), observed via hooks. {end_text}."
+        f"{prompt_count} prompt(s), {_task_status_text}, observed via hooks.{end_text}"
     )
 
     task = buf.get("task") if isinstance(buf.get("task"), str) and buf.get("task") else None
+
+    # Model/cost/tokens -- opportunistically populated by the Claude Code
+    # status line (handle_claude_status), never guessed from names/env vars.
+    # Absent entirely (not merely None) when never observed, so old readers
+    # and the "verification never fabricated" contract both stay honest.
+    models_seen = [m for m in (buf.get("models_seen") or []) if isinstance(m, str)][:5]
+    model_current = buf.get("model_current") if isinstance(buf.get("model_current"), str) else None
+    execution_model = model_current or "unknown"
+
+    cost_total = buf.get("cost_total_usd")
+    cost_baseline = buf.get("cost_baseline_usd")
+    estimated_cost: float | None = None
+    cost_provenance: str | None = None
+    if isinstance(cost_total, (int, float)) and isinstance(cost_baseline, (int, float)):
+        # Claude Code's own cumulative session cost, windowed to this Shard's
+        # session by subtracting the value observed at the first status ping
+        # (usually ~0, but some Claude Code versions carry cost over across
+        # /clear -- see status-line docs). Never the raw whole-session total.
+        estimated_cost = round(max(0.0, float(cost_total) - float(cost_baseline)), 6)
+        cost_provenance = "provider_reported"
+
+    tokens_current = buf.get("tokens_current") if isinstance(buf.get("tokens_current"), dict) else None
+    prompt_tokens = completion_tokens = total_tokens = None
+    cache_creation_tokens = cache_read_tokens = None
+    tokens_provenance: str | None = None
+    if tokens_current:
+        prompt_tokens = int(tokens_current.get("input") or 0)
+        completion_tokens = int(tokens_current.get("output") or 0)
+        total_tokens = prompt_tokens + completion_tokens
+        cache_creation_tokens = int(tokens_current.get("cache_creation") or 0)
+        cache_read_tokens = int(tokens_current.get("cache_read") or 0)
+        tokens_provenance = "provider_reported"
+
+    duration_seconds = _turn_duration_seconds(buf)
 
     entry: dict = {
         "schema_version": SHARD_SCHEMA_VERSION,
         "timestamp": record["timestamp"],
         "task": task or _TASK_PLACEHOLDER,
-        "execution_model": "unknown",
+        "execution_model": execution_model,
         "executor": EXECUTOR,
         "import_source": IMPORT_SOURCE,
         "import_method": IMPORT_METHOD,
@@ -787,8 +983,30 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "tool_failure_count": int(buf.get("tool_failure_count") or 0),
             "task_source": "first_user_prompt_excerpt" if task else "not_captured",
             "hook_events_dropped": int(buf.get("dropped_events") or 0),
+            # Turn completion -- independent of session_end_observed above.
+            "task_status": task_status,
+            "first_prompt_at": buf.get("first_prompt_at"),
+            "last_turn_completed_at": buf.get("last_stop_at"),
+            # Model/cost/token provenance (status-line capture; see above).
+            "models_seen": models_seen,
+            "model_source": "status_line" if model_current else "not_captured",
+            "cost_total_usd": cost_total if isinstance(cost_total, (int, float)) else None,
+            "cost_baseline_usd": cost_baseline if isinstance(cost_baseline, (int, float)) else None,
+            "last_status_ping_at": buf.get("status_last_seen_at"),
         },
     }
+    if estimated_cost is not None:
+        entry["estimated_cost"] = estimated_cost
+        entry["cost_provenance"] = cost_provenance
+    if tokens_provenance is not None:
+        entry["prompt_tokens"] = prompt_tokens
+        entry["completion_tokens"] = completion_tokens
+        entry["total_tokens"] = total_tokens
+        entry["cache_creation_tokens"] = cache_creation_tokens
+        entry["cache_read_tokens"] = cache_read_tokens
+        entry["tokens_provenance"] = tokens_provenance
+    if duration_seconds is not None:
+        entry["duration_seconds"] = duration_seconds
     try:
         from openshard.history.repo_identity import REPO_IDENTITY_FIELD, capture_repo_identity
 
@@ -911,6 +1129,8 @@ def _apply(payload: HookPayload, buf: dict, repo_root: Path) -> tuple[str, bool,
 
     if event == EVENT_USER_PROMPT_SUBMIT:
         buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
+        if not buf.get("first_prompt_at"):
+            buf["first_prompt_at"] = _now()
         if not buf.get("task"):
             buf["task"] = sanitize_task_excerpt(payload.prompt)
         _append_event(
@@ -964,6 +1184,7 @@ def _apply(payload: HookPayload, buf: dict, repo_root: Path) -> tuple[str, bool,
 
     if event == EVENT_STOP:
         buf["turn_count"] = int(buf.get("turn_count") or 0) + 1
+        buf["last_stop_at"] = _now()
         _append_event(
             buf, event_type="session.activity", action="assistant turn completed",
             status="unknown", evidence="directly_observed",
@@ -1090,3 +1311,106 @@ def run_hook_from_stream(
     if outcome.action == "error" or os.environ.get("OPENSHARD_HOOK_DEBUG"):
         _diag(f"{outcome.event or '?'}: {outcome.action} ({outcome.detail})")
     return outcome
+
+
+# ---------------------------------------------------------------------------
+# Status-line handling -- see StatusPayload/extract_status_payload above.
+# ---------------------------------------------------------------------------
+
+
+def _apply_status(payload: StatusPayload, buf: dict) -> bool:
+    """Merge one status-line observation into *buf*. Returns True if anything changed.
+
+    Never raises. Model ids/cost/token counts are the only new state; no
+    Event is appended for a status ping (it is not itself a lifecycle fact
+    worth recording, just metadata about facts already recorded elsewhere).
+    """
+    from openshard.adapters.claude_code_import import _sanitize_model
+
+    changed = False
+    buf["status_last_seen_at"] = _now()
+
+    if payload.model_id:
+        safe_model = _sanitize_model(payload.model_id)
+        if safe_model != "unknown":
+            if buf.get("model_current") != safe_model:
+                buf["model_current"] = safe_model
+                changed = True
+            seen = buf.setdefault("models_seen", [])
+            if safe_model not in seen and len(seen) < 5:
+                seen.append(safe_model)
+                changed = True
+
+    if payload.cost_total_usd is not None:
+        if buf.get("cost_baseline_usd") is None:
+            buf["cost_baseline_usd"] = payload.cost_total_usd
+            changed = True
+        if buf.get("cost_total_usd") != payload.cost_total_usd:
+            buf["cost_total_usd"] = payload.cost_total_usd
+            changed = True
+
+    if payload.tokens_input is not None or payload.tokens_output is not None:
+        tokens = {
+            "input": payload.tokens_input or 0,
+            "output": payload.tokens_output or 0,
+            "cache_creation": payload.tokens_cache_creation or 0,
+            "cache_read": payload.tokens_cache_read or 0,
+        }
+        if buf.get("tokens_current") != tokens:
+            buf["tokens_current"] = tokens
+            changed = True
+
+    return changed
+
+
+def handle_claude_status(data: Mapping[str, Any], *, env: Mapping[str, str] | None = None) -> str:
+    """Process one Claude Code status-line JSON payload. Never raises.
+
+    Returns the text to print as the rendered status line (Claude Code uses
+    this command's stdout directly, unlike the silent hooks command). Model/
+    cost/token capture is a side effect only; a failure anywhere in the
+    capture path still returns a usable status line.
+    """
+    fallback = _status_line_text(data) if isinstance(data, Mapping) else ""
+    try:
+        payload = extract_status_payload(data)
+        if payload is None:
+            return fallback
+        repo_root = resolve_repo_root(payload, env)
+        if repo_root is None:
+            return fallback
+
+        from openshard.history.jsonl_store import history_file_lock
+
+        path = buffer_path(repo_root, payload.session_id)  # type: ignore[arg-type]
+        with history_file_lock(path):
+            buf = _load_or_create_buffer(repo_root, payload.session_id, "Status")  # type: ignore[arg-type]
+            changed = _apply_status(payload, buf)
+            if changed and buf.get("record"):
+                _fold(buf, repo_root)
+            _write_buffer(path, buf)
+        return fallback
+    except Exception:
+        return fallback
+
+
+def run_status_from_stream(stream: object, *, env: Mapping[str, str] | None = None) -> str:
+    """Read one status-line payload from *stream* (stdin) and handle it. Never raises.
+
+    Always returns text suitable to print as the status line, even on
+    completely empty/malformed input.
+    """
+    raw: object = None
+    try:
+        source = getattr(stream, "buffer", None) or stream
+        reader = getattr(source, "read", None)
+        raw = reader() if callable(reader) else None
+    except Exception:
+        raw = None
+    data = parse_hook_payload(raw)
+    if data is None:
+        return ""
+    try:
+        return handle_claude_status(data, env=env)
+    except Exception:
+        return ""

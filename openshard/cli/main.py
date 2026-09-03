@@ -2070,7 +2070,14 @@ def mcp_install_group() -> None:
     default=False,
     help="Configure the MCP server only; skip the Claude Code auto-capture hooks.",
 )
-def mcp_install_claude(repo_path: Path | None, as_json: bool, no_hooks: bool) -> None:
+@click.option(
+    "--no-statusline",
+    "no_statusline",
+    is_flag=True,
+    default=False,
+    help="Skip configuring the Claude Code status line (model/cost/token capture).",
+)
+def mcp_install_claude(repo_path: Path | None, as_json: bool, no_hooks: bool, no_statusline: bool) -> None:
     """Configure Claude Code for this repository: OpenShard MCP server + auto-capture hooks.
 
     MCP: uses `claude mcp add` (local scope: private to you, bound to this
@@ -2083,19 +2090,29 @@ def mcp_install_claude(repo_path: Path | None, as_json: bool, no_hooks: bool) ->
     automatically as Shards/Receipts -- no `openshard import claude` needed.
     Unrelated hooks and settings are preserved. Pass --no-hooks to skip.
 
+    Status line: also configures `statusLine` in the same settings file, the
+    only official surface that reports model id, session cost, and token
+    counts, so receipts can show them instead of Unknown/Not recorded. Only
+    set when the project has no status line of its own yet -- an existing
+    one is never replaced. Pass --no-statusline to skip.
+
     Restart Claude Code afterwards if it is already running. Safe to re-run;
     never creates duplicate entries.
     """
     from openshard.adapters.claude_hooks_install import (
         ClaudeHooksInstallResult,
         install_claude_hooks,
+        install_claude_statusline,
     )
     from openshard.adapters.claude_mcp_install import install_claude_mcp
 
     result = install_claude_mcp(repo_path=repo_path)
     hooks_result: ClaudeHooksInstallResult | None = None
+    statusline_result: ClaudeHooksInstallResult | None = None
     if result.status != "error" and not no_hooks and result.repo_root is not None:
         hooks_result = install_claude_hooks(repo_root=result.repo_root)
+    if result.status != "error" and not no_hooks and not no_statusline and result.repo_root is not None:
+        statusline_result = install_claude_statusline(repo_root=result.repo_root)
 
     hooks_failed = hooks_result is not None and hooks_result.status == "error"
 
@@ -2116,6 +2133,15 @@ def mcp_install_claude(repo_path: Path | None, as_json: bool, no_hooks: bool) ->
                     "warnings": hooks_result.warnings,
                 }
                 if hooks_result is not None
+                else {"status": "skipped"}
+            ),
+            "statusline": (
+                {
+                    "status": statusline_result.status,
+                    "settings_path": str(statusline_result.settings_path) if statusline_result.settings_path else None,
+                    "message": statusline_result.message,
+                }
+                if statusline_result is not None
                 else {"status": "skipped"}
             ),
         }
@@ -2164,6 +2190,18 @@ def mcp_install_claude(repo_path: Path | None, as_json: bool, no_hooks: bool) ->
         for w in hooks_result.warnings:
             click.echo(f"  ! {w}")
 
+    if statusline_result is None:
+        click.echo("Status line (model/cost/token capture): skipped.")
+    elif statusline_result.status == "error":
+        click.echo(f"Status line: NOT configured. {statusline_result.message}")
+    elif statusline_result.status == "skipped_existing":
+        click.echo(f"Status line: not changed. {statusline_result.message}")
+    else:
+        state = {"installed": "installed", "already_installed": "already configured"}.get(
+            statusline_result.status, statusline_result.status
+        )
+        click.echo(f"Status line: {state}. Receipts can now show model/cost/token data when available.")
+
     click.echo("\nRestart Claude Code if it is already running.")
     if hooks_failed:
         raise SystemExit(1)
@@ -2193,6 +2231,21 @@ def hooks_claude(event_override: str | None) -> None:
     from openshard.adapters.claude_hooks import run_hook_from_stream
 
     run_hook_from_stream(sys.stdin, env=os.environ, event_override=event_override)
+
+
+@hooks_group.command("claude-status")
+def hooks_claude_status() -> None:
+    """Claude Code status-line entrypoint: read status JSON from stdin, print a status line.
+
+    Configured as this repository's `statusLine` command by `openshard mcp
+    install claude` (only when none was already configured). Its stdout IS
+    the rendered status line, so this always prints something -- as a side
+    effect, model id / cumulative session cost / token counts are recorded
+    (best-effort, never blocking) so receipts can show them. Always exits 0.
+    """
+    from openshard.adapters.claude_hooks import run_status_from_stream
+
+    click.echo(run_status_from_stream(sys.stdin, env=os.environ))
 
 
 @cli.group("reflect")
