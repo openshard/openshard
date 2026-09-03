@@ -215,6 +215,10 @@ SOURCE_REVIEW_CHECKS = "review_checks"
 SOURCE_POLICY_DECISIONS = "policy_decisions"
 SOURCE_CLAUDE_CODE_IMPORT = "claude_code_import"
 SOURCE_CLAUDE_CODE_WRAP = "claude_code_wrap"
+# Demo v1 PR5: Events built at observation time by the Claude Code hook
+# adapter (``adapters/claude_hooks.py``) from official Claude Code hook
+# payloads. Same embedded-Events convention as import/wrap.
+SOURCE_CLAUDE_CODE_HOOKS = "claude_code_hooks"
 SOURCE_NATIVE_RUN = "native_run"
 
 _ACTION_LIMIT = 120

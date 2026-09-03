@@ -40,19 +40,64 @@ _STATUS_TO_CHANGE_TYPE: dict[str, str] = {
 }
 
 
-def _parse_git_changed_files(repo_path: Path) -> tuple[list[dict], str]:
-    """Return changed files from ``git diff HEAD --name-status`` in *repo_path*.
+# Paths under these prefixes are OpenShard's / Claude Code's own local state,
+# never evidence of the task's work, so they are excluded from untracked-file
+# inference when a repository does not gitignore them.
+_UNTRACKED_EXCLUDED_PREFIXES: tuple[str, ...] = (".openshard/", ".claude/")
+
+
+def _list_untracked_files(repo_path: Path) -> list[str] | None:
+    """Untracked, not-ignored file paths from ``git ls-files``; None on error. Never raises."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=repo_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5.0,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return [
+        ln.strip() for ln in result.stdout.splitlines()
+        if ln.strip() and not ln.strip().startswith(_UNTRACKED_EXCLUDED_PREFIXES)
+    ]
+
+
+def _parse_git_changed_files(
+    repo_path: Path,
+    base_ref: str = "HEAD",
+    include_untracked: bool = False,
+) -> tuple[list[dict], str]:
+    """Return changed files from ``git diff <base_ref> --name-status`` in *repo_path*.
 
     Returns ``(files, files_source)`` where ``files`` is a list of
     ``{path, change_type, summary}`` dicts and ``files_source`` is either
     ``"git_diff_inferred"`` or ``"not_available"``.  Never raises.
 
+    ``base_ref`` defaults to ``HEAD`` (uncommitted changes only). A caller
+    that snapshotted the HEAD commit before an external session started can
+    pass that hash instead, so work committed *during* the session is still
+    reported rather than disappearing from the diff.
+
+    ``include_untracked`` additionally reports untracked, not-ignored files
+    (``git ls-files --others --exclude-standard``) as ``create`` -- plain
+    ``git diff`` never lists a brand-new file, which is the common case for
+    an external agent session. OpenShard's own ``.openshard/`` and Claude
+    Code's ``.claude/`` state are excluded.
+
     File paths are stored relative to the repo root.  At most _MAX_FILES
     entries are returned.
     """
+    ref = base_ref if isinstance(base_ref, str) and base_ref.strip() else "HEAD"
     try:
         result = subprocess.run(
-            ["git", "diff", "HEAD", "--name-status"],
+            ["git", "diff", ref, "--name-status"],
             cwd=repo_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -64,14 +109,20 @@ def _parse_git_changed_files(repo_path: Path) -> tuple[list[dict], str]:
         if result.returncode != 0:
             return [], "not_available"
         lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
-        if not lines:
-            return [], "git_diff_inferred"
     except Exception:
         return [], "not_available"
+
+    if include_untracked:
+        for path in _list_untracked_files(repo_path) or []:
+            lines.append(f"A\t{path}")
+
+    if not lines:
+        return [], "git_diff_inferred"
 
     from openshard.safety.sanitize import sanitize_text
 
     files: list[dict] = []
+    seen: set[str] = set()
     for line in lines:
         if len(files) >= _MAX_FILES:
             break
@@ -82,8 +133,9 @@ def _parse_git_changed_files(repo_path: Path) -> tuple[list[dict], str]:
         status_code = status_raw[0] if status_raw else "M"
         change_type = _STATUS_TO_CHANGE_TYPE.get(status_code, "update")
         safe_path = sanitize_text(path_raw, _PATH_CAP)
-        if not safe_path:
+        if not safe_path or safe_path in seen:
             continue
+        seen.add(safe_path)
         files.append({
             "path": safe_path,
             "change_type": change_type,
@@ -110,20 +162,25 @@ def _scrub_notes_file(path: Path, max_chars: int = _MAX_NOTES_READ_CHARS) -> str
     return scrubbed[:_SUMMARY_CAP]
 
 
-def _sanitize_task(task: str) -> str:
+def _sanitize_task(
+    task: str,
+    placeholder: str = "Claude Code session import",
+    cap: int = _TASK_CAP,
+) -> str:
     """Sanitize a task description for safe storage.
 
-    Scrubs secret-like values, replaces absolute paths with a neutral token,
-    strips control characters, and caps length.  Returns a neutral placeholder
-    if nothing safe remains.
+    Scrubs secret-like values, strips control characters/whitespace runs, and
+    caps length at *cap*.  Returns *placeholder* if nothing safe remains.
+    Shared with the Claude Code hook adapter, which passes its own
+    placeholder and a tighter cap.
     """
     from openshard.security.secret_scan import scrub_text_for_secrets
 
     if not isinstance(task, str) or not task.strip():
-        return "Claude Code session import"
-    scrubbed, _ = scrub_text_for_secrets(task[:_TASK_CAP], source_label="<task>")
-    cleaned = " ".join(scrubbed.split())
-    return cleaned[:_TASK_CAP] or "Claude Code session import"
+        return placeholder
+    scrubbed, _ = scrub_text_for_secrets(task[:cap], source_label="<task>")
+    printable = "".join(ch if ch.isprintable() else " " for ch in scrubbed)
+    return " ".join(printable.split())[:cap] or placeholder
 
 
 def _sanitize_model(model: str | None) -> str:

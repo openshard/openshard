@@ -28,10 +28,12 @@ CAPTURE_UNKNOWN = "unknown"
 VALID_CAPTURE_DEPTHS = frozenset({CAPTURE_FULL, CAPTURE_PARTIAL, CAPTURE_UNKNOWN})
 
 # Executors OpenShard did not run itself — it only observed the git state an
-# external coding agent left behind. Never invents verification, cost, or
-# approval for these (see openshard/adapters/claude_code_import.py and
-# openshard/adapters/wrap_exec.py).
-_EXTERNAL_ADAPTER_EXECUTORS = frozenset({"claude_code_import", "claude_code_wrap"})
+# external coding agent left behind, or (for ``claude_code_hooks``) the
+# lifecycle evidence Claude Code's official hooks handed it. Never invents
+# verification, cost, or approval for these (see
+# openshard/adapters/claude_code_import.py, openshard/adapters/wrap_exec.py
+# and openshard/adapters/claude_hooks.py).
+_EXTERNAL_ADAPTER_EXECUTORS = frozenset({"claude_code_import", "claude_code_wrap", "claude_code_hooks"})
 
 _EXTERNAL_AGENT_LABEL = "Claude Code (external)"
 
