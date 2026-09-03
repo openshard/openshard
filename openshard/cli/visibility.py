@@ -288,12 +288,19 @@ def ranking_lines(ranking: dict) -> list[str]:
     bonuses = ranking.get("bonuses", {})
     return [
         f"{_INDENT}How ranking works",
-        f"{_INDENT}  {ranking.get('method', 'deterministic keyword overlap')}.",
+        f"{_INDENT}  {ranking.get('method', 'deterministic evidence scoring')}.",
         (
-            f"{_INDENT}  Score = keyword hits in task text {_TIMES}{weights.get('task_text', '?')}, "
-            f"shard id {_TIMES}{weights.get('shard_id', '?')}, agent {_TIMES}{weights.get('agent', '?')}; "
-            f"+{bonuses.get('prior_verification_failure', '?')} for a recorded failure, "
-            f"+{bonuses.get('multiple_attempts', '?')} for retries."
+            f"{_INDENT}  File overlap: touched {_TIMES}{weights.get('file_touched', '?')}, "
+            f"referenced by a finding {_TIMES}{weights.get('file_referenced', '?')}."
+        ),
+        (
+            f"{_INDENT}  Keyword overlap: task text {_TIMES}{weights.get('task_text', '?')}, "
+            f"shard id {_TIMES}{weights.get('shard_id', '?')}, agent {_TIMES}{weights.get('agent', '?')}."
+        ),
+        (
+            f"{_INDENT}  Bonuses: +{bonuses.get('prior_verification_failure', '?')} for a recorded failure, "
+            f"+{bonuses.get('multiple_attempts', '?')} for retries, "
+            f"+{bonuses.get('resolved_after_failure', '?')} when a later attempt passed after an earlier failure."
         ),
         (
             f"{_INDENT}  Reads only: {', '.join(ranking.get('fields_read', []))}. "
