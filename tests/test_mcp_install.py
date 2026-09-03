@@ -18,9 +18,11 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
+from openshard.adapters.claude_capture_client import DEFAULT_PORT
 from openshard.adapters.claude_hooks_install import (
     HOOK_COMMAND,
     HOOK_EVENTS,
+    HTTP_EVENTS,
     SETTINGS_RELPATH,
     STATUS_COMMAND,
     SYNC_EVENTS,
@@ -30,6 +32,7 @@ from openshard.adapters.claude_hooks_install import (
     install_claude_hooks,
     install_claude_statusline,
     installed_events,
+    installed_hook_port,
     is_openshard_hook,
     is_openshard_statusline,
     merge_openshard_hooks,
@@ -573,16 +576,34 @@ class TestCliInstall(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestHookConfigShape(unittest.TestCase):
-    def test_config_covers_every_supported_event_with_the_hook_command(self):
+    def test_config_covers_every_supported_event(self):
+        # PR9.5: every hot event is an HTTP hook to the local capture service;
+        # SessionStart (which Claude Code never delivers over HTTP) stays the
+        # command that starts the service.
         config = build_hook_config()
         self.assertEqual(set(config), set(HOOK_EVENTS))
+        self.assertEqual(set(HTTP_EVENTS), set(HOOK_EVENTS) - {"SessionStart"})
         for event, groups in config.items():
             self.assertEqual(len(groups), 1, event)
             hooks = groups[0]["hooks"]
             self.assertEqual(len(hooks), 1)
-            self.assertEqual(hooks[0]["type"], "command")
-            self.assertEqual(hooks[0]["command"], HOOK_COMMAND)
             self.assertIsInstance(hooks[0]["timeout"], int)
+            if event == "SessionStart":
+                self.assertEqual(hooks[0]["type"], "command")
+                self.assertEqual(hooks[0]["command"], HOOK_COMMAND)
+            else:
+                self.assertEqual(hooks[0]["type"], "http")
+                self.assertEqual(hooks[0]["url"], f"http://127.0.0.1:{DEFAULT_PORT}/hooks/claude")
+                self.assertEqual(hooks[0]["allowedEnvVars"], ["CLAUDE_PROJECT_DIR"])
+                self.assertEqual(hooks[0]["headers"], {"X-OpenShard-Project-Dir": "$CLAUDE_PROJECT_DIR"})
+
+    def test_port_is_honoured(self):
+        config = build_hook_config(port=50123)
+        for event in HTTP_EVENTS:
+            self.assertEqual(config[event][0]["hooks"][0]["url"], "http://127.0.0.1:50123/hooks/claude")
+        self.assertEqual(installed_hook_port({"hooks": config}), 50123)
+        self.assertIsNone(installed_hook_port({"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": HOOK_COMMAND}]}]}}))
 
     def test_tool_events_carry_matcher_others_do_not(self):
         config = build_hook_config()
@@ -591,17 +612,14 @@ class TestHookConfigShape(unittest.TestCase):
         for event in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"):
             self.assertNotIn("matcher", config[event][0])
 
-    def test_snapshot_hooks_are_synchronous_staging_hooks_async(self):
-        # Stop/SessionEnd write the runs.jsonl snapshot and must finish before
-        # Claude Code moves on; the per-tool/per-prompt hooks only stage.
+    def test_every_hook_is_synchronous(self):
+        # A warm service answers in milliseconds, and synchronous delivery
+        # keeps events strictly ordered (an async Stop could overtake the
+        # tool hooks before it). Nothing is marked async any more.
         config = build_hook_config()
-        self.assertEqual(SYNC_EVENTS, {"Stop", "SessionEnd"})
+        self.assertEqual(SYNC_EVENTS, set(HOOK_EVENTS))
         for event in HOOK_EVENTS:
-            hook = config[event][0]["hooks"][0]
-            if event in SYNC_EVENTS:
-                self.assertNotIn("async", hook, event)
-            else:
-                self.assertTrue(hook["async"], event)
+            self.assertNotIn("async", config[event][0]["hooks"][0], event)
 
     def test_command_contains_no_machine_specific_path(self):
         blob = json.dumps(build_hook_config())
@@ -613,10 +631,35 @@ class TestHookConfigShape(unittest.TestCase):
     def test_is_openshard_hook(self):
         self.assertTrue(is_openshard_hook({"type": "command", "command": HOOK_COMMAND}))
         self.assertTrue(is_openshard_hook({"type": "command", "command": HOOK_COMMAND + " --event Stop"}))
+        self.assertTrue(is_openshard_hook({"type": "http", "url": f"http://127.0.0.1:{DEFAULT_PORT}/hooks/claude"}))
+        self.assertTrue(is_openshard_hook({"type": "http", "url": "http://localhost:47815/hooks/claude/"}))
+        self.assertFalse(is_openshard_hook({"type": "http", "url": "http://127.0.0.1:47811/other"}))
+        self.assertFalse(is_openshard_hook({"type": "http", "url": "http://example.com:47811/hooks/claude"}))
+        self.assertFalse(is_openshard_hook({"type": "http", "url": "https://127.0.0.1:47811/hooks/claude"}))
         self.assertFalse(is_openshard_hook({"type": "command", "command": "openshard hooks claudette"}))
         self.assertFalse(is_openshard_hook({"type": "command", "command": "echo hi"}))
         self.assertFalse(is_openshard_hook({"type": "prompt", "command": HOOK_COMMAND}))
         self.assertFalse(is_openshard_hook("openshard hooks claude"))
+
+    def test_legacy_command_hooks_are_upgraded_in_place(self):
+        # A pre-PR9.5 settings file (command hooks everywhere) becomes the
+        # HTTP layout on the next install, reported as "updated", with no
+        # duplicate and no leftover command entry for the HTTP events.
+        legacy = {"hooks": {
+            event: [{"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 15, "async": True}]}]
+            for event in HOOK_EVENTS
+        }}
+        merged, changes = merge_openshard_hooks(legacy)
+        self.assertEqual(merged["hooks"], build_hook_config())
+        for event in HTTP_EVENTS:
+            self.assertEqual(changes[event], "updated")
+
+    def test_port_change_is_an_update(self):
+        current, _ = merge_openshard_hooks({}, port=DEFAULT_PORT)
+        moved, changes = merge_openshard_hooks(current, port=DEFAULT_PORT + 1)
+        self.assertTrue(all(changes[e] == "updated" for e in HTTP_EVENTS))
+        self.assertEqual(changes["SessionStart"], "unchanged")
+        self.assertEqual(installed_hook_port(moved), DEFAULT_PORT + 1)
 
 
 class TestMergeOpenshardHooks(unittest.TestCase):

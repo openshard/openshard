@@ -16,8 +16,10 @@ run *synchronously* (Claude Code waits on them). That makes the unrelated
 import cost fully visible to the user on every turn.
 
 This module recognizes the exact, fixed argv shapes those two commands use
-and dispatches straight to :mod:`openshard.adapters.claude_hooks`, importing
-nothing else. Anything that is not an exact match -- including
+and dispatches straight to :mod:`openshard.adapters.claude_capture_client`
+(PR9.5: which forwards to the warm capture service, falling back to
+:mod:`openshard.adapters.claude_hooks` in-process only when no service can
+be reached), importing nothing else. Anything that is not an exact match -- including
 ``--help``, unknown flags, or any other subcommand -- falls straight
 through to the real Click app (``openshard.cli.main:cli``), completely
 unchanged. The fast path is a pure latency optimization: every behavior it
@@ -52,7 +54,18 @@ def _parse_hooks_claude_argv(rest: list[str]) -> str | None | bool:
 
 def _try_fast_path(argv: list[str]) -> bool:
     """Handle *argv* without importing ``openshard.cli.main``. Returns True if handled."""
-    if len(argv) < 2 or argv[0] != "hooks":
+    if len(argv) < 2:
+        return False
+    if argv[0] == "capture" and argv[1] == "serve" and len(argv) == 2:
+        # The capture service itself (spawned detached by the client). It is
+        # long-running, but skipping the full CLI import still shortens the
+        # window between "service not running" and "service healthy".
+        import os
+
+        from openshard.adapters.claude_capture_service import serve
+
+        raise SystemExit(serve(env=os.environ))
+    if argv[0] != "hooks":
         return False
     sub, rest = argv[1], argv[2:]
 
@@ -62,9 +75,9 @@ def _try_fast_path(argv: list[str]) -> bool:
             return False
         import os
 
-        from openshard.adapters.claude_hooks import run_hook_from_stream
+        from openshard.adapters.claude_capture_client import run_hook_via_service
 
-        run_hook_from_stream(sys.stdin, env=os.environ, event_override=event_override)  # type: ignore[arg-type]
+        run_hook_via_service(sys.stdin, env=os.environ, event_override=event_override)  # type: ignore[arg-type]
         return True
 
     if sub == "claude-status":
@@ -72,9 +85,9 @@ def _try_fast_path(argv: list[str]) -> bool:
             return False
         import os
 
-        from openshard.adapters.claude_hooks import run_status_from_stream
+        from openshard.adapters.claude_capture_client import run_status_via_service
 
-        sys.stdout.write(run_status_from_stream(sys.stdin, env=os.environ) + "\n")
+        sys.stdout.write(run_status_via_service(sys.stdin, env=os.environ) + "\n")
         sys.stdout.flush()
         return True
 

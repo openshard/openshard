@@ -6,6 +6,33 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- Near-zero blocking Claude Code capture (PR9.5): the hooks Claude Code waits
+  on no longer spawn a Python process or fold a receipt. `UserPromptSubmit`,
+  `PostToolUse`, `PostToolUseFailure`, `Stop` and `SessionEnd` are installed
+  as Claude Code's official **HTTP hooks**, POSTing the payload to a warm,
+  loopback-only local capture service (`openshard capture serve`, started
+  automatically by the `SessionStart` command hook and by `openshard setup`).
+  The service's blocking path only validates, reduces the payload to the
+  same privacy-safe shape as before (scrubbed task excerpt, repo-relative
+  path, summarized command -- never raw prompts, transcripts or absolute
+  paths), appends it to a per-session queue file with `fsync`, and returns;
+  a background worker then replays the queue through the unchanged fold
+  logic, so Shard records and receipts are byte-for-byte what the
+  synchronous path produced, just eventually consistent (normally within a
+  few hundred milliseconds). Replays are idempotent (every queued event has
+  an id the session buffer remembers) and leftover queues are recovered on
+  service start and on the next `SessionStart`, so a crash or kill loses no
+  acknowledged event. The service exits by itself after 4 idle hours, on
+  `openshard capture stop`, or on `mcp uninstall claude`; a port taken by
+  another program is skipped for the next one in a small range and
+  `setup`/`doctor` report and repair the hook URLs. `openshard capture
+  status|start|stop|serve` are new; `doctor` gains a "Capture service" line;
+  `setup` reports the service state. The command-form entrypoints
+  (`openshard hooks claude`, `openshard hooks claude-status`) now forward to
+  the service and fall back to in-process handling only when it cannot be
+  reached (`OPENSHARD_CAPTURE_DISABLE=1` forces the old in-process path).
+  Existing pre-PR9.5 hook configurations keep working and are upgraded in
+  place on the next `openshard setup`. See `docs/capture-performance.md`.
 - Strong local visibility (Free v0.4.0): a user never has to trust that
   OpenShard is "working in the background" -- four commands show exactly
   what it captured, offline, for the current repository:

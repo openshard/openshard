@@ -84,6 +84,27 @@ computed at most once per session. Both the hook and status-line handlers
 acquire the buffer's lock with a bounded timeout, never Claude Code's
 unbounded wait -- see ``docs/capture-performance.md`` for what was
 measured and why.
+
+Near-zero blocking capture (PR9.5)
+----------------------------------
+In normal operation this module no longer runs inside the process Claude
+Code is waiting on. Claude Code's HTTP hooks POST each payload to the warm
+local capture service (``adapters/claude_capture_service.py``), whose
+blocking path only validates, *reduces* the payload to the privacy-safe
+shape below, appends it to a per-session queue file (fsync) and returns.
+A background worker then replays the queue through exactly the same
+``_apply`` / ``_fold`` code as before, so every semantic documented above
+(evidence levels, fold boundaries, buffer lifecycle, receipt shape) is
+unchanged -- only *when* it runs changed.
+
+``ReducedHookPayload`` is the only representation of a hook that is ever
+persisted outside ``runs.jsonl``: it carries the already-scrubbed task
+excerpt, the repo-relative file target and the summarized command, never
+the raw prompt, absolute path or raw command text. Replays are idempotent
+(``dedup_id``) and carry the time the hook was *received* (``at``), so a
+queue replayed after a crash still records the right timestamps.
+``handle_claude_hook`` / ``handle_claude_status`` remain the synchronous
+in-process path and are used as the fallback when no service is reachable.
 """
 
 from __future__ import annotations
@@ -319,6 +340,34 @@ class StatusPayload:
     tokens_cache_creation: int | None = None
     tokens_cache_read: int | None = None
 
+    def to_dict(self) -> dict:
+        """Queue representation: every field except ``cwd`` (used for repo resolution only)."""
+        return {
+            "session_id": self.session_id,
+            "model_id": self.model_id,
+            "cost_total_usd": self.cost_total_usd,
+            "tokens_input": self.tokens_input,
+            "tokens_output": self.tokens_output,
+            "tokens_cache_creation": self.tokens_cache_creation,
+            "tokens_cache_read": self.tokens_cache_read,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> StatusPayload | None:
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+            return None
+        return cls(
+            session_id=session_id,
+            cwd=None,
+            model_id=_str_or_none(data.get("model_id"), 200),
+            cost_total_usd=_number_or_none(data.get("cost_total_usd")),
+            tokens_input=_int_or_none(data.get("tokens_input")),
+            tokens_output=_int_or_none(data.get("tokens_output")),
+            tokens_cache_creation=_int_or_none(data.get("tokens_cache_creation")),
+            tokens_cache_read=_int_or_none(data.get("tokens_cache_read")),
+        )
+
 
 def _number_or_none(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -386,6 +435,35 @@ def _status_line_text(data: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_forbidden_capture_root(root: Path) -> bool:
+    """True when *root* must never be treated as the repository a hook captures into.
+
+    Guards against a payload whose ``cwd``/``CLAUDE_PROJECT_DIR`` has no
+    project git repository of its own walking (or falling back, when no
+    ``.git`` exists at all) all the way up to -- or beyond -- the user's
+    home directory. This is a real, observed condition on at least one
+    development machine (the home directory is itself a git repository),
+    and capturing there would run ``git diff``/``git ls-files`` across the
+    user's entire home tree and start writing ``.openshard/`` there --
+    never the intent of a Claude Code hook. A real project that happens to
+    live *under* the home directory and has its own nearer ``.git`` is
+    unaffected: the walk already stops at the first ``.git`` it finds,
+    which is never home in that case. Never raises.
+    """
+    try:
+        home = Path.home().resolve()
+    except OSError:
+        return False
+    try:
+        resolved = root.resolve()
+    except OSError:
+        return False
+    try:
+        return resolved == home or home.is_relative_to(resolved)
+    except (ValueError, OSError):
+        return resolved == home
+
+
 def resolve_repo_root(payload: HookPayload | StatusPayload, env: Mapping[str, str] | None = None) -> Path | None:
     """Locate the repository this hook/status payload belongs to. Never raises.
 
@@ -393,7 +471,10 @@ def resolve_repo_root(payload: HookPayload | StatusPayload, env: Mapping[str, st
     fired this hook) wins, then the payload's ``cwd``. The nearest enclosing
     git root is used; a directory that is not inside a git repository is
     used as-is (``.openshard/`` is created there). Environment variables
-    are only ever *read* here to find the repo -- never stored.
+    are only ever *read* here to find the repo -- never stored. A resolved
+    root that is the user's home directory (or an ancestor of it -- see
+    ``_is_forbidden_capture_root``) is refused; the next candidate (or
+    ``None``) is used instead, so no git command ever runs against it.
     """
     from openshard.adapters.claude_mcp_install import find_repo_root
 
@@ -410,7 +491,10 @@ def resolve_repo_root(payload: HookPayload | StatusPayload, env: Mapping[str, st
             if not p.is_dir():
                 continue
             root = find_repo_root(p)
-            return root if root is not None else p.resolve()
+            resolved = root if root is not None else p.resolve()
+            if _is_forbidden_capture_root(resolved):
+                continue
+            return resolved
         except Exception:
             continue
     return None
@@ -485,6 +569,100 @@ def summarize_command(command: str | None) -> tuple[str, str | None, str]:
 
 
 # ---------------------------------------------------------------------------
+# Reduced payload -- the only hook representation ever persisted outside
+# runs.jsonl (the capture service's per-session queue). Everything free-text
+# or path-like is already scrubbed / repo-anchored here, so a queue file can
+# never leak what the module docstring promises is never stored.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ReducedHookPayload:
+    event: str
+    session_id: str
+    source: str | None = None  # SessionStart
+    reason: str | None = None  # SessionEnd
+    task_excerpt: str | None = None  # UserPromptSubmit: scrubbed, bounded excerpt (never the prompt)
+    tool_name: str | None = None  # PostToolUse / PostToolUseFailure
+    file_target: str | None = None  # repo-relative path, or None
+    file_dropped: bool = False  # a file_path was given but fell outside the repository
+    command_action: str | None = None  # summarized Bash command text ("Bash: ..."), scrubbed
+    command_target: str | None = None
+    command_kind: str | None = None  # test | lint | other
+    stop_hook_active: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "event": self.event,
+            "session_id": self.session_id,
+            "source": self.source,
+            "reason": self.reason,
+            "task_excerpt": self.task_excerpt,
+            "tool_name": self.tool_name,
+            "file_target": self.file_target,
+            "file_dropped": self.file_dropped,
+            "command_action": self.command_action,
+            "command_target": self.command_target,
+            "command_kind": self.command_kind,
+            "stop_hook_active": self.stop_hook_active,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ReducedHookPayload | None:
+        """Rebuild from a queue line; None when the line is not a valid reduced hook."""
+        event = data.get("event")
+        session_id = data.get("session_id")
+        if not isinstance(event, str) or event not in SUPPORTED_HOOK_EVENTS:
+            return None
+        if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+            return None
+        return cls(
+            event=event,
+            session_id=session_id,
+            source=_str_or_none(data.get("source"), 40),
+            reason=_str_or_none(data.get("reason"), 40),
+            task_excerpt=_str_or_none(data.get("task_excerpt"), _TASK_CAP),
+            tool_name=_str_or_none(data.get("tool_name"), 80),
+            file_target=_str_or_none(data.get("file_target"), _PATH_CAP),
+            file_dropped=bool(data.get("file_dropped")),
+            command_action=_str_or_none(data.get("command_action"), _COMMAND_CAP + 32),
+            command_target=_str_or_none(data.get("command_target"), 40),
+            command_kind=_str_or_none(data.get("command_kind"), 16),
+            stop_hook_active=bool(data.get("stop_hook_active")),
+        )
+
+
+def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPayload | None:
+    """Scrub and repo-anchor *payload* into the persistable ``ReducedHookPayload``.
+
+    This is the only place raw prompt / file path / command text is ever
+    looked at; the result is what both the synchronous path and the capture
+    service's queue carry from here on. Returns None without a session id.
+    """
+    if payload.session_id is None:
+        return None
+    reduced = ReducedHookPayload(
+        event=payload.event,
+        session_id=payload.session_id,
+        source=payload.source,
+        reason=payload.reason,
+        stop_hook_active=payload.stop_hook_active,
+    )
+    if payload.event == EVENT_USER_PROMPT_SUBMIT:
+        reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
+    elif payload.event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
+        tool = payload.tool_name or "unknown"
+        reduced.tool_name = tool
+        if tool in FILE_TOOLS:
+            reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
+            reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
+        elif tool in COMMAND_TOOLS:
+            action, target, kind = summarize_command(payload.command)
+            reduced.command_action, reduced.command_target, reduced.command_kind = action, target, kind
+    return reduced
+
+
+# ---------------------------------------------------------------------------
 # Per-session staging buffer
 # ---------------------------------------------------------------------------
 
@@ -497,11 +675,11 @@ def buffer_path(repo_root: Path, session_id: str) -> Path:
     return sessions_dir(repo_root) / f"{session_id}.json"
 
 
-def _new_buffer(session_id: str, repo_root: Path, first_hook: str) -> dict:
+def _new_buffer(session_id: str, repo_root: Path, first_hook: str, *, now: str | None = None) -> dict:
     from openshard.analysis.repo_map import collect_git_info
 
     git_info = collect_git_info(repo_root)
-    now = _now()
+    now = now or _now()
     buf: dict = {
         "schema_version": BUFFER_SCHEMA_VERSION,
         "session_id": session_id,
@@ -536,6 +714,9 @@ def _new_buffer(session_id: str, repo_root: Path, first_hook: str) -> dict:
         "cost_baseline_usd": None,  # cost observed at the first status ping
         "tokens_current": None,  # {"input", "output", "cache_creation", "cache_read"}
         "status_last_seen_at": None,
+        # Ids of queued events already applied (capture service replay
+        # idempotency; see apply_reduced_hook). Bounded, most recent last.
+        "applied_ids": [],
     }
     _append_event(
         buf,
@@ -544,8 +725,13 @@ def _new_buffer(session_id: str, repo_root: Path, first_hook: str) -> dict:
         status="started",
         evidence="directly_observed",
         metadata={"hook": first_hook},
+        occurred_at=now,
     )
     return buf
+
+
+_MAX_APPLIED_IDS = 512  # in-memory buffer cap, while a session is live
+_PERSISTED_APPLIED_IDS = 64  # smaller tail written to runs.jsonl (see build_hook_entry)
 
 
 def _append_event(
@@ -557,8 +743,9 @@ def _append_event(
     evidence: str,
     target: str | None = None,
     metadata: dict | None = None,
+    occurred_at: str | None = None,
 ) -> None:
-    """Build one canonical Event now (occurred_at = now) and stage it."""
+    """Build one canonical Event (occurred_at = *occurred_at* or now) and stage it."""
     from openshard.history.event import SOURCE_CLAUDE_CODE_HOOKS, make_event
 
     if len(buf["events"]) >= _MAX_BUFFERED_EVENTS:
@@ -569,7 +756,7 @@ def _append_event(
         event_type=event_type,
         source=SOURCE_CLAUDE_CODE_HOOKS,
         action=action,
-        occurred_at=_now(),
+        occurred_at=occurred_at or _now(),
         run_id=record.get("run_id"),
         shard_id=record.get("shard_id"),
         attempt_number=record.get("attempt_number"),
@@ -686,6 +873,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
             else None
         ),
         "status_last_seen_at": capture.get("last_status_ping_at"),
+        "applied_ids": [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)],
     }
 
 
@@ -719,7 +907,9 @@ def _find_persisted_entry(repo_root: Path, session_id: str) -> dict | None:
     return None
 
 
-def _load_or_create_buffer(repo_root: Path, session_id: str, first_hook: str) -> dict:
+def _load_or_create_buffer(
+    repo_root: Path, session_id: str, first_hook: str, *, now: str | None = None
+) -> dict:
     path = buffer_path(repo_root, session_id)
     buf = _read_buffer(path) if path.exists() else None
     if buf is not None:
@@ -729,7 +919,7 @@ def _load_or_create_buffer(repo_root: Path, session_id: str, first_hook: str) ->
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
             return rebuilt
-    return _new_buffer(session_id, repo_root, first_hook)
+    return _new_buffer(session_id, repo_root, first_hook, now=now)
 
 
 def _load_buffer_light(repo_root: Path, session_id: str) -> dict | None:
@@ -1047,6 +1237,16 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "tool_failure_count": int(buf.get("tool_failure_count") or 0),
             "task_source": "first_user_prompt_excerpt" if task else "not_captured",
             "hook_events_dropped": int(buf.get("dropped_events") or 0),
+            # Dedup ids applied so far (capture-service replay idempotency).
+            # Persisted (bounded to a small tail, not the full in-memory cap)
+            # so a session's dedup memory survives the buffer being deleted
+            # at SessionEnd -- a leftover queue file replayed after the
+            # session has already ended (e.g. a crash mid-drain) is rebuilt
+            # from this list and still recognizes its own old events as
+            # duplicates instead of re-applying them. See _buffer_from_entry.
+            "applied_event_ids": [i for i in (buf.get("applied_ids") or []) if isinstance(i, str)][
+                -_PERSISTED_APPLIED_IDS:
+            ],
             # Turn completion -- independent of session_end_observed above.
             "task_status": task_status,
             "first_prompt_at": buf.get("first_prompt_at"),
@@ -1174,9 +1374,15 @@ class HookOutcome:
     warnings: list[str] = field(default_factory=list)
 
 
-def _apply(payload: HookPayload, buf: dict, repo_root: Path) -> tuple[str, bool, bool]:
-    """Mutate *buf* for one hook. Returns ``(detail, should_fold, should_delete_buffer)``."""
-    buf["last_activity_at"] = _now()
+def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str) -> tuple[str, bool, bool]:
+    """Mutate *buf* for one hook. Returns ``(detail, should_fold, should_delete_buffer)``.
+
+    *now* is the time the hook was observed (received) -- for a synchronous
+    call that is the current time; for a queued replay it is the time the
+    capture service accepted the event, so timestamps stay honest even when
+    the replay happens later (e.g. after a service restart).
+    """
+    buf["last_activity_at"] = now
     event = payload.event
 
     if event == EVENT_SESSION_START:
@@ -1189,19 +1395,21 @@ def _apply(payload: HookPayload, buf: dict, repo_root: Path) -> tuple[str, bool,
             _append_event(
                 buf, event_type="session.activity", action="Claude Code session resumed",
                 status="unknown", evidence="directly_observed", metadata={"hook": event, "source": source},
+                occurred_at=now,
             )
         return f"session start ({source})", False, False
 
     if event == EVENT_USER_PROMPT_SUBMIT:
         buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
         if not buf.get("first_prompt_at"):
-            buf["first_prompt_at"] = _now()
+            buf["first_prompt_at"] = now
         if not buf.get("task"):
-            buf["task"] = sanitize_task_excerpt(payload.prompt)
+            buf["task"] = payload.task_excerpt
         _append_event(
             buf, event_type="session.activity", action="user prompt submitted",
             status="unknown", evidence="directly_observed",
             metadata={"hook": event, "prompt_index": buf["prompt_count"]},
+            occurred_at=now,
         )
         # First prompt = the session has real work: create the record now so
         # even a session interrupted before any Stop leaves a trace.
@@ -1221,8 +1429,8 @@ def _apply(payload: HookPayload, buf: dict, repo_root: Path) -> tuple[str, bool,
         action = f"tool {tool}"
         status = "failed" if failed else "unknown"
         if tool in FILE_TOOLS:
-            target = _to_repo_relative(payload.file_path, repo_root)
-            if target is None and payload.file_path:
+            target = payload.file_target
+            if target is None and payload.file_dropped:
                 metadata["path_dropped"] = "outside repository"
             if not failed:
                 status = "passed"  # PostToolUse only fires when Claude Code applied the edit
@@ -1231,13 +1439,14 @@ def _apply(payload: HookPayload, buf: dict, repo_root: Path) -> tuple[str, bool,
                     if target in files or len(files) < _MAX_HOOK_FILES:
                         files[target] = files.get(target) or ("create" if tool == "Write" else "update")
         elif tool in COMMAND_TOOLS:
-            action, target, kind = summarize_command(payload.command)
-            metadata["command_kind"] = kind
+            action = payload.command_action or "Bash command"
+            target = payload.command_target
+            metadata["command_kind"] = payload.command_kind or "other"
             # A command exiting non-zero still fires PostToolUse; outcome unknown.
             status = "failed" if failed else "unknown"
         _append_event(
             buf, event_type="tool.invoked", action=action, target=target,
-            status=status, evidence="agent_reported", metadata=metadata,
+            status=status, evidence="agent_reported", metadata=metadata, occurred_at=now,
         )
         # Bounded periodic snapshot (see _TOOL_FOLD_INTERVAL_SECONDS): only
         # once a record exists, and never more often than the interval.
@@ -1249,11 +1458,11 @@ def _apply(payload: HookPayload, buf: dict, repo_root: Path) -> tuple[str, bool,
 
     if event == EVENT_STOP:
         buf["turn_count"] = int(buf.get("turn_count") or 0) + 1
-        buf["last_stop_at"] = _now()
+        buf["last_stop_at"] = now
         _append_event(
             buf, event_type="session.activity", action="assistant turn completed",
             status="unknown", evidence="directly_observed",
-            metadata={"hook": event, "turn_index": buf["turn_count"]},
+            metadata={"hook": event, "turn_index": buf["turn_count"]}, occurred_at=now,
         )
         if _has_activity(buf):
             return "turn completed", True, False
@@ -1261,48 +1470,65 @@ def _apply(payload: HookPayload, buf: dict, repo_root: Path) -> tuple[str, bool,
 
     if event == EVENT_SESSION_END:
         reason = payload.reason or "unknown"
-        buf["ended"] = {"reason": reason, "at": _now()}
+        buf["ended"] = {"reason": reason, "at": now}
         if not _has_activity(buf):
             return "session ended with no work; nothing recorded", False, True
         _append_event(
             buf, event_type="run.completed", action=f"Claude Code session ended (reason={reason})",
             status="unknown", evidence="directly_observed", metadata={"hook": event, "reason": reason},
+            occurred_at=now,
         )
         return f"session ended ({reason})", True, True
 
     return "unsupported event", False, False
 
 
-def handle_claude_hook(
-    data: Mapping[str, Any],
-    *,
-    env: Mapping[str, str] | None = None,
-    event_override: str | None = None,
-) -> HookOutcome:
-    """Process one decoded Claude Code hook payload. Never raises.
+def _already_applied(buf: dict, dedup_id: str | None) -> bool:
+    if not dedup_id:
+        return False
+    applied = buf.get("applied_ids")
+    return isinstance(applied, list) and dedup_id in applied
 
-    Safe to call repeatedly: a repeated identical payload only bumps counts
-    (tool/prompt/turn) -- it can never create a second record for the same
-    session, because the record is upserted by ``capture.session_id``.
+
+def _mark_applied(buf: dict, dedup_id: str | None) -> None:
+    if not dedup_id:
+        return
+    applied = buf.get("applied_ids")
+    if not isinstance(applied, list):
+        applied = []
+    applied.append(dedup_id)
+    if len(applied) > _MAX_APPLIED_IDS:
+        del applied[: len(applied) - _MAX_APPLIED_IDS]
+    buf["applied_ids"] = applied
+
+
+def apply_reduced_hook(
+    payload: ReducedHookPayload,
+    repo_root: Path,
+    *,
+    dedup_id: str | None = None,
+    at: str | None = None,
+) -> HookOutcome:
+    """Stage/fold one already-reduced hook for *repo_root*. Never raises.
+
+    The shared core of the synchronous path (``handle_claude_hook``) and
+    the capture service's queue replay. ``dedup_id`` makes a replay
+    idempotent: an id already recorded in the session buffer is ignored
+    (so a queue re-read after a crash never double-counts). ``at`` is the
+    observation time to record (default: now).
     """
     try:
-        payload = extract_hook_payload(data, event_override=event_override)
-        if payload is None:
-            return HookOutcome(event=str(data.get("hook_event_name") or event_override or ""), action="ignored",
-                               detail="unsupported or missing hook_event_name")
-        if payload.session_id is None:
-            return HookOutcome(event=payload.event, action="ignored", detail="missing or invalid session_id")
-        repo_root = resolve_repo_root(payload, env)
-        if repo_root is None:
-            return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
-                               detail="could not resolve repository directory")
-
+        now = at or _now()
         from openshard.history.jsonl_store import history_file_lock
 
         path = buffer_path(repo_root, payload.session_id)
         with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
-            buf = _load_or_create_buffer(repo_root, payload.session_id, payload.event)
-            detail, should_fold, should_delete = _apply(payload, buf, repo_root)
+            buf = _load_or_create_buffer(repo_root, payload.session_id, payload.event, now=now)
+            if _already_applied(buf, dedup_id):
+                return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
+                                   repo_root=repo_root, detail="duplicate event id")
+            detail, should_fold, should_delete = _apply(payload, buf, repo_root, now=now)
+            _mark_applied(buf, dedup_id)
             if buf.get("ended") and _has_activity(buf):
                 # A hook arriving after SessionEnd (a background Stop that
                 # finished late, or a resume of an ended session): snapshot
@@ -1345,6 +1571,38 @@ def handle_claude_hook(
             shard_id=record.get("shard_id"), run_id=record.get("run_id"), detail=detail,
         )
     except Exception as exc:  # observational hook: never propagate
+        return HookOutcome(event=payload.event, action="error", session_id=payload.session_id,
+                           detail=f"{type(exc).__name__}")
+
+
+def handle_claude_hook(
+    data: Mapping[str, Any],
+    *,
+    env: Mapping[str, str] | None = None,
+    event_override: str | None = None,
+) -> HookOutcome:
+    """Process one decoded Claude Code hook payload synchronously. Never raises.
+
+    Safe to call repeatedly: a repeated identical payload only bumps counts
+    (tool/prompt/turn) -- it can never create a second record for the same
+    session, because the record is upserted by ``capture.session_id``.
+    """
+    try:
+        payload = extract_hook_payload(data, event_override=event_override)
+        if payload is None:
+            return HookOutcome(event=str(data.get("hook_event_name") or event_override or ""), action="ignored",
+                               detail="unsupported or missing hook_event_name")
+        if payload.session_id is None:
+            return HookOutcome(event=payload.event, action="ignored", detail="missing or invalid session_id")
+        repo_root = resolve_repo_root(payload, env)
+        if repo_root is None:
+            return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
+                               detail="could not resolve repository directory")
+        reduced = reduce_hook_payload(payload, repo_root)
+        if reduced is None:
+            return HookOutcome(event=payload.event, action="ignored", detail="missing or invalid session_id")
+        return apply_reduced_hook(reduced, repo_root)
+    except Exception as exc:  # observational hook: never propagate
         return HookOutcome(event=str(data.get("hook_event_name") or ""), action="error",
                            detail=f"{type(exc).__name__}")
 
@@ -1383,7 +1641,7 @@ def run_hook_from_stream(
 # ---------------------------------------------------------------------------
 
 
-def _apply_status(payload: StatusPayload, buf: dict) -> bool:
+def _apply_status(payload: StatusPayload, buf: dict, *, now: str | None = None) -> bool:
     """Merge one status-line observation into *buf*. Returns True if anything changed.
 
     Never raises. Model ids/cost/token counts are the only new state; no
@@ -1393,7 +1651,7 @@ def _apply_status(payload: StatusPayload, buf: dict) -> bool:
     from openshard.adapters.claude_code_import import _sanitize_model
 
     changed = False
-    buf["status_last_seen_at"] = _now()
+    buf["status_last_seen_at"] = now or _now()
 
     if payload.model_id:
         safe_model = _sanitize_model(payload.model_id)
@@ -1453,19 +1711,43 @@ def handle_claude_status(data: Mapping[str, Any], *, env: Mapping[str, str] | No
         repo_root = resolve_repo_root(payload, env)
         if repo_root is None:
             return fallback
-
-        from openshard.history.jsonl_store import history_file_lock
-
-        path = buffer_path(repo_root, payload.session_id)  # type: ignore[arg-type]
-        with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
-            buf = _load_buffer_light(repo_root, payload.session_id)  # type: ignore[arg-type]
-            if buf is None:
-                return fallback
-            _apply_status(payload, buf)
-            _write_buffer(path, buf)
+        apply_status_payload(payload, repo_root)
         return fallback
     except Exception:
         return fallback
+
+
+def apply_status_payload(
+    payload: StatusPayload,
+    repo_root: Path,
+    *,
+    dedup_id: str | None = None,
+    at: str | None = None,
+) -> bool:
+    """Merge one status observation into the session's buffer for *repo_root*.
+
+    Returns True when something was recorded. Never raises. Shared by the
+    synchronous status-line handler and the capture service's queue replay
+    (``dedup_id`` / ``at`` as for :func:`apply_reduced_hook`).
+    """
+    try:
+        if payload.session_id is None:
+            return False
+        from openshard.history.jsonl_store import history_file_lock
+
+        path = buffer_path(repo_root, payload.session_id)
+        with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
+            buf = _load_buffer_light(repo_root, payload.session_id)
+            if buf is None:
+                return False
+            if _already_applied(buf, dedup_id):
+                return False
+            _apply_status(payload, buf, now=at)
+            _mark_applied(buf, dedup_id)
+            _write_buffer(path, buf)
+        return True
+    except Exception:
+        return False
 
 
 def run_status_from_stream(stream: object, *, env: Mapping[str, str] | None = None) -> str:

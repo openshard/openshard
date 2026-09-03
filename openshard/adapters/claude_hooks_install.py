@@ -1,9 +1,13 @@
-"""Claude Code hook installation for OpenShard auto-capture (Demo v1 PR5).
+"""Claude Code hook installation for OpenShard auto-capture (Demo v1 PR5, PR9.5).
 
-Writes the hook configuration that makes Claude Code run
-``openshard hooks claude`` at the lifecycle points the hook adapter
-(``adapters/claude_hooks.py``) understands, into the repository's
-``.claude/settings.local.json``.
+Writes the hook configuration that delivers Claude Code's lifecycle hooks
+to OpenShard into the repository's ``.claude/settings.local.json``. Since
+PR9.5 every hook that can be an HTTP hook is one (``UserPromptSubmit``,
+``PostToolUse``, ``PostToolUseFailure``, ``Stop``, ``SessionEnd`` POST
+their payload to the local capture service,
+``adapters/claude_capture_service.py``); ``SessionStart`` remains the
+``openshard hooks claude`` command, because Claude Code does not deliver
+HTTP hooks for it and because that command is what starts the service.
 
 Why this file and scope
 -----------------------
@@ -37,9 +41,16 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from openshard.adapters.claude_capture_client import (
+    DEFAULT_PORT,
+    HOOK_PATH,
+    PROJECT_DIR_HEADER,
+)
 
 HOOK_COMMAND = "openshard hooks claude"
 STATUS_COMMAND = "openshard hooks claude-status"
@@ -50,61 +61,100 @@ _GIT_TIMEOUT_SECONDS = 5.0
 # file edits (tool_input.file_path) and shell commands (tool_input.command).
 TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
 
+TRANSPORT_COMMAND = "command"
+TRANSPORT_HTTP = "http"
+_HOOK_URL_RE = re.compile(r"^http://(?:127\.0\.0\.1|localhost):(\d{1,5})" + re.escape(HOOK_PATH) + r"/?$")
+
 
 @dataclass(frozen=True)
 class HookSpec:
     event: str
     matcher: str | None
     timeout: int
-    # ``async: true`` -> Claude Code does not wait for the hook and ignores
-    # its output, so Python start-up never delays the user or the model on
-    # the frequent, purely-staging hooks (per tool call, per prompt, session
-    # start). Stop and SessionEnd stay synchronous: they are the points that
-    # snapshot staged evidence into runs.jsonl, and a background hook can be
-    # torn down with the Claude process before it writes (observed in
-    # `claude -p` smoke testing). See docs/capture-performance.md (PR7) for
-    # what this synchronous per-turn cost actually measures -- the console
-    # script now fast-paths around the full CLI's import graph specifically
-    # because of this tradeoff; SessionEnd's timeout also raises Claude
-    # Code's default 1.5s SessionEnd budget.
-    run_async: bool
+    # PR9.5: every hook that can be an HTTP hook is one -- Claude Code POSTs
+    # the payload straight to the warm local capture service (see
+    # adapters/claude_capture_service.py), so no Python process is spawned
+    # and the blocking cost is a loopback round trip. Only ``SessionStart``
+    # stays a command hook: Claude Code does not deliver HTTP hooks for that
+    # event, and it is precisely the hook that starts the service when it is
+    # not running. All hooks are synchronous now -- a warm service answers in
+    # milliseconds, and synchronous delivery keeps events strictly ordered
+    # (an async Stop could otherwise overtake the tool hooks before it).
+    transport: str
+    run_async: bool = False
 
 
 HOOK_SPECS: tuple[HookSpec, ...] = (
-    HookSpec("SessionStart", None, 15, True),
-    HookSpec("UserPromptSubmit", None, 15, True),
-    HookSpec("PostToolUse", TOOL_MATCHER, 15, True),
-    HookSpec("PostToolUseFailure", TOOL_MATCHER, 15, True),
-    HookSpec("Stop", None, 15, False),
-    HookSpec("SessionEnd", None, 10, False),
+    HookSpec("SessionStart", None, 15, TRANSPORT_COMMAND),
+    HookSpec("UserPromptSubmit", None, 5, TRANSPORT_HTTP),
+    HookSpec("PostToolUse", TOOL_MATCHER, 5, TRANSPORT_HTTP),
+    HookSpec("PostToolUseFailure", TOOL_MATCHER, 5, TRANSPORT_HTTP),
+    HookSpec("Stop", None, 5, TRANSPORT_HTTP),
+    HookSpec("SessionEnd", None, 5, TRANSPORT_HTTP),
 )
 SYNC_EVENTS: frozenset[str] = frozenset(s.event for s in HOOK_SPECS if not s.run_async)
+HTTP_EVENTS: tuple[str, ...] = tuple(s.event for s in HOOK_SPECS if s.transport == TRANSPORT_HTTP)
 HOOK_EVENTS: tuple[str, ...] = tuple(s.event for s in HOOK_SPECS)
 
 
-def _hook_entry(spec: HookSpec) -> dict:
-    entry: dict = {"type": "command", "command": HOOK_COMMAND, "timeout": spec.timeout}
+def hook_url(port: int) -> str:
+    return f"http://127.0.0.1:{int(port)}{HOOK_PATH}"
+
+
+def _hook_entry(spec: HookSpec, port: int = DEFAULT_PORT) -> dict:
+    if spec.transport == TRANSPORT_HTTP:
+        entry: dict = {
+            "type": "http",
+            "url": hook_url(port),
+            "timeout": spec.timeout,
+            # Lets the service anchor the event to the project Claude Code
+            # was started in, exactly like CLAUDE_PROJECT_DIR does for the
+            # command form; when Claude Code does not interpolate it the
+            # header is empty and the payload's ``cwd`` is used instead.
+            "headers": {PROJECT_DIR_HEADER: "$CLAUDE_PROJECT_DIR"},
+            "allowedEnvVars": ["CLAUDE_PROJECT_DIR"],
+        }
+        return entry
+    entry = {"type": "command", "command": HOOK_COMMAND, "timeout": spec.timeout}
     if spec.run_async:
         entry["async"] = True
     return entry
 
 
-def _group_entry(spec: HookSpec) -> dict:
+def _group_entry(spec: HookSpec, port: int = DEFAULT_PORT) -> dict:
     group: dict = {}
     if spec.matcher:
         group["matcher"] = spec.matcher
-    group["hooks"] = [_hook_entry(spec)]
+    group["hooks"] = [_hook_entry(spec, port)]
     return group
 
 
-def build_hook_config() -> dict[str, list[dict]]:
-    """The exact ``hooks`` block OpenShard installs (fresh-file shape)."""
-    return {spec.event: [_group_entry(spec)] for spec in HOOK_SPECS}
+def build_hook_config(port: int = DEFAULT_PORT) -> dict[str, list[dict]]:
+    """The exact ``hooks`` block OpenShard installs (fresh-file shape) for service *port*."""
+    return {spec.event: [_group_entry(spec, port)] for spec in HOOK_SPECS}
+
+
+def _hook_entry_port(hook: object) -> int | None:
+    """The service port an OpenShard HTTP hook entry points at, else None."""
+    if not isinstance(hook, dict) or hook.get("type") != "http":
+        return None
+    url = hook.get("url")
+    if not isinstance(url, str):
+        return None
+    match = _HOOK_URL_RE.match(url.strip())
+    if match is None:
+        return None
+    port = int(match.group(1))
+    return port if 0 < port < 65536 else None
 
 
 def is_openshard_hook(hook: object) -> bool:
-    """True for a command hook entry that runs OpenShard's Claude hook command."""
-    if not isinstance(hook, dict) or hook.get("type") != "command":
+    """True for a hook entry that is OpenShard's: the command form or the HTTP form."""
+    if not isinstance(hook, dict):
+        return False
+    if hook.get("type") == "http":
+        return _hook_entry_port(hook) is not None
+    if hook.get("type") != "command":
         return False
     command = hook.get("command")
     if not isinstance(command, str):
@@ -113,13 +163,33 @@ def is_openshard_hook(hook: object) -> bool:
     return stripped == HOOK_COMMAND or stripped.startswith(HOOK_COMMAND + " ")
 
 
-def merge_openshard_hooks(settings: dict) -> tuple[dict, dict[str, str]]:
+def installed_hook_port(settings: object) -> int | None:
+    """Port the installed OpenShard HTTP hooks point at (first found), or None."""
+    if not isinstance(settings, dict) or not isinstance(settings.get("hooks"), dict):
+        return None
+    for event in HOOK_EVENTS:
+        groups = settings["hooks"].get(event)
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for hook in group.get("hooks") or []:
+                port = _hook_entry_port(hook)
+                if port is not None:
+                    return port
+    return None
+
+
+def merge_openshard_hooks(settings: dict, *, port: int = DEFAULT_PORT) -> tuple[dict, dict[str, str]]:
     """Return ``(new_settings, changes)`` with OpenShard's hooks merged in.
 
     ``changes`` maps each event to ``"added"`` / ``"updated"`` /
     ``"unchanged"``. The input is never mutated. Raises ``ValueError`` when
     the existing ``hooks`` structure is not the documented shape (so the
-    caller can refuse to write rather than clobber the file).
+    caller can refuse to write rather than clobber the file). An older
+    command-form entry (pre-PR9.5) or an HTTP entry for a different port is
+    reported as ``"updated"`` and replaced in place.
     """
     new_settings = copy.deepcopy(settings)
     hooks = new_settings.get("hooks")
@@ -138,7 +208,7 @@ def merge_openshard_hooks(settings: dict) -> tuple[dict, dict[str, str]]:
         if not isinstance(groups, list):
             raise ValueError(f"'hooks.{spec.event}' is not a JSON array")
 
-        desired_hook = _hook_entry(spec)
+        desired_hook = _hook_entry(spec, port)
         kept = False
         changed = False
         for group in groups:
@@ -176,7 +246,7 @@ def merge_openshard_hooks(settings: dict) -> tuple[dict, dict[str, str]]:
                     and not any(True for k in g if k not in ("hooks", "matcher")))
         ]
         if not kept:
-            groups.append(_group_entry(spec))
+            groups.append(_group_entry(spec, port))
             # "updated" when we had to move/dedupe an existing OpenShard entry.
             changes[spec.event] = "updated" if changed else "added"
         else:
@@ -348,10 +418,12 @@ def ensure_local_settings_ignored(repo_root: Path) -> str | None:
         return f"Could not update .git/info/exclude; add {rel} to your gitignore."
 
 
-def install_claude_hooks(*, repo_root: Path) -> ClaudeHooksInstallResult:
+def install_claude_hooks(*, repo_root: Path, port: int | None = None) -> ClaudeHooksInstallResult:
     """Merge OpenShard's Claude Code hooks into ``<repo_root>/.claude/settings.local.json``.
 
-    Idempotent and additive (see module docstring). Never raises.
+    Idempotent and additive (see module docstring). Never raises. *port*
+    is the capture service port the HTTP hooks should target (default: the
+    port a running service publishes, else ``DEFAULT_PORT``).
     """
     try:
         root = Path(repo_root)
@@ -359,8 +431,12 @@ def install_claude_hooks(*, repo_root: Path) -> ClaudeHooksInstallResult:
         settings, err = _read_settings(settings_path)
         if err or settings is None:
             return _error(err or "Could not read Claude Code settings.", settings_path)
+        if port is None:
+            from openshard.adapters.claude_capture_client import resolve_port
+
+            port = resolve_port()
         try:
-            merged, changes = merge_openshard_hooks(settings)
+            merged, changes = merge_openshard_hooks(settings, port=port)
         except ValueError as exc:
             return _error(
                 f"{settings_path} has an unexpected hooks layout ({exc}); OpenShard will not modify it.",

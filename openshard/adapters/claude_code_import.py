@@ -20,8 +20,18 @@ Design constraints:
 from __future__ import annotations
 
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+# These git calls can run from OpenShard's background capture-service worker
+# (adapters/claude_capture_service.py), a process that may itself have no
+# console (e.g. spawned with CREATE_NO_WINDOW). Without this flag, such a
+# console-less parent causes Windows to allocate a brand-new visible console
+# for each git.exe child. Output is always captured via PIPE here regardless,
+# so no window is ever needed; harmless for every other (already-consoled)
+# caller of this module.
+_NO_WINDOW_KW: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 _MAX_FILES = 20
 _MAX_NOTES_READ_CHARS = 4_000
@@ -58,6 +68,7 @@ def _list_untracked_files(repo_path: Path) -> list[str] | None:
             encoding="utf-8",
             errors="replace",
             timeout=5.0,
+            **_NO_WINDOW_KW,
         )
     except Exception:
         return None
@@ -105,6 +116,7 @@ def _parse_git_changed_files(
             encoding="utf-8",
             errors="replace",
             timeout=5.0,
+            **_NO_WINDOW_KW,
         )
         if result.returncode != 0:
             return [], "not_available"

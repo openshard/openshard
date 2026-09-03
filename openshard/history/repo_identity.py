@@ -23,11 +23,17 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 REPO_IDENTITY_FIELD = "repo_identity"
 
 _GIT_TIMEOUT_SECONDS = 3
+
+# See the matching comment in adapters/claude_code_import.py: this git call
+# can run from the console-less background capture-service worker, which
+# would otherwise cause Windows to pop a new console per git.exe child.
+_NO_WINDOW_KW: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 # scp-like SSH syntax: ``[user@]host:path`` with no scheme. The host must not
 # contain ``/`` and the path must not start with ``/`` (that would be a
@@ -104,6 +110,7 @@ def _origin_remote_url(path: Path) -> str | None:
         r = subprocess.run(
             ["git", "config", "--get", "remote.origin.url"],
             cwd=str(path), capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS,
+            **_NO_WINDOW_KW,
         )
         if r.returncode != 0:
             return None
