@@ -71,6 +71,19 @@ fabricated completion.
 
 Public API never raises and never writes to stdout (Claude Code treats
 hook stdout specially for some events); diagnostics go to stderr only.
+
+Latency (PR7)
+-------------
+The status line (``handle_claude_status``) is Claude Code's most frequent,
+synchronous entrypoint into this module, so it never folds: it only
+updates the staging buffer above and lets the next real fold boundary
+(a throttled tool-hook snapshot, ``Stop``, or ``SessionEnd``) pick up the
+model/cost/token values it observed. A fold's git-identity lookup
+(``git config --get remote.origin.url``) is cached on the buffer and
+computed at most once per session. Both the hook and status-line handlers
+acquire the buffer's lock with a bounded timeout, never Claude Code's
+unbounded wait -- see ``docs/capture-performance.md`` for what was
+measured and why.
 """
 
 from __future__ import annotations
@@ -137,6 +150,18 @@ _TOOL_FOLD_INTERVAL_SECONDS = 30
 # session is only ever snapshotted, never marked ended.
 _STALE_BUFFER_SECONDS = 60 * 60
 _MAX_STALE_SWEEP = 20
+
+# Requirement: hook processing must never hang Claude Code on lock
+# contention (a stuck/contended sidecar lock, e.g. antivirus scanning the
+# .openshard directory, or an unusually slow concurrent hook). Every lock
+# acquisition and JSONL write on this module's hot path is bounded by this
+# timeout; on expiry the caller's existing top-level `except Exception`
+# fails the single capture open (skips it, diagnostics to stderr) rather
+# than blocking the hook -- and therefore Claude Code -- indefinitely. Not
+# used for the (rarer, already-async) stale-buffer sweep, which gets a
+# somewhat longer allowance since it is not gating a single hook's turn.
+_LOCK_TIMEOUT_SECONDS = 3.0
+_SWEEP_LOCK_TIMEOUT_SECONDS = 5.0
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 _FIRST_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")
@@ -707,6 +732,25 @@ def _load_or_create_buffer(repo_root: Path, session_id: str, first_hook: str) ->
     return _new_buffer(session_id, repo_root, first_hook)
 
 
+def _load_buffer_light(repo_root: Path, session_id: str) -> dict | None:
+    """Like ``_load_or_create_buffer``, but never creates a brand-new buffer.
+
+    Used only by the status-line path (``handle_claude_status``), which must
+    never spawn git (see module docstring / Requirement 7): ``_new_buffer``
+    collects git branch/HEAD/dirty state via four git subprocess calls, which
+    is fine as a one-time per-session cost paid by a real lifecycle hook, but
+    is not acceptable on the status line's frequent, synchronous hot path.
+    If the session has no buffer yet and no persisted record either, there is
+    nothing useful this status ping can do, so it is simply not recorded --
+    the next real hook (SessionStart/UserPromptSubmit) creates the buffer
+    normally, and a later status ping is then captured as usual.
+    """
+    path = buffer_path(repo_root, session_id)
+    if path.exists():
+        return _read_buffer(path)
+    return _buffer_from_entry(_find_persisted_entry(repo_root, session_id) or {}, session_id) or None
+
+
 # ---------------------------------------------------------------------------
 # Record creation and fold (snapshot into runs.jsonl)
 # ---------------------------------------------------------------------------
@@ -748,6 +792,26 @@ def _ensure_record(buf: dict, repo_root: Path) -> None:
             ev["run_id"] = buf["record"]["run_id"]
             ev["shard_id"] = buf["record"]["shard_id"]
             ev["attempt_number"] = 1
+
+
+def _cached_repo_identity(buf: dict, repo_root: Path) -> str | None:
+    """The repo's ``git config --get remote.origin.url`` identity, computed once per session.
+
+    A remote origin does not change mid-session, so re-running this git
+    subprocess on every fold (every ~30s of tool activity, every Stop) is
+    pure waste; the first computed value (including ``None``, meaning no
+    usable origin) is cached on the buffer and reused for the rest of the
+    session's folds.
+    """
+    if buf.get("repo_identity_computed"):
+        value = buf.get("repo_identity")
+        return value if isinstance(value, str) else None
+    from openshard.history.repo_identity import capture_repo_identity
+
+    identity = capture_repo_identity(repo_root)
+    buf["repo_identity_computed"] = True
+    buf["repo_identity"] = identity
+    return identity
 
 
 def _git_changed_files(buf: dict, repo_root: Path) -> tuple[list[dict], str]:
@@ -1008,9 +1072,9 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if duration_seconds is not None:
         entry["duration_seconds"] = duration_seconds
     try:
-        from openshard.history.repo_identity import REPO_IDENTITY_FIELD, capture_repo_identity
+        from openshard.history.repo_identity import REPO_IDENTITY_FIELD
 
-        identity = capture_repo_identity(repo_root)
+        identity = _cached_repo_identity(buf, repo_root)
         if identity:
             entry[REPO_IDENTITY_FIELD] = identity
     except Exception:
@@ -1030,6 +1094,7 @@ def _fold(buf: dict, repo_root: Path) -> tuple[dict, str]:
         repo_root / ".openshard" / "runs.jsonl",
         entry,
         lambda e: _is_session_entry(e, session_id),
+        timeout=_LOCK_TIMEOUT_SECONDS,
     )
     buf["last_fold_at"] = _now()
     return entry, outcome
@@ -1066,7 +1131,7 @@ def sweep_stale_buffers(repo_root: Path, *, max_age_seconds: float = _STALE_BUFF
             if not _SESSION_ID_RE.match(sid):
                 continue
             try:
-                with history_file_lock(path):
+                with history_file_lock(path, timeout=_SWEEP_LOCK_TIMEOUT_SECONDS):
                     buf = _read_buffer(path)
                     if buf is None:
                         continue
@@ -1235,7 +1300,7 @@ def handle_claude_hook(
         from openshard.history.jsonl_store import history_file_lock
 
         path = buffer_path(repo_root, payload.session_id)
-        with history_file_lock(path):
+        with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
             buf = _load_or_create_buffer(repo_root, payload.session_id, payload.event)
             detail, should_fold, should_delete = _apply(payload, buf, repo_root)
             if buf.get("ended") and _has_activity(buf):
@@ -1370,6 +1435,15 @@ def handle_claude_status(data: Mapping[str, Any], *, env: Mapping[str, str] | No
     this command's stdout directly, unlike the silent hooks command). Model/
     cost/token capture is a side effect only; a failure anywhere in the
     capture path still returns a usable status line.
+
+    Requirement 7 (status-line performance): this function must stay cheap
+    and never touch git or rewrite ``runs.jsonl`` -- it may run very
+    frequently and is synchronous (Claude Code waits on its stdout to
+    render). It therefore only ever updates and persists the small per-
+    session staging buffer (a bounded-size local JSON write); the model/
+    cost/token values it records are picked up at the *next* natural fold
+    boundary (a periodic tool-hook snapshot, ``Stop``, or ``SessionEnd`` --
+    see ``_apply``/``_fold``), never folded from here directly.
     """
     fallback = _status_line_text(data) if isinstance(data, Mapping) else ""
     try:
@@ -1383,11 +1457,11 @@ def handle_claude_status(data: Mapping[str, Any], *, env: Mapping[str, str] | No
         from openshard.history.jsonl_store import history_file_lock
 
         path = buffer_path(repo_root, payload.session_id)  # type: ignore[arg-type]
-        with history_file_lock(path):
-            buf = _load_or_create_buffer(repo_root, payload.session_id, "Status")  # type: ignore[arg-type]
-            changed = _apply_status(payload, buf)
-            if changed and buf.get("record"):
-                _fold(buf, repo_root)
+        with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
+            buf = _load_buffer_light(repo_root, payload.session_id)  # type: ignore[arg-type]
+            if buf is None:
+                return fallback
+            _apply_status(payload, buf)
             _write_buffer(path, buf)
         return fallback
     except Exception:

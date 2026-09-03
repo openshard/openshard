@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import threading
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -11,8 +13,12 @@ from pathlib import Path
 import pytest
 
 from openshard.history.jsonl_store import (
+    LockTimeoutError,
+    _file_lock,
     _lock_path_for,
     append_jsonl,
+    history_file_lock,
+    upsert_jsonl,
     write_jsonl,
 )
 
@@ -137,3 +143,94 @@ def test_write_jsonl_is_crash_safe_and_shares_lock(tmp_path: Path) -> None:
     assert not (tmp_path / "runs.jsonl.tmp").exists()
     # Append and rewrite resolve to the same lock path (mutual exclusion).
     assert _lock_path_for(path) == path.with_name("runs.jsonl.lock")
+
+
+# --- PR7: bounded lock waits (Requirement 5) ---------------------------------
+
+
+class _BackgroundHolder:
+    """Holds a `_file_lock` on a background thread until told to release it."""
+
+    def __init__(self, lock_path: Path) -> None:
+        self.lock_path = lock_path
+        self._release = threading.Event()
+        self._acquired = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        with _file_lock(self.lock_path):
+            self._acquired.set()
+            self._release.wait(timeout=30)
+
+    def start_and_wait_until_held(self) -> None:
+        self._thread.start()
+        assert self._acquired.wait(timeout=5), "background holder never acquired the lock"
+
+    def release(self) -> None:
+        self._release.set()
+        self._thread.join(timeout=5)
+
+
+def test_bounded_timeout_raises_promptly_when_lock_is_held(tmp_path: Path) -> None:
+    lock_path = tmp_path / "buffer.json.lock"
+    holder = _BackgroundHolder(lock_path)
+    holder.start_and_wait_until_held()
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(LockTimeoutError):
+            with _file_lock(lock_path, timeout=0.3):
+                pass  # pragma: no cover - never reached
+        elapsed = time.monotonic() - t0
+        # Bounded: raises close to the requested timeout, never hangs, and
+        # never fires (much) sooner than requested either.
+        assert 0.25 <= elapsed < 5.0
+    finally:
+        holder.release()
+
+
+def test_bounded_timeout_succeeds_once_contender_releases(tmp_path: Path) -> None:
+    lock_path = tmp_path / "buffer.json.lock"
+    holder = _BackgroundHolder(lock_path)
+    holder.start_and_wait_until_held()
+    releaser = threading.Timer(0.2, holder.release)
+    releaser.start()
+    try:
+        with _file_lock(lock_path, timeout=5.0):
+            pass  # acquired without raising once the holder let go
+    finally:
+        releaser.cancel()
+
+
+def test_default_timeout_none_still_blocks_until_released(tmp_path: Path) -> None:
+    """Every existing caller's unbounded-wait behavior is unchanged by default."""
+    lock_path = tmp_path / "buffer.json.lock"
+    holder = _BackgroundHolder(lock_path)
+    holder.start_and_wait_until_held()
+    releaser = threading.Timer(0.2, holder.release)
+    releaser.start()
+    try:
+        t0 = time.monotonic()
+        with _file_lock(lock_path):  # timeout=None: blocks, never raises
+            elapsed = time.monotonic() - t0
+        assert elapsed >= 0.15
+    finally:
+        releaser.cancel()
+
+
+def test_history_file_lock_and_upsert_jsonl_accept_timeout_kwarg(tmp_path: Path) -> None:
+    """Public wrappers plumb `timeout` through to the same bounded wait."""
+    path = tmp_path / "runs.jsonl"
+    lock_path = _lock_path_for(path)
+    holder = _BackgroundHolder(lock_path)
+    holder.start_and_wait_until_held()
+    try:
+        with pytest.raises(LockTimeoutError):
+            with history_file_lock(path, timeout=0.2):
+                pass  # pragma: no cover - never reached
+        with pytest.raises(LockTimeoutError):
+            upsert_jsonl(path, {"n": 1}, lambda e: True, timeout=0.2)
+    finally:
+        holder.release()
+    # Contention gone: the same calls now succeed normally.
+    upsert_jsonl(path, {"n": 1}, lambda e: True, timeout=5.0)
+    assert [json.loads(ln) for ln in _read_lines(path)] == [{"n": 1}]

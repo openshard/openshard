@@ -40,6 +40,23 @@ All notable changes to OpenShard are documented here.
   --others`); work committed during a session is diffed against the HEAD
   snapshotted at session start.
 
+### Changed
+
+- Claude Code capture performance hardening: `Stop` (fires every turn) and
+  `SessionEnd` are synchronous hooks, and the status line is inherently
+  synchronous, so their latency was fully visible to the user. The
+  `openshard` console script now fast-paths `hooks claude` /
+  `hooks claude-status` around the full CLI's import graph (run pipeline,
+  provider clients, evals, planning), and the status-line handler no longer
+  performs a git diff / git-identity lookup / `runs.jsonl` rewrite on every
+  ping — it only updates the lightweight staging buffer and lets the next
+  real fold boundary (a throttled tool-hook snapshot, `Stop`, or
+  `SessionEnd`) pick up model/cost/token values. Lock waits on the hook/
+  status-line path are now bounded (fails open, Claude Code is never
+  blocked) rather than unbounded. See `docs/capture-performance.md` for
+  what was measured. No schema or behavior change to `runs.jsonl` or the
+  hook command Claude Code invokes.
+
 ## 0.3.0 - 2026-06-06
 
 First-class Claude Code session receipt import, skills list command, and tooling hardening.

@@ -11,6 +11,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1077,7 +1080,7 @@ class TestModelTokenCostCapture:
         assert str(repo.resolve()) not in raw
 
     def test_status_handler_never_raises_and_still_returns_text(self, repo: Path):
-        with patch.object(ch, "_load_or_create_buffer", side_effect=RuntimeError("boom")):
+        with patch.object(ch, "_load_buffer_light", side_effect=RuntimeError("boom")):
             text = _status(repo)
         assert isinstance(text, str)
 
@@ -1186,3 +1189,166 @@ class TestBackwardCompatibility:
         assert "RECEIPT" in out
         full = render_full_shard_receipt(receipt)
         assert "SHARD" in full
+
+
+# ---------------------------------------------------------------------------
+# PR7: capture performance and latency hardening
+# ---------------------------------------------------------------------------
+
+
+class TestStatusLineFastPath:
+    """Requirement 7: the status line must never touch git or fold to runs.jsonl."""
+
+    def test_status_line_never_folds(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")  # first prompt already folds once
+        before = _raw(repo)
+        with patch.object(ch, "_fold", wraps=ch._fold) as fold_spy:
+            for i in range(5):
+                _status(repo, tokens_input=1000 + i * 100, tokens_output=50 + i)
+            assert fold_spy.call_count == 0
+        # Status pings never touch runs.jsonl at all -- byte-identical to before.
+        assert _raw(repo) == before
+
+    def test_status_line_never_spawns_a_subprocess_in_steady_state(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        with patch("subprocess.run") as run_spy:
+            _status(repo, tokens_input=1234, cost_total=0.05)
+        run_spy.assert_not_called()
+
+    def test_first_ever_status_ping_creates_no_buffer_and_spawns_no_git(self, repo: Path):
+        """A status ping arriving before any lifecycle hook must not create
+        a buffer via git-collecting `_new_buffer` -- see `_load_buffer_light`."""
+        with patch("subprocess.run") as run_spy:
+            text = _status(repo)
+        run_spy.assert_not_called()
+        assert isinstance(text, str)
+        assert not (repo / ".openshard" / "runs.jsonl").exists()
+        assert not buffer_path(repo.resolve(), SID).exists()
+
+    def test_status_line_steady_state_stays_well_under_budget(self, repo: Path):
+        """Requirement 2: a coarse, generously-bounded regression tripwire.
+
+        Not a claim about absolute performance (see docs/capture-performance.md
+        for real numbers) -- just wide enough (a few x the ~25-35ms typically
+        observed for this in-process call on the dev machine) to catch a
+        regression back to doing real fold work here (previously ~150-700ms)
+        without being flaky on a loaded CI runner.
+        """
+        _run(repo, "UserPromptSubmit", prompt="task")
+        samples = []
+        for i in range(10):
+            t0 = time.monotonic()
+            _status(repo, tokens_input=1000 + i, cost_total=0.01 * i)
+            samples.append(time.monotonic() - t0)
+        samples.sort()
+        median = samples[len(samples) // 2]
+        assert median < 0.15, f"status-line steady-state median {median * 1000:.1f}ms exceeded budget"
+
+    def test_repeated_status_pings_do_not_grow_runs_jsonl_until_real_fold(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")  # first prompt already folds once
+        before = _raw(repo)
+        for i in range(10):
+            _status(repo, tokens_input=1000 + i, cost_total=0.01 * i)
+        assert _raw(repo) == before  # status pings alone never rewrite runs.jsonl
+        _run(repo, "Stop")
+        assert len(_runs_lines(repo)) == 1
+        entry = _runs_lines(repo)[0]
+        assert entry["prompt_tokens"] == 1009  # last-observed value still reaches the fold
+
+
+class TestRepoIdentityCaching:
+    """Requirement 3/6: `git config --get remote.origin.url` is not re-run per fold."""
+
+    def test_repo_identity_git_call_happens_at_most_once_per_session(self, repo: Path):
+        from openshard.history import repo_identity as ri
+
+        with patch.object(ri, "_origin_remote_url", wraps=ri._origin_remote_url) as spy:
+            _run(repo, "UserPromptSubmit", prompt="task")
+            (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+            _run(repo, "PostToolUse", tool_name="Write", tool_input={"file_path": str(repo / "a.py")})
+            path = buffer_path(repo.resolve(), SID)
+            buf = json.loads(path.read_text(encoding="utf-8"))
+            buf["last_fold_at"] = "2000-01-01T00:00:00Z"
+            path.write_text(json.dumps(buf), encoding="utf-8")
+            _run(repo, "PostToolUse", tool_name="Write", tool_input={"file_path": str(repo / "a.py")})
+            _run(repo, "Stop")
+        # Two real folds happened (the throttled tool snapshot and Stop),
+        # but the git-identity subprocess only ran once for the session.
+        assert spy.call_count == 1
+
+
+class TestBoundedLockWaitsAndFailOpen:
+    """Requirements 4 and 5: bounded lock waits, and Claude Code keeps running."""
+
+    def test_hook_fails_open_when_lock_acquisition_times_out(self, repo: Path):
+        from openshard.history.jsonl_store import LockTimeoutError
+
+        with patch("openshard.history.jsonl_store.history_file_lock", side_effect=LockTimeoutError("stuck")):
+            out = _run(repo, "UserPromptSubmit", prompt="task")
+        assert out.action == "error"
+        # Never blocked: the patched lock raised immediately, so this whole
+        # call returns fast rather than hanging Claude Code.
+
+    def test_status_line_fails_open_when_lock_acquisition_times_out(self, repo: Path):
+        from openshard.history.jsonl_store import LockTimeoutError
+
+        with patch("openshard.history.jsonl_store.history_file_lock", side_effect=LockTimeoutError("stuck")):
+            text = _status(repo)
+        assert isinstance(text, str)  # status line still renders something
+
+    def test_hook_does_not_hang_on_a_genuinely_held_lock(self, repo: Path):
+        """End-to-end: a real contended lock still returns within a bounded time."""
+        _run(repo, "UserPromptSubmit", prompt="task")
+        path = buffer_path(repo.resolve(), SID)
+        release = threading.Event()
+        acquired = threading.Event()
+
+        def hold():
+            from openshard.history.jsonl_store import _file_lock, _lock_path_for
+            with _file_lock(_lock_path_for(path)):
+                acquired.set()
+                release.wait(timeout=10)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        try:
+            assert acquired.wait(timeout=5)
+            with patch.object(ch, "_LOCK_TIMEOUT_SECONDS", 0.3):
+                t0 = time.monotonic()
+                out = _run(repo, "Stop")
+                elapsed = time.monotonic() - t0
+        finally:
+            release.set()
+            holder.join(timeout=5)
+        assert out.action == "error"
+        assert elapsed < 5.0  # bounded, not hung
+
+
+class TestConcurrentHookActivity:
+    """Requirement 11: concurrent/contended hook activity must not corrupt history."""
+
+    def test_concurrent_tool_hooks_same_session_no_corruption_no_loss(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        n = 25
+
+        def fire(i: int) -> None:
+            handle_claude_hook(
+                _payload("PostToolUse", repo, SID, tool_name="Bash", tool_input={"command": f"echo {i}"}),
+                env={"CLAUDE_PROJECT_DIR": str(repo)},
+            )
+
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            list(ex.map(fire, range(n)))
+        _run(repo, "Stop")
+
+        raw = _raw(repo).splitlines()
+        assert len(raw) == 1  # exactly one record, no torn/duplicate lines
+        entry = json.loads(raw[0])
+        assert entry["capture"]["tool_call_count"] == n  # every call counted, none lost
+
+    def test_rapid_repeated_stop_does_not_explode_record_count(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        for _ in range(15):
+            _run(repo, "Stop")
+        assert len(_runs_lines(repo)) == 1
+        assert _runs_lines(repo)[0]["capture"]["turn_count"] == 15

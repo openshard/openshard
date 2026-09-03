@@ -39,7 +39,7 @@ Repository = "https://github.com/MichaelObasa/openshard"
 "Bug Tracker" = "https://github.com/MichaelObasa/openshard/issues"
 
 [project.scripts]
-openshard = "openshard.cli.main:cli"
+openshard = "openshard.cli.entrypoint:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
