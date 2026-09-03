@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,6 +109,17 @@ class GitInfo:
     is_git: bool
 
 
+# See the matching comment in adapters/claude_code_import.py: this git call
+# can run from the console-less background capture-service worker, which
+# would otherwise cause Windows to pop a new console per git.exe child.
+# getattr sidesteps mypy's attr-defined error for CREATE_NO_WINDOW, which
+# only exists in typeshed's Windows stubs (a sys.platform guard alone does
+# not make a direct attribute access type-check on this cross-platform module).
+_NO_WINDOW_KW: dict = (
+    {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
+)
+
+
 def _run_git(root: Path, args: list[str], *, timeout: float = 5.0) -> str | None:
     """Run a git command under *root*; return stdout on success, else None. Never raises."""
     try:
@@ -117,6 +129,7 @@ def _run_git(root: Path, args: list[str], *, timeout: float = 5.0) -> str | None
             capture_output=True,
             text=True,
             timeout=timeout,
+            **_NO_WINDOW_KW,
         )
         if result.returncode == 0:
             return result.stdout

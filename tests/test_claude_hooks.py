@@ -272,6 +272,119 @@ class TestRepoResolution:
         assert not (repo / ".openshard").exists()
 
 
+class TestRepoBoundarySafety:
+    """A payload must never walk upward into the user's home directory or
+    beyond (see openshard.adapters.claude_hooks._is_forbidden_capture_root).
+
+    Regression coverage for a real incident: on at least one development
+    machine the home directory is itself a git repository, so a cwd with no
+    project git repo of its own would otherwise resolve "the repository" to
+    home and run git diff / git ls-files across the user's entire home tree.
+    """
+
+    def test_home_directory_itself_is_never_the_repo(self, tmp_path: Path, monkeypatch):
+        fake_home = tmp_path / "home-is-a-repo"
+        fake_home.mkdir()
+        _git(fake_home, "init", "-q")
+        (fake_home / "README.md").write_text("hi\n", encoding="utf-8")
+        _git(fake_home, "add", ".")
+        _git(fake_home, "commit", "-q", "-m", "init")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+        p = extract_hook_payload(_payload("Stop", fake_home, cwd=str(fake_home)))
+        assert p is not None
+        assert resolve_repo_root(p, {}) is None
+
+        outcome = handle_claude_hook(_payload("Stop", fake_home, cwd=str(fake_home)), env={})
+        assert outcome.action == "ignored"
+        assert not (fake_home / ".openshard").exists()
+
+    def test_subdirectory_of_home_with_no_project_git_is_never_captured(self, tmp_path: Path, monkeypatch):
+        fake_home = tmp_path / "home-is-a-repo"
+        fake_home.mkdir()
+        _git(fake_home, "init", "-q")
+        (fake_home / "README.md").write_text("hi\n", encoding="utf-8")
+        _git(fake_home, "add", ".")
+        _git(fake_home, "commit", "-q", "-m", "init")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        # A fresh subfolder under home with no .git of its own -- e.g. the
+        # user ran `claude` directly in a brand-new, not-yet-initialized
+        # project directory that happens to live under their home directory.
+        scratch = fake_home / "scratch"
+        scratch.mkdir()
+
+        p = extract_hook_payload(_payload("Stop", scratch, cwd=str(scratch)))
+        assert p is not None
+        assert resolve_repo_root(p, {}) is None
+        outcome = handle_claude_hook(_payload("Stop", scratch, cwd=str(scratch)), env={})
+        assert outcome.action == "ignored"
+        assert not (scratch / ".openshard").exists()
+        assert not (fake_home / ".openshard").exists()
+
+    def test_project_dir_header_pointing_at_home_falls_back_or_fails_closed(self, tmp_path: Path, monkeypatch):
+        fake_home = tmp_path / "home-is-a-repo"
+        fake_home.mkdir()
+        _git(fake_home, "init", "-q")
+        (fake_home / "README.md").write_text("hi\n", encoding="utf-8")
+        _git(fake_home, "add", ".")
+        _git(fake_home, "commit", "-q", "-m", "init")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        # CLAUDE_PROJECT_DIR resolves to home (forbidden); cwd resolves to a
+        # real, legitimate nested project repo -- the legitimate candidate
+        # must still be used rather than giving up entirely.
+        real_project = fake_home / "projects" / "real-project"
+        real_project.mkdir(parents=True)
+        _git(real_project, "init", "-q")
+        (real_project / "a.txt").write_text("x\n", encoding="utf-8")
+        _git(real_project, "add", ".")
+        _git(real_project, "commit", "-q", "-m", "init")
+
+        p = extract_hook_payload(_payload("Stop", real_project, cwd=str(real_project)))
+        assert p is not None
+        assert resolve_repo_root(p, {"CLAUDE_PROJECT_DIR": str(fake_home)}) == real_project.resolve()
+
+    def test_nested_repo_under_home_still_resolves_normally(self, tmp_path: Path, monkeypatch):
+        # The common, legitimate case: home happens to be a git repo, but the
+        # real project has its own nearer .git -- must be unaffected.
+        fake_home = tmp_path / "home-is-a-repo"
+        fake_home.mkdir()
+        _git(fake_home, "init", "-q")
+        (fake_home / "README.md").write_text("hi\n", encoding="utf-8")
+        _git(fake_home, "add", ".")
+        _git(fake_home, "commit", "-q", "-m", "init")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        project = fake_home / "openshard"
+        project.mkdir()
+        _git(project, "init", "-q")
+        (project / "a.txt").write_text("x\n", encoding="utf-8")
+        _git(project, "add", ".")
+        _git(project, "commit", "-q", "-m", "init")
+        sub = project / "src"
+        sub.mkdir()
+
+        p = extract_hook_payload(_payload("Stop", project, cwd=str(sub)))
+        assert p is not None
+        assert resolve_repo_root(p, {}) == project.resolve()
+
+        entry = _session(project)
+        assert entry["capture"]["session_id"] == SID
+        assert not (fake_home / ".openshard").exists()
+
+    def test_ancestor_of_home_is_also_forbidden(self, tmp_path: Path, monkeypatch):
+        # Defensive belt-and-braces: even if find_repo_root somehow returned
+        # something *above* home (e.g. a .git at the drive/volume root),
+        # refuse it too -- not just an exact match on home.
+        grandparent = tmp_path
+        fake_home = grandparent / "Users" / "someone"
+        fake_home.mkdir(parents=True)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+        from openshard.adapters.claude_hooks import _is_forbidden_capture_root
+
+        assert _is_forbidden_capture_root(grandparent) is True
+        assert _is_forbidden_capture_root(fake_home) is True
+        assert _is_forbidden_capture_root(fake_home / "project") is False
+
+
 # ---------------------------------------------------------------------------
 # Session lifecycle -> canonical Events -> runs.jsonl
 # ---------------------------------------------------------------------------

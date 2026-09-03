@@ -493,6 +493,14 @@ def _render_setup_result(result) -> None:
             "skipped_existing": "skipped (custom status line present)",
         }.get(result.statusline.status, result.statusline.status)
         click.echo(f"  Enrichment:    {statusline_state}")
+    if result.capture_service is not None:
+        service_state = {
+            "running": f"running (127.0.0.1:{result.capture_service.get('port')})",
+            "started": f"started (127.0.0.1:{result.capture_service.get('port')})",
+            "disabled": "disabled (OPENSHARD_CAPTURE_DISABLE)",
+            "unavailable": "not running (could not be started)",
+        }.get(str(result.capture_service.get("state")), str(result.capture_service.get("state")))
+        click.echo(f"  Capture:       {service_state}")
 
     click.echo("")
     if result.readiness == "ready":
@@ -2422,6 +2430,7 @@ def mcp_uninstall_claude(repo_path: Path | None, as_json: bool) -> None:
     own is left alone. Local Shard/Receipt history under `.openshard/` is
     never deleted by this command.
     """
+    from openshard.adapters.claude_capture_service import stop_service
     from openshard.adapters.claude_hooks_install import (
         uninstall_claude_hooks,
         uninstall_claude_statusline,
@@ -2432,6 +2441,11 @@ def mcp_uninstall_claude(repo_path: Path | None, as_json: bool) -> None:
     root = mcp_result.repo_root or find_repo_root(repo_path)
     hooks_result = uninstall_claude_hooks(repo_root=root) if root is not None else None
     statusline_result = uninstall_claude_statusline(repo_root=root) if root is not None else None
+    # The capture service is per user, not per repository; stopping it here
+    # leaves nothing of OpenShard running after an uninstall. Any other
+    # repository still configured simply restarts it at its next session
+    # start (or status-line render).
+    service_result = stop_service()
 
     any_error = (
         mcp_result.status == "error"
@@ -2457,6 +2471,7 @@ def mcp_uninstall_claude(repo_path: Path | None, as_json: bool) -> None:
                 if statusline_result is not None
                 else {"status": "skipped"}
             ),
+            "capture_service": service_result,
         }
         click.echo(json.dumps(payload, indent=2))
         if any_error:
@@ -2472,6 +2487,11 @@ def mcp_uninstall_claude(repo_path: Path | None, as_json: bool) -> None:
         click.echo(f"Auto-capture hooks: {hooks_result.status.replace('_', ' ')}. {hooks_result.message}")
     if statusline_result is not None:
         click.echo(f"Status line: {statusline_result.status.replace('_', ' ')}. {statusline_result.message}")
+    if service_result.get("was_running"):
+        click.echo("Capture service: stopped." if service_result.get("stopped") else
+                   "Capture service: still draining; run `openshard capture stop` to check.")
+    else:
+        click.echo("Capture service: not running.")
     click.echo("\nLocal Shard/Receipt history under .openshard/ was not touched.")
     if any_error:
         raise SystemExit(1)
@@ -2498,9 +2518,9 @@ def hooks_claude(event_override: str | None) -> None:
     Evidence lands in this repository's .openshard/runs.jsonl as normal
     Shard records readable via `openshard last`, `openshard mcp serve`, etc.
     """
-    from openshard.adapters.claude_hooks import run_hook_from_stream
+    from openshard.adapters.claude_capture_client import run_hook_via_service
 
-    run_hook_from_stream(sys.stdin, env=os.environ, event_override=event_override)
+    run_hook_via_service(sys.stdin, env=os.environ, event_override=event_override)
 
 
 @hooks_group.command("claude-status")
@@ -2513,9 +2533,102 @@ def hooks_claude_status() -> None:
     effect, model id / cumulative session cost / token counts are recorded
     (best-effort, never blocking) so receipts can show them. Always exits 0.
     """
-    from openshard.adapters.claude_hooks import run_status_from_stream
+    from openshard.adapters.claude_capture_client import run_status_via_service
 
-    click.echo(run_status_from_stream(sys.stdin, env=os.environ))
+    click.echo(run_status_via_service(sys.stdin, env=os.environ))
+
+
+@cli.group("capture")
+def capture_group() -> None:
+    """The local Claude Code capture service (started automatically; rarely needed by hand)."""
+
+
+def _render_capture_status(status: dict) -> None:
+    if status.get("running"):
+        click.echo(f"Capture service: running on 127.0.0.1:{status['port']} (pid {status.get('pid')})")
+        uptime = status.get("uptime_seconds")
+        if isinstance(uptime, (int, float)):
+            click.echo(f"  uptime:   {int(uptime)}s")
+        stats = status.get("stats") or {}
+        if stats:
+            click.echo(
+                f"  events:   {stats.get('queued', 0)} queued, {stats.get('replayed', 0)} folded, "
+                f"{status.get('pending', 0)} pending, {stats.get('replay_errors', 0)} errors"
+            )
+        timing = status.get("blocking_ms") or {}
+        if timing.get("n"):
+            click.echo(
+                f"  blocking: p50 {timing.get('p50_ms')}ms, p95 {timing.get('p95_ms')}ms "
+                f"(last {timing.get('window')} of {timing.get('n')} requests)"
+            )
+    else:
+        click.echo(f"Capture service: not running (expected on 127.0.0.1:{status['port']})")
+        if status.get("stale_state"):
+            click.echo("  a stale state file from a previous instance will be cleaned up on next start")
+
+
+@capture_group.command("status")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def capture_status(as_json: bool) -> None:
+    """Show whether the capture service is running, and what it has processed."""
+    from openshard.adapters.claude_capture_service import service_status
+
+    status = service_status()
+    if as_json:
+        click.echo(json.dumps(status, indent=2))
+        return
+    _render_capture_status(status)
+
+
+@capture_group.command("start")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def capture_start(as_json: bool) -> None:
+    """Start the capture service if it is not already running (idempotent)."""
+    from openshard.adapters.claude_capture_client import ensure_service
+    from openshard.adapters.claude_capture_service import service_status
+
+    port, state = ensure_service()
+    status = service_status()
+    if as_json:
+        click.echo(json.dumps({"state": state, "port": port, **status}, indent=2))
+    else:
+        click.echo({"running": "Capture service already running.", "started": "Capture service started.",
+                    "disabled": "Capture service disabled (OPENSHARD_CAPTURE_DISABLE).",
+                    "unavailable": "Capture service could not be started."}[state])
+        _render_capture_status(status)
+    if state == "unavailable":
+        raise SystemExit(1)
+
+
+@capture_group.command("stop")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def capture_stop(as_json: bool) -> None:
+    """Stop the capture service (it drains queued events first). Sessions restart it as needed."""
+    from openshard.adapters.claude_capture_service import stop_service
+
+    result = stop_service()
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    elif not result["was_running"]:
+        click.echo("Capture service was not running.")
+    elif result["stopped"]:
+        click.echo("Capture service stopped.")
+    else:
+        click.echo("Capture service did not stop in time; it may still be draining. Re-run to check.")
+    if result["was_running"] and not result["stopped"]:
+        raise SystemExit(1)
+
+
+@capture_group.command("serve")
+@click.option("--port", "port", type=int, default=None, help="Bind this port instead of the default range.")
+@click.option("--idle-timeout", "idle_timeout", type=float, default=None,
+              help="Exit after this many seconds without a request (default: 4 hours; 0 = never).")
+def capture_serve(port: int | None, idle_timeout: float | None) -> None:
+    """Run the capture service in the foreground (what `openshard capture start` spawns detached)."""
+    from openshard.adapters.claude_capture_service import IDLE_TIMEOUT_SECONDS, serve
+
+    code = serve(port=port, idle_timeout=IDLE_TIMEOUT_SECONDS if idle_timeout is None else idle_timeout)
+    raise SystemExit(code)
 
 
 @cli.group("reflect")
@@ -5604,12 +5717,29 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     _echo_warnings_next_steps(state)
 
     hooks_ok = bool(claude_status.hook_events_installed) and not claude_status.hook_events_missing
+    hooks_detail = claude_status.hooks_settings_error or "not configured"
+    if hooks_ok and claude_status.hooks_need_upgrade:
+        hooks_ok = False
+        hooks_detail = "older hook configuration; run `openshard setup` to switch to the fast capture path"
+    service_ok = bool(claude_status.capture_service.get("running"))
+    if service_ok and claude_status.capture_port_mismatch:
+        service_ok = False
+        service_detail = (
+            f"hooks target port {claude_status.hooks_port} but the service listens on "
+            f"{claude_status.capture_service.get('port')}; run `openshard setup`"
+        )
+    else:
+        service_detail = (
+            f"running on 127.0.0.1:{claude_status.capture_service.get('port')}" if service_ok
+            else "not running; it starts automatically at the next Claude Code session (`openshard capture start`)"
+        )
     checks: list[tuple[str, bool, str]] = [
         ("Repository", root is not None, "not a git repository"),
         ("Local history", history_writable, f"{HISTORY_RELPATH.as_posix()} is not writable"),
         ("Claude Code", claude_status.claude_cli.available, "CLI not found on PATH"),
         ("MCP", claude_status.mcp_configured, claude_status.mcp_detail),
-        ("Auto-capture hooks", hooks_ok, claude_status.hooks_settings_error or "not configured"),
+        ("Auto-capture hooks", hooks_ok, hooks_detail),
+        ("Capture service", service_ok, service_detail),
         (
             "Receipt enrichment",
             claude_status.statusline_state == "openshard",

@@ -37,13 +37,18 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from openshard.adapters.claude_capture_client import ensure_service
+from openshard.adapters.claude_capture_service import service_status
 from openshard.adapters.claude_hooks_install import (
     HOOK_EVENTS,
+    HTTP_EVENTS,
     SETTINGS_RELPATH,
     ClaudeHooksInstallResult,
     install_claude_hooks,
     install_claude_statusline,
     installed_events,
+    installed_hook_port,
+    is_openshard_hook,
     is_openshard_statusline,
     load_settings,
 )
@@ -86,6 +91,11 @@ class ClaudeIntegrationStatus:
     hook_events_missing: list[str]
     hooks_settings_error: str | None
     statusline_state: str  # "openshard" | "custom" | "absent"
+    # PR9.5: the warm capture service the HTTP hooks talk to.
+    capture_service: dict = field(default_factory=dict)  # service_status() snapshot
+    hooks_port: int | None = None  # port the installed HTTP hooks target
+    hooks_need_upgrade: bool = False  # pre-PR9.5 command-form hooks still installed
+    capture_port_mismatch: bool = False  # hooks target a port the service is not on
 
     def to_dict(self) -> dict:
         return {
@@ -99,7 +109,30 @@ class ClaudeIntegrationStatus:
             "hook_events_missing": self.hook_events_missing,
             "hooks_settings_error": self.hooks_settings_error,
             "statusline_state": self.statusline_state,
+            "capture_service_running": bool(self.capture_service.get("running")),
+            "capture_service_port": self.capture_service.get("port"),
+            "hooks_port": self.hooks_port,
+            "hooks_need_upgrade": self.hooks_need_upgrade,
+            "capture_port_mismatch": self.capture_port_mismatch,
         }
+
+
+def _http_events_installed(settings: dict) -> list[str]:
+    """Events (of HTTP_EVENTS) whose installed OpenShard hook is the HTTP form."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    found: list[str] = []
+    for event in HTTP_EVENTS:
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            entries = group.get("hooks") if isinstance(group, dict) else None
+            if any(isinstance(h, dict) and h.get("type") == "http" and is_openshard_hook(h) for h in entries or []):
+                found.append(event)
+                break
+    return found
 
 
 def detect_claude_integration(repo_root: Path | None) -> ClaudeIntegrationStatus:
@@ -136,6 +169,8 @@ def detect_claude_integration(repo_root: Path | None) -> ClaudeIntegrationStatus
     hook_events_missing: list[str] = list(HOOK_EVENTS)
     hooks_settings_error: str | None = None
     statusline_state = "absent"
+    hooks_port: int | None = None
+    hooks_need_upgrade = False
 
     if repo_root is not None:
         settings, err = load_settings(repo_root)
@@ -144,11 +179,19 @@ def detect_claude_integration(repo_root: Path | None) -> ClaudeIntegrationStatus
         elif settings is not None:
             hook_events_installed = installed_events(settings)
             hook_events_missing = [e for e in HOOK_EVENTS if e not in hook_events_installed]
+            hooks_port = installed_hook_port(settings)
+            http_installed = _http_events_installed(settings)
+            hooks_need_upgrade = bool(hook_events_installed) and any(
+                e in hook_events_installed and e not in http_installed for e in HTTP_EVENTS
+            )
             status_line = settings.get("statusLine")
             if is_openshard_statusline(status_line):
                 statusline_state = "openshard"
             elif status_line is not None:
                 statusline_state = "custom"
+
+    service = service_status()
+    mismatch = bool(service.get("running")) and hooks_port is not None and hooks_port != service.get("port")
 
     return ClaudeIntegrationStatus(
         claude_cli=claude_avail,
@@ -159,6 +202,10 @@ def detect_claude_integration(repo_root: Path | None) -> ClaudeIntegrationStatus
         hook_events_missing=hook_events_missing,
         hooks_settings_error=hooks_settings_error,
         statusline_state=statusline_state,
+        capture_service=service,
+        hooks_port=hooks_port,
+        hooks_need_upgrade=hooks_need_upgrade,
+        capture_port_mismatch=mismatch,
     )
 
 
@@ -195,6 +242,8 @@ class SetupResult:
     statusline: ClaudeHooksInstallResult | None
     readiness: str  # "ready" | "ready_partial" | "not_ready"
     next_steps: list[str] = field(default_factory=list)
+    # PR9.5: {"state": running|started|disabled|unavailable, "port": int|None}
+    capture_service: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -207,10 +256,20 @@ class SetupResult:
             "mcp": _mcp_result_dict(self.mcp),
             "hooks": _hooks_result_dict(self.hooks),
             "statusline": _hooks_result_dict(self.statusline),
+            "capture_service": self.capture_service if self.capture_service is not None else {"status": "skipped"},
             "readiness": self.readiness,
             "ready": self.readiness == "ready",
             "next_steps": self.next_steps,
         }
+
+
+def ensure_capture_service() -> dict:
+    """Start (or find) the capture service; ``{"state", "port"}``. Never raises."""
+    try:
+        port, state = ensure_service()
+    except Exception:
+        port, state = None, "unavailable"
+    return {"state": state, "port": port}
 
 
 def run_setup(*, repo_path: Path | None = None) -> SetupResult:
@@ -262,7 +321,11 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
             next_steps=next_steps,
         )
 
-    hooks_result = install_claude_hooks(repo_root=root)
+    # The capture service first: the HTTP hooks written below must target
+    # the port it actually listens on (normally the default; a different
+    # one only when the default is taken by another program).
+    service = ensure_capture_service()
+    hooks_result = install_claude_hooks(repo_root=root, port=service.get("port") or None)
     next_steps.extend(hooks_result.warnings)
     if hooks_result.status == "error":
         next_steps.append(hooks_result.message)
@@ -270,7 +333,7 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
             repo_root=root, is_git=True, claude_cli=claude_avail,
             history_path=history_path, history_writable=writable,
             mcp=mcp_result, hooks=hooks_result, statusline=None, readiness="not_ready",
-            next_steps=next_steps,
+            next_steps=next_steps, capture_service=service,
         )
 
     statusline_result = install_claude_statusline(repo_root=root)
@@ -285,6 +348,16 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
         next_steps.append(statusline_result.message)
     else:
         readiness = "ready"
+
+    if service.get("state") == "unavailable":
+        # Hooks are installed and every Claude Code session start retries
+        # the service, but until it runs the HTTP hooks have nothing to talk
+        # to -- capture would silently not happen, so this is not "ready".
+        readiness = "not_ready"
+        next_steps.append(
+            "The local capture service could not be started (see ~/.openshard/claude-capture.log); "
+            "run `openshard capture start`, then re-run `openshard setup`."
+        )
 
     if not writable:
         # MCP/hooks/status line can all be configured correctly and captures
@@ -301,5 +374,5 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
         repo_root=root, is_git=True, claude_cli=claude_avail,
         history_path=history_path, history_writable=writable,
         mcp=mcp_result, hooks=hooks_result, statusline=statusline_result,
-        readiness=readiness, next_steps=next_steps,
+        readiness=readiness, next_steps=next_steps, capture_service=service,
     )
