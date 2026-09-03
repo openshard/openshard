@@ -35,15 +35,33 @@ verification results, never raw notes — cross into relevant context.
 
 Task-aware relevance (relevant_context)
 ----------------------------------------
-``relevant_context`` ranks Shards for a free-text task using simple,
-deterministic keyword-overlap scoring over task text/shard id/agent, plus
-small bonuses for a shard with a recorded verification failure or more than
-one attempt (prior failures and retries are the most useful history for an
-agent starting a similar task). No embeddings, fuzzy matching, or model
-calls — see ``_score_group``. Like ``search_history``, this loads and
-groups ``runs.jsonl`` exactly once per call; unlike it, per-attempt
-``ShardReceipt`` objects are only built for the shards that actually make
-the final ranked result, not for every group in history.
+``relevant_context`` ranks Shards for a free-text task using deterministic
+evidence scoring — see ``_score_group``. Two evidence channels, both read
+directly from the raw run entry (no per-group ``ShardReceipt`` build):
+
+* File/path overlap -- file-like tokens mentioned in the task (e.g.
+  ``openshard/history/query.py``) are matched against the Shard's changed
+  files and the paths of its non-Note findings. This is the strongest
+  signal: it means the same code was actually touched or flagged, not just
+  discussed in similar words. See ``_file_overlap_score``.
+* Task-keyword overlap -- the existing overlap against task text, shard id,
+  and agent, but with a small blacklist of generic engineering verbs
+  ("fix", "test", "code", "add", ...) removed before scoring (see
+  ``_GENERIC_TERMS``), since those words appear in nearly every task and
+  carry no discriminative signal on their own.
+
+A Shard qualifies only when at least one of these channels produces
+evidence (score > 0 before bonuses); a recorded verification failure,
+more than one attempt, or an earlier failure later resolved by a passing
+attempt then each add a small fixed bonus on top -- never enough on their
+own to pull in an unrelated Shard. Ordering is score descending with
+recency only as a tie-break, so a strong old match is never buried by a
+weak recent one. No embeddings, fuzzy matching, or model calls anywhere.
+
+Like ``search_history``, this loads and groups ``runs.jsonl`` exactly once
+per call; unlike it, per-attempt ``ShardReceipt`` objects are only built
+for the shards that actually make the final ranked result, not for every
+group in history.
 """
 
 from __future__ import annotations
@@ -422,16 +440,67 @@ _STOPWORDS: frozenset[str] = frozenset({
     "did", "can", "could", "should", "would", "will", "shall", "may", "might",
     "must", "have", "has", "had", "i", "we", "you", "they", "he", "she",
 })
+
+# Generic engineering vocabulary: words that show up in nearly every task
+# ("fix the bug", "add a test", "update the code") and so match almost any
+# history regardless of topic. Filtered out of the *query* only -- a Shard's
+# own task text is left untouched, since it is compared against the
+# filtered query terms either way. Kept separate from _STOPWORDS because
+# these are content words (a plain grammar stopword list would not catch
+# them), not because the tokenizer treats them differently.
+_GENERIC_TERMS: frozenset[str] = frozenset({
+    "fix", "fixed", "fixes", "fixing",
+    "bug", "bugs", "issue", "issues",
+    "test", "tests", "testing",
+    "code", "coding",
+    "add", "adds", "added", "adding",
+    "implement", "implements", "implemented", "implementing", "implementation",
+    "update", "updates", "updated", "updating",
+    "change", "changes", "changed", "changing",
+    "feature", "features",
+    "task", "tasks",
+    # "error"/"errors" deliberately NOT listed: unlike the filler verbs above
+    # it is a subject-matter noun ("error boundary", "5xx errors", "error
+    # budget") and is often the one distinctive term two tasks share. Its
+    # worst case is a weak score-2 match ranked below any file evidence,
+    # which is cheaper than dropping a genuine connection.
+    "problem", "problems",
+    "improve", "improves", "improved", "improvement",
+    "handle", "handles", "handling",
+    "make", "makes", "making",
+    "work", "working",
+    "new", "old",
+})
+
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
+# File-like tokens in free task text: a path with at least one separator
+# (e.g. "openshard/history/query.py"), or a bare filename with a common
+# code/config extension (e.g. "query.py") -- narrow enough to skip "v4.6" or
+# "e.g." style false positives, wide enough to cover most repositories.
+_CODE_EXTENSIONS = (
+    "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "rs", "java", "kt",
+    "rb", "php", "c", "cpp", "cc", "h", "hpp", "cs", "swift", "scala",
+    "json", "yaml", "yml", "toml", "tf", "tfvars", "md", "sh", "ps1",
+    "sql", "html", "css", "scss", "vue", "svelte", "ini", "cfg", "conf",
+)
+_PATH_RE = re.compile(
+    r"(?:[\w.-]+[/\\])+[\w.-]+\.[A-Za-z0-9]{1,8}"
+    r"|[\w-]{2,}\.(?:" + "|".join(_CODE_EXTENSIONS) + r")\b",
+    re.IGNORECASE,
+)
 # Per-field keyword weights and fixed bonuses. Kept explicit and small so a
 # match's score is always explainable from its `signals` list.
 _WEIGHT_TASK = 2
 _WEIGHT_SHARD_ID = 1
 _WEIGHT_AGENT = 1
+_WEIGHT_FILE_TOUCHED = 6
+_WEIGHT_FILE_REFERENCED = 4
 _BONUS_FAILURE = 2
 _BONUS_MULTI_ATTEMPT = 1
+_BONUS_RESOLVED = 2
 
+_MAX_FILE_SIGNALS = 3
 _MAX_CONTEXT_FILES = 8
 _MAX_CONTEXT_FINDINGS = 5
 _MAX_CONTEXT_ATTEMPTS = 5
@@ -442,6 +511,178 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in _WORD_RE.findall((text or "").lower()) if t not in _STOPWORDS]
 
 
+def _query_terms(task: str) -> list[str]:
+    """Content words from *task* for keyword-overlap scoring.
+
+    Stopwords and generic engineering verbs (see ``_GENERIC_TERMS``) are
+    removed and the result de-duplicated in first-seen order, so a task like
+    "fix the bug in terraform validate" scores only on "terraform"/
+    "validate" -- generic noise never contributes on its own.
+    """
+    return list(dict.fromkeys(t for t in _tokenize(task) if t not in _GENERIC_TERMS))
+
+
+def _extract_path_mentions(task: str) -> list[str]:
+    """File-like substrings mentioned in *task*, in first-seen order, deduped."""
+    seen: list[str] = []
+    for m in _PATH_RE.finditer(task or ""):
+        token = m.group(0).strip(".,;:()[]{}'\"")
+        if token and token not in seen:
+            seen.append(token)
+    return seen
+
+
+def _normalize_path(p: str) -> str:
+    return p.replace("\\", "/").strip().lower()
+
+
+def _match_one_path(query_token: str, evidence: list[str]) -> str | None:
+    """Return the evidence path *query_token* matches, or ``None``.
+
+    Matching is on whole path segments, in either direction: an exact
+    normalized path, or one path being a segment-boundary suffix of the
+    other. So "backend/utils.py" matches "src/backend/utils.py", and a bare
+    "utils.py" matches "frontend/utils.py" -- a bare filename is the only
+    form that matches across directories, because it is the only form that
+    names no directory to contradict.
+
+    Directories are never ignored: "backend/utils.py" must NOT match
+    "frontend/utils.py" just because both end in the same filename, or the
+    match would assert "modified the same file" about a different file.
+
+    *evidence* is scanned in order and callers pass it sorted, so the chosen
+    path is the same on every run even when several candidates match.
+    """
+    norm_q = _normalize_path(query_token)
+    for ev in evidence:
+        norm_ev = _normalize_path(ev)
+        if norm_ev == norm_q or norm_ev.endswith("/" + norm_q) or norm_q.endswith("/" + norm_ev):
+            return ev
+    return None
+
+
+def _entry_touched_paths(entry: dict) -> list[str]:
+    """Changed-file paths recorded on *entry* -- same source fields
+    ``build_shard_receipt`` uses for ``files_touched``, read directly so
+    scoring never needs a full receipt build for every group in history.
+
+    Returned sorted: which path a query token matches must not depend on
+    set iteration order, which varies between processes with the
+    interpreter's hash seed (see ``_match_one_path``)."""
+    touched: set[str] = set()
+    for f in entry.get("files_detail") or []:
+        if isinstance(f, dict) and isinstance(f.get("path"), str) and f["path"]:
+            touched.add(f["path"])
+    if not touched:
+        diff_review = entry.get("diff_review") or {}
+        for p in diff_review.get("changed_files") or []:
+            if isinstance(p, str) and p:
+                touched.add(p)
+        fr = entry.get("final_report") or {}
+        for p in fr.get("diff_files") or []:
+            if isinstance(p, str) and p:
+                touched.add(p)
+    return sorted(touched)
+
+
+def _entry_referenced_paths(entry: dict) -> list[str]:
+    """Paths of *entry*'s non-Note findings only -- the same subset of
+    findings that actually crosses into a relevant_context match (see the
+    module docstring's privacy note), so this never scores on evidence the
+    match itself would not also expose. Sorted, for the same determinism
+    reason as ``_entry_touched_paths``."""
+    referenced: set[str] = set()
+    sources = [entry.get("findings"), (entry.get("final_report") or {}).get("findings")]
+    for raw in sources:
+        for item in raw or []:
+            if not isinstance(item, dict):
+                continue
+            severity = item.get("severity") or "Note"
+            path = item.get("path")
+            if severity != "Note" and isinstance(path, str) and path:
+                referenced.add(path)
+    return sorted(referenced)
+
+
+def _file_overlap_score(query_paths: list[str], entry: dict) -> tuple[int, list[str]]:
+    """Score + explain file/path evidence between *query_paths* and *entry*.
+
+    Checks touched files first (strongest -- the same code was changed),
+    then referenced-finding paths, each capped so one Shard can't dominate
+    purely on file count. A path matched once (e.g. both touched and
+    referenced) is never double-counted. Every input is in a fixed order
+    (query tokens as mentioned, evidence sorted), so both the score and the
+    exact path named in each signal are reproducible run to run.
+    """
+    if not query_paths:
+        return 0, []
+    score = 0
+    signals: list[str] = []
+    matched_paths: set[str] = set()
+    for evidence, weight, verb in (
+        (_entry_touched_paths(entry), _WEIGHT_FILE_TOUCHED, "modified the same file"),
+        (_entry_referenced_paths(entry), _WEIGHT_FILE_REFERENCED, "prior finding referenced the same file"),
+    ):
+        if not evidence:
+            continue
+        for token in query_paths:
+            if len(signals) >= _MAX_FILE_SIGNALS:
+                return score, signals
+            hit = _match_one_path(token, evidence)
+            if hit and hit not in matched_paths:
+                matched_paths.add(hit)
+                score += weight
+                signals.append(f"{verb}: {hit}")
+    return score, signals
+
+
+def _entry_verification_failed(entry: dict) -> bool:
+    """True if *entry* itself (one attempt) recorded a verification/check failure."""
+    if entry.get("verification_passed") is False:
+        return True
+    osn = entry.get("osn_verification_contract")
+    if isinstance(osn, dict) and str(osn.get("status") or "") == "failed":
+        return True
+    checks = entry.get("review_checks")
+    if isinstance(checks, list) and any(
+        isinstance(c, dict) and c.get("status") == "failed" for c in checks
+    ):
+        return True
+    return False
+
+
+def _entry_verification_passed(entry: dict) -> bool:
+    """True if *entry* itself (one attempt) recorded a clean verification pass."""
+    if entry.get("verification_passed") is True:
+        return True
+    osn = entry.get("osn_verification_contract")
+    if isinstance(osn, dict) and str(osn.get("status") or "") == "passed":
+        return True
+    checks = entry.get("review_checks")
+    if isinstance(checks, list) and checks and all(
+        isinstance(c, dict) and c.get("status") == "passed" for c in checks
+    ):
+        return True
+    return False
+
+
+def _resolution_signal(group: _ShardGroup) -> str | None:
+    """Signal text when an earlier attempt failed and a later one passed.
+
+    Distinct from the plain "multiple attempts" bonus: this specifically
+    rewards the case a starting agent most wants to know about -- this area
+    had a failure, and it was subsequently resolved.
+    """
+    if len(group.attempts) < 2:
+        return None
+    ordered = sorted(group.attempts, key=lambda item: item[0])
+    earliest_entry = ordered[0][1]
+    latest_entry = ordered[-1][1]
+    if _entry_verification_failed(earliest_entry) and _entry_verification_passed(latest_entry):
+        return "earlier attempt failed verification; a later attempt passed"
+    return None
+
+
 def ranking_explanation() -> dict:
     """The exact, static rules ``relevant_context`` ranks by -- for display.
 
@@ -450,19 +691,25 @@ def ranking_explanation() -> dict:
     that could drift from the code. Pure data; no history is read.
     """
     return {
-        "method": "deterministic keyword overlap (no embeddings, no model calls)",
+        "method": (
+            "deterministic evidence scoring: file/path overlap plus task-"
+            "keyword overlap (no embeddings, no model calls)"
+        ),
         "weights": {
             "task_text": _WEIGHT_TASK,
             "shard_id": _WEIGHT_SHARD_ID,
             "agent": _WEIGHT_AGENT,
+            "file_touched": _WEIGHT_FILE_TOUCHED,
+            "file_referenced": _WEIGHT_FILE_REFERENCED,
         },
         "bonuses": {
             "prior_verification_failure": _BONUS_FAILURE,
             "multiple_attempts": _BONUS_MULTI_ATTEMPT,
+            "resolved_after_failure": _BONUS_RESOLVED,
         },
         "fields_read": [
             "task text", "shard id", "agent", "status", "verification result",
-            "changed file paths", "non-Note findings",
+            "changed file paths", "non-Note finding paths", "non-Note findings",
         ],
         "fields_never_read": [
             "transcripts", "assistant responses", "tool output", "notes",
@@ -517,30 +764,25 @@ class RelevantContext:
 
 def _group_has_failure(group: _ShardGroup) -> bool:
     """True if any attempt of *group* recorded a verification or check failure."""
-    for _, entry in group.attempts:
-        if entry.get("verification_passed") is False:
-            return True
-        osn = entry.get("osn_verification_contract")
-        if isinstance(osn, dict) and str(osn.get("status") or "") == "failed":
-            return True
-        checks = entry.get("review_checks")
-        if isinstance(checks, list) and any(
-            isinstance(c, dict) and c.get("status") == "failed" for c in checks
-        ):
-            return True
-    return False
+    return any(_entry_verification_failed(entry) for _, entry in group.attempts)
 
 
-def _score_group(query_terms: list[str], group: _ShardGroup, entry: dict) -> tuple[int, list[str]]:
-    """Deterministic keyword-overlap score for one Shard group against *query_terms*.
+def _score_group(
+    query_terms: list[str], query_paths: list[str], group: _ShardGroup, entry: dict,
+) -> tuple[int, list[str]]:
+    """Deterministic evidence score for one Shard group against a query.
 
-    Reads only the latest attempt's ``task``/agent identity and the group's
-    own attempt records — never a built ShardReceipt, so scoring every group
-    in history costs no extra I/O or receipt-construction work. Returns
-    ``(0, [])`` when no query term overlaps the task text, shard id, or agent
-    at all: relevance always requires topical overlap, never failure/retry
-    signals alone (those only ever add to an already-relevant match).
+    Combines two independent evidence channels -- file/path overlap
+    (``_file_overlap_score``) and task-keyword overlap against the latest
+    attempt's task text, shard id, and agent identity -- read directly from
+    the raw entry, never a built ShardReceipt, so scoring every group in
+    history costs no extra I/O or receipt-construction work. Returns
+    ``(0, [])`` when neither channel finds any evidence at all: relevance
+    always requires file or topical overlap, never failure/retry signals
+    alone (those only ever add to an already-relevant match).
     """
+    file_score, file_signals = _file_overlap_score(query_paths, entry)
+
     task_tokens = set(_tokenize(str(entry.get("task") or "")))
     shard_id_tokens = set(re.split(r"[^a-z0-9]+", group.shard_id.lower()))
     agent, _, _ = derive_shard_identity(entry)
@@ -562,19 +804,26 @@ def _score_group(query_terms: list[str], group: _ShardGroup, entry: dict) -> tup
         if hit:
             matched.append(term)
 
-    if keyword_score <= 0:
+    total = file_score + keyword_score
+    if total <= 0:
         return 0, []
 
-    signals = [f"task overlap: {', '.join(matched)}"]
-    bonus = 0
+    signals: list[str] = list(file_signals)
+    if matched:
+        signals.append(f"task overlap: {', '.join(matched)}")
+
     if _group_has_failure(group):
-        bonus += _BONUS_FAILURE
+        total += _BONUS_FAILURE
         signals.append("prior verification failure")
     if len(group.attempts) > 1:
-        bonus += _BONUS_MULTI_ATTEMPT
+        total += _BONUS_MULTI_ATTEMPT
         signals.append(f"multiple attempts ({len(group.attempts)})")
+    resolved = _resolution_signal(group)
+    if resolved:
+        total += _BONUS_RESOLVED
+        signals.append(resolved)
 
-    return keyword_score + bonus, signals
+    return total, signals
 
 
 def _bounded_attempts(attempts: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
@@ -674,12 +923,14 @@ def relevant_context(
     """Return a bounded, ranked set of prior Shards relevant to *task*.
 
     Deterministic local scoring only (see ``_score_group``) — no embeddings,
-    fuzzy matching, or model calls. A Shard is included only when at least
-    one non-stopword term of *task* overlaps its task text, shard id, or
-    agent; a recorded verification failure or more than one attempt then adds
-    a small bonus on top, so failed/retried history about the same topic
-    ranks above a single passing run about it, but failure/retry signals
-    alone never pull in an unrelated Shard.
+    fuzzy matching, or model calls. A Shard is included only when it carries
+    real evidence: a file/path mentioned in *task* was touched or referenced
+    by a finding, or a non-generic content term of *task* overlaps its task
+    text, shard id, or agent. A recorded verification failure, more than one
+    attempt, or an earlier failure later resolved by a passing attempt then
+    each add a small bonus on top, so failed/retried history about the same
+    topic ranks above a single passing run about it -- but these signals
+    alone never pull in a Shard with no file or topical overlap at all.
 
     Ordering is fully deterministic: score descending, ties broken by
     recency (newest first), remaining ties broken by shard_id. ``repo``
@@ -690,15 +941,16 @@ def relevant_context(
     fill the limit.
     """
     clean_task = task or ""
-    query_terms = list(dict.fromkeys(_tokenize(clean_task)))
-    if not query_terms or limit <= 0:
+    query_terms = _query_terms(clean_task)
+    query_paths = _extract_path_mentions(clean_task)
+    if (not query_terms and not query_paths) or limit <= 0:
         return RelevantContext(task=clean_task, matches=[], context_text=_no_match_text(clean_task))
 
     groups = _load_groups(repo_path, repo)  # one load + group pass, newest first
     scored: list[tuple[int, int, str, list[str], _ShardGroup]] = []
     for position, group in enumerate(groups):
         _, entry = group.latest
-        score, signals = _score_group(query_terms, group, entry)
+        score, signals = _score_group(query_terms, query_paths, group, entry)
         if score > 0:
             scored.append((score, position, group.shard_id, signals, group))
 

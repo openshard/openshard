@@ -271,7 +271,7 @@ class TestContext:
         assert "1 of 4 recorded Shards matched" in out
         assert "shard-native-2" in out
         assert "Why matched" in out
-        assert "task overlap: fix, terraform, validate" in out
+        assert "task overlap: terraform, validate" in out
         assert "prior verification failure" in out
         assert "(score" in out
         assert "verification" in out.lower()
@@ -317,8 +317,12 @@ class TestContext:
         m = next(x for x in payload["matches"] if x["shard_id"] == "shard-hooks-1")
         assert m["why_relevant"] == ["task overlap: auth"]
         assert m["origin"] == "external_observed" and m["capture_depth"] == "partial"
-        assert payload["ranking"]["weights"] == {"task_text": 2, "shard_id": 1, "agent": 1}
-        assert payload["ranking"]["bonuses"] == {"prior_verification_failure": 2, "multiple_attempts": 1}
+        assert payload["ranking"]["weights"] == {
+            "task_text": 2, "shard_id": 1, "agent": 1, "file_touched": 6, "file_referenced": 4,
+        }
+        assert payload["ranking"]["bonuses"] == {
+            "prior_verification_failure": 2, "multiple_attempts": 1, "resolved_after_failure": 2,
+        }
         assert "context_text" in payload
 
     def test_json_no_match_and_not_found(self, repo: Path, tmp_path: Path):
