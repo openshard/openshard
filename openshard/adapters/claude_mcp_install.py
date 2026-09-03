@@ -332,3 +332,77 @@ def install_claude_mcp(*, repo_path: Path | None = None) -> ClaudeMcpInstallResu
         message="Configured.",
         warnings=warnings,
     )
+
+
+@dataclass
+class ClaudeMcpUninstallResult:
+    status: str  # "removed" | "not_installed" | "error"
+    repo_root: Path | None
+    message: str
+    warnings: list[str] = field(default_factory=list)
+
+
+def uninstall_claude_mcp(*, repo_path: Path | None = None) -> ClaudeMcpUninstallResult:
+    """Remove OpenShard's local-scope Claude Code MCP entry for this repository, if present.
+
+    Only removes the local-scope ``openshard`` entry that matches this
+    repository -- an entry pointing at a different repository, or not owned
+    by OpenShard's own local scope, is left untouched. A missing ``claude``
+    CLI, a missing repository, or no matching entry are all reported as
+    ``status="not_installed"`` rather than an error: there is simply nothing
+    to undo. Never raises.
+    """
+    claude_avail = detect_claude_cli()
+    if not claude_avail.available:
+        return ClaudeMcpUninstallResult(
+            status="not_installed", repo_root=None,
+            message="Claude Code CLI not found; nothing to remove.",
+        )
+
+    root = find_repo_root(repo_path)
+    if root is None:
+        return ClaudeMcpUninstallResult(
+            status="not_installed", repo_root=None,
+            message="Not inside a git repository; nothing to remove.",
+        )
+
+    claude_bin = claude_avail.path or "claude"
+    existing = get_existing_entry(claude_bin)
+    if existing is None:
+        return ClaudeMcpUninstallResult(
+            status="not_installed", repo_root=root, message="No OpenShard MCP entry was configured.",
+        )
+
+    already_local = bool(existing.scope) and "local" in (existing.scope or "").lower()
+    same_target = existing.command == "openshard" and _same_repo(
+        _extract_repo_path(existing.args_raw), root
+    )
+    if not (already_local and same_target):
+        return ClaudeMcpUninstallResult(
+            status="not_installed", repo_root=root,
+            message="OpenShard MCP entry is not configured for this repository; nothing removed.",
+        )
+
+    try:
+        remove_result = subprocess.run(
+            [claude_bin, "mcp", "remove", SERVER_NAME, "-s", SCOPE],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_CLAUDE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        return ClaudeMcpUninstallResult(
+            status="error", repo_root=root, message=f"Failed to run 'claude mcp remove': {exc}",
+        )
+
+    if remove_result.returncode != 0:
+        detail = (remove_result.stderr or remove_result.stdout or "").strip()
+        return ClaudeMcpUninstallResult(
+            status="error", repo_root=root,
+            message=f"Claude Code rejected the removal: {detail or 'unknown error'}",
+        )
+
+    return ClaudeMcpUninstallResult(status="removed", repo_root=root, message="MCP configuration removed.")

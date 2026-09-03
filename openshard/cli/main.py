@@ -370,15 +370,32 @@ def env_cmd() -> None:
 
 @cli.command("setup")
 @click.option("--agent", "as_agent", is_flag=True, default=False,
-              help="Machine-readable setup status for agent/CI use.")
+              help="Read-only machine-readable status; makes no changes (for agent/CI use).")
 @click.option("--json", "as_json", is_flag=True, default=False,
-              help="Output as JSON (implied by --agent).")
-def setup_cmd(as_agent: bool, as_json: bool) -> None:
-    """Show setup status or run first-run onboarding (agent-friendly with --agent --json)."""
+              help="Run setup and print the result as JSON (implied by --agent).")
+@click.option("--yes", "-y", "assume_yes", is_flag=True, default=False,
+              help="Non-interactive: skip the provider onboarding wizard even in a TTY.")
+@click.option(
+    "--repo-path",
+    "repo_path",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository to configure Claude Code for (default: current directory).",
+)
+def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path | None) -> None:
+    """Set up OpenShard for this repository: the one command a new user needs.
+
+    Detects the environment, configures Claude Code capture for this
+    repository (MCP server, auto-capture hooks, and status-line receipt
+    enrichment where safe -- reusing the same installers as `openshard mcp
+    install claude`), and reports whether it is ready to use. Safe to re-run:
+    already-configured components are left untouched. Use --agent for a
+    read-only status snapshot with no side effects (CI/agent discovery).
+    """
     from openshard.config import onboarding as ob
 
-    if as_agent or as_json:
-        # Machine-readable path: no interactive UI, return JSON status and exit.
+    if as_agent:
+        # Machine-readable path: no interactive UI, no configuration writes.
         state = _current_state()
         keys_present = ob.api_key_present()
         detected_providers = [p for p, present in keys_present.items() if present]
@@ -392,6 +409,10 @@ def setup_cmd(as_agent: bool, as_json: bool) -> None:
             recommended_next_action = (
                 f"Run `openshard setup` to switch from demo to {detected_providers[0]}."
             )
+        from openshard.adapters.claude_mcp_install import find_repo_root
+        from openshard.adapters.claude_setup import detect_claude_integration
+
+        claude_status = detect_claude_integration(find_repo_root(repo_path))
         payload = {
             "mode": "agent",
             "interactive": False,
@@ -411,6 +432,7 @@ def setup_cmd(as_agent: bool, as_json: bool) -> None:
                 "enabled": True,
                 "storage": ".openshard/",
             },
+            "claude_code": claude_status.to_dict(),
             "next_actions": [
                 "openshard env --json",
                 'openshard run "explain this repo"',
@@ -420,18 +442,81 @@ def setup_cmd(as_agent: bool, as_json: bool) -> None:
         click.echo(json.dumps(payload, indent=2))
         return
 
-    # Human path: run interactive onboarding (only in TTY).
+    # Real setup: offer the provider onboarding wizard first (unchanged UX),
+    # then configure Claude Code capture -- this is the part PR8 adds so a
+    # new user never needs to discover `mcp install claude` on their own.
     from openshard.cli.ui.onboarding import _should_run_onboarding, run_onboarding_flow
 
-    if _should_run_onboarding():
+    if not assume_yes and _should_run_onboarding():
         run_onboarding_flow()
+
+    from openshard.adapters.claude_setup import run_setup
+
+    result = run_setup(repo_path=repo_path)
+
+    if as_json:
+        click.echo(json.dumps(result.to_dict(), indent=2))
+        if result.readiness == "not_ready":
+            raise SystemExit(1)
+        return
+
+    _render_setup_result(result)
+    if result.readiness == "not_ready":
+        raise SystemExit(1)
+
+
+def _render_setup_result(result) -> None:
+    """Human-readable rendering of a claude_setup.SetupResult for `openshard setup`."""
+    click.echo("\nOpenShard Setup\n")
+    click.echo(f"  Repository:    {'git repository' if result.is_git else 'not a git repository'}")
+    if result.is_git:
+        cli_label = "detected" if result.claude_cli.available else "not found"
+        click.echo(f"  Claude Code:   {cli_label}")
+    from openshard.adapters.claude_setup import HISTORY_RELPATH
+
+    history_label = "writable" if result.history_writable else "not writable"
+    click.echo(f"  Local history: {history_label} ({HISTORY_RELPATH.as_posix()})")
+
+    if result.mcp is not None:
+        mcp_state = {
+            "installed": "installed", "updated": "updated", "already_installed": "already configured",
+        }.get(result.mcp.status, result.mcp.status)
+        click.echo(f"  MCP:           {mcp_state}")
+    if result.hooks is not None:
+        hooks_state = {
+            "installed": "installed", "updated": "updated", "already_installed": "already configured",
+        }.get(result.hooks.status, result.hooks.status)
+        click.echo(f"  Auto-capture:  {hooks_state}")
+    if result.statusline is not None:
+        statusline_state = {
+            "installed": "installed", "already_installed": "already configured",
+            "skipped_existing": "skipped (custom status line present)",
+        }.get(result.statusline.status, result.statusline.status)
+        click.echo(f"  Enrichment:    {statusline_state}")
+
+    click.echo("")
+    if result.readiness == "ready":
+        click.echo("OpenShard is ready. Use Claude Code normally.")
+        click.echo("\nNext steps:")
+        click.echo("  1. Open Claude Code in this repository.")
+        click.echo("  2. Complete a normal coding task.")
+        click.echo("  3. Run `openshard last` to see the captured Shard receipt.")
+        for step in result.next_steps:
+            click.echo(f"  ! {step}")
+    elif result.readiness == "ready_partial":
+        click.echo("OpenShard is ready, with one limitation: model/cost/token capture is unavailable.")
+        click.echo("Use Claude Code normally -- Shards and receipts are still recorded.")
+        click.echo("\nNext steps:")
+        click.echo("  1. Open Claude Code in this repository.")
+        click.echo("  2. Complete a normal coding task.")
+        click.echo("  3. Run `openshard last` to see the captured Shard receipt.")
+        for step in result.next_steps:
+            click.echo(f"  ! {step}")
     else:
-        # Non-TTY human path: just show doctor output.
-        state = _current_state()
-        click.echo("\nOpenShard Setup\n")
-        click.echo(f"  Onboarding completed: {'yes' if not ob.is_first_run() else 'no'}")
-        click.echo(f"  Config found:         {'yes' if state['config_found'] else 'no'}")
-        _echo_warnings_next_steps(state)
+        click.echo("OpenShard setup is incomplete.")
+        click.echo("\nNext step:")
+        for step in result.next_steps:
+            click.echo(f"  - {step}")
 
 
 @cli.command()
@@ -2204,6 +2289,85 @@ def mcp_install_claude(repo_path: Path | None, as_json: bool, no_hooks: bool, no
 
     click.echo("\nRestart Claude Code if it is already running.")
     if hooks_failed:
+        raise SystemExit(1)
+
+
+@mcp_group.group("uninstall")
+def mcp_uninstall_group() -> None:
+    """Remove OpenShard's Claude Code configuration for a repository."""
+
+
+@mcp_uninstall_group.command("claude")
+@click.option(
+    "--repo-path",
+    "repo_path",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository to remove Claude Code configuration from (default: current directory).",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def mcp_uninstall_claude(repo_path: Path | None, as_json: bool) -> None:
+    """Remove the OpenShard MCP entry, auto-capture hooks, and status line for this repository.
+
+    Reverses `openshard mcp install claude` / `openshard setup`. Only
+    OpenShard's own entries are removed -- identified the same way they were
+    installed (exact command match) -- so unrelated Claude Code
+    configuration is never touched. A status line that is not OpenShard's
+    own is left alone. Local Shard/Receipt history under `.openshard/` is
+    never deleted by this command.
+    """
+    from openshard.adapters.claude_hooks_install import (
+        uninstall_claude_hooks,
+        uninstall_claude_statusline,
+    )
+    from openshard.adapters.claude_mcp_install import find_repo_root, uninstall_claude_mcp
+
+    mcp_result = uninstall_claude_mcp(repo_path=repo_path)
+    root = mcp_result.repo_root or find_repo_root(repo_path)
+    hooks_result = uninstall_claude_hooks(repo_root=root) if root is not None else None
+    statusline_result = uninstall_claude_statusline(repo_root=root) if root is not None else None
+
+    any_error = (
+        mcp_result.status == "error"
+        or (hooks_result is not None and hooks_result.status == "error")
+        or (statusline_result is not None and statusline_result.status == "error")
+    )
+    any_removed = (
+        mcp_result.status == "removed"
+        or (hooks_result is not None and hooks_result.status == "removed")
+        or (statusline_result is not None and statusline_result.status == "removed")
+    )
+
+    if as_json:
+        payload = {
+            "mcp": {"status": mcp_result.status, "message": mcp_result.message},
+            "hooks": (
+                {"status": hooks_result.status, "events": hooks_result.events, "message": hooks_result.message}
+                if hooks_result is not None
+                else {"status": "skipped"}
+            ),
+            "statusline": (
+                {"status": statusline_result.status, "message": statusline_result.message}
+                if statusline_result is not None
+                else {"status": "skipped"}
+            ),
+        }
+        click.echo(json.dumps(payload, indent=2))
+        if any_error:
+            raise SystemExit(1)
+        return
+
+    if any_removed:
+        click.echo("OpenShard Claude Code configuration removed.")
+    else:
+        click.echo("No OpenShard Claude Code configuration was found to remove.")
+    click.echo(f"MCP: {mcp_result.status.replace('_', ' ')}. {mcp_result.message}")
+    if hooks_result is not None:
+        click.echo(f"Auto-capture hooks: {hooks_result.status.replace('_', ' ')}. {hooks_result.message}")
+    if statusline_result is not None:
+        click.echo(f"Status line: {statusline_result.status.replace('_', ' ')}. {statusline_result.message}")
+    click.echo("\nLocal Shard/Receipt history under .openshard/ was not touched.")
+    if any_error:
         raise SystemExit(1)
 
 
@@ -5250,12 +5414,30 @@ def init(as_json: bool, assume_yes: bool, mode: str | None, provider: str | None
 
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
-def doctor(as_json: bool) -> None:
-    """Diagnose OpenShard configuration and setup state."""
+@click.option(
+    "--repo-path",
+    "repo_path",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Repository to check Claude Code integration for (default: current directory).",
+)
+def doctor(as_json: bool, repo_path: Path | None) -> None:
+    """Diagnose OpenShard configuration and setup state, including Claude Code integration."""
+    from openshard.adapters.claude_mcp_install import find_repo_root
+    from openshard.adapters.claude_setup import HISTORY_RELPATH, detect_claude_integration
+    from openshard.adapters.claude_setup import history_writable as check_history_writable
     from openshard.config import onboarding as ob
 
     state = _current_state()
     state["git_repo"] = ob.detect_git_repo()
+
+    root = find_repo_root(repo_path)
+    base_dir = root if root is not None else (repo_path or Path.cwd())
+    claude_status = detect_claude_integration(root)
+    history_writable = check_history_writable(base_dir)
+    claude_dict = claude_status.to_dict()
+    claude_dict["history_writable"] = history_writable
+    state["claude_code"] = claude_dict
 
     if as_json:
         click.echo(json.dumps(state, indent=2))
@@ -5276,6 +5458,40 @@ def doctor(as_json: bool) -> None:
     for prov, present in ob.api_key_present().items():
         click.echo(f"    {prov:<12} {'yes' if present else 'no'}")
     _echo_warnings_next_steps(state)
+
+    hooks_ok = bool(claude_status.hook_events_installed) and not claude_status.hook_events_missing
+    checks: list[tuple[str, bool, str]] = [
+        ("Repository", root is not None, "not a git repository"),
+        ("Local history", history_writable, f"{HISTORY_RELPATH.as_posix()} is not writable"),
+        ("Claude Code", claude_status.claude_cli.available, "CLI not found on PATH"),
+        ("MCP", claude_status.mcp_configured, claude_status.mcp_detail),
+        ("Auto-capture hooks", hooks_ok, claude_status.hooks_settings_error or "not configured"),
+        (
+            "Receipt enrichment",
+            claude_status.statusline_state == "openshard",
+            claude_status.hooks_settings_error or (
+                "custom status line present" if claude_status.statusline_state == "custom" else "not configured"
+            ),
+        ),
+    ]
+    click.echo("\nClaude Code\n")
+    for label, ok, detail in checks:
+        mark = "✓" if ok else "✗"
+        suffix = "" if ok else f" ({detail})"
+        click.echo(f"  {mark} {label}{suffix}")
+
+    core_ready = (
+        root is not None and history_writable and claude_status.claude_cli.available
+        and claude_status.mcp_configured and hooks_ok
+    )
+    fully_ready = core_ready and claude_status.statusline_state == "openshard"
+    click.echo("")
+    if fully_ready:
+        click.echo("Ready -- use Claude Code normally.")
+    elif core_ready:
+        click.echo("Ready, with limited receipts -- use Claude Code normally. Run `openshard setup` for details.")
+    else:
+        click.echo("Not ready -- run `openshard setup` to configure Claude Code capture.")
     click.echo("")
 
 

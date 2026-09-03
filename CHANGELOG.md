@@ -6,6 +6,28 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- Zero-friction onboarding: `openshard setup` is now the one command a new
+  user needs. It detects the environment (git repository, Claude Code CLI,
+  existing MCP/hook/status-line configuration, local history writability),
+  configures Claude Code capture for the current repository by orchestrating
+  the existing `mcp install claude` installers (MCP server, auto-capture
+  hooks, status-line enrichment), and reports one of three honest
+  outcomes: ready, ready with a limitation (e.g. a custom status line it
+  will not replace, so model/cost/token data stays unavailable), or not
+  ready with the exact next step. Safe to re-run; already-configured
+  components are left byte-for-byte alone. `--yes` skips the interactive
+  provider wizard, `--json` returns a machine-readable result, and
+  `--agent` remains a read-only status snapshot that never writes. No API
+  key, account, or network is required.
+- `openshard doctor` now includes a Claude Code checklist (Repository,
+  Local history, Claude Code, MCP, Auto-capture hooks, Receipt enrichment)
+  with a ✓/✗ per line, the specific problem for each ✗, and a one-line
+  verdict; `--json` gains a `claude_code` block. Read-only.
+- `openshard mcp uninstall claude` — reverses `setup` / `mcp install
+  claude`. Removes only OpenShard's own local-scope MCP entry, hook
+  entries, and status line (a custom status line is never touched);
+  unrelated Claude Code settings and all `.openshard/` history are left
+  intact.
 - Richer Claude Code receipts:
   - A task's receipt is now available as soon as its turn finishes (`Stop`
     fires) — it never has to wait for `SessionEnd`, which stays independent

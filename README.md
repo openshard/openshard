@@ -122,6 +122,43 @@ pipx upgrade openshard
 See [docs/install.md](docs/install.md) for upgrade instructions and notes.
 
 ---
+
+## Quick start with Claude Code
+
+The fastest way to get value from OpenShard is to let it quietly record the Claude Code work you already do. No API key, account, or cloud service is needed — everything stays in the repository.
+
+```bash
+pipx install openshard   # 1. Install (once per machine)
+cd my-project            # 2. Go to a git repository
+openshard setup          # 3. Set up (once per repository)
+```
+
+`openshard setup` detects your environment, configures Claude Code for this repository, and ends with:
+
+```text
+OpenShard is ready. Use Claude Code normally.
+
+Next steps:
+  1. Open Claude Code in this repository.
+  2. Complete a normal coding task.
+  3. Run `openshard last` to see the captured Shard receipt.
+```
+
+That is the whole loop: use Claude Code as you normally would, then run `openshard last` to see the receipt of what happened.
+
+Useful follow-ups:
+
+```bash
+openshard doctor                 # Is OpenShard actually working here? (✓/✗ checklist)
+openshard setup                  # Safe to re-run; already-configured parts are left alone
+openshard mcp uninstall claude   # Remove OpenShard's Claude Code configuration (history is kept)
+```
+
+If `setup` reports a limitation — most commonly a custom Claude Code status line already in place — it tells you exactly what stays unavailable (model/cost/token data on receipts) and the one step to enable it. It never replaces your existing settings.
+
+Under the hood, `setup` registers a local, read-only MCP server so Claude can look up your history, installs Claude Code hooks that record sessions as Shards, and configures the status line for receipt enrichment. You do not need to understand any of that to use it; the lower-level `openshard mcp install claude` command remains available if you want to.
+
+---
 Launch the TUI:
 
 ```bash
@@ -317,7 +354,17 @@ Workflow packs make common review patterns repeatable without forcing users to r
 ---
 
 ## Command reference
-Most developers should start with the TUI:
+Set up and check Claude Code capture:
+
+```bash
+openshard setup                                    # Configure Claude Code capture for this repo (safe to re-run)
+openshard setup --json                             # Same, with a machine-readable result
+openshard setup --agent --json                     # Read-only status snapshot; never writes (CI/agents)
+openshard doctor                                   # Health check: repo, history, Claude Code, MCP, hooks, enrichment
+openshard mcp install claude                       # Lower-level: MCP server + hooks + status line only
+openshard mcp uninstall claude                     # Remove OpenShard's Claude Code config; history is never deleted
+```
+Most developers who want the interactive experience should start with the TUI:
 
 ```bash
 openshard tui                                      # Launch the OpenShard terminal UI
