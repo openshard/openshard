@@ -1732,20 +1732,43 @@ def _render_log_entry(entry: dict, detail: str, index: int | None = None) -> Non
             click.echo("  Method: same-token API price estimate. Real single-model cost may differ.")
 
 
+def _locate_history():
+    """Resolve where this repository's local history lives (see history.locate).
+
+    Walks up from the current directory to the nearest ``.openshard/`` or
+    ``.git`` so ``last`` / ``history`` / ``context`` / ``stats`` read the same
+    ``runs.jsonl`` from the repository root or any subdirectory of it, and
+    never a sibling or parent repository's.
+    """
+    from openshard.history.locate import locate_history
+
+    return locate_history()
+
+
 @cli.command()
 @click.option("--more", is_flag=True, default=False, help="Show file list, model names, and token breakdown.")
 @click.option("--full", is_flag=True, default=False, help="Show all stored details including verification and workspace.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def last(more: bool, full: bool, as_json: bool):
-    """Show details of the most recent run without rerunning it."""
-    log_path = Path.cwd() / _LOG_PATH
+    """Show what just happened: the most recent Shard receipt for this repository.
+
+    Works from the repository root or any subdirectory. Nothing is rerun and
+    nothing is guessed: unknown model/cost/tokens render as unknown or not
+    recorded, and costs are always labelled as estimates.
+    """
+    from openshard.cli.visibility import no_history_lines, repo_note_lines
+
+    loc = _locate_history()
+    log_path = loc.runs_path
 
     if as_json:
         from openshard.history.shard_contract import build_shard_receipt
 
         entries = _load_run_entries(log_path)
         if not entries:
-            click.echo(json.dumps(_machine_envelope("last", "not_found", run=None), indent=2))
+            click.echo(json.dumps(
+                _machine_envelope("last", "not_found", run=None, repo=loc.to_dict()), indent=2,
+            ))
             return
         entry = entries[-1]
         receipt = build_shard_receipt(entry, index=len(entries) - 1)
@@ -1759,6 +1782,7 @@ def last(more: bool, full: bool, as_json: bool):
         )
         payload = _machine_envelope(
             "last", "ok", shard_id=receipt.shard_id,
+            repo=loc.to_dict(),
             run=_export_run_entry(entry, include_timeline=True, receipt=receipt),
             trust={
                 "score": _ts.score,
@@ -1777,21 +1801,103 @@ def last(more: bool, full: bool, as_json: bool):
 
     detail = "full" if full else ("more" if more else "default")
     if not log_path.exists():
-        click.echo("No run history found. Run a task first with 'openshard run'.")
+        for line in no_history_lines(loc):
+            click.echo(line)
         return
-    entries = []
-    for line in log_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    entries = _load_run_entries(log_path)
     if not entries:
         click.echo("No runs recorded yet.")
         return
+    for line in repo_note_lines(loc):
+        click.echo(line)
     _render_log_entry(entries[-1], detail, index=len(entries) - 1)
+
+
+@cli.command("history")
+@click.option("--limit", default=10, type=click.IntRange(min=1), show_default=True,
+              help="Show the most recent N Shards.")
+@click.option("--repo", "repo_filter", default=None,
+              help="Only Shards recorded for this repository identity, remote URL, or folder name.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def history_cmd(limit: int, repo_filter: str | None, as_json: bool) -> None:
+    """List recent work: a compact, newest-first view of this repository's Shards.
+
+    Each row shows when, which agent, the status OpenShard can truthfully
+    claim (a completed Claude Code turn is not a verified result), the check
+    summary, the estimated cost, and how many attempts the Shard has had.
+    Local history only; works from any subdirectory of the repository.
+    """
+    from openshard.cli.visibility import history_json_body, no_history_lines, render_history
+    from openshard.history.query import recent_shards
+
+    loc = _locate_history()
+    page = recent_shards(limit=limit, repo=repo_filter, repo_path=loc.root)
+
+    if as_json:
+        status = "ok" if page.items else "not_found"
+        click.echo(json.dumps(_machine_envelope("history", status, **history_json_body(page, loc)), indent=2))
+        return
+    if not page.items:
+        if repo_filter and page.total_shards == 0 and loc.runs_path.exists():
+            click.echo(f"No Shards recorded for repository filter '{repo_filter}' in {loc.display_name}.")
+            return
+        for line in no_history_lines(loc):
+            click.echo(line)
+        return
+    for line in render_history(page, loc):
+        click.echo(line)
+
+
+@cli.command("context")
+@click.argument("task", nargs=-1)
+@click.option("--limit", default=None, type=click.IntRange(min=1),
+              help="Maximum matches to show (default: the same 5 the MCP tool returns).")
+@click.option("--repo", "repo_filter", default=None,
+              help="Only Shards recorded for this repository identity, remote URL, or folder name.")
+@click.option("--text", "as_text", is_flag=True, default=False,
+              help="Print only the context block an agent would receive, verbatim.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def context_cmd(task: tuple[str, ...], limit: int | None, repo_filter: str | None, as_text: bool, as_json: bool) -> None:
+    """Show what OpenShard would surface to an agent for TASK, and why.
+
+    This is the same relevant_context the local MCP server exposes: prior
+    Shards ranked by deterministic keyword overlap, each with the signals
+    that matched it, its status and verification, retry history, changed
+    files, and structured findings. No transcripts, notes, or model calls.
+    """
+    from openshard.cli.visibility import context_json_body, render_context
+    from openshard.history.query import (
+        DEFAULT_CONTEXT_LIMIT,
+        ranking_explanation,
+        recent_shards,
+        relevant_context,
+    )
+
+    task_text = " ".join(task).strip()
+    loc = _locate_history()
+    effective_limit = limit if limit is not None else DEFAULT_CONTEXT_LIMIT
+    ctx = relevant_context(task_text, limit=effective_limit, repo=repo_filter, repo_path=loc.root)
+    # relevant_context already counted every Shard it considered; only a blank
+    # task (which loads nothing) needs a separate count for an honest total.
+    total = ctx.total_shards if task_text else recent_shards(limit=0, repo=repo_filter, repo_path=loc.root).total_shards
+    ranking = ranking_explanation()
+
+    if as_json:
+        if not task_text:
+            status = "no_task"
+        elif ctx.matches:
+            status = "ok"
+        else:
+            status = "not_found" if total == 0 else "no_match"
+        click.echo(json.dumps(
+            _machine_envelope("context", status, **context_json_body(ctx, loc, total, ranking)), indent=2,
+        ))
+        return
+    if as_text:
+        click.echo(ctx.context_text.rstrip("\n"))
+        return
+    for line in render_context(ctx, loc, total, ranking):
+        click.echo(line)
 
 
 @cli.group("trust")
@@ -2751,11 +2857,49 @@ def repo_plan_cmd(task: str, as_json: bool, refresh: bool) -> None:
 
 
 @cli.group("stats", invoke_without_command=True)
+@click.option("--limit", default=None, type=click.IntRange(min=1),
+              help="Aggregate only the most recent N Shards (default: all).")
+@click.option("--repo", "repo_filter", default=None,
+              help="Only Shards recorded for this repository identity, remote URL, or folder name.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 @click.pass_context
-def stats_group(ctx: click.Context) -> None:
-    """Receipt-quality stats over recent OpenShard run receipts."""
-    if ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
+def stats_group(ctx: click.Context, limit: int | None, repo_filter: str | None, as_json: bool) -> None:
+    """Honest local counts over this repository's recorded Shards.
+
+    Shards, agents, models (with an explicit unknown bucket), verification
+    outcomes, estimated cost, provider-reported tokens, observed duration and
+    most-changed files -- all derived from existing receipts, nothing scored
+    or inferred. Subcommands give receipt-quality (completeness) and
+    failure-category views.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    from openshard.cli.visibility import no_history_lines, render_stats, stats_json_body
+    from openshard.history.query import recent_shards
+    from openshard.history.stats import compute_history_stats
+
+    loc = _locate_history()
+    page = recent_shards(limit=limit, repo=repo_filter, repo_path=loc.root)
+    stats = compute_history_stats(
+        page.items,
+        total_attempts=page.total_attempts if limit is None else None,
+    )
+
+    if as_json:
+        status = "ok" if page.items else "not_found"
+        click.echo(json.dumps(
+            _machine_envelope("stats", status, **stats_json_body(stats, loc, limited_to=limit)), indent=2,
+        ))
+        return
+    if not page.items:
+        if repo_filter and loc.runs_path.exists():
+            click.echo(f"No Shards recorded for repository filter '{repo_filter}' in {loc.display_name}.")
+            return
+        for line in no_history_lines(loc):
+            click.echo(line)
+        return
+    for line in render_stats(stats, loc, limited_to=limit):
+        click.echo(line)
 
 
 @stats_group.command("completeness")
@@ -2773,7 +2917,7 @@ def stats_completeness(as_json: bool, limit: int) -> None:
     from openshard.history.completeness import evaluate_completeness
     from openshard.history.shard_contract import build_shard_receipt
 
-    log_path = Path.cwd() / _LOG_PATH
+    log_path = _locate_history().runs_path
     entries = _load_run_entries(log_path)
 
     if not entries:
@@ -2857,7 +3001,7 @@ def stats_failures(as_json: bool, limit: int) -> None:
     from openshard.history.failures import evaluate_failures
     from openshard.history.shard_contract import build_shard_receipt
 
-    log_path = Path.cwd() / _LOG_PATH
+    log_path = _locate_history().runs_path
     entries = _load_run_entries(log_path)
 
     if not entries:

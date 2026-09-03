@@ -144,7 +144,18 @@ Next steps:
   3. Run `openshard last` to see the captured Shard receipt.
 ```
 
-That is the whole loop: use Claude Code as you normally would, then run `openshard last` to see the receipt of what happened.
+That is the whole loop: use Claude Code as you normally would, then look at what OpenShard captured. You never have to trust that it is "working in the background" -- four commands show exactly what it knows, locally and offline:
+
+```bash
+openshard setup
+# use Claude Code normally
+openshard last                    # What just happened? The newest receipt: task, agent, model, cost, files, checks
+openshard history                 # Recent work: a compact newest-first list of Shards for this repository
+openshard context "add caching"   # What OpenShard would surface to an agent for this task, and why each item matched
+openshard stats                   # Honest counts: Shards, agents, models, verification, estimated cost, tokens
+```
+
+All four work from the repository root or any subdirectory of it, read only this repository's `.openshard/runs.jsonl`, and take `--json` for scripting. They never invent values: an unknown model is shown as unknown, a missing cost as not recorded, a partially observed session as a partial capture, and every cost as an estimate.
 
 Useful follow-ups:
 
@@ -375,12 +386,19 @@ Run tasks:
 openshard run "Review this repo for risks"         # Run a task through OpenShard from the shell
 openshard run --workflow native "Fix this bug"     # Run using the native workflow path
 ```
-Inspect the latest run:
+Inspect what OpenShard captured (local, offline, works from any subdirectory of the repo):
 
 ```bash
 openshard last                                     # Show the latest run summary
 openshard last --more                              # Show the expanded Shard receipt
 openshard last --full                              # Show full stored/debug details
+openshard history                                  # Recent Shards for this repo, newest first
+openshard history --limit 20 --json                # Same, more rows, machine-readable
+openshard context "fix the flaky auth test"        # What relevant_context would give an agent, and why
+openshard context --text "fix the flaky auth test" # Just the block an agent would receive
+openshard stats                                    # Counts over recorded Shards (agents, models, checks, est. cost)
+openshard stats completeness                       # Receipt completeness heuristic
+openshard stats failures                           # Failure categories over recent runs
 ```
 Reflect and export:
 
@@ -463,6 +481,7 @@ Current features include:
 * Routing across models/workflows where available
 * Shard receipts with model, risk, files, checks, cost, result, and trust signals
 * `/last`, `/last more`, and `/last --full`
+* Local visibility commands: `openshard history`, `openshard context "<task>"`, `openshard stats` (offline, per-repository, explainable, `--json`)
 * `openshard proof last` for latest-run proof inspection
 * `openshard trust last` for latest-run trust scoring
 * Shard quality summary in `last --json`
