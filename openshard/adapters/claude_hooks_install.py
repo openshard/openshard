@@ -184,6 +184,45 @@ def merge_openshard_hooks(settings: dict) -> tuple[dict, dict[str, str]]:
     return new_settings, changes
 
 
+def remove_openshard_hooks(settings: dict) -> tuple[dict, dict[str, str]]:
+    """Return ``(new_settings, changes)`` with OpenShard's hooks removed.
+
+    ``changes`` maps each event to ``"removed"`` / ``"absent"``. Mirrors
+    ``merge_openshard_hooks``'s identification (``is_openshard_hook``) so
+    only OpenShard's own entries are ever removed -- unrelated hooks, their
+    matchers, and every other settings key are left exactly as they were.
+    The input is never mutated.
+    """
+    new_settings = copy.deepcopy(settings)
+    hooks = new_settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return new_settings, {spec.event: "absent" for spec in HOOK_SPECS}
+
+    changes: dict[str, str] = {}
+    for spec in HOOK_SPECS:
+        groups = hooks.get(spec.event)
+        if not isinstance(groups, list):
+            changes[spec.event] = "absent"
+            continue
+        removed_any = False
+        new_groups: list = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                new_groups.append(group)
+                continue
+            others = [h for h in group["hooks"] if not is_openshard_hook(h)]
+            if len(others) != len(group["hooks"]):
+                removed_any = True
+            if others:
+                new_group = dict(group)
+                new_group["hooks"] = others
+                new_groups.append(new_group)
+            # else: the group had only our hook(s) -- drop it entirely.
+        hooks[spec.event] = new_groups
+        changes[spec.event] = "removed" if removed_any else "absent"
+    return new_settings, changes
+
+
 def installed_events(settings: object) -> list[str]:
     """Events (of HOOK_EVENTS) that already carry an OpenShard hook in *settings*."""
     if not isinstance(settings, dict) or not isinstance(settings.get("hooks"), dict):
@@ -202,7 +241,7 @@ def installed_events(settings: object) -> list[str]:
 
 @dataclass
 class ClaudeHooksInstallResult:
-    status: str  # "installed" | "updated" | "already_installed" | "skipped_existing" | "error"
+    status: str  # "installed" | "updated" | "already_installed" | "skipped_existing" | "removed" | "not_installed" | "error"
     settings_path: Path | None
     events: dict[str, str] = field(default_factory=dict)
     message: str = ""
@@ -211,6 +250,16 @@ class ClaudeHooksInstallResult:
 
 def _error(message: str, settings_path: Path | None = None) -> ClaudeHooksInstallResult:
     return ClaudeHooksInstallResult(status="error", settings_path=settings_path, message=message)
+
+
+def load_settings(repo_root: Path) -> tuple[dict | None, str | None]:
+    """Read-only ``(settings, error)`` for ``<repo_root>/.claude/settings.local.json``.
+
+    Public wrapper around the same parsing ``install_claude_hooks`` uses, for
+    callers (``openshard doctor``, ``openshard setup --agent``) that only
+    ever need to inspect the file, never write it.
+    """
+    return _read_settings(Path(repo_root) / SETTINGS_RELPATH)
 
 
 def _read_settings(path: Path) -> tuple[dict | None, str | None]:
@@ -395,3 +444,63 @@ def install_claude_statusline(*, repo_root: Path) -> ClaudeHooksInstallResult:
         )
     except Exception as exc:
         return _error(f"Failed to configure Claude Code status line: {type(exc).__name__}")
+
+
+def uninstall_claude_hooks(*, repo_root: Path) -> ClaudeHooksInstallResult:
+    """Remove OpenShard's Claude Code hooks from ``<repo_root>/.claude/settings.local.json``.
+
+    Reverses ``install_claude_hooks``: only entries identified by
+    ``is_openshard_hook`` are removed. Unrelated hooks, matchers, and every
+    other settings key survive untouched. Never raises, and never touches
+    ``.openshard/`` history.
+    """
+    try:
+        root = Path(repo_root)
+        settings_path = root / SETTINGS_RELPATH
+        settings, err = _read_settings(settings_path)
+        if err or settings is None:
+            return _error(err or "Could not read Claude Code settings.", settings_path)
+        merged, changes = remove_openshard_hooks(settings)
+        if all(v == "absent" for v in changes.values()):
+            return ClaudeHooksInstallResult(
+                status="not_installed", settings_path=settings_path, events=changes,
+                message="No OpenShard auto-capture hooks were configured.",
+            )
+        _write_settings(settings_path, merged)
+        return ClaudeHooksInstallResult(
+            status="removed", settings_path=settings_path, events=changes,
+            message="Auto-capture hooks removed.",
+        )
+    except Exception as exc:
+        return _error(f"Failed to remove Claude Code hooks: {type(exc).__name__}")
+
+
+def uninstall_claude_statusline(*, repo_root: Path) -> ClaudeHooksInstallResult:
+    """Remove OpenShard's ``statusLine`` entry, but only if it is OpenShard's own.
+
+    A custom status line (anything other than exactly OpenShard's command)
+    is left completely untouched -- there is nothing of OpenShard's to
+    remove, and OpenShard never removes configuration it did not add. Never
+    raises.
+    """
+    try:
+        root = Path(repo_root)
+        settings_path = root / SETTINGS_RELPATH
+        settings, err = _read_settings(settings_path)
+        if err or settings is None:
+            return _error(err or "Could not read Claude Code settings.", settings_path)
+        existing = settings.get("statusLine")
+        if not is_openshard_statusline(existing):
+            return ClaudeHooksInstallResult(
+                status="not_installed", settings_path=settings_path,
+                message="No OpenShard status line was configured; nothing removed.",
+            )
+        merged = copy.deepcopy(settings)
+        merged.pop("statusLine", None)
+        _write_settings(settings_path, merged)
+        return ClaudeHooksInstallResult(
+            status="removed", settings_path=settings_path,
+            message="Status line configuration removed.",
+        )
+    except Exception as exc:
+        return _error(f"Failed to remove Claude Code status line: {type(exc).__name__}")

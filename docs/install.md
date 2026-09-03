@@ -20,7 +20,16 @@ Then install OpenShard:
 pipx install git+https://github.com/MichaelObasa/openshard.git
 ```
 
-Run the TUI:
+Set up Claude Code capture for a repository (once per repository, safe to re-run):
+
+```sh
+cd my-project
+openshard setup
+```
+
+Then use Claude Code normally and run `openshard last` to see the receipt. `openshard doctor` answers "is OpenShard actually working here?", and `openshard mcp uninstall claude` removes OpenShard's Claude Code configuration again (local history is never deleted).
+
+Or run the TUI:
 
 ```sh
 openshard tui
