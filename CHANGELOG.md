@@ -6,6 +6,27 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- Richer Claude Code receipts:
+  - A task's receipt is now available as soon as its turn finishes (`Stop`
+    fires) — it never has to wait for `SessionEnd`, which stays independent
+    session metadata (`capture.task_status`, distinct from verification).
+  - Model, cumulative session cost, and input/output/cache token counts are
+    now captured from Claude Code's *status line* (`statusLine` setting) —
+    the only official, local, no-network surface that reports them; no hook
+    payload carries this data. `openshard mcp install claude` configures a
+    status line automatically when the project has none of its own yet
+    (`--no-statusline` to skip); a `openshard hooks claude-status` command is
+    installed as its entrypoint. Model switches mid-session are preserved
+    (never flattened to one model); cost is windowed to this Shard's session
+    (baseline-subtracted, never a whole-session cumulative total dumped onto
+    one receipt) and always labelled `est.` — never billing truth.
+  - Task-boundary duration (first prompt → most recent completed turn, not
+    whole-session time), a repo-relative `Files` list with change-type
+    letters, per-tool `Activity` counts, and an `Evidence` summary line are
+    now shown in the compact receipt. All are additive and gated on data
+    being present, so existing receipts render unchanged.
+  - Unknown model/cost/tokens still render as `Unknown` / `Not recorded` —
+    never guessed from names, env vars, or user text.
 - Claude Code auto capture: `openshard mcp install claude` now also installs
   OpenShard's Claude Code lifecycle hooks (`SessionStart`, `UserPromptSubmit`,
   `PostToolUse`, `PostToolUseFailure`, `Stop`, `SessionEnd`) into the

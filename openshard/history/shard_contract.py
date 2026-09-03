@@ -492,6 +492,21 @@ class ShardReceipt:
     # fabricated.
     run_id: str | None = None
     attempt_number: int | None = None
+    # Turn-completion status -- independent of whether the underlying agent
+    # session itself has ended (see openshard.adapters.claude_hooks). None
+    # for entries that don't carry this signal (most executors); never
+    # conflated with verification ("Completed" is not "verified").
+    task_completion: str | None = None
+    # Token usage -- only ever populated from a trustworthy provider/agent
+    # source (see build_shard_receipt); None means genuinely not known, never 0.
+    tokens_input: int | None = None
+    tokens_output: int | None = None
+    tokens_cache_creation: int | None = None
+    tokens_cache_read: int | None = None
+    tokens_provenance: str | None = None
+    # Cost provenance -- distinguishes a provider-reported figure from an
+    # OpenShard-calculated or OpenShard-estimated one (see cost_display).
+    cost_provenance: str | None = None
 
 
 def _verification_from_osn_contract(
@@ -721,6 +736,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     _approval_reason: str = approval_receipt_raw.get("reason", "") if approval_receipt_raw else ""
 
     cost_raw = entry.get("estimated_cost")
+    cost_provenance = entry.get("cost_provenance") if isinstance(entry.get("cost_provenance"), str) else None
     if cost_raw is None:
         _sr_costs = [
             s["cost"] for s in (entry.get("stage_runs") or [])
@@ -728,7 +744,15 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         ]
         if _sr_costs:
             cost_raw = sum(_sr_costs)
-    cost_display = f"${cost_raw:.4f}" if cost_raw is not None else "Not recorded"
+    if cost_raw is None:
+        cost_display = "Not recorded"
+    elif cost_provenance:
+        # Provider/agent-reported figures (Claude Code's own status-line cost,
+        # OpenTelemetry cost metrics, ...) are all documented as approximate,
+        # never billing truth -- labelled "est." rather than shown as fact.
+        cost_display = f"${cost_raw:.2f} est."
+    else:
+        cost_display = f"${cost_raw:.4f}"
 
     summary = entry.get("summary") or ""
     _review_findings_raw = entry.get("findings") or []
@@ -807,6 +831,18 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         for s in stage_runs
         if isinstance(s, dict) and "stage_type" in s and "model" in s
     ]
+    if not model_stages:
+        # A session observed across more than one model (e.g. a mid-session
+        # /model switch) must not be presented as if only one model ran it.
+        # capture.models_seen is namespaced metadata only claude_hooks sets;
+        # harmless (absent) for every other producer.
+        _capture_block: dict = entry.get("capture") or {}
+        _capture_block = _capture_block if isinstance(_capture_block, dict) else {}
+        _models_seen = [m for m in (_capture_block.get("models_seen") or []) if isinstance(m, str) and m][:5]
+        if len(_models_seen) > 1:
+            model_stages = [
+                (f"Observed {i + 1}", _display_model_name(m)) for i, m in enumerate(_models_seen)
+            ]
 
     command_policy = entry.get("command_policy") or {}
     allowed_paths = list(command_policy.get("allowed_paths") or [])
@@ -970,6 +1006,33 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     _run_id_val = entry.get("run_id") or timestamp or None
     _attempt_number_val = entry.get("attempt_number") if isinstance(entry.get("attempt_number"), int) else None
 
+    # Turn-completion status -- see openshard.adapters.claude_hooks._task_status.
+    # capture.task_status is namespaced metadata only claude_hooks sets today;
+    # harmless (absent -> None -> no line rendered) for every other producer.
+    _capture_for_status: dict = entry.get("capture") or {}
+    _capture_for_status = _capture_for_status if isinstance(_capture_for_status, dict) else {}
+    _task_status_raw = _capture_for_status.get("task_status")
+    _task_completion_display = (
+        {
+            "turn_completed": "Completed",
+            "in_progress": "In progress",
+            "ended_no_turn": "Ended (no turn observed)",
+        }.get(_task_status_raw)
+        if isinstance(_task_status_raw, str)
+        else None
+    )
+
+    # Token usage -- only ever surfaced on the receipt when a producer stamped
+    # an explicit provenance token alongside the counts (see build_hook_entry).
+    # Several older/native entries carry bare prompt_tokens/completion_tokens
+    # with no such marker; those must stay off the receipt's Tokens display
+    # unchanged (fail closed rather than assume a source for pre-existing data).
+    _tokens_provenance = entry.get("tokens_provenance") if isinstance(entry.get("tokens_provenance"), str) else None
+    _tokens_input = entry.get("prompt_tokens") if _tokens_provenance else None
+    _tokens_output = entry.get("completion_tokens") if _tokens_provenance else None
+    _tokens_cache_creation = entry.get("cache_creation_tokens") if _tokens_provenance else None
+    _tokens_cache_read = entry.get("cache_read_tokens") if _tokens_provenance else None
+
     return ShardReceipt(
         shard_id=_shard_id_val,
         created_at=timestamp,
@@ -1045,6 +1108,13 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         verification_raw_output_stored=_v_raw_stored,
         run_id=_run_id_val,
         attempt_number=_attempt_number_val,
+        task_completion=_task_completion_display,
+        tokens_input=_tokens_input if isinstance(_tokens_input, int) else None,
+        tokens_output=_tokens_output if isinstance(_tokens_output, int) else None,
+        tokens_cache_creation=_tokens_cache_creation if isinstance(_tokens_cache_creation, int) else None,
+        tokens_cache_read=_tokens_cache_read if isinstance(_tokens_cache_read, int) else None,
+        tokens_provenance=_tokens_provenance,
+        cost_provenance=cost_provenance,
         shard=build_shard(
             entry,
             shard_id=_shard_id_val,
@@ -1101,6 +1171,52 @@ def _format_timeline_label(ev: dict) -> str:
     return label
 
 
+def _format_token_count(n: int) -> str:
+    """Compact display for a token count: 850 -> "850", 14000 -> "14k", 2500 -> "2.5k"."""
+    if n < 1000:
+        return str(n)
+    k = n / 1000
+    return f"{k:.0f}k" if k == int(k) else f"{k:.1f}k"
+
+
+_FILE_CHANGE_LETTERS: dict[str, str] = {"create": "A", "update": "M", "delete": "D"}
+
+
+def _tool_activity_counts(receipt: ShardReceipt) -> list[tuple[str, int]]:
+    """Per-tool invocation counts (e.g. [("Read", 3), ("Edit", 2)]), first-seen order.
+
+    Derived at read time from receipt.events -- no new stored field. Every
+    event this counts was already EVIDENCE_AGENT_REPORTED tool.invoked
+    evidence; this only aggregates it for display, never claims an outcome.
+    """
+    from openshard.history.event import EVENT_TOOL_INVOKED
+
+    counts: dict[str, int] = {}
+    for ev in receipt.events:
+        if getattr(ev, "event_type", None) != EVENT_TOOL_INVOKED:
+            continue
+        tool = (ev.metadata or {}).get("tool") if isinstance(getattr(ev, "metadata", None), dict) else None
+        if not isinstance(tool, str) or not tool:
+            continue
+        counts[tool] = counts.get(tool, 0) + 1
+    return list(counts.items())
+
+
+_EVIDENCE_DISPLAY: dict[str, str] = {
+    "directly_observed": "Directly observed",
+    "agent_reported": "Agent reported",
+    "git_observed": "Git observed",
+    "independently_verified": "Independently verified",
+}
+
+
+def _evidence_summary(receipt: ShardReceipt) -> list[str]:
+    """Distinct evidence kinds behind this receipt's events, in a stable priority order."""
+    seen = {getattr(ev, "evidence", None) for ev in receipt.events}
+    order = ["independently_verified", "directly_observed", "git_observed", "agent_reported"]
+    return [_EVIDENCE_DISPLAY[k] for k in order if k in seen]
+
+
 def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     """Render a bordered, column-aligned RECEIPT block. Pure, no I/O."""
     file_str = f"{receipt.files_changed} file{'s' if receipt.files_changed != 1 else ''}"
@@ -1118,21 +1234,55 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
             "Capture",
             f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
         ))
+    if receipt.task_completion:
+        lines.append(_row("Status", receipt.task_completion))
+    lines.append(_row(model_label, model_value))
+    if receipt.duration_seconds is not None:
+        lines.append(_row("Duration", f"{receipt.duration_seconds:.1f}s"))
     lines += [
-        _row(model_label, model_value),
         _row("Risk", receipt.risk),
         _row("Sandbox", receipt.sandbox),
         _row("Changed", file_str),
+    ]
+    if receipt.files_detail:
+        lines.append(f"{_INDENT}Files")
+        for _fd in receipt.files_detail[:10]:
+            if not isinstance(_fd, dict):
+                continue
+            path = _fd.get("path")
+            if not isinstance(path, str) or not path:
+                continue
+            change_type = _fd.get("change_type")
+            letter = _FILE_CHANGE_LETTERS.get(change_type, "M") if isinstance(change_type, str) else "M"
+            lines.append(f"{_INDENT}  {letter} {path}")
+        if len(receipt.files_detail) > 10:
+            lines.append(f"{_INDENT}  +{len(receipt.files_detail) - 10} more")
+    _activity = _tool_activity_counts(receipt)
+    if _activity:
+        lines.append(f"{_INDENT}Activity")
+        for tool, count in _activity:
+            lines.append(f"{_INDENT}  {tool} × {count}")
+    lines += [
         _row("Checks", receipt.checks_display),
         _row("Approval", receipt.approval),
         _row("Cost", receipt.cost_display),
-        _row("Result", receipt.result),
     ]
+    if receipt.tokens_input is not None or receipt.tokens_output is not None:
+        _tok_in = _format_token_count(receipt.tokens_input or 0)
+        _tok_out = _format_token_count(receipt.tokens_output or 0)
+        _tok_line = f"{_tok_in} input / {_tok_out} output"
+        if receipt.tokens_cache_read:
+            _tok_line += f" (+{_format_token_count(receipt.tokens_cache_read)} cache read)"
+        lines.append(_row("Tokens", _tok_line))
+    lines.append(_row("Result", receipt.result))
     _secret_count = sum(1 for c in receipt.evidence_capsules if c.kind == "secret_scan")
     if _secret_count:
         lines.append(_row("Secrets", f"{_secret_count} finding(s) — see full receipt"))
     if receipt.developer_feedback:
         lines.append(_row("Feedback", receipt.developer_feedback.get("outcome", "")))
+    _evidence = _evidence_summary(receipt)
+    if _evidence:
+        lines.append(_row("Evidence", ", ".join(_evidence)))
 
     _TOP_SEVERITIES = {"Critical", "High", "Medium"}
     top_raw = [f for f in receipt.findings if f.severity in _TOP_SEVERITIES]
@@ -1648,6 +1798,10 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
 
     lines.append(f"{_INDENT}COST")
     lines.append(f"{_INDENT}{receipt.cost_display}")
+    if receipt.tokens_input is not None or receipt.tokens_output is not None:
+        _tok_in = _format_token_count(receipt.tokens_input or 0)
+        _tok_out = _format_token_count(receipt.tokens_output or 0)
+        lines.append(_row("Tokens", f"{_tok_in} input / {_tok_out} output"))
     lines.append("")
 
     lines += [_SEP, f"{_INDENT}RECEIPT"]

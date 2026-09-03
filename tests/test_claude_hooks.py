@@ -23,10 +23,13 @@ from openshard.adapters.claude_hooks import (
     buffer_path,
     build_hook_entry,
     extract_hook_payload,
+    extract_status_payload,
     handle_claude_hook,
+    handle_claude_status,
     parse_hook_payload,
     resolve_repo_root,
     run_hook_from_stream,
+    run_status_from_stream,
     sanitize_task_excerpt,
     summarize_command,
     sweep_stale_buffers,
@@ -56,7 +59,11 @@ from openshard.history.query import (
     search_history,
 )
 from openshard.history.shard import CAPTURE_PARTIAL, ORIGIN_EXTERNAL_OBSERVED
-from openshard.history.shard_contract import build_shard_receipt
+from openshard.history.shard_contract import (
+    build_shard_receipt,
+    render_compact_shard_receipt,
+    render_full_shard_receipt,
+)
 
 SID = "0f1e2d3c-4b5a-4697-8877-665544332211"
 SID2 = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -100,6 +107,37 @@ def _payload(event: str, repo: Path, session_id: str = SID, **fields) -> dict:
 
 def _run(repo: Path, event: str, session_id: str = SID, **fields) -> HookOutcome:
     return handle_claude_hook(_payload(event, repo, session_id, **fields), env={"CLAUDE_PROJECT_DIR": str(repo)})
+
+
+def _status_payload(
+    repo: Path,
+    session_id: str = SID,
+    *,
+    model_id: str | None = "claude-sonnet-5",
+    model_display: str | None = "Claude Sonnet 5",
+    cost_total: float | None = 0.0,
+    tokens_input: int | None = None,
+    tokens_output: int | None = None,
+    cache_read: int | None = None,
+    cache_creation: int | None = None,
+) -> dict:
+    data: dict = {"session_id": session_id, "cwd": str(repo)}
+    if model_id is not None:
+        data["model"] = {"id": model_id, "display_name": model_display}
+    if cost_total is not None:
+        data["cost"] = {"total_cost_usd": cost_total}
+    if tokens_input is not None or tokens_output is not None:
+        usage = {"input_tokens": tokens_input, "output_tokens": tokens_output}
+        if cache_read is not None:
+            usage["cache_read_input_tokens"] = cache_read
+        if cache_creation is not None:
+            usage["cache_creation_input_tokens"] = cache_creation
+        data["context_window"] = {"current_usage": usage}
+    return data
+
+
+def _status(repo: Path, session_id: str = SID, **kwargs) -> str:
+    return handle_claude_status(_status_payload(repo, session_id, **kwargs), env={"CLAUDE_PROJECT_DIR": str(repo)})
 
 
 def _runs_lines(repo: Path) -> list[dict]:
@@ -819,3 +857,332 @@ class TestCwdIndependence:
             os.chdir(orig)
         assert (repo / ".openshard" / "runs.jsonl").exists()
         assert not (elsewhere / ".openshard").exists()
+
+
+# ---------------------------------------------------------------------------
+# PR6: task completion independent of SessionEnd
+# ---------------------------------------------------------------------------
+
+
+class TestTaskCompletion:
+    def test_stop_makes_task_completed_without_session_end(self, repo: Path):
+        entry = _session(repo, end=False)
+        assert entry["capture"]["session_end_observed"] is False
+        assert entry["capture"]["task_status"] == "turn_completed"
+        receipt = build_shard_receipt(entry)
+        assert receipt.task_completion == "Completed"
+        out = render_compact_shard_receipt(receipt)
+        assert "Completed" in out
+
+    def test_in_progress_before_any_stop(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        entry = _runs_lines(repo)[0]
+        assert entry["capture"]["task_status"] == "in_progress"
+        receipt = build_shard_receipt(entry)
+        assert receipt.task_completion == "In progress"
+
+    def test_session_end_metadata_arrives_later_without_changing_task_status(self, repo: Path):
+        entry = _session(repo, end=False)
+        assert entry["capture"]["task_status"] == "turn_completed"
+        _run(repo, "SessionEnd", reason="other")
+        after = _runs_lines(repo)[0]
+        assert after["capture"]["task_status"] == "turn_completed"
+        assert after["capture"]["session_end_observed"] is True
+
+    def test_repeated_stop_is_idempotent_on_task_status(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _run(repo, "Stop")
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["capture"]["task_status"] == "turn_completed"
+        assert entry["capture"]["turn_count"] == 2
+
+    def test_checks_still_not_run_when_turn_completed(self, repo: Path):
+        entry = _session(repo, end=False)
+        receipt = build_shard_receipt(entry)
+        assert receipt.checks_display == "Not run"
+        assert receipt.task_completion == "Completed"  # completion != verification
+
+
+# ---------------------------------------------------------------------------
+# PR6: task-boundary duration (first prompt -> most recent Stop)
+# ---------------------------------------------------------------------------
+
+
+class TestDuration:
+    def test_duration_absent_before_any_stop(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        entry = _runs_lines(repo)[0]
+        assert "duration_seconds" not in entry
+
+    def test_duration_present_and_non_negative_after_stop(self, repo: Path):
+        entry = _session(repo, end=False)
+        assert entry["duration_seconds"] is not None
+        assert entry["duration_seconds"] >= 0
+        receipt = build_shard_receipt(entry)
+        assert receipt.duration_seconds is not None
+        out = render_compact_shard_receipt(receipt)
+        assert "Duration" in out
+
+
+# ---------------------------------------------------------------------------
+# PR6: status-line payload parsing
+# ---------------------------------------------------------------------------
+
+
+class TestStatusPayloadParsing:
+    def test_extracts_model_cost_tokens(self):
+        data = {
+            "session_id": SID,
+            "cwd": "/repo",
+            "model": {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"},
+            "cost": {"total_cost_usd": 0.42},
+            "context_window": {
+                "current_usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 5,
+                    "cache_read_input_tokens": 3,
+                }
+            },
+        }
+        p = extract_status_payload(data)
+        assert p is not None
+        assert p.model_id == "claude-sonnet-5"
+        assert p.cost_total_usd == 0.42
+        assert p.tokens_input == 100
+        assert p.tokens_output == 20
+        assert p.tokens_cache_creation == 5
+        assert p.tokens_cache_read == 3
+
+    def test_missing_or_invalid_session_id_returns_none(self):
+        assert extract_status_payload({"cwd": "/repo"}) is None
+        assert extract_status_payload({"session_id": 123}) is None
+        assert extract_status_payload({"session_id": "../../etc/passwd"}) is None
+
+    def test_malformed_nested_objects_are_ignored_not_fatal(self):
+        p = extract_status_payload({
+            "session_id": SID, "model": "not-a-dict", "cost": "nope",
+            "context_window": {"current_usage": "nope"},
+        })
+        assert p is not None
+        assert p.model_id is None
+        assert p.cost_total_usd is None
+        assert p.tokens_input is None
+
+    def test_bool_values_never_treated_as_numbers(self):
+        p = extract_status_payload({"session_id": SID, "cost": {"total_cost_usd": True}})
+        assert p is not None
+        assert p.cost_total_usd is None
+
+    def test_status_line_text_prefers_folder_and_model(self):
+        text = ch._status_line_text({"cwd": "/home/dev/myrepo", "model": {"display_name": "Claude Sonnet 5"}})
+        assert text == "myrepo · Claude Sonnet 5"
+
+    def test_status_line_text_handles_windows_path(self):
+        text = ch._status_line_text({"cwd": "C:\\Users\\dev\\myrepo", "model": {"display_name": "Claude Sonnet 5"}})
+        assert text == "myrepo · Claude Sonnet 5"
+
+    def test_status_line_text_never_raises_on_garbage(self):
+        assert ch._status_line_text({}) == ""
+        assert ch._status_line_text({"cwd": 123, "model": []}) == ""
+
+
+# ---------------------------------------------------------------------------
+# PR6: model / token / cost capture via the status line
+# ---------------------------------------------------------------------------
+
+
+class TestModelTokenCostCapture:
+    def test_no_status_line_model_stays_unknown(self, repo: Path):
+        entry = _session(repo)
+        assert entry["execution_model"] == "unknown"
+        receipt = build_shard_receipt(entry)
+        assert receipt.model_display == "Unknown"
+        assert "prompt_tokens" not in entry
+        assert "estimated_cost" not in entry
+
+    def test_model_captured_from_status_line_and_fed_into_next_fold(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _status(repo)
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["execution_model"] == "claude-sonnet-5"
+        assert entry["capture"]["model_source"] == "status_line"
+        receipt = build_shard_receipt(entry)
+        assert receipt.model_display == "Claude Sonnet 5"
+
+    def test_model_switch_is_not_flattened_to_one_model(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _status(repo, model_id="claude-sonnet-5")
+        _run(repo, "Stop")
+        _status(repo, model_id="claude-opus-5")
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["capture"]["models_seen"] == ["claude-sonnet-5", "claude-opus-5"]
+        assert entry["execution_model"] == "claude-opus-5"
+        receipt = build_shard_receipt(entry)
+        assert len(receipt.model_stages) == 2
+        out = render_compact_shard_receipt(receipt)
+        assert "Models" in out
+        assert "→" in out
+
+    def test_token_usage_captured_with_provenance(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _status(repo, tokens_input=14000, tokens_output=2000, cache_read=500)
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["prompt_tokens"] == 14000
+        assert entry["completion_tokens"] == 2000
+        assert entry["total_tokens"] == 16000
+        assert entry["cache_read_tokens"] == 500
+        assert entry["tokens_provenance"] == "provider_reported"
+        receipt = build_shard_receipt(entry)
+        out = render_compact_shard_receipt(receipt)
+        assert "Tokens" in out
+        assert "14k input" in out
+        assert "2k output" in out
+
+    def test_cost_is_delta_from_baseline_not_raw_cumulative_total(self, repo: Path):
+        _run(repo, "SessionStart", source="startup")
+        _status(repo, cost_total=0.10)  # baseline observed before any real work
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _status(repo, cost_total=0.37)
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["estimated_cost"] == pytest.approx(0.27)
+        assert entry["cost_provenance"] == "provider_reported"
+
+    def test_cost_display_is_clearly_labelled_estimate(self, repo: Path):
+        _run(repo, "SessionStart", source="startup")
+        _status(repo, cost_total=0.0)  # baseline before any work
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _status(repo, cost_total=0.18)
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        receipt = build_shard_receipt(entry)
+        assert receipt.cost_display == "$0.18 est."
+
+    def test_no_status_line_cost_stays_not_recorded(self, repo: Path):
+        entry = _session(repo)
+        receipt = build_shard_receipt(entry)
+        assert receipt.cost_display == "Not recorded"
+
+    def test_status_ping_never_leaks_absolute_repo_path(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _status(repo)
+        _run(repo, "Stop")
+        raw = _raw(repo)
+        assert str(repo) not in raw
+        assert str(repo.resolve()) not in raw
+
+    def test_status_handler_never_raises_and_still_returns_text(self, repo: Path):
+        with patch.object(ch, "_load_or_create_buffer", side_effect=RuntimeError("boom")):
+            text = _status(repo)
+        assert isinstance(text, str)
+
+    def test_run_status_from_stream_handles_bad_input(self):
+        import io
+
+        assert run_status_from_stream(io.BytesIO(b""), env={}) == ""
+        assert run_status_from_stream(io.StringIO("nope"), env={}) == ""
+
+        class Broken:
+            def read(self):
+                raise OSError("closed")
+
+        assert run_status_from_stream(Broken(), env={}) == ""
+
+    def test_status_line_ignored_for_unresolvable_repo(self, tmp_path: Path):
+        outcome = handle_claude_status(
+            _status_payload(tmp_path / "does-not-exist"), env={"CLAUDE_PROJECT_DIR": str(tmp_path / "nope")},
+        )
+        assert isinstance(outcome, str)
+        assert not (tmp_path / ".openshard").exists()
+
+
+# ---------------------------------------------------------------------------
+# PR6: richer receipt presentation (files, tool activity, evidence)
+# ---------------------------------------------------------------------------
+
+
+class TestRicherReceiptPresentation:
+    def test_files_block_shows_change_type_letters(self, repo: Path):
+        entry = _session(repo)
+        receipt = build_shard_receipt(entry)
+        out = render_compact_shard_receipt(receipt)
+        assert "A calc.py" in out
+        assert "M README.md" in out
+
+    def test_tool_activity_rendered(self, repo: Path):
+        entry = _session(repo)
+        receipt = build_shard_receipt(entry)
+        out = render_compact_shard_receipt(receipt)
+        assert "Activity" in out
+        assert "Write × 1" in out
+        assert "Edit × 1" in out
+        assert "Bash × 1" in out
+
+    def test_evidence_summary_lists_distinct_kinds(self, repo: Path):
+        entry = _session(repo)
+        receipt = build_shard_receipt(entry)
+        out = render_compact_shard_receipt(receipt)
+        assert "Evidence" in out
+        assert "Directly observed" in out
+        assert "Agent reported" in out
+        assert "Git observed" in out
+        assert "Independently verified" not in out  # never fabricated
+
+    def test_no_activity_or_files_block_for_empty_receipt(self):
+        from openshard.history.shard_contract import ShardReceipt
+
+        receipt = ShardReceipt(
+            shard_id="shard-x", created_at="", task_short="t", task_full="t", agent="a",
+            strategy="Not recorded", model_display="Unknown", risk="-", sandbox="-",
+            files_changed=0, checks_display="Not run", approval="-", cost_display="Not recorded",
+            result="-", status="-", duration_seconds=None,
+        )
+        out = render_compact_shard_receipt(receipt)
+        assert "Files" not in out
+        assert "Activity" not in out
+        assert "Evidence" not in out
+
+
+# ---------------------------------------------------------------------------
+# PR6: backward compatibility with pre-PR6 records
+# ---------------------------------------------------------------------------
+
+
+class TestBackwardCompatibility:
+    def test_old_claude_hook_record_without_new_fields_loads_safely(self):
+        legacy_entry = {
+            "schema_version": "1.1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "task": "legacy task",
+            "execution_model": "unknown",
+            "executor": EXECUTOR,
+            "import_source": "claude_code",
+            "capture": {
+                "source": "claude_code_hooks",
+                "session_id": SID,
+                "status": "ended",
+                "session_end_observed": True,
+                "prompt_count": 1,
+                "turn_count": 1,
+                "tool_call_count": 0,
+            },
+            "files_detail": [],
+            "run_id": "r1",
+            "shard_id": "shard-20260101-0001",
+            "attempt_number": 1,
+        }
+        receipt = build_shard_receipt(legacy_entry)
+        assert receipt.task_completion is None
+        assert receipt.tokens_input is None
+        assert receipt.tokens_output is None
+        assert receipt.cost_display == "Not recorded"
+        assert receipt.model_display == "Unknown"
+        out = render_compact_shard_receipt(receipt)
+        assert "RECEIPT" in out
+        full = render_full_shard_receipt(receipt)
+        assert "SHARD" in full
