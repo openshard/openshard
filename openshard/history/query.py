@@ -65,6 +65,8 @@ from openshard.history.shard_contract import (
 
 __all__ = [
     "DEFAULT_CONTEXT_LIMIT",
+    "HistoryPage",
+    "RecentShard",
     "RelevantAttempt",
     "RelevantContext",
     "RelevantMatch",
@@ -74,6 +76,7 @@ __all__ = [
     "get_receipt",
     "get_shard",
     "list_shards",
+    "recent_shards",
     "relevant_context",
     "search_history",
 ]
@@ -222,6 +225,63 @@ def list_shards(
         return []
     groups = _load_groups(repo_path, repo)
     return [_shard_for(g) for g in groups[:limit]]
+
+
+@dataclass
+class RecentShard:
+    """One Shard as ``openshard history`` / ``openshard stats`` see it.
+
+    The receipt is the *latest attempt's* canonical receipt (unchanged from
+    what ``openshard last`` renders); ``attempt_count`` / ``has_failure``
+    summarise the whole attempt group so retries stay visible without
+    listing the Shard more than once.
+    """
+
+    shard: Shard
+    receipt: ShardReceipt
+    attempt_count: int
+    has_failure: bool
+
+
+@dataclass
+class HistoryPage:
+    """A bounded, newest-first page of recent Shards plus honest totals."""
+
+    total_shards: int
+    total_attempts: int
+    items: list[RecentShard] = field(default_factory=list)
+
+
+def recent_shards(
+    *,
+    limit: int | None = DEFAULT_LIMIT,
+    repo: str | None = None,
+    repo_path: Path | None = None,
+) -> HistoryPage:
+    """Return the most recent Shards with their latest-attempt receipts.
+
+    Same grouping, ordering and ``repo`` filter as ``list_shards`` --
+    ``runs.jsonl`` is loaded and grouped exactly once, and a receipt is built
+    only for the Shards that make the page (``limit=None`` means every
+    Shard, which ``openshard stats`` needs). ``total_shards`` /
+    ``total_attempts`` always describe the whole (repo-filtered) history so
+    a caller can say "showing N of M".
+    """
+    groups = _load_groups(repo_path, repo)
+    total_attempts = sum(len(g.attempts) for g in groups)
+    if limit is not None and limit <= 0:
+        return HistoryPage(total_shards=len(groups), total_attempts=total_attempts, items=[])
+    page = groups if limit is None else groups[:limit]
+    items: list[RecentShard] = []
+    for group in page:
+        receipt = _receipt_for(group)
+        items.append(RecentShard(
+            shard=receipt.shard or _shard_for(group),
+            receipt=receipt,
+            attempt_count=len(group.attempts),
+            has_failure=_group_has_failure(group),
+        ))
+    return HistoryPage(total_shards=len(groups), total_attempts=total_attempts, items=items)
 
 
 def get_shard(shard_id: str, *, repo_path: Path | None = None) -> Shard:
@@ -382,6 +442,36 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in _WORD_RE.findall((text or "").lower()) if t not in _STOPWORDS]
 
 
+def ranking_explanation() -> dict:
+    """The exact, static rules ``relevant_context`` ranks by -- for display.
+
+    Exposed so ``openshard context`` can explain a score from the same
+    constants ``_score_group`` uses, rather than a hand-written description
+    that could drift from the code. Pure data; no history is read.
+    """
+    return {
+        "method": "deterministic keyword overlap (no embeddings, no model calls)",
+        "weights": {
+            "task_text": _WEIGHT_TASK,
+            "shard_id": _WEIGHT_SHARD_ID,
+            "agent": _WEIGHT_AGENT,
+        },
+        "bonuses": {
+            "prior_verification_failure": _BONUS_FAILURE,
+            "multiple_attempts": _BONUS_MULTI_ATTEMPT,
+        },
+        "fields_read": [
+            "task text", "shard id", "agent", "status", "verification result",
+            "changed file paths", "non-Note findings",
+        ],
+        "fields_never_read": [
+            "transcripts", "assistant responses", "tool output", "notes",
+            "environment", "absolute paths",
+        ],
+        "tie_break": "newest first, then shard id",
+    }
+
+
 @dataclass
 class RelevantAttempt:
     """One attempt of a matched Shard, bounded to status/verification only."""
@@ -412,11 +502,17 @@ class RelevantMatch:
 
 @dataclass
 class RelevantContext:
-    """Bounded result of relevant_context: ranked matches plus injectable text."""
+    """Bounded result of relevant_context: ranked matches plus injectable text.
+
+    ``total_shards`` is how many (repo-filtered) Shards were considered, so a
+    caller can say "N of M matched" without loading history a second time.
+    It is 0 when nothing was loaded (blank task / non-positive limit).
+    """
 
     task: str
     matches: list[RelevantMatch]
     context_text: str
+    total_shards: int = 0
 
 
 def _group_has_failure(group: _ShardGroup) -> bool:
@@ -610,4 +706,9 @@ def relevant_context(
     scored.sort(key=lambda t: (-t[0], t[1], t[2]))
 
     matches = [_build_relevant_match(group, score, signals) for score, _, _, signals, group in scored[:limit]]
-    return RelevantContext(task=clean_task, matches=matches, context_text=_render_context_text(clean_task, matches))
+    return RelevantContext(
+        task=clean_task,
+        matches=matches,
+        context_text=_render_context_text(clean_task, matches),
+        total_shards=len(groups),
+    )

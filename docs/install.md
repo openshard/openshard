@@ -27,7 +27,16 @@ cd my-project
 openshard setup
 ```
 
-Then use Claude Code normally and run `openshard last` to see the receipt. `openshard doctor` answers "is OpenShard actually working here?", and `openshard mcp uninstall claude` removes OpenShard's Claude Code configuration again (local history is never deleted).
+Then use Claude Code normally and look at what was captured:
+
+```sh
+openshard last                   # the newest receipt
+openshard history                # recent Shards for this repository
+openshard context "some task"    # what OpenShard would surface for that task, and why
+openshard stats                  # counts over everything recorded here
+```
+
+These work from any subdirectory of the repository and never need a network connection or account. `openshard doctor` answers "is OpenShard actually working here?", and `openshard mcp uninstall claude` removes OpenShard's Claude Code configuration again (local history is never deleted).
 
 Or run the TUI:
 

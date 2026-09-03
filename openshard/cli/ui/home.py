@@ -25,6 +25,9 @@ TAGLINE = "The control layer for AI coding agents."
 QUICK_COMMANDS = [
     ("run",      "Make a controlled change"),
     ("last",     "Inspect latest receipt"),
+    ("history",  "Recent work in this repo"),
+    ("context",  "What OpenShard would surface for a task"),
+    ("stats",    "Counts over recorded Shards"),
     ("models",     "View model route"),
     ("demo shard", "Preview OpenShard output"),
 ]

@@ -18,14 +18,17 @@ from typing import Any
 from openshard.history import query as history_query
 from openshard.history.query import (
     DEFAULT_CONTEXT_LIMIT,
-    RelevantAttempt,
-    RelevantMatch,
-    SearchHit,
     UnknownRunError,
     UnknownShardError,
 )
-from openshard.history.shard import Shard
-from openshard.history.shard_contract import ShardFinding, ShardReceipt
+from openshard.history.views import (
+    MAX_FILES,
+    MAX_FINDINGS,
+    receipt_to_dict,
+    relevant_match_to_dict,
+    search_hit_to_dict,
+    shard_to_dict,
+)
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -49,11 +52,16 @@ SERVER_INSTRUCTIONS = (
 
 # Tool-layer bounds -- independent of history.query's own DEFAULT_LIMIT so a
 # malformed/huge client-supplied limit can never force an unbounded response.
+# The per-object bounds (MAX_FILES / MAX_FINDINGS / MAX_TEXT) and every dict
+# projection live in ``openshard.history.views`` so the CLI's --json surfaces
+# and this server share one privacy boundary.
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 200
-MAX_FILES = 50
-MAX_FINDINGS = 20
-_MAX_TEXT = 300
+
+__all__ = [
+    "DEFAULT_LIMIT", "MAX_FILES", "MAX_FINDINGS", "MAX_LIMIT", "SERVER_NAME",
+    "build_server", "serve_stdio",
+]
 
 
 def _clamp_limit(limit: int) -> int:
@@ -62,140 +70,6 @@ def _clamp_limit(limit: int) -> int:
     if limit <= 0:
         return limit
     return min(limit, MAX_LIMIT)
-
-
-def _truncate(text: str | None) -> str | None:
-    if not text:
-        return None
-    return text if len(text) <= _MAX_TEXT else text[: _MAX_TEXT - 1] + "…"
-
-
-def _shard_dict(shard: Shard) -> dict[str, Any]:
-    """Canonical Shard -> bounded dict. Identity/origin only -- no evidence fields."""
-    return {
-        "shard_id": shard.shard_id,
-        "created_at": shard.created_at,
-        "task_short": shard.task_short,
-        "task_full": shard.task_full,
-        "agent": shard.agent,
-        "origin": shard.origin,
-        "capture_depth": shard.capture_depth,
-    }
-
-
-def _search_hit_dict(hit: SearchHit) -> dict[str, Any]:
-    d = _shard_dict(hit.shard)
-    d.update(
-        {
-            "score": hit.score,
-            "matched_fields": list(hit.matched_fields),
-            "status": hit.status,
-            "repo": hit.repo,
-        }
-    )
-    return d
-
-
-def _finding_dict(finding: ShardFinding) -> dict[str, Any]:
-    return {
-        "severity": finding.severity,
-        "message": _truncate(finding.message),
-        "path": finding.path,
-        "line": finding.line,
-    }
-
-
-def _file_dict(raw: dict) -> dict[str, Any]:
-    return {
-        "path": raw.get("path"),
-        "change_type": raw.get("change_type"),
-        "summary": _truncate(raw.get("summary")) if isinstance(raw.get("summary"), str) else None,
-    }
-
-
-def _receipt_dict(receipt: ShardReceipt) -> dict[str, Any]:
-    """Canonical ShardReceipt -> bounded, privacy-safe dict.
-
-    Deliberately omits: raw prompts/transcripts, stdout/stderr (including
-    adapter_stdout_summary/adapter_stderr_summary), diffs, agent_notes and
-    run_timeline (free-text/internal debug traces), and any field carrying an
-    absolute filesystem path. Only counts, short structured findings, and
-    relative file paths already safe to display in the CLI receipt cross the
-    MCP boundary.
-    """
-    shard = receipt.shard
-    files_raw = receipt.files_detail or [{"path": p} for p in receipt.files_touched]
-
-    return {
-        "shard_id": receipt.shard_id,
-        "run_id": receipt.run_id,
-        "attempt_number": receipt.attempt_number,
-        "created_at": receipt.created_at,
-        "task_short": receipt.task_short,
-        "task_full": receipt.task_full,
-        "agent": receipt.agent,
-        "origin": shard.origin if shard else None,
-        "capture_depth": shard.capture_depth if shard else None,
-        "model": receipt.model_display,
-        "model_stages": [{"stage": s, "model": m} for s, m in receipt.model_stages],
-        "strategy": receipt.strategy,
-        "risk": receipt.risk,
-        "sandbox": receipt.sandbox,
-        "files_changed": receipt.files_changed,
-        "files": [_file_dict(f) for f in files_raw[:MAX_FILES] if isinstance(f, dict)],
-        "diff_added": receipt.diff_added,
-        "diff_removed": receipt.diff_removed,
-        "checks": receipt.checks_display,
-        "status": receipt.status,
-        "verification_status": receipt.verification_status or None,
-        "verification_reason": _truncate(receipt.verification_reason) or None,
-        "verification_returncode": receipt.verification_returncode,
-        "verification_duration_seconds": receipt.verification_duration_seconds,
-        "approval": receipt.approval,
-        "cost": receipt.cost_display,
-        "result": _truncate(receipt.result),
-        "repo": receipt.repo,
-        "branch": receipt.branch,
-        "git_state": receipt.git_state,
-        "duration_seconds": receipt.duration_seconds,
-        "context_quality": receipt.context_quality,
-        "findings": [_finding_dict(f) for f in receipt.findings[:MAX_FINDINGS]],
-    }
-
-
-def _relevant_attempt_dict(attempt: RelevantAttempt) -> dict[str, Any]:
-    return {
-        "run_id": attempt.run_id,
-        "attempt_number": attempt.attempt_number,
-        "status": attempt.status,
-        "verification_status": attempt.verification_status or None,
-        "verification_reason": _truncate(attempt.verification_reason) or None,
-    }
-
-
-def _relevant_match_dict(match: RelevantMatch) -> dict[str, Any]:
-    """Canonical RelevantMatch -> bounded, privacy-safe dict.
-
-    Same privacy boundary as ``_receipt_dict``: no raw prompts/transcripts/
-    diffs/stdout/stderr/absolute paths. Additionally excludes every
-    Note-severity finding (see ``history.query`` module docstring) — only
-    Critical/High/Medium/Low findings, which come from actual review/
-    verification results rather than free-form agent notes, are included.
-    """
-    d = _shard_dict(match.shard)
-    d.update({
-        "score": match.score,
-        "why_relevant": list(match.signals),
-        "status": match.status,
-        "verification_status": match.verification_status or None,
-        "verification_reason": _truncate(match.verification_reason) or None,
-        "result": _truncate(match.result),
-        "repo": match.repo,
-        "files": list(match.files[:MAX_FILES]),
-        "findings": [_finding_dict(f) for f in match.findings[:MAX_FINDINGS]],
-        "attempts": [_relevant_attempt_dict(a) for a in match.attempts],
-    })
-    return d
 
 
 def build_server(*, repo_path: Path | None = None) -> FastMCP:
@@ -221,7 +95,7 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
         shards = history_query.list_shards(
             limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
         )
-        return [_shard_dict(s) for s in shards]
+        return [shard_to_dict(s) for s in shards]
 
     @mcp.tool()
     def get_shard(shard_id: str) -> dict[str, Any]:
@@ -234,7 +108,7 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
             shard = history_query.get_shard(shard_id, repo_path=repo_path)
         except UnknownShardError as exc:
             raise ValueError(str(exc)) from None
-        return _shard_dict(shard)
+        return shard_to_dict(shard)
 
     @mcp.tool()
     def get_receipt(
@@ -254,7 +128,7 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
             )
         except (UnknownShardError, UnknownRunError) as exc:
             raise ValueError(str(exc)) from None
-        return _receipt_dict(receipt)
+        return receipt_to_dict(receipt)
 
     @mcp.tool()
     def search_history(
@@ -269,7 +143,7 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
         hits = history_query.search_history(
             query, limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
         )
-        return [_search_hit_dict(h) for h in hits]
+        return [search_hit_to_dict(h) for h in hits]
 
     @mcp.tool()
     def relevant_context(
@@ -292,7 +166,7 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
         )
         return {
             "task": ctx.task,
-            "matches": [_relevant_match_dict(m) for m in ctx.matches],
+            "matches": [relevant_match_to_dict(m) for m in ctx.matches],
             "context_text": ctx.context_text,
         }
 

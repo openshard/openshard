@@ -6,6 +6,41 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- Strong local visibility (Free v0.4.0): a user never has to trust that
+  OpenShard is "working in the background" -- four commands show exactly
+  what it captured, offline, for the current repository:
+  - `openshard last` is the polished "what just happened?" view: task,
+    status, executor, model(s), duration, provider-reported tokens,
+    estimated cost, changed files, checks, capture depth, evidence kinds and
+    result, straight from the newest Shard receipt. When run from a
+    subdirectory it says which repository root the history came from;
+    `--json` gains a `repo` block (identity, folder name, relative history
+    path -- never an absolute path).
+  - `openshard history [--limit N] [--repo R] [--json]` lists recent Shards
+    newest first: time, shard id, task, agent, the status OpenShard can
+    truthfully claim (a completed Claude Code turn is shown as `Completed`,
+    never as verified), a check summary, estimated cost, changed-file count,
+    attempt count and partial-capture marker.
+  - `openshard context "<task>" [--limit N] [--text] [--json]` exposes the
+    same `relevant_context` the local MCP server gives an agent, with the
+    signals that matched each Shard, its score, status/verification, retry
+    history, changed files, non-Note findings and provenance (who ran it,
+    how completely it was observed) -- plus a plain-English "How ranking
+    works" footer generated from the scorer's own constants. `--text`
+    prints the exact block an agent would receive. Retrieval quality is
+    unchanged (PR10).
+  - `openshard stats [--limit N] [--repo R] [--json]` gives honest counts
+    derived from existing receipts: Shards/attempts/retries, agents, origin
+    and capture depth, models (with an explicit `unknown` bucket),
+    verification outcomes, Claude Code turn status (labelled as not being
+    verification), estimated cost with the number of Shards it covers and
+    the number missing it, provider-reported token totals, observed
+    duration, files changed and the most-changed files. No productivity or
+    efficiency scores. `stats completeness` / `stats failures` are unchanged.
+  - `openshard.history.locate` resolves the history root for all of the
+    above; `openshard.history.views` holds the single privacy-bounded dict
+    projection shared by the MCP server and the CLI `--json` surfaces.
+
 - Zero-friction onboarding: `openshard setup` is now the one command a new
   user needs. It detects the environment (git repository, Claude Code CLI,
   existing MCP/hook/status-line configuration, local history writability),
@@ -61,6 +96,18 @@ All notable changes to OpenShard are documented here.
 - Untracked new files are now reported by the hook capture (`git ls-files
   --others`); work committed during a session is diffed against the HEAD
   snapshotted at session start.
+
+### Fixed
+
+- `openshard last` (and `stats completeness` / `stats failures`) read
+  `.openshard/runs.jsonl` relative to the current directory, so running
+  them from a subdirectory of a repository reported "No run history found"
+  even though Claude Code hooks had recorded Shards at the repository root.
+  They now resolve the repository's history root from any subdirectory
+  (`repo`, `repo/subdir`, `repo/subdir/deeper` all read the same file),
+  stop at the nearest `.git` so a nested repository never reads its
+  parent's history, and never reach a sibling repository. Non-git
+  directories keep the previous cwd behaviour.
 
 ### Changed
 
