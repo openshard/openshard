@@ -1,0 +1,7 @@
+Add a `relay snapshot PATH` command that writes every job currently in the queue to PATH, one job per line, in the same tab-separated format the queue file itself uses.
+
+Requirements:
+- `relay snapshot PATH` must not modify the queue file itself, only write PATH.
+- Add unit tests for the new behaviour and make sure the project's checks pass.
+
+Do not commit.

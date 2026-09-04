@@ -1,0 +1,3 @@
+Add validation to `relay add`: a job's `retries` value must not be negative. If someone runs `relay add NAME COMMAND --retries -1`, reject it with a clear error and do not add the job.
+
+Add a unit test for this validation and run the test suite. Do not commit.

@@ -1,0 +1,8 @@
+Add a `relay rename OLD_NAME NEW_NAME` command that renames an existing job, keeping its command and every other field unchanged.
+
+Requirements:
+- `relay rename OLD_NAME NEW_NAME` fails with a clear error (and changes nothing) if OLD_NAME does not exist, or if NEW_NAME is already used by a different job.
+- Renaming a job must not change its position in the queue.
+- Add unit tests for the new behaviour and make sure the project's checks pass.
+
+Do not commit.

@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "2_multi_attempt_chronology",
+  "title": "Multi-attempt chronology: a same-Shard failed attempt followed by a corrected one",
+  "repository": {
+    "kind": "seed",
+    "path": "../_shared/relay_seed",
+    "default_branch": "main",
+    "base_commit": "d8c94df70eb695cc322f97738adb9a6dc4e710d0"
+  },
+  "burn_in": {
+    "prompt": "burn_in_stage1_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900,
+    "require_verification_failed": true,
+    "require_known_failed_approach": true,
+    "require_expected_evidence": true,
+    "capture": "claude_wrap_chain",
+    "wrap_stages": [
+      {"prompt": "burn_in_stage1_prompt.txt", "task": "Add relay purge (removes noop jobs)"},
+      {"prompt": "burn_in_stage2_prompt.txt", "task": "Fix relay purge to write through QueueFile.save()"}
+    ]
+  },
+  "evaluation": {
+    "prompt": "evaluation_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900
+  },
+  "verification": {
+    "steps": [
+      {
+        "name": "hidden_tests",
+        "argv": [
+          "{python}", "-m", "unittest", "discover",
+          "-s", "{scenario}/verification/hidden_tests",
+          "-t", "{scenario}/verification/hidden_tests",
+          "-v"
+        ],
+        "cwd": "{workspace}",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "known_failed_approach": {
+    "id": "direct_file_write_bypassing_queuefile_save",
+    "description": "This project's queue file format has a compatibility rule (CONTRIBUTING.md): a record whose optional fields are all at their default must serialise exactly as it did before that field existed, so QueueFile.save()/format_line() must be the only way anything writes the queue file. The known failed approach (burn-in stage 1) implements relay purge with a raw, unmediated file write instead, which always writes every column -- violating that rule. Stage 2 fixes it by routing purge's write through QueueFile.save() -- the corrected second attempt of the same Shard this scenario captures.",
+    "mode": "all",
+    "criteria": [
+      {"kind": "verification_step_failed", "step": "hidden_tests"},
+      {"kind": "paths_changed", "any_of": ["relay/cli.py"]}
+    ]
+  },
+  "expected_evidence": {
+    "description": "After burn-in, the treatment history holds one Shard (executor claude_code_wrap) with two real, wrap-linked attempts: attempt 1 ('Add relay purge...', the known failed approach) and attempt 2 ('Fix relay purge...', the correction). This is what the scenario actually verifies: the same shard_id on both entries (attempt_number 1 and 2), and that relevant_context surfaces both as a per-attempt status list ('Attempts: 1: ..., 2: ...'). It does NOT verify a history.query.RecoveryObservation, and never claims one: neither attempt carries a verification_passed value, since no production real-agent capture path (Claude/Codex hooks, the OpenCode plugin, or `openshard wrap`) ever records one -- only OpenShard's native run pipeline does, which PR13 deliberately excludes as 'the coding agent'. See notes below and README.md for the full, explicit product-gap statement.",
+    "min_shards": 1,
+    "executor": "claude_code_wrap",
+    "task_contains_any": ["purge", "queue"],
+    "files_include_any": ["relay/cli.py"],
+    "files_exclude_all": []
+  },
+  "notes": [
+    "The evaluation prompt (reset-retries) is a different, related task from the burn-in's (purge); it names no files and does not describe the file-write-discipline issue at all.",
+    "Burn-in stage 2's task text ('Fix relay purge to go through QueueFile.save()') does name the correct mechanism -- this is intentional: it is evidence about a DIFFERENT, already-fixed past task, and the eval task (reset-retries) requires generalising that principle, not copying a literal answer. This is different from a same-task solution leak (see Scenario 1), which this scenario does not have: applying 'always route file writes through QueueFile.save()' to reset-retries still requires the agent to write reset-retries' own logic.",
+    "Hidden verification is shared by every stage of this scenario (burn-in stage 1 checks purge, burn-in stage 2 checks purge, the evaluation arms check reset-retries -- purge does not exist post-reset). Each TestCase skips itself when its own subcommand is not registered, so python -m unittest's exit code always reflects only the feature actually present at that stage.",
+    "PRODUCT GAP (documented, not fixed by PR13): OpenShard's PR11 added history.query.RecoveryObservation, which derives a verified fail-then-pass chronology from a Shard's attempts. External-agent hook/plugin capture (Claude Code hooks, the OpenCode plugin) and `openshard wrap` do not currently persist the verification_passed / osn_verification_contract fields RecoveryObservation is derived from -- only OpenShard's native run pipeline writes them. So PR13 cannot honestly test RecoveryObservation against externally-captured history today; this scenario tests the multi-attempt chronology (same shard_id, sequential attempt_number, per-attempt rendering) that IS real and IS captured, and stops there. Closing this gap would mean changing what external capture persists, which is a production-OpenShard decision outside PR13's scope."
+  ]
+}

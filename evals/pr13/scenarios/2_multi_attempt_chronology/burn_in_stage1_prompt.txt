@@ -1,0 +1,5 @@
+Add a `relay purge` command: `relay purge` removes every job whose command is exactly `noop`, leaving the rest of the queue file untouched.
+
+Implement it directly: load the queue, filter out the matching jobs, and write the remaining jobs back to the queue file yourself with a plain `open(path, "w")` — write each line as `f"{job.name}\t{job.command}\t{job.retries}\n"`. Do not use `QueueFile.save()`.
+
+Add a unit test for `relay purge` and run the test suite. Do not commit.

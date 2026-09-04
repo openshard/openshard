@@ -1,0 +1,5 @@
+Add a `relay export PATH` command that writes every job in the queue to PATH as CSV: one line per job, comma-separated (`name,command,retries`), no header row.
+
+Implement the write as a single string with `\n` between lines, written with `Path(path).write_text(csv_text, encoding="utf-8")` — nothing fancier.
+
+Add a unit test for `relay export` and run the test suite. Do not commit.

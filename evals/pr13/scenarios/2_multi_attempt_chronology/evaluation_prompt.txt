@@ -1,0 +1,8 @@
+Add a `relay reset-retries` command: `relay reset-retries` sets every job's `retries` back to 0, leaving every other field of every job unchanged.
+
+Requirements:
+- `relay reset-retries` updates the queue file in place.
+- Every other field (name, command, and any other fields already in a job record) must be preserved exactly.
+- Add unit tests for the new behaviour and make sure the project's checks pass.
+
+Do not commit.

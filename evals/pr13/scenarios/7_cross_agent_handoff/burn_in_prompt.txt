@@ -1,0 +1,7 @@
+Jobs need an optional `tags` field: a comma-separated list of strings, default empty (no tags).
+
+Add the `tags` field directly to the `FIELDS` tuple in `relay/_schema.py`, as a new `Field(...)` entry following the exact same pattern as the existing entries. Only `relay/_schema.py`, `relay/queue.py`, and test files need to change for this — no other files in the repository need to be touched.
+
+Make `relay add NAME COMMAND --tags a,b,c` store it, and make `relay show` and `relay list` display it. Queue files written before this change, which have no tags column, must still load with tags empty.
+
+Add unit tests for the new behaviour and run the test suite. Do not commit.

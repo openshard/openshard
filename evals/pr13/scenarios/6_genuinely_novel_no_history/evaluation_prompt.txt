@@ -1,0 +1,6 @@
+Add a `watch` command that polls the queue file for changes (by checking its last-modified time) and reprints the full job list every time it changes, continuing until interrupted with Ctrl+C. Poll no more than a few times per second.
+
+Requirements:
+- Add unit tests for the new behaviour (test the polling/change-detection logic directly rather than actually running the command forever) and make sure the project's checks pass.
+
+Do not commit.

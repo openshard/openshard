@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "id": "6_genuinely_novel_no_history",
+  "title": "Genuinely novel task: no precedent anywhere in the repository's history",
+  "repository": {
+    "kind": "seed",
+    "path": "../_shared/relay_seed",
+    "default_branch": "main",
+    "base_commit": "d8c94df70eb695cc322f97738adb9a6dc4e710d0"
+  },
+  "burn_in": {
+    "prompt": "burn_in_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900,
+    "require_verification_failed": false,
+    "require_known_failed_approach": false,
+    "require_expected_evidence": false
+  },
+  "evaluation": {
+    "prompt": "evaluation_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900
+  },
+  "verification": {
+    "steps": [
+      {
+        "name": "hidden_tests",
+        "argv": [
+          "{python}", "-m", "unittest", "discover",
+          "-s", "{scenario}/verification/hidden_tests",
+          "-t", "{scenario}/verification/hidden_tests",
+          "-v"
+        ],
+        "cwd": "{workspace}",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "known_failed_approach": {
+    "id": "not_applicable_harm_test_scenario",
+    "description": "This scenario is not a known-bad-approach trap; it tests behaviour when history exists but is genuinely unrelated (docs-only) to a genuinely novel task. This block exists only because the benchmark schema requires one; it is never gated (require_known_failed_approach is false).",
+    "mode": "all",
+    "criteria": [
+      {"kind": "verification_step_failed", "step": "hidden_tests"},
+      {"kind": "paths_changed", "any_of": ["README.md"]}
+    ]
+  },
+  "expected_evidence": {
+    "description": "After burn-in the treatment history holds one real Shard for a docs-only change (README.md), touching no code file. The first two generic checks (min_shards; a shard whose task mentions 'license' and whose files are README.md only) are expected to pass and confirm the burn-in was genuinely captured. The third generic check, retrievable_via_relevant_context, is a positive-retrievability assertion and is EXPECTED TO READ FALSE here: relevant_context(evaluation prompt) returns ZERO matches by design -- the burn-in task shares no non-stopword vocabulary with the evaluation task at all (unlike Scenario 5, where the project name alone yields a weak nonzero score). Because that sub-check folds into the overall 'present' flag, 'present' will also read false for this scenario; require_expected_evidence is therefore false so the run is not aborted for achieving exactly the zero-match outcome it exists to test. The scenario's own tests assert the zero-match result directly against real captured history.",
+    "min_shards": 1,
+    "executor": "claude_code_hooks",
+    "task_contains_any": ["license"],
+    "files_include_any": ["README.md"],
+    "files_exclude_all": ["relay/cli.py", "relay/queue.py", "relay/records.py"]
+  },
+  "notes": [
+    "The evaluation prompt (relay watch) names no files and is unrelated to README.md or licensing.",
+    "Confirmed directly with a synthetic history entry before finalizing this scenario: relevant_context(evaluation_prompt) returns 0 matches against the burn-in Shard, and context_text reads 'No relevant prior OpenShard history found for this task.' -- this is the one scenario in this set where that literal claim holds; Scenario 5 documents why it could not achieve the same with a code-adjacent burn-in task.",
+    "The watch command is verified black-box (a real subprocess, the queue file mutated, stdout polled with bounded waits and the process always killed in a finally block) rather than assuming any internal API shape, since the evaluation prompt does not mandate one. Confirmed directly: the base commit fails fast (no hang), a correct implementation passes in under 2 seconds.",
+    "Expected effect: a harm/null-condition test. Treatment's .openshard/ history is non-empty but relevant_context is empty for this task -- treatment should behave identically to control, receiving no evidence to use either way.",
+    "Revision (2026-09-04): a live attempt aborted with burn_in_evidence_missing. Root cause: this scenario had require_expected_evidence: true, but the benchmark's generic expected-evidence check includes a positive retrievability sub-check (the burn-in Shard must appear in relevant_context(evaluation prompt)) that a zero-match scenario cannot satisfy by definition -- the captured Shard was real and matched on task/files; only that sub-check failed. Fixed by setting require_expected_evidence: false (the same choice Scenario 5 already made for the same reason) and stating the expected read-out above. Nothing about the burn-in prompt, evaluation prompt, hidden verification, or the shared harness changed, and the prior history was not made artificially retrievable."
+  ]
+}

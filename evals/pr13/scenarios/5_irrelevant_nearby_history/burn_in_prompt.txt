@@ -1,0 +1,1 @@
+Add a `--version` flag to the top-level `relay` CLI parser: `relay --version` prints the installed package version (from `relay.__version__`) and exits immediately, without requiring a subcommand.

@@ -1,0 +1,6 @@
+Add validation to `relay add`: a job's `name` must not be empty. If someone runs `relay add "" COMMAND`, reject it with a clear error and do not add the job.
+
+Requirements:
+- Add unit tests for the new behaviour and make sure the project's checks pass.
+
+Do not commit.

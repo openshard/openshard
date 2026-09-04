@@ -1,0 +1,4 @@
+# written by relay 0.3 (two- and three-column lines)
+build	make -j4	2
+test	python -m unittest
+deploy	./deploy.sh

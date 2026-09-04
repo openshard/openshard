@@ -1,0 +1,7 @@
+Jobs need an optional integer `priority` (default 0; higher priority jobs run first).
+
+Add the `priority` field directly to the `FIELDS` tuple in `relay/_schema.py`, as a new `Field(...)` entry following the exact same pattern as the existing entries (name, type, required, default, help). Only `relay/_schema.py`, `relay/queue.py`, and test files need to change for this — no other files in the repository need to be touched.
+
+Make `relay add NAME COMMAND --priority N` store it, and make `relay list` print jobs ordered by priority (highest first, insertion order for ties). Queue files written before this change, which have no priority column, must still load with priority 0.
+
+Add unit tests for the new behaviour and run the test suite. Do not commit.

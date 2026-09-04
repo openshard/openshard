@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "5_irrelevant_nearby_history",
+  "title": "Irrelevant nearby history: unrelated history in the same repository",
+  "repository": {
+    "kind": "seed",
+    "path": "../_shared/relay_seed",
+    "default_branch": "main",
+    "base_commit": "d8c94df70eb695cc322f97738adb9a6dc4e710d0"
+  },
+  "burn_in": {
+    "prompt": "burn_in_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900,
+    "require_verification_failed": false,
+    "require_known_failed_approach": false,
+    "require_expected_evidence": false
+  },
+  "evaluation": {
+    "prompt": "evaluation_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900
+  },
+  "verification": {
+    "steps": [
+      {
+        "name": "hidden_tests",
+        "argv": [
+          "{python}", "-m", "unittest", "discover",
+          "-s", "{scenario}/verification/hidden_tests",
+          "-t", "{scenario}/verification/hidden_tests",
+          "-v"
+        ],
+        "cwd": "{workspace}",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "known_failed_approach": {
+    "id": "not_applicable_harm_test_scenario",
+    "description": "This scenario is not a known-bad-approach trap; it tests OpenShard's relevance scoring on a genuinely unrelated task. This block exists only because the benchmark schema requires one; it is never gated (require_known_failed_approach is false).",
+    "mode": "all",
+    "criteria": [
+      {"kind": "verification_step_failed", "step": "hidden_tests"},
+      {"kind": "paths_changed", "any_of": ["relay/cli.py"]}
+    ]
+  },
+  "expected_evidence": {
+    "description": "After burn-in the treatment history holds one real Shard for a --version flag -- code-adjacent (touches relay/cli.py, the same file most CLI features touch) but topically unrelated to the evaluation task (rename). Confirmed directly (see the scenario's own tests) that OpenShard's deterministic keyword-overlap scoring gives this the minimum possible nonzero score (2) from the incidental project-name ('relay') overlap alone -- no file-overlap signal, no failure/retry bonus, nothing else. This is NOT the empty-history case (Scenario 6); it deliberately exercises the low end of the scoring range rather than true absence.",
+    "min_shards": 1,
+    "executor": "claude_code_hooks",
+    "task_contains_any": ["version"],
+    "files_include_any": ["relay/cli.py"],
+    "files_exclude_all": []
+  },
+  "notes": [
+    "The evaluation prompt (relay rename) names no files and does not reference the burn-in's --version flag.",
+    "Earlier drafts of this scenario's burn-in task (a 'relay count' command, plus the standard 'add unit tests / do not commit' trailer every other scenario's prompts use) scored 6, not 2 -- 'command'/'queue'/'unit'/'commit' all incidentally overlapped with the evaluation prompt's own wording. The burn-in prompt was rewritten (no shared trailer, no queue/job/command vocabulary) and the resulting score verified directly with a synthetic history entry before finalizing this scenario, rather than assumed.",
+    "require_expected_evidence is false: the generic expected-evidence check's retrievability sub-check expects a clearly 'ok' match, which is not the honest framing here (the match is real but deliberately weak) -- see tests/test_pr13_scenarios_2to7.py for a narrow, scenario-specific assertion on the exact score and signal instead.",
+    "Expected effect: a harm test. relay rename's correct implementation does not depend on the --version flag at all; the question is whether a weak, low-information match changes treatment's behaviour (it should not)."
+  ]
+}

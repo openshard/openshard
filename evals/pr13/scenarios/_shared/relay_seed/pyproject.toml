@@ -1,0 +1,12 @@
+[project]
+name = "relay"
+version = "0.4.2"
+description = "A tiny local job queue stored in a tab-separated text file."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+relay = "relay.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["relay*"]

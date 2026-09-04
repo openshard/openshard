@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "3_prior_engineering_constraint",
+  "title": "Prior engineering constraint: a platform line-ending discipline learned on a different task",
+  "repository": {
+    "kind": "seed",
+    "path": "../_shared/relay_seed",
+    "default_branch": "main",
+    "base_commit": "d8c94df70eb695cc322f97738adb9a6dc4e710d0"
+  },
+  "burn_in": {
+    "prompt": "burn_in_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900,
+    "require_verification_failed": true,
+    "require_known_failed_approach": true,
+    "require_expected_evidence": true
+  },
+  "evaluation": {
+    "prompt": "evaluation_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900
+  },
+  "verification": {
+    "steps": [
+      {
+        "name": "hidden_tests",
+        "argv": [
+          "{python}", "-m", "unittest", "discover",
+          "-s", "{scenario}/verification/hidden_tests",
+          "-t", "{scenario}/verification/hidden_tests",
+          "-v"
+        ],
+        "cwd": "{workspace}",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "known_failed_approach": {
+    "id": "platform_default_newline_translation",
+    "description": "A plain text-mode file write (open()/Path.write_text() without newline='' or newline='\\n') translates '\\n' to the platform line separator on write -- CRLF on Windows -- even when the in-memory text only ever used '\\n'. relay's own queue-file writer (QueueFile.save) already avoids this (write_text(..., newline='\\n')); the burn-in's `relay export` is built with a plain write, so it silently produces CRLF output.",
+    "mode": "all",
+    "criteria": [
+      {"kind": "verification_step_failed", "step": "hidden_tests"},
+      {"kind": "paths_changed", "any_of": ["relay/cli.py"]}
+    ]
+  },
+  "expected_evidence": {
+    "description": "After burn-in the treatment history holds one hook-captured Claude Code Shard for the export task whose changed files include relay/cli.py. Hook capture records no verification outcome, so the Shard's verification status is 'Not recorded'; the useful evidence is the prior attempt's existence, its task text (mentioning CSV/export/queue file writing), and the files it touched -- not a description of the specific bug.",
+    "min_shards": 1,
+    "executor": "claude_code_hooks",
+    "task_contains_any": ["export", "csv", "queue"],
+    "files_include_any": ["relay/cli.py"],
+    "files_exclude_all": []
+  },
+  "notes": [
+    "The evaluation prompt (relay snapshot) is a different, related file-writing task; it names no files and says nothing about line endings, encodings, or the platform.",
+    "The burn-in prompt explicitly forces the known failed approach (a plain write_text call) so the failure is deterministic rather than relying on a model happening to make the same mistake unprompted -- the same lesson learned revising Scenario 1 after Pilot 0.",
+    "Verification is shared by every stage of this scenario (burn-in checks 'export', the evaluation arms check 'snapshot' -- 'export' does not exist post-reset); each hidden TestCase skips itself when its own command is not registered, so the exit code always reflects only the feature genuinely present at that stage.",
+    "Expected effect: plausible modest help for treatment (a concrete, generalizable file-writing discipline was demonstrated on a related task), without a forced correctness trap on the evaluation task itself -- unlike Scenario 1, control is not artificially set up to fail; a careful implementation of `snapshot` can pass regardless of prior evidence."
+  ]
+}

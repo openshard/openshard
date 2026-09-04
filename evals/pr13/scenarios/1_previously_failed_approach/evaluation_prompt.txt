@@ -1,0 +1,9 @@
+Add an optional integer `priority` to job records in this repository (default 0; higher priority jobs should run first).
+
+Requirements:
+- `relay add NAME COMMAND --priority N` stores the priority.
+- `relay list` prints jobs ordered by priority, highest first, keeping insertion order for equal priorities.
+- Queue files written before this change (no priority column) must still load, with priority 0.
+- Add unit tests for the new behaviour and make sure the project's checks pass.
+
+Do not commit.

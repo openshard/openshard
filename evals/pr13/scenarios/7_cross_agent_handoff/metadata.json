@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "id": "7_cross_agent_handoff",
+  "title": "Cross-agent handoff: OpenCode creates history, Claude Code (Sonnet) evaluates",
+  "status": "inconclusive",
+  "status_reason": "Not completed under PR13. Three live attempts produced no valid failed-prior-attempt precondition and no A/B arm ever ran: v1 -- OpenCode received an invalid model id (the Claude Code alias 'sonnet'); v2 -- OpenCode reached OpenRouter but the model call failed with 402 insufficient credits (exit 0, no work); v3 -- OpenCode ran successfully but the burn-in PASSED verification (the agent implemented tags correctly instead of hand-editing the generated schema), so burn_in_did_not_fail. No valid cross-agent benchmark result was recorded; cross-agent evidence transfer remains unmeasured. Not to be tuned or rerun as part of PR13.",
+  "repository": {
+    "kind": "seed",
+    "path": "../_shared/relay_seed",
+    "default_branch": "main",
+    "base_commit": "d8c94df70eb695cc322f97738adb9a6dc4e710d0"
+  },
+  "burn_in": {
+    "prompt": "burn_in_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900,
+    "require_verification_failed": true,
+    "require_known_failed_approach": true,
+    "require_expected_evidence": true,
+    "capture": "opencode_hooks",
+    "agent": "opencode",
+    "agent_model": "openrouter/anthropic/claude-sonnet-5"
+  },
+  "evaluation": {
+    "prompt": "evaluation_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900
+  },
+  "verification": {
+    "steps": [
+      {
+        "name": "generated_schema_in_sync",
+        "argv": ["{python}", "scripts/gen_schema.py", "--check"],
+        "cwd": "{workspace}",
+        "timeout_seconds": 60
+      },
+      {
+        "name": "hidden_tests",
+        "argv": [
+          "{python}", "-m", "unittest", "discover",
+          "-s", "{scenario}/verification/hidden_tests",
+          "-t", "{scenario}/verification/hidden_tests",
+          "-v"
+        ],
+        "cwd": "{workspace}",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "known_failed_approach": {
+    "id": "hand_edited_generated_schema_cross_agent",
+    "description": "Same known failed approach as Scenario 1 (relay/_schema.py is generated from schema/jobs.json; hand-editing the generated module instead of the source of truth passes the visible tests but fails the repository's own generator check) -- reused here on a different field ('tags') and a different burn-in agent (OpenCode instead of Claude Code hooks), to isolate the agent-identity variable from Scenario 1's already-tested same-agent, same-task repeat.",
+    "mode": "all",
+    "criteria": [
+      {"kind": "verification_step_failed", "step": "generated_schema_in_sync"},
+      {"kind": "paths_changed", "any_of": ["relay/_schema.py"]}
+    ]
+  },
+  "expected_evidence": {
+    "description": "After burn-in the treatment history holds one OpenCode-plugin-captured Shard (executor opencode_plugin) for the tags task, whose changed files include relay/_schema.py but not schema/jobs.json. Plugin capture, like Claude Code hook capture, records no verification outcome; the useful evidence for the Claude/Sonnet evaluation arm is the prior attempt's existence, its task text, and the files it touched -- captured by a different agent than the one now being evaluated.",
+    "min_shards": 1,
+    "executor": "opencode_plugin",
+    "task_contains_any": ["tags"],
+    "files_include_any": ["relay/_schema.py"],
+    "files_exclude_all": ["schema/jobs.json"]
+  },
+  "notes": [
+    "The evaluation prompt is neutral: it names no files and does not say how to make the schema change. Both arms are evaluated by Claude Code (the --model given to the benchmark, e.g. Sonnet) -- only the burn-in agent differs from every other scenario.",
+    "The burn-in prompt explicitly restricts the burn-in agent's changes to relay/_schema.py, relay/queue.py, and test files (the same deterministic, no-golden-solution-leak technique Scenario 1's revision 2 uses), so the known failed approach is forced regardless of which agent runs it.",
+    "This scenario requires the OpenCode CLI ('opencode') to be installed and authenticated on the machine running the benchmark; the preflight check aborts with 'opencode_cli_missing' if it is not on PATH. Not yet run live -- see tests/test_pr13_scenarios_2to7.py for deterministic coverage using a fake 'opencode' process that calls OpenShard's real OpenCode-plugin translator/fold path directly.",
+    "Verified directly against hand-written naive (hand-edited relay/_schema.py) and correct (schema/jobs.json + regenerate) implementations of the tags field before finalizing: base commit and the naive approach both fail generated_schema_in_sync; the correct approach passes every hidden test.",
+    "Revision (2026-09-04): a live attempt aborted with burn_in_failed_differently. Root cause (from the run's own artifacts): the benchmark's --model (the Claude Code alias 'sonnet') was passed straight to `opencode run --model`, which requires 'provider/model'; OpenCode answered 'Model not found: sonnet/.' and exited 1 in ~30s with zero tool calls and zero file changes. Its plugin still captured a task-only Shard (session created, prompt submitted, idle), so the runner went on to verification, which failed only because tags was never added while gen_schema --check trivially passed on the untouched tree -- so neither known-failed-approach criterion could match. Fix: burn_in.agent_model now names OpenCode's own model id (required and validated for opencode_hooks; never the Claude --model), and the opencode burn-in aborts as burn_in_agent_failed when the agent process exits non-zero, so a burn-in that never attempted the task can no longer be mislabelled as 'failed differently'. The burn-in prompt, evaluation prompt, hidden verification and known_failed_approach criteria are unchanged.",
+    "Revision v2 (2026-09-04): a second live attempt (pilot-scenario7-v2) aborted with the same burn_in_failed_differently, but for a DIFFERENT reason found only in the artifacts: OpenCode accepted the openrouter/anthropic/claude-sonnet-5 model, but the model call itself failed with an OpenRouter 402 'Insufficient credits' error and OpenCode EXITED 0 -- with zero tool calls, zero turns, and zero file changes (B1 byte-identical to base; gen_schema --check trivially passed). The v1 fix only guarded a NON-zero exit, so this exit-0 no-work case slipped through to verification and mislabelled again. This is an environment condition (no OpenRouter credits on this machine), not a prompt/fixture/detector defect; the fix makes the abort ACCURATE, it does not and cannot make Scenario 7 pass live without credits. Fix: the opencode burn-in now also aborts as burn_in_agent_failed when the agent exits 0 but made no attempt (0 tool calls AND 0 changed files), quoting OpenCode's own error. Safe because the known bad approach always edits relay/_schema.py, so any genuine attempt changes at least one file. Prompt, evaluation prompt, hidden verification and criteria remain unchanged; scenarios 1-6 are untouched (the guard lives only in the opencode_hooks burn-in branch)."
+  ]
+}

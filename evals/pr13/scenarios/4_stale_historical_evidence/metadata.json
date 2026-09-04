@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "4_stale_historical_evidence",
+  "title": "Stale historical evidence: a superficially similar but domain-mismatched prior fix",
+  "repository": {
+    "kind": "seed",
+    "path": "../_shared/relay_seed",
+    "default_branch": "main",
+    "base_commit": "d8c94df70eb695cc322f97738adb9a6dc4e710d0"
+  },
+  "burn_in": {
+    "prompt": "burn_in_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900,
+    "require_verification_failed": false,
+    "require_known_failed_approach": false,
+    "require_expected_evidence": true
+  },
+  "evaluation": {
+    "prompt": "evaluation_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900
+  },
+  "verification": {
+    "steps": [
+      {
+        "name": "hidden_tests",
+        "argv": [
+          "{python}", "-m", "unittest", "discover",
+          "-s", "{scenario}/verification/hidden_tests",
+          "-t", "{scenario}/verification/hidden_tests",
+          "-v"
+        ],
+        "cwd": "{workspace}",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "known_failed_approach": {
+    "id": "not_applicable_harm_test_scenario",
+    "description": "This scenario is not a known-bad-approach trap (see Scenario 1); it tests whether superficially similar but domain-mismatched history helps, hurts, or is neutral. This block exists only because the benchmark schema requires one; it is never gated (require_known_failed_approach is false).",
+    "mode": "all",
+    "criteria": [
+      {"kind": "verification_step_failed", "step": "hidden_tests"},
+      {"kind": "paths_changed", "any_of": ["relay/records.py", "relay/cli.py"]}
+    ]
+  },
+  "expected_evidence": {
+    "description": "After burn-in the treatment history holds one hook-captured Claude Code Shard for the retries-validation task. Its content does not directly answer the evaluation task (name validation, a different field) -- the question this scenario asks is whether exposure to it helps, hurts, or makes no measurable difference to treatment's correctness on the actual (unrelated-field) task.",
+    "min_shards": 1,
+    "executor": "claude_code_hooks",
+    "task_contains_any": ["retries", "validation", "negative"],
+    "files_include_any": ["relay/records.py", "relay/cli.py"],
+    "files_exclude_all": []
+  },
+  "notes": [
+    "The evaluation prompt (empty-name validation) names no files and does not reference the burn-in's retries validation at all.",
+    "Verification (hidden_tests) checks ONLY the evaluation task (empty-name rejection); it deliberately does not check the burn-in's own retries-validation feature, since burn-in's code is reset away before the arms run and its own correctness is not gated for this scenario (require_verification_failed/require_known_failed_approach are both false -- only require_expected_evidence, confirming the Shard genuinely exists, is required).",
+    "Confirmed on the base commit before writing this scenario: relay add \"\" COMMAND currently succeeds (exit 0) -- the empty-name gap is real, not synthetic.",
+    "Expected effect: a harm test. Both arms should be able to solve the evaluation task; the metric of interest is whether treatment's exposure to the retries-validation Shard changes its outcome at all (it plausibly should not, since the content does not transfer to name validation) -- not a correctness delta."
+  ]
+}

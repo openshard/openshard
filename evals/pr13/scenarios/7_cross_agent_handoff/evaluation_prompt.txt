@@ -1,0 +1,9 @@
+Add an optional `tags` field to job records in this repository: a comma-separated list of strings, default empty (no tags).
+
+Requirements:
+- `relay add NAME COMMAND --tags a,b,c` stores it.
+- `relay show` and `relay list` display it.
+- Queue files written before this change (no tags column) must still load, with tags empty.
+- Add unit tests for the new behaviour and make sure the project's checks pass.
+
+Do not commit.

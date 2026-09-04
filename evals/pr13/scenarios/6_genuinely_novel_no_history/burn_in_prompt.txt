@@ -1,0 +1,1 @@
+Add a one-line License note near the top of README.md: `License: Apache-2.0`.

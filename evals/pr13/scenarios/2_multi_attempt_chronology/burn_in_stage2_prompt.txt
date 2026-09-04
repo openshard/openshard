@@ -1,0 +1,3 @@
+The `relay purge` command's queue file output doesn't match this project's compatibility rules for optional trailing fields (see CONTRIBUTING.md). Fix `relay purge` so it writes the queue file through `QueueFile.save()` instead of writing the file directly, so its output matches every other command's.
+
+Run the test suite to confirm the fix. Do not commit.

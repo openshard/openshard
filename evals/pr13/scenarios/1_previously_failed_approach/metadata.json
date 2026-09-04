@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "id": "1_previously_failed_approach",
+  "title": "Previously failed approach: hand-editing a generated schema module",
+  "repository": {
+    "kind": "seed",
+    "path": "seed",
+    "default_branch": "main",
+    "base_commit": "d8c94df70eb695cc322f97738adb9a6dc4e710d0"
+  },
+  "burn_in": {
+    "prompt": "burn_in_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900,
+    "require_verification_failed": true,
+    "require_known_failed_approach": true,
+    "require_expected_evidence": true
+  },
+  "evaluation": {
+    "prompt": "evaluation_prompt.txt",
+    "max_turns": 40,
+    "timeout_seconds": 900
+  },
+  "verification": {
+    "steps": [
+      {
+        "name": "generated_schema_in_sync",
+        "argv": ["{python}", "scripts/gen_schema.py", "--check"],
+        "cwd": "{workspace}",
+        "timeout_seconds": 60
+      },
+      {
+        "name": "hidden_tests",
+        "argv": [
+          "{python}", "-m", "unittest", "discover",
+          "-s", "{scenario}/verification/hidden_tests",
+          "-t", "{scenario}/verification/hidden_tests",
+          "-v"
+        ],
+        "cwd": "{workspace}",
+        "timeout_seconds": 300
+      }
+    ]
+  },
+  "known_failed_approach": {
+    "id": "hand_edited_generated_schema",
+    "description": "relay/_schema.py is generated from schema/jobs.json (CONTRIBUTING.md; header comment). The failed approach adds the field by editing the generated module by hand instead of editing schema/jobs.json and regenerating. The feature works locally and the visible tests pass, but the repository's own check (python scripts/gen_schema.py --check) fails and the source of truth never learns about the field.",
+    "mode": "all",
+    "criteria": [
+      {"kind": "verification_step_failed", "step": "generated_schema_in_sync"},
+      {"kind": "paths_changed", "any_of": ["relay/_schema.py"]}
+    ]
+  },
+  "expected_evidence": {
+    "description": "After burn-in the treatment history holds one hook-captured Claude Code Shard for the same task whose changed files include relay/_schema.py but not schema/jobs.json. Hook capture records no verification outcome, so the Shard's verification status is 'Not recorded'; the useful evidence is the prior attempt itself, its task text, and the files it touched.",
+    "min_shards": 1,
+    "executor": "claude_code_hooks",
+    "task_contains_any": ["priority"],
+    "files_include_any": ["relay/_schema.py"],
+    "files_exclude_all": ["schema/jobs.json"]
+  },
+  "revision": {
+    "version": 2,
+    "changed_at": "2026-09-04",
+    "changed_field": "burn_in.prompt (burn_in_prompt.txt)",
+    "reason": "Pilot 0 ran this scenario's original burn-in prompt (a soft nudge naming only relay/_schema.py) through the real Claude Code CLI with Claude Sonnet 5 as the burn-in model. Sonnet independently discovered CONTRIBUTING.md's generator workflow and implemented the feature correctly (schema/jobs.json + regeneration), so require_known_failed_approach was not satisfied and the benchmark aborted before any workspace for arm A or B was created -- zero control/treatment pairs ran. The burn-in prompt was revised, before any control/treatment outcome existed to react to, to explicitly restrict the burn-in agent's changes to relay/_schema.py, relay/queue.py, and test files, forcing the known failed approach deterministically. It still never names schema/jobs.json, scripts/gen_schema.py, or the word 'regenerate', so the change does not teach the burn-in agent to avoid the correct approach by naming it -- it only closes the set of files the agent is told to touch. Nothing about the evaluation prompt, verification steps, known_failed_approach criteria, or expected_evidence definition changed."
+  },
+  "notes": [
+    "The evaluation prompt is neutral: it names no files and does not say how to make the schema change.",
+    "The burn-in prompt explicitly restricts the burn-in agent's changes to relay/_schema.py, relay/queue.py, and test files, forcing the known failed approach deterministically. It never names schema/jobs.json, scripts/gen_schema.py, or the generator, so the Shard's captured task text (visible to the treatment arm via relevant_context) never leaks the correct implementation path -- see 'revision' above.",
+    "Verification is benchmark-owned and runs after the agent has exited; hidden tests never enter the workspace."
+  ]
+}
