@@ -244,6 +244,22 @@ class SetupResult:
     next_steps: list[str] = field(default_factory=list)
     # PR9.5: {"state": running|started|disabled|unavailable, "port": int|None}
     capture_service: dict | None = None
+    # PR12: Codex / OpenCode capture integrations, keyed by agent
+    # ("codex", "opencode"); each configured only when its CLI is installed.
+    agents: dict = field(default_factory=dict)
+
+    @property
+    def claude_configured(self) -> bool:
+        return (
+            self.mcp is not None and self.mcp.status != "error"
+            and self.hooks is not None and self.hooks.status != "error"
+        )
+
+    def configured_agents(self) -> list[str]:
+        """Agent keys whose capture integration is configured after this setup."""
+        out: list[str] = ["claude_code"] if self.claude_configured else []
+        out.extend(k for k, r in self.agents.items() if getattr(r, "configured", False))
+        return out
 
     def to_dict(self) -> dict:
         return {
@@ -257,6 +273,8 @@ class SetupResult:
             "hooks": _hooks_result_dict(self.hooks),
             "statusline": _hooks_result_dict(self.statusline),
             "capture_service": self.capture_service if self.capture_service is not None else {"status": "skipped"},
+            "agents": {k: r.to_dict() for k, r in self.agents.items()},
+            "configured_agents": self.configured_agents(),
             "readiness": self.readiness,
             "ready": self.readiness == "ready",
             "next_steps": self.next_steps,
@@ -272,14 +290,35 @@ def ensure_capture_service() -> dict:
     return {"state": state, "port": port}
 
 
-def run_setup(*, repo_path: Path | None = None) -> SetupResult:
-    """Configure Claude Code capture for this repository, as safely as `mcp install claude` does.
+def _claude_install_step(claude_avail: ClaudeCliAvailability) -> str:
+    guidance = claude_avail.install_guidance[0] if claude_avail.install_guidance else None
+    step = "Install the Claude Code CLI"
+    if guidance:
+        step += f" (e.g. `{guidance}`)"
+    step += ", then re-run `openshard setup`."
+    return step
 
-    Orchestrates the existing installers -- no duplicate installation logic
-    lives here. Every step is idempotent, so calling this repeatedly (as
-    ``openshard setup`` run twice will) never duplicates configuration and
-    never re-writes a file whose content would not change.
+
+def run_setup(*, repo_path: Path | None = None) -> SetupResult:
+    """Configure capture for every supported agent installed on this machine.
+
+    Claude Code (MCP + hooks + status line, exactly as `mcp install claude`
+    does), then Codex hooks and the OpenCode plugin (PR12) for whichever of
+    those CLIs is on PATH. Orchestrates the existing installers -- no
+    duplicate installation logic lives here. Every step is idempotent, so
+    calling this repeatedly (as ``openshard setup`` run twice will) never
+    duplicates configuration and never re-writes a file whose content would
+    not change.
+
+    Readiness: ``ready`` when at least one detected agent is fully
+    configured and nothing blocking was found; ``ready_partial`` when
+    capture works but a limitation was recorded (a custom status line, a
+    user-owned plugin file, a skipped agent); ``not_ready`` when no
+    supported agent CLI is installed, the repository is not usable, or
+    every attempted install failed.
     """
+    from openshard.adapters.agent_setup import agent_label, detect_agent_cli, setup_detected_agents
+
     root = find_repo_root(repo_path)
     claude_avail = detect_claude_cli()
     base_dir = root if root is not None else (repo_path or Path.cwd())
@@ -294,64 +333,87 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
             history_path=history_path, history_writable=writable,
             mcp=None, hooks=None, statusline=None, readiness="not_ready",
             next_steps=["Run `openshard setup` again from inside a git repository "
-                        "to enable Claude Code capture for a project."],
+                        "to enable coding-agent capture for a project."],
         )
 
-    if not claude_avail.available:
-        guidance = claude_avail.install_guidance[0] if claude_avail.install_guidance else None
-        step = "Install the Claude Code CLI"
-        if guidance:
-            step += f" (e.g. `{guidance}`)"
-        step += ", then re-run `openshard setup`."
+    other_agents_present = [a for a in ("codex", "opencode") if detect_agent_cli(a)[0]]
+    if not claude_avail.available and not other_agents_present:
         return SetupResult(
             repo_root=root, is_git=True, claude_cli=claude_avail,
             history_path=history_path, history_writable=writable,
             mcp=None, hooks=None, statusline=None, readiness="not_ready",
-            next_steps=[step],
+            next_steps=[
+                _claude_install_step(claude_avail),
+                "Or install Codex (`npm install -g @openai/codex`) or OpenCode "
+                "(`npm install -g opencode-ai`); `openshard setup` configures whichever agents it finds.",
+            ],
         )
 
-    mcp_result = install_claude_mcp(repo_path=root)
-    next_steps.extend(mcp_result.warnings)
-    if mcp_result.status == "error":
-        next_steps.append(mcp_result.message)
-        return SetupResult(
-            repo_root=root, is_git=True, claude_cli=claude_avail,
-            history_path=history_path, history_writable=writable,
-            mcp=mcp_result, hooks=None, statusline=None, readiness="not_ready",
-            next_steps=next_steps,
-        )
-
-    # The capture service first: the HTTP hooks written below must target
-    # the port it actually listens on (normally the default; a different
-    # one only when the default is taken by another program).
+    # The capture service first: the Claude HTTP hooks and the OpenCode
+    # plugin written below must target the port it actually listens on
+    # (normally the default; a different one only when the default is
+    # taken by another program).
     service = ensure_capture_service()
-    hooks_result = install_claude_hooks(repo_root=root, port=service.get("port") or None)
-    next_steps.extend(hooks_result.warnings)
-    if hooks_result.status == "error":
-        next_steps.append(hooks_result.message)
-        return SetupResult(
-            repo_root=root, is_git=True, claude_cli=claude_avail,
-            history_path=history_path, history_writable=writable,
-            mcp=mcp_result, hooks=hooks_result, statusline=None, readiness="not_ready",
-            next_steps=next_steps, capture_service=service,
+    port = service.get("port") or None
+
+    mcp_result: ClaudeMcpInstallResult | None = None
+    hooks_result: ClaudeHooksInstallResult | None = None
+    statusline_result: ClaudeHooksInstallResult | None = None
+    claude_ok = False
+    claude_limited = False
+    if claude_avail.available:
+        mcp_result = install_claude_mcp(repo_path=root)
+        next_steps.extend(mcp_result.warnings)
+        if mcp_result.status == "error":
+            next_steps.append(mcp_result.message)
+        else:
+            hooks_result = install_claude_hooks(repo_root=root, port=port)
+            next_steps.extend(hooks_result.warnings)
+            if hooks_result.status == "error":
+                next_steps.append(hooks_result.message)
+            else:
+                claude_ok = True
+                statusline_result = install_claude_statusline(repo_root=root)
+                if statusline_result.status == "skipped_existing":
+                    claude_limited = True
+                    next_steps.append(
+                        f"Remove the custom statusLine entry in {SETTINGS_RELPATH.as_posix()} "
+                        "(or leave it) to enable model/cost/token capture in receipts."
+                    )
+                elif statusline_result.status == "error":
+                    claude_limited = True
+                    next_steps.append(statusline_result.message)
+    else:
+        next_steps.append(
+            "Claude Code CLI not found on PATH; Claude Code capture skipped ("
+            + _claude_install_step(claude_avail).rstrip(".") + ")."
         )
 
-    statusline_result = install_claude_statusline(repo_root=root)
-    if statusline_result.status == "skipped_existing":
+    agents = setup_detected_agents(repo_root=root, port=port)
+    agents_ok: list[str] = []
+    agents_limited = False
+    for key, result in agents.items():
+        next_steps.extend(result.warnings)
+        next_steps.extend(result.next_steps)
+        if result.configured:
+            agents_ok.append(key)
+        elif result.status == "skipped":
+            continue
+        else:
+            agents_limited = True
+            if result.status == "error":
+                next_steps.append(f"{agent_label(key)}: {result.message}")
+
+    if not claude_ok and not agents_ok:
+        readiness = "not_ready"
+    elif claude_limited or agents_limited or (claude_avail.available and not claude_ok):
         readiness = "ready_partial"
-        next_steps.append(
-            f"Remove the custom statusLine entry in {SETTINGS_RELPATH.as_posix()} "
-            "(or leave it) to enable model/cost/token capture in receipts."
-        )
-    elif statusline_result.status == "error":
-        readiness = "ready_partial"
-        next_steps.append(statusline_result.message)
     else:
         readiness = "ready"
 
-    if service.get("state") == "unavailable":
-        # Hooks are installed and every Claude Code session start retries
-        # the service, but until it runs the HTTP hooks have nothing to talk
+    if readiness != "not_ready" and service.get("state") == "unavailable":
+        # Hooks/plugin are installed and every session start retries the
+        # service, but until it runs the HTTP hooks have nothing to talk
         # to -- capture would silently not happen, so this is not "ready".
         readiness = "not_ready"
         next_steps.append(
@@ -374,5 +436,5 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
         repo_root=root, is_git=True, claude_cli=claude_avail,
         history_path=history_path, history_writable=writable,
         mcp=mcp_result, hooks=hooks_result, statusline=statusline_result,
-        readiness=readiness, next_steps=next_steps, capture_service=service,
+        readiness=readiness, next_steps=next_steps, capture_service=service, agents=agents,
     )

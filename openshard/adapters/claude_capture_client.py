@@ -78,6 +78,15 @@ BACKOFF_FILENAME = "claude-capture.backoff.json"
 SERVICE_NAME = "openshard-claude-capture"
 HOOK_PATH = "/hooks/claude"
 STATUS_PATH = "/status/claude"
+# PR12: the same service, one receiver path per agent. The path is the only
+# thing that tells the service which translator to run.
+CODEX_HOOK_PATH = "/hooks/codex"
+OPENCODE_HOOK_PATH = "/hooks/opencode"
+AGENT_HOOK_PATHS: dict[str, str] = {
+    "claude_code": HOOK_PATH,
+    "codex": CODEX_HOOK_PATH,
+    "opencode": OPENCODE_HOOK_PATH,
+}
 HEALTH_PATH = "/health"
 SHUTDOWN_PATH = "/shutdown"
 PROJECT_DIR_HEADER = "X-OpenShard-Project-Dir"
@@ -218,13 +227,22 @@ def health(port: int, *, timeout: float = 1.0) -> dict | None:
 
 
 def post_hook(
-    port: int, raw: bytes, *, project_dir: str | None = None, event_override: str | None = None
+    port: int,
+    raw: bytes,
+    *,
+    project_dir: str | None = None,
+    event_override: str | None = None,
+    hook_path: str = HOOK_PATH,
 ) -> bool:
-    """POST one raw hook payload. True when the service accepted (durably queued) it."""
-    path = HOOK_PATH
+    """POST one raw hook payload. True when the service accepted (durably queued) it.
+
+    *hook_path* selects the agent receiver (``HOOK_PATH`` for Claude Code,
+    ``CODEX_HOOK_PATH`` / ``OPENCODE_HOOK_PATH`` for the others).
+    """
+    path = hook_path
     if event_override:
         safe = "".join(ch for ch in event_override if ch.isalnum())
-        path = f"{HOOK_PATH}?event={safe}"
+        path = f"{hook_path}?event={safe}"
     headers = {PROJECT_DIR_HEADER: project_dir} if project_dir else None
     result = _request("POST", port, path, raw, headers)
     return result is not None and result[0] == 200
@@ -538,13 +556,15 @@ def _project_dir(env: dict | os._Environ) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _inline_hook(raw: bytes, env: dict | os._Environ, event_override: str | None) -> str:
-    from openshard.adapters.claude_hooks import handle_claude_hook, parse_hook_payload
+def _inline_hook(
+    raw: bytes, env: dict | os._Environ, event_override: str | None, agent: str = "claude_code"
+) -> str:
+    from openshard.adapters.claude_hooks import handle_hook, parse_hook_payload
 
     data = parse_hook_payload(raw)
     if data is None:
         return "ignored"
-    outcome = handle_claude_hook(data, env=env, event_override=event_override)
+    outcome = handle_hook(data, env=env, event_override=event_override, agent=agent)
     if outcome.action == "error" or env.get("OPENSHARD_HOOK_DEBUG"):
         try:
             sys.stderr.write(f"[openshard hooks] {outcome.event or '?'}: {outcome.action} ({outcome.detail})\n")
@@ -554,32 +574,43 @@ def _inline_hook(raw: bytes, env: dict | os._Environ, event_override: str | None
 
 
 def run_hook_via_service(
-    stream: object, *, env: dict | os._Environ | None = None, event_override: str | None = None
+    stream: object,
+    *,
+    env: dict | os._Environ | None = None,
+    event_override: str | None = None,
+    agent: str = "claude_code",
+    spawn: bool = True,
 ) -> str:
-    """Console-script body for ``openshard hooks claude``. Never raises, never prints to stdout.
+    """Console-script body for ``openshard hooks claude`` / ``openshard hooks codex``.
 
-    Returns a short label of what happened: ``forwarded`` (the service
-    durably queued it), or the synchronous outcome label when the service
-    was unavailable and the payload was handled in-process.
+    Never raises, never prints to stdout. Returns a short label of what
+    happened: ``forwarded`` (the service durably queued it), or the
+    synchronous outcome label when the service was unavailable and the
+    payload was handled in-process. *agent* picks the receiver path and the
+    in-process translator; *spawn=False* (Codex ``SessionEnd``, whose hook
+    timeout is capped at a few seconds) skips starting a service and goes
+    straight to the in-process fallback when none is running.
     """
     env = os.environ if env is None else env
     raw = _read_all(stream)
     if not raw.strip():
         return "ignored"
+    hook_path = AGENT_HOOK_PATHS.get(agent, HOOK_PATH)
     try:
         if not disabled(env):
             project_dir = _project_dir(env)
             port = resolve_port(env)
-            if post_hook(port, raw, project_dir=project_dir, event_override=event_override):
+            if post_hook(port, raw, project_dir=project_dir, event_override=event_override, hook_path=hook_path):
                 return "forwarded"
-            port_after, _state = ensure_service(env)
-            if port_after is not None and post_hook(
-                port_after, raw, project_dir=project_dir, event_override=event_override
-            ):
-                return "forwarded"
+            if spawn:
+                port_after, _state = ensure_service(env)
+                if port_after is not None and post_hook(
+                    port_after, raw, project_dir=project_dir, event_override=event_override, hook_path=hook_path
+                ):
+                    return "forwarded"
     except Exception:
         pass
-    return _inline_hook(raw, env, event_override)
+    return _inline_hook(raw, env, event_override, agent)
 
 
 def _fallback_status_text(raw: bytes) -> str:
