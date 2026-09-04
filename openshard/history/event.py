@@ -307,6 +307,30 @@ class Event:
         )
 
 
+def tool_identity(event: Event) -> str | None:
+    """The tool a ``tool.invoked`` Event names, from structured fields only.
+
+    Every producer already carries the identity somewhere structured, but
+    not in the same place: the native run pipeline and the Claude hooks
+    adapter set ``metadata["tool"]``; the legacy native-step and timeline
+    projections set ``target``. This is the one reader for all of them --
+    ``action`` (free text) is deliberately never parsed. Returns ``None``
+    for a non-tool Event or one with no structured identity (older native
+    records written before ``metadata["tool"]`` existed) rather than
+    guessing.
+    """
+    if getattr(event, "event_type", None) != EVENT_TOOL_INVOKED:
+        return None
+    metadata = getattr(event, "metadata", None)
+    meta_tool = metadata.get("tool") if isinstance(metadata, dict) else None
+    if isinstance(meta_tool, str) and meta_tool:
+        return meta_tool
+    target = getattr(event, "target", None)
+    if isinstance(target, str) and target:
+        return target
+    return None
+
+
 # ---------------------------------------------------------------------------
 # ID helper -- for read-time projection of legacy records only.
 # ---------------------------------------------------------------------------

@@ -248,6 +248,20 @@ def _match_lines(index: int, match: RelevantMatch) -> list[str]:
             for n, a in enumerate(match.attempts, start=1)
         )
         lines.append(row("Attempts", seq))
+    if match.recovery:
+        # Chronology only: what was observed between the two verification
+        # results, never presented as the proven cause of the later pass.
+        ro = match.recovery
+        lines.append(row(
+            "Recovery",
+            f"attempt {ro.failed_attempt_number} failed {_ARROW} attempt {ro.recovery_attempt_number} passed"
+            " (chronology only, not a proven cause)",
+        ))
+        if ro.intervening_files:
+            lines.append(row("  Changed", f"between failure and pass: {', '.join(ro.intervening_files)}"))
+        if ro.intervening_tools:
+            lines.append(row("  Tools", f"between failure and pass: {', '.join(ro.intervening_tools)}"))
+        lines.append(row("  Later", f"{ro.later_same_file_activity} unverified later attempt(s) on the same files"))
     if match.files:
         lines.append(row("Files", ", ".join(match.files)))
     for f in match.findings:

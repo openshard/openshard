@@ -154,6 +154,11 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
         id, or agent overlaps ``task``, each with its status, verification
         result, non-Note findings, changed files, and — for retried Shards —
         a per-attempt history (e.g. attempt 1 failed, attempt 2 passed).
+        When a matched Shard recorded a verification failure later followed
+        by a pass, ``matches[].recovery`` additionally reports that observed
+        chronology (failed attempt, files/tools observed on the attempts in
+        between, the attempt that later passed) — observation only; it is
+        never a claim that those files or tools caused the later pass.
         Ranking is local keyword-overlap scoring only (no embeddings or model
         calls); a recorded verification failure or multiple attempts add a
         small bonus but never pull in an unrelated Shard on their own.

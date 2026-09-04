@@ -342,6 +342,29 @@ class TestContext:
         assert "multiple attempts (2)" in out
         assert "Attempts" in out and "1: Failed" in out and "2: Passed" in out
 
+    def test_recovery_observation_is_shown(self, tmp_path: Path):
+        first = dict(NATIVE_FAILED, shard_id="shard-multi", attempt_number=1, task="implement terraform retry")
+        first.pop("review_checks")
+        second = dict(
+            NATIVE_PASSED, shard_id="shard-multi", attempt_number=2, timestamp=T3, run_id=T3,
+            task="implement terraform retry (retry)", retry_triggered=True,
+            files_detail=[{"path": "openshard/history/query.py", "change_type": "update"}],
+        )
+        repo = _repo(tmp_path, [first, second])
+        out = _ok(_invoke(["context", "terraform retry"], repo))
+        assert "Recovery" in out
+        assert "attempt 1 failed" in out and "attempt 2 passed" in out
+        assert "openshard/history/query.py" in out
+        payload = json.loads(_ok(_invoke(["context", "--json", "terraform retry"], repo)))
+        match = next(m for m in payload["matches"] if m["shard_id"] == "shard-multi")
+        assert match["recovery"]["failed_attempt_number"] == 1
+        assert match["recovery"]["recovery_attempt_number"] == 2
+        assert match["recovery"]["intervening_files"] == ["openshard/history/query.py"]
+
+    def test_no_recovery_row_when_no_recovery(self, repo: Path):
+        out = _ok(_invoke(["context", "fix terraform validate"], repo))
+        assert "Recovery" not in out
+
 
 # ---------------------------------------------------------------------------
 # openshard stats

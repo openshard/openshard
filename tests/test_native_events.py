@@ -109,6 +109,29 @@ class TestBuildNativeEventsUnit(unittest.TestCase):
             if e["event_type"] == EVENT_TOOL_INVOKED:
                 self.assertIsNone(e["target"])
 
+    def test_tool_invoked_metadata_carries_structured_tool_identity(self):
+        """PR11: the tool name lives in metadata["tool"] (the same key the
+        Claude hooks adapter uses), and event.tool_identity reads it -- the
+        free-text ``action`` is never the source."""
+        from openshard.history.event import Event, tool_identity
+
+        entry = _entry(tool_trace=_tool_trace())
+        events = _build_native_events(entry, [], False, None, False)
+        tool_events = [e for e in events if e["event_type"] == EVENT_TOOL_INVOKED]
+        self.assertEqual([e["metadata"]["tool"] for e in tool_events], ["read_file", "run_verification"])
+        self.assertEqual(
+            [tool_identity(Event.from_dict(e)) for e in tool_events], ["read_file", "run_verification"],
+        )
+        # Non-tool events never report an identity; a tool event with no
+        # structured identity (legacy target/metadata both absent) is None.
+        other = next(e for e in events if e["event_type"] != EVENT_TOOL_INVOKED)
+        self.assertIsNone(tool_identity(Event.from_dict(other)))
+        stripped = dict(tool_events[0], metadata={}, target=None)
+        self.assertIsNone(tool_identity(Event.from_dict(stripped)))
+        # Legacy projections put the identity in ``target``; that still works.
+        legacy = dict(tool_events[0], metadata={}, target="read_file")
+        self.assertEqual(tool_identity(Event.from_dict(legacy)), "read_file")
+
     def test_file_changed_status_is_unknown_not_pass_fail(self):
         entry = _entry()
         events = _build_native_events(entry, _files(), False, None, False)

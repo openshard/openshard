@@ -345,7 +345,12 @@ def _build_native_events(
                         source=SOURCE_NATIVE_RUN,
                         action=f"tool {call.get('tool', 'unknown')}",
                         status=STATUS_PASSED if call.get("ok") else STATUS_FAILED,
+                        # metadata["tool"] is the canonical structured tool
+                        # identity every tool.invoked producer exposes (the
+                        # Claude hooks adapter sets the same key); readers use
+                        # event.tool_identity rather than parsing ``action``.
                         metadata={
+                            "tool": call.get("tool"),
                             "approved": call.get("approved"),
                             "output_chars": call.get("output_chars"),
                         },
