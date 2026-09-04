@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from openshard.history.query import RelevantAttempt, RelevantMatch, SearchHit
+from openshard.history.query import RecoveryObservation, RelevantAttempt, RelevantMatch, SearchHit
 from openshard.history.shard import Shard
 from openshard.history.shard_contract import ShardFinding, ShardReceipt
 
@@ -154,6 +154,35 @@ def relevant_attempt_to_dict(attempt: RelevantAttempt) -> dict[str, Any]:
     }
 
 
+def recovery_observation_to_dict(ro: RecoveryObservation) -> dict[str, Any]:
+    """Canonical RecoveryObservation -> bounded, privacy-safe dict.
+
+    Same privacy boundary as the rest of this module. Every string field on
+    ``RecoveryObservation`` has already passed through
+    ``openshard.safety.sanitize`` (detail text) or the same touched-path
+    evidence the rest of ``relevant_context`` reads (file paths) before this
+    point -- ``truncate_text`` here is a second bound, not the only one, per
+    the "do not assume a field is safe merely because it is length-bounded"
+    rule this PR follows.
+    """
+    return {
+        "shard_id": ro.shard_id,
+        "failed_attempt_number": ro.failed_attempt_number,
+        "recovery_attempt_number": ro.recovery_attempt_number,
+        "failed_run_id": ro.failed_run_id,
+        "recovery_run_id": ro.recovery_run_id,
+        "failed_timestamp": ro.failed_timestamp,
+        "recovery_timestamp": ro.recovery_timestamp,
+        "failure_status": ro.failure_status,
+        "failure_detail": truncate_text(ro.failure_detail),
+        "recovery_status": ro.recovery_status,
+        "recovery_detail": truncate_text(ro.recovery_detail),
+        "intervening_files": list(ro.intervening_files[:MAX_FILES]),
+        "intervening_tools": list(ro.intervening_tools),
+        "later_same_file_activity": ro.later_same_file_activity,
+    }
+
+
 def relevant_match_to_dict(match: RelevantMatch) -> dict[str, Any]:
     """Canonical RelevantMatch -> bounded, privacy-safe dict.
 
@@ -161,6 +190,9 @@ def relevant_match_to_dict(match: RelevantMatch) -> dict[str, Any]:
     Note-severity finding (see the ``history.query`` module docstring) --
     only Critical/High/Medium/Low findings, which come from actual review/
     verification results rather than free-form agent notes, are included.
+    ``recovery`` is ``None`` unless this Shard recorded an observed failure
+    later followed by a pass (see ``RecoveryObservation``); it is additive
+    and never affects any other key here.
     """
     d = shard_to_dict(match.shard)
     d.update({
@@ -174,5 +206,6 @@ def relevant_match_to_dict(match: RelevantMatch) -> dict[str, Any]:
         "files": list(match.files[:MAX_FILES]),
         "findings": [finding_to_dict(f) for f in match.findings[:MAX_FINDINGS]],
         "attempts": [relevant_attempt_to_dict(a) for a in match.attempts],
+        "recovery": recovery_observation_to_dict(match.recovery) if match.recovery else None,
     })
     return d

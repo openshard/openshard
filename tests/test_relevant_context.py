@@ -555,6 +555,462 @@ class TestContextText:
 
 
 # ---------------------------------------------------------------------------
+# PR11: evidence-backed recovery observations
+# ---------------------------------------------------------------------------
+
+
+def _tool_event(tool: str, event_id: str) -> dict:
+    """An embedded canonical Event (see openshard.history.event) recording
+    one tool invocation -- the same shape adapters like the Claude Code
+    hooks adapter already write onto ``events``."""
+    return {
+        "schema_version": 1, "event_id": event_id, "event_type": "tool.invoked",
+        "occurred_at": None, "run_id": None, "shard_id": None, "attempt_number": None,
+        "actor": None, "source": "test", "action": tool, "target": None,
+        "status": "unknown", "evidence": "unknown", "metadata": {"tool": tool},
+        "raw_content_stored": False,
+    }
+
+
+def _recovery_pair(
+    shard_id: str,
+    *,
+    failed_ts: str = T1,
+    recovery_ts: str = T3,
+    recovery_kwargs: dict | None = None,
+    failed_kwargs: dict | None = None,
+) -> list[dict]:
+    """A minimal two-attempt Shard: attempt 1 fails verification, attempt 2
+    later passes. Both entries carry "terraform verification" in their task
+    text so the Shard matches regardless of which attempt is "latest"."""
+    return [
+        _entry("add terraform verification step", failed_ts, shard_id=shard_id,
+               attempt_number=1, verification_passed=False, **(failed_kwargs or {})),
+        _entry("terraform verification retry", recovery_ts, shard_id=shard_id,
+               attempt_number=2, verification_passed=True, **(recovery_kwargs or {})),
+    ]
+
+
+class TestRecoveryObservation:
+    def test_failed_then_later_passed_yields_recovery_observation(self, tmp_path: Path):
+        _write(tmp_path, _recovery_pair(
+            "shard-recover",
+            recovery_kwargs={
+                "files_detail": [
+                    {"path": "openshard/history/query.py", "change_type": "update"},
+                    {"path": "tests/test_history_query.py", "change_type": "update"},
+                ],
+                "events": [_tool_event("Edit", "e1"), _tool_event("Bash", "e2")],
+            },
+        ))
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        match = next(m for m in ctx.matches if m.shard.shard_id == "shard-recover")
+        ro = match.recovery
+        assert ro is not None
+        assert ro.shard_id == "shard-recover"
+        assert ro.failed_attempt_number == 1
+        assert ro.recovery_attempt_number == 2
+        assert ro.intervening_files == ["openshard/history/query.py", "tests/test_history_query.py"]
+        assert ro.intervening_tools == ["Edit", "Bash"]
+        assert ro.later_same_file_activity == 0
+
+    def test_no_observation_when_only_failure_and_no_later_pass(self, tmp_path: Path):
+        _write(tmp_path, [
+            _entry("add terraform verification step", T1, shard_id="shard-onlyfail",
+                   verification_passed=False),
+        ])
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        match = next(m for m in ctx.matches if m.shard.shard_id == "shard-onlyfail")
+        assert match.recovery is None
+
+    def test_no_observation_when_only_a_pass(self, tmp_path: Path):
+        _write(tmp_path, [
+            _entry("add terraform verification step", T1, shard_id="shard-onlypass",
+                   verification_passed=True),
+        ])
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        match = next(m for m in ctx.matches if m.shard.shard_id == "shard-onlypass")
+        assert match.recovery is None
+
+    def test_no_observation_when_two_attempts_both_fail(self, tmp_path: Path):
+        _write(tmp_path, [
+            _entry("add terraform verification step", T1, shard_id="shard-stillfailing",
+                   attempt_number=1, verification_passed=False),
+            _entry("terraform verification retry", T3, shard_id="shard-stillfailing",
+                   attempt_number=2, verification_passed=False),
+        ])
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        match = next(m for m in ctx.matches if m.shard.shard_id == "shard-stillfailing")
+        assert match.recovery is None
+
+    def test_deterministic_output_across_calls(self, tmp_path: Path):
+        _write(tmp_path, _recovery_pair(
+            "shard-recover",
+            recovery_kwargs={"files_detail": [{"path": "a.py", "change_type": "update"}]},
+        ))
+        first = relevant_context("terraform verification", repo_path=tmp_path)
+        second = relevant_context("terraform verification", repo_path=tmp_path)
+        r1 = next(m for m in first.matches if m.shard.shard_id == "shard-recover").recovery
+        r2 = next(m for m in second.matches if m.shard.shard_id == "shard-recover").recovery
+        assert r1 == r2
+
+    def test_provenance_fields_are_correct(self, tmp_path: Path):
+        _write(tmp_path, _recovery_pair("shard-recover", failed_ts=T1, recovery_ts=T3))
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        ro = next(m for m in ctx.matches if m.shard.shard_id == "shard-recover").recovery
+        assert ro.shard_id == "shard-recover"
+        assert ro.failed_attempt_number == 1
+        assert ro.recovery_attempt_number == 2
+        assert ro.failed_timestamp == T1
+        assert ro.recovery_timestamp == T3
+        assert ro.failed_run_id == T1
+        assert ro.recovery_run_id == T3
+        assert ro.failure_status
+        assert ro.recovery_status
+
+    def test_intervening_files_are_repo_relative_and_bounded(self, tmp_path: Path):
+        """An absolute path in the raw evidence is dropped, never surfaced --
+        even though the rest of relevant_context does not re-check this for
+        older evidence (see the module docstring's privacy rule for PR11)."""
+        _write(tmp_path, _recovery_pair(
+            "shard-abs",
+            recovery_kwargs={"files_detail": [
+                {"path": "C:/Users/private/secret.py", "change_type": "update"},
+                {"path": "openshard/history/query.py", "change_type": "update"},
+            ]},
+        ))
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        ro = next(m for m in ctx.matches if m.shard.shard_id == "shard-abs").recovery
+        assert ro.intervening_files == ["openshard/history/query.py"]
+
+    def test_no_raw_output_or_secrets_leak_into_recovery_detail(self, tmp_path: Path):
+        _write(tmp_path, _recovery_pair(
+            "shard-secret",
+            failed_kwargs={"osn_verification_contract": {
+                "enabled": True, "status": "failed",
+                "summary": "token=sk-abcdefghijklmnopqrstuvwxyz123456 leaked in output",
+            }},
+            recovery_kwargs={"osn_verification_contract": {
+                "enabled": True, "status": "passed", "summary": "all checks passed",
+            }},
+        ))
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        ro = next(m for m in ctx.matches if m.shard.shard_id == "shard-secret").recovery
+        assert ro.failure_detail is None
+        blob = json.dumps(ro.__dict__, default=str)
+        assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in blob
+
+    def test_missing_detail_stays_missing_not_synthesized(self, tmp_path: Path):
+        _write(tmp_path, _recovery_pair("shard-nodetail"))
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        ro = next(m for m in ctx.matches if m.shard.shard_id == "shard-nodetail").recovery
+        assert ro.failure_detail is None
+        assert ro.recovery_detail is None
+        assert ro.intervening_files == []
+        assert ro.intervening_tools == []
+
+    def test_later_same_file_activity_counts_correctly(self, tmp_path: Path):
+        """Under the latest-state rule anything after the recovery attempt is
+        unverified by construction; the count is of those unverified
+        follow-ups that touched one of the same files."""
+        _write(tmp_path, [
+            _entry("add terraform verification step", T1, shard_id="shard-activity",
+                   attempt_number=1, verification_passed=False),
+            _entry("terraform verification retry", T2, shard_id="shard-activity",
+                   attempt_number=2, verification_passed=True,
+                   files_detail=[{"path": "openshard/history/query.py", "change_type": "update"}]),
+            _entry("terraform verification follow-up", T3, shard_id="shard-activity",
+                   attempt_number=3, **_UNVERIFIED,
+                   files_detail=[{"path": "openshard/history/query.py", "change_type": "update"}]),
+            _entry("terraform verification cleanup", T4, shard_id="shard-activity",
+                   attempt_number=4, **_UNVERIFIED,
+                   files_detail=[{"path": "openshard/history/other.py", "change_type": "update"}]),
+        ])
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        ro = next(m for m in ctx.matches if m.shard.shard_id == "shard-activity").recovery
+        assert ro.recovery_attempt_number == 2
+        assert ro.intervening_files == ["openshard/history/query.py"]
+        # attempt 3 (unverified) touched the same file (+1); attempt 4 touched
+        # a different file (not counted).
+        assert ro.later_same_file_activity == 1
+
+    def test_recovery_observation_only_on_relevant_matches(self, tmp_path: Path):
+        """A Shard with its own genuine failure/recovery pattern is not
+        exposed at all -- recovery observations never widen the retrieval,
+        they only ever decorate an already-relevant match."""
+        entries = [
+            _entry("rotate kubernetes certificates", T1, shard_id="shard-irrelevant",
+                   attempt_number=1, verification_passed=False),
+            _entry("rotate kubernetes certificates retry", T3, shard_id="shard-irrelevant",
+                   attempt_number=2, verification_passed=True),
+        ]
+        _write(tmp_path, entries)
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        assert ctx.matches == []
+
+    def test_unrelated_shards_do_not_get_recovery_observations(self, tmp_path: Path):
+        entries = _recovery_pair("shard-recover")
+        entries += [
+            _entry("rotate kubernetes certificates", T1, shard_id="shard-unrelated-recovery",
+                   attempt_number=1, verification_passed=False),
+            _entry("rotate kubernetes certificates retry", T3, shard_id="shard-unrelated-recovery",
+                   attempt_number=2, verification_passed=True),
+        ]
+        _write(tmp_path, entries)
+        ctx = relevant_context("terraform verification", repo_path=tmp_path)
+        ids = [m.shard.shard_id for m in ctx.matches]
+        assert "shard-recover" in ids
+        assert "shard-unrelated-recovery" not in ids
+
+    def test_repository_isolation_preserved(self, tmp_path: Path):
+        _write(tmp_path, _recovery_pair(
+            "shard-recover", failed_kwargs={"repo_name": "alpha"}, recovery_kwargs={"repo_name": "alpha"},
+        ))
+        ctx = relevant_context("terraform verification", repo_path=tmp_path, repo="beta")
+        assert ctx.matches == []
+
+    def test_relevant_context_does_not_touch_memory_stores(self, tmp_path: Path):
+        """Read-time only (PR11): deriving a RecoveryObservation must never
+        write memory.jsonl (PR9 explicit feedback) or failure_memory.jsonl
+        (routing signal store) -- there is no new persistence in this PR."""
+        _write(tmp_path, _recovery_pair(
+            "shard-recover",
+            recovery_kwargs={"files_detail": [{"path": "a.py", "change_type": "update"}]},
+        ))
+        relevant_context("terraform verification", repo_path=tmp_path)
+        assert not (tmp_path / ".openshard" / "memory.jsonl").exists()
+        assert not (tmp_path / ".openshard" / "failure_memory.jsonl").exists()
+
+    def test_limit_and_no_match_behavior_preserved(self, tmp_path: Path):
+        _write(tmp_path, _recovery_pair(
+            "shard-recover",
+            recovery_kwargs={"files_detail": [{"path": "a.py", "change_type": "update"}]},
+        ))
+        assert relevant_context("terraform verification", repo_path=tmp_path, limit=0).matches == []
+        assert relevant_context("zzz-nonexistent-zzz", repo_path=tmp_path).matches == []
+
+
+# Verification-state vocabulary for _chain(): each attempt k also touches
+# "f<k>.py" so intervening_files reveals exactly which attempts were counted.
+_UNVERIFIED = {"verification_attempted": False, "verification_passed": None}
+_STATE_KWARGS = {
+    "fail": {"verification_passed": False},
+    "pass": {"verification_passed": True},
+    "none": _UNVERIFIED,
+    # Conflicting signals on one attempt: the boolean says passed, an
+    # independent review check says failed.
+    "conflict": {
+        "verification_passed": True,
+        "review_checks": [{"name": "terraform_validate", "status": "failed", "summary": "x"}],
+    },
+}
+
+
+def _chain(shard_id: str, states: list[str], **extra) -> list[dict]:
+    """A Shard whose attempts, in append order, have the given verification
+    states. Timestamps increase with append order; tasks always match
+    "terraform verification"."""
+    entries = []
+    for k, state in enumerate(states, start=1):
+        ts = f"2026-08-01T{k // 60:02d}:{k % 60:02d}:00Z"
+        entries.append(_entry(
+            f"terraform verification attempt {k}", ts, shard_id=shard_id, attempt_number=k,
+            files_detail=[{"path": f"f{k}.py", "change_type": "update"}],
+            **_STATE_KWARGS[state], **extra,
+        ))
+    return entries
+
+
+def _recovery_of(tmp_path: Path, shard_id: str):
+    ctx = relevant_context("terraform verification", repo_path=tmp_path)
+    return next(m for m in ctx.matches if m.shard.shard_id == shard_id).recovery
+
+
+class TestRecoverySemantics:
+    """The latest-state rule, case by case (see the query module docstring)."""
+
+    def test_fail_pass(self, tmp_path: Path):
+        _write(tmp_path, _chain("s", ["fail", "pass"]))
+        ro = _recovery_of(tmp_path, "s")
+        assert (ro.failed_attempt_number, ro.recovery_attempt_number) == (1, 2)
+        assert ro.intervening_files == ["f2.py"]
+
+    def test_fail_fail_pass_uses_most_recent_failure(self, tmp_path: Path):
+        _write(tmp_path, _chain("s", ["fail", "fail", "pass"]))
+        ro = _recovery_of(tmp_path, "s")
+        assert (ro.failed_attempt_number, ro.recovery_attempt_number) == (2, 3)
+        assert ro.intervening_files == ["f3.py"]
+
+    def test_fail_pass_pass_runs_to_latest_pass(self, tmp_path: Path):
+        _write(tmp_path, _chain("s", ["fail", "pass", "pass"]))
+        ro = _recovery_of(tmp_path, "s")
+        assert (ro.failed_attempt_number, ro.recovery_attempt_number) == (1, 3)
+        assert ro.intervening_files == ["f2.py", "f3.py"]
+
+    def test_fail_pass_fail_relapse_yields_nothing(self, tmp_path: Path):
+        """The latest verified state is failed: reporting the earlier
+        recovery would misrepresent the Shard's current state."""
+        _write(tmp_path, _chain("s", ["fail", "pass", "fail"]))
+        assert _recovery_of(tmp_path, "s") is None
+
+    def test_fail_pass_fail_pass_reports_latest_sequence_only(self, tmp_path: Path):
+        _write(tmp_path, _chain("s", ["fail", "pass", "fail", "pass"]))
+        ro = _recovery_of(tmp_path, "s")
+        assert (ro.failed_attempt_number, ro.recovery_attempt_number) == (3, 4)
+        assert ro.intervening_files == ["f4.py"]
+
+    def test_pass_fail_pass(self, tmp_path: Path):
+        _write(tmp_path, _chain("s", ["pass", "fail", "pass"]))
+        ro = _recovery_of(tmp_path, "s")
+        assert (ro.failed_attempt_number, ro.recovery_attempt_number) == (2, 3)
+
+    def test_pass_only_chain_yields_nothing(self, tmp_path: Path):
+        _write(tmp_path, _chain("s", ["pass", "pass"]))
+        assert _recovery_of(tmp_path, "s") is None
+
+    def test_unverified_attempts_are_not_evidence(self, tmp_path: Path):
+        """An attempt with no verification result is neither a pass nor a
+        failure: it neither closes nor blocks a pair, but its activity is
+        still reported when it sits between the failure and the pass."""
+        _write(tmp_path, _chain("s", ["fail", "none", "pass"]))
+        ro = _recovery_of(tmp_path, "s")
+        assert (ro.failed_attempt_number, ro.recovery_attempt_number) == (1, 3)
+        assert ro.intervening_files == ["f2.py", "f3.py"]
+
+    def test_unverified_tail_does_not_hide_or_fabricate_state(self, tmp_path: Path):
+        _write(tmp_path, _chain("s", ["fail", "pass", "none"]))
+        ro = _recovery_of(tmp_path, "s")
+        assert (ro.failed_attempt_number, ro.recovery_attempt_number) == (1, 2)
+        assert ro.later_same_file_activity == 0  # f3.py is not one of the same files
+        _write(tmp_path, _chain("t", ["fail", "none", "none"]))
+        assert _recovery_of(tmp_path, "t") is None
+        _write(tmp_path, _chain("u", ["none", "none"]))
+        assert _recovery_of(tmp_path, "u") is None
+
+    def test_conflicting_signals_on_one_attempt_count_as_failed(self, tmp_path: Path):
+        """verification_passed=True plus a failed review check is a failure
+        (failed wins): it can open a pair as the failure but never close
+        one as the pass."""
+        _write(tmp_path, _chain("s", ["conflict", "pass"]))
+        ro = _recovery_of(tmp_path, "s")
+        assert (ro.failed_attempt_number, ro.recovery_attempt_number) == (1, 2)
+        _write(tmp_path, _chain("t", ["fail", "conflict"]))
+        assert _recovery_of(tmp_path, "t") is None
+        _write(tmp_path, _chain("u", ["fail", "pass", "conflict"]))
+        assert _recovery_of(tmp_path, "u") is None
+
+    def test_append_order_is_chronology_even_when_timestamps_disagree(self, tmp_path: Path):
+        """The repository's established ordering: runs.jsonl append order is
+        the attempt chronology (as _bounded_attempts and _resolution_signal
+        already assume). A later-stamped failure appended *before* an
+        earlier-stamped pass is therefore the earlier attempt."""
+        _write(tmp_path, [
+            _entry("terraform verification attempt", T3, shard_id="s", attempt_number=1,
+                   verification_passed=False),
+            _entry("terraform verification attempt", T1, shard_id="s", attempt_number=2,
+                   verification_passed=True),
+        ])
+        ro = _recovery_of(tmp_path, "s")
+        assert (ro.failed_attempt_number, ro.recovery_attempt_number) == (1, 2)
+        assert (ro.failed_timestamp, ro.recovery_timestamp) == (T3, T1)
+        # Reversed append order, same records: now the pass comes first and
+        # the latest state is the failure -> no observation.
+        _write(tmp_path, [
+            _entry("terraform verification attempt", T1, shard_id="s", attempt_number=2,
+                   verification_passed=True),
+            _entry("terraform verification attempt", T3, shard_id="s", attempt_number=1,
+                   verification_passed=False),
+        ])
+        assert _recovery_of(tmp_path, "s") is None
+
+
+class TestRecoveryBoundedWork:
+    @staticmethod
+    def _long_chain(n: int) -> list[dict]:
+        """n attempts: the first attempt inside the recovery window fails,
+        the last passes, everything else is unverified -- the shape that
+        maximises intervening work for a given window size."""
+        from openshard.history.query import _MAX_RECOVERY_WINDOW
+
+        states = ["none"] * n
+        states[n - _MAX_RECOVERY_WINDOW] = "fail"
+        states[-1] = "pass"
+        return _chain("s", states)
+
+    def test_work_does_not_grow_with_attempt_chain_length(self, tmp_path: Path):
+        from openshard.history import query as q
+
+        counts: dict[int, tuple[int, int]] = {}
+        for n in (10, 60):
+            _write(tmp_path, self._long_chain(n))
+            with patch.object(q, "events_from_entry", wraps=q.events_from_entry) as ev_spy, \
+                 patch.object(q, "build_shard_receipt", wraps=q.build_shard_receipt) as rc_spy:
+                ro = _recovery_of(tmp_path, "s")
+            assert ro is not None
+            assert ro.recovery_attempt_number == n
+            assert ro.failed_attempt_number == n - q._MAX_RECOVERY_WINDOW + 1
+            counts[n] = (ev_spy.call_count, rc_spy.call_count)
+        # Intervening projections are bounded by the window, and receipt
+        # builds are exactly what _build_relevant_match already did before
+        # PR11 (latest + bounded attempt history) -- none added by recovery.
+        assert counts[10] == counts[60]
+        assert counts[60][0] <= q._MAX_RECOVERY_WINDOW - 1
+
+    def test_pair_entirely_before_the_window_is_not_reported(self, tmp_path: Path):
+        """Missing evidence stays missing: a recovery older than the window
+        is not reported, and nothing is synthesized in its place."""
+        from openshard.history.query import _MAX_RECOVERY_WINDOW
+
+        states = ["fail", "pass"] + ["none"] * _MAX_RECOVERY_WINDOW
+        _write(tmp_path, _chain("s", states))
+        assert _recovery_of(tmp_path, "s") is None
+
+    def test_intervening_lists_are_capped(self, tmp_path: Path):
+        from openshard.history.query import _MAX_RECOVERY_FILES, _MAX_RECOVERY_TOOLS
+
+        many_files = [{"path": f"pkg/m{i}.py", "change_type": "update"} for i in range(30)]
+        many_tools = [_tool_event(f"Tool{i}", f"e{i}") for i in range(30)]
+        _write(tmp_path, _recovery_pair(
+            "s", recovery_kwargs={"files_detail": many_files, "events": many_tools},
+        ))
+        ro = _recovery_of(tmp_path, "s")
+        assert len(ro.intervening_files) == _MAX_RECOVERY_FILES
+        assert len(ro.intervening_tools) == _MAX_RECOVERY_TOOLS
+
+
+class TestRecoveryNativeToolEvidence:
+    def test_native_tool_trace_yields_intervening_tools(self, tmp_path: Path):
+        """Regression: the real native path (tool_trace -> _build_native_events
+        -> embedded ``events``) must expose tool identity to recovery
+        observations, exactly like the Claude hooks path does."""
+        from openshard.run._pipeline_helpers import _build_native_events
+
+        failed, recovery = _recovery_pair("s")
+        recovery["tool_trace"] = [
+            {"tool": "read_file", "ok": True, "approved": True, "output_chars": 12, "error": None},
+            {"tool": "write_file", "ok": True, "approved": True, "output_chars": 0, "error": None},
+            {"tool": "read_file", "ok": True, "approved": True, "output_chars": 40, "error": None},
+            {"tool": "run_verification", "ok": True, "approved": True, "output_chars": 3, "error": None},
+        ]
+        recovery["events"] = _build_native_events(recovery, [], True, True, False)
+        failed["events"] = _build_native_events(failed, [], True, False, False)
+        _write(tmp_path, [failed, recovery])
+        ro = _recovery_of(tmp_path, "s")
+        assert ro.intervening_tools == ["read_file", "write_file", "run_verification"]
+
+    def test_native_tool_events_without_structured_identity_are_skipped(self, tmp_path: Path):
+        """A native record written before metadata["tool"] existed has no
+        structured identity; its free-text ``action`` is never parsed."""
+        failed, recovery = _recovery_pair("s")
+        legacy_event = _tool_event("ignored", "e-legacy")
+        legacy_event["metadata"] = {"approved": True, "output_chars": 5}
+        legacy_event["action"] = "tool read_file"
+        recovery["events"] = [legacy_event]
+        _write(tmp_path, [failed, recovery])
+        assert _recovery_of(tmp_path, "s").intervening_tools == []
+
+
+# ---------------------------------------------------------------------------
 # MCP tool: registration and call
 # ---------------------------------------------------------------------------
 
@@ -615,6 +1071,37 @@ class TestRelevantContextMcpTool:
         _, structured = _call(server, "relevant_context", {"task": "terraform verification"})
         json.dumps(structured)  # must not raise
 
+    def test_recovery_is_none_when_shard_has_no_recovery(self, scenario: Path):
+        server = build_server(repo_path=scenario)
+        _, structured = _call(server, "relevant_context", {"task": "terraform verification"})
+        failed_match = next(m for m in structured["matches"] if m["shard_id"] == "shard-failed")
+        assert failed_match["recovery"] is None
+
+    def test_recovery_dict_is_populated_for_a_recovered_shard(self, tmp_path: Path):
+        _write(tmp_path, _recovery_pair(
+            "shard-recover",
+            recovery_kwargs={"files_detail": [{"path": "openshard/history/query.py", "change_type": "update"}]},
+        ))
+        server = build_server(repo_path=tmp_path)
+        _, structured = _call(server, "relevant_context", {"task": "terraform verification"})
+        match = next(m for m in structured["matches"] if m["shard_id"] == "shard-recover")
+        assert match["recovery"] == {
+            "shard_id": "shard-recover",
+            "failed_attempt_number": 1,
+            "recovery_attempt_number": 2,
+            "failed_run_id": T1,
+            "recovery_run_id": T3,
+            "failed_timestamp": T1,
+            "recovery_timestamp": T3,
+            "failure_status": "failed",
+            "failure_detail": None,
+            "recovery_status": "passed",
+            "recovery_detail": None,
+            "intervening_files": ["openshard/history/query.py"],
+            "intervening_tools": [],
+            "later_same_file_activity": 0,
+        }
+
     def test_match_fields_are_bounded(self, scenario: Path):
         server = build_server(repo_path=scenario)
         _, structured = _call(server, "relevant_context", {"task": "terraform verification"})
@@ -622,7 +1109,7 @@ class TestRelevantContextMcpTool:
         assert set(match) == {
             "shard_id", "created_at", "task_short", "task_full", "agent", "origin", "capture_depth",
             "score", "why_relevant", "status", "verification_status", "verification_reason",
-            "result", "repo", "files", "findings", "attempts",
+            "result", "repo", "files", "findings", "attempts", "recovery",
         }
 
     def test_privacy_no_forbidden_fields_leak(self, tmp_path: Path):

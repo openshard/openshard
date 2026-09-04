@@ -1189,14 +1189,12 @@ def _tool_activity_counts(receipt: ShardReceipt) -> list[tuple[str, int]]:
     event this counts was already EVIDENCE_AGENT_REPORTED tool.invoked
     evidence; this only aggregates it for display, never claims an outcome.
     """
-    from openshard.history.event import EVENT_TOOL_INVOKED
+    from openshard.history.event import tool_identity
 
     counts: dict[str, int] = {}
     for ev in receipt.events:
-        if getattr(ev, "event_type", None) != EVENT_TOOL_INVOKED:
-            continue
-        tool = (ev.metadata or {}).get("tool") if isinstance(getattr(ev, "metadata", None), dict) else None
-        if not isinstance(tool, str) or not tool:
+        tool = tool_identity(ev)
+        if tool is None:
             continue
         counts[tool] = counts.get(tool, 0) + 1
     return list(counts.items())

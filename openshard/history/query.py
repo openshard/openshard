@@ -58,6 +58,36 @@ own to pull in an unrelated Shard. Ordering is score descending with
 recency only as a tie-break, so a strong old match is never buried by a
 weak recent one. No embeddings, fuzzy matching, or model calls anywhere.
 
+Recovery observations (PR11)
+-----------------------------
+Once a Shard has already qualified as a match above, ``RelevantMatch.recovery``
+additionally describes the Shard's *latest evidence-backed recovered state*,
+when it has one (see ``RecoveryObservation`` / ``_derive_recovery_observation``).
+The rule is deliberately conservative -- latest-state, not first-pair:
+
+* Only attempts with a real verification result count. An attempt that
+  recorded no verification at all is neither a pass nor a failure and
+  never contributes evidence (see ``_attempt_verification_state``).
+* If the most recent verified attempt is a *failure*, there is no
+  recovery observation -- whatever passed earlier, the Shard's last known
+  state is failed and reporting an older recovery would misrepresent it.
+* If the most recent verified attempt *passed*, the observation runs from
+  the most recent verified failure before it up to that pass. So
+  fail->pass, fail->fail->pass, fail->pass->pass and pass->fail->pass all
+  yield one observation (from the last failure to the last pass);
+  fail->pass->fail yields none; fail->pass->fail->pass reports only the
+  second failure->pass sequence.
+
+What the observation carries is chronology and evidence only: the failed
+attempt, the files changed / tools invoked on the attempts *after* it up
+to and including the passing attempt, and the passing attempt. OpenShard
+never claims those files or tools *caused* the later pass -- only that
+they were observed between the two verification results -- and every
+rendering says so. Derivation reuses the attempt entries already loaded
+for ranking (no second history load, no ``ShardReceipt`` builds), examines
+at most the ``_MAX_RECOVERY_WINDOW`` most recent attempts of the Shard, and
+only runs for Shards that already made the ranked, limit-bounded result.
+
 Like ``search_history``, this loads and groups ``runs.jsonl`` exactly once
 per call; unlike it, per-attempt ``ShardReceipt`` objects are only built
 for the shards that actually make the final ranked result, not for every
@@ -70,6 +100,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from openshard.history.event import events_from_entry, tool_identity
 from openshard.history.metrics import load_runs
 from openshard.history.repo_identity import entry_matches_repo
 from openshard.history.run_attempt import UnknownShardError
@@ -78,13 +109,16 @@ from openshard.history.shard_contract import (
     ShardFinding,
     ShardReceipt,
     _make_shard_id,
+    _verification_from_osn_contract,
     build_shard_receipt,
 )
+from openshard.safety.sanitize import is_absolute_path, sanitize_text
 
 __all__ = [
     "DEFAULT_CONTEXT_LIMIT",
     "HistoryPage",
     "RecentShard",
+    "RecoveryObservation",
     "RelevantAttempt",
     "RelevantContext",
     "RelevantMatch",
@@ -505,6 +539,20 @@ _MAX_CONTEXT_FILES = 8
 _MAX_CONTEXT_FINDINGS = 5
 _MAX_CONTEXT_ATTEMPTS = 5
 
+# Recovery observations (PR11) -- kept small for the same "explainable, not a
+# dump" reason as the caps above. The window is the number of most-recent
+# attempts a recovery derivation may examine at all: the same bound the
+# per-attempt history already uses, so a Shard with a very long retry
+# chain never makes relevant_context do more than a fixed amount of extra
+# work per match (see _derive_recovery_observation).
+_MAX_RECOVERY_WINDOW = _MAX_CONTEXT_ATTEMPTS
+_MAX_RECOVERY_FILES = 8
+_MAX_RECOVERY_TOOLS = 8
+# Matches the cap _verification_from_osn_contract already applies to a raw
+# reason/summary string; re-applied here since sanitize_text (not just
+# truncation) is what actually makes the value safe to expose.
+_RECOVERY_DETAIL_LIMIT = 200
+
 
 def _tokenize(text: str) -> list[str]:
     """Lowercase, split on non-alphanumerics, drop trivial stopwords."""
@@ -666,6 +714,11 @@ def _entry_verification_passed(entry: dict) -> bool:
     return False
 
 
+def _ordered_attempts(group: _ShardGroup) -> list[tuple[int, dict]]:
+    """*group*'s attempts in chronological (file-append) order."""
+    return sorted(group.attempts, key=lambda item: item[0])
+
+
 def _resolution_signal(group: _ShardGroup) -> str | None:
     """Signal text when an earlier attempt failed and a later one passed.
 
@@ -675,12 +728,207 @@ def _resolution_signal(group: _ShardGroup) -> str | None:
     """
     if len(group.attempts) < 2:
         return None
-    ordered = sorted(group.attempts, key=lambda item: item[0])
+    ordered = _ordered_attempts(group)
     earliest_entry = ordered[0][1]
     latest_entry = ordered[-1][1]
     if _entry_verification_failed(earliest_entry) and _entry_verification_passed(latest_entry):
         return "earlier attempt failed verification; a later attempt passed"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Recovery observations (PR11)
+# ---------------------------------------------------------------------------
+
+
+def _attempt_number_or_position(entry: dict, position: int) -> int:
+    """*entry*'s own recorded attempt number, or its 1-based chronological
+    position when no explicit number was persisted (legacy/external entries).
+    Never fabricated as anything other than a plain position in that case."""
+    n = entry.get("attempt_number")
+    return n if isinstance(n, int) and not isinstance(n, bool) else position
+
+
+_STATE_FAILED = "failed"
+_STATE_PASSED = "passed"
+
+
+def _attempt_verification_state(entry: dict) -> str | None:
+    """The single verification state one attempt contributes as evidence:
+    ``"failed"``, ``"passed"``, or ``None`` when it recorded no verification
+    result at all (never guessed from anything else).
+
+    Precedence when an attempt carries *conflicting* signals -- e.g.
+    ``verification_passed: True`` alongside a ``review_checks`` entry whose
+    status is ``failed`` -- is **failed wins**: any recorded failure makes
+    the attempt count as a failure. Treating a partly-failed attempt as a
+    pass would let a recovery observation claim a recovered state the
+    evidence does not support; the reverse error is merely conservative.
+    """
+    if _entry_verification_failed(entry):
+        return _STATE_FAILED
+    if _entry_verification_passed(entry):
+        return _STATE_PASSED
+    return None
+
+
+def _find_recovery_pair(window: list[tuple[int, dict]]) -> tuple[int, int] | None:
+    """Positions (into *window*) of the most recent verified failure and the
+    latest verified pass after it, or ``None`` -- the latest-state rule
+    spelled out in the module docstring.
+
+    Walking *window* backwards: the first attempt with any verification
+    state at all is the Shard's latest known state. If that is a failure,
+    or there is no verified attempt, there is nothing to report. If it is a
+    pass, the most recent failure before it (skipping unverified attempts,
+    which are not evidence either way) closes the pair. Attempts after the
+    latest pass are by construction unverified. Deterministic: only
+    positions in the already-ordered list are consulted.
+    """
+    latest_pass: int | None = None
+    for pos in range(len(window) - 1, -1, -1):
+        state = _attempt_verification_state(window[pos][1])
+        if state is None:
+            continue
+        if latest_pass is None:
+            if state == _STATE_FAILED:
+                return None
+            latest_pass = pos
+            continue
+        if state == _STATE_FAILED:
+            return pos, latest_pass
+    return None
+
+
+def _entry_verification_evidence(entry: dict, fallback_status: str) -> tuple[str, str | None]:
+    """``(status, detail)`` for one attempt without building a receipt.
+
+    Uses the same OSN verification-contract mapping ``build_shard_receipt``
+    uses for ``verification_status`` / ``verification_reason``; when the
+    entry has no OSN contract (boolean or review-check evidence only) the
+    status token falls back to what ``_attempt_verification_state`` already
+    established and the detail stays ``None`` -- never synthesized from
+    check names or free text. The detail is re-sanitized here because the
+    contract's own 200-char cap is a length bound, not a safety check.
+    """
+    status, reason, _rc, _dur, _raw = _verification_from_osn_contract(entry)
+    detail = sanitize_text(reason, _RECOVERY_DETAIL_LIMIT) if reason else None
+    return (status or fallback_status), detail
+
+
+def _intervening_evidence(
+    window: list[tuple[int, dict]], start: int, end: int,
+) -> tuple[list[str], list[str]]:
+    """Files changed / tools invoked on the attempts strictly after *start*
+    through *end* (positions into *window*), first-seen order, deduplicated
+    and capped.
+
+    Bounded work: at most ``len(window) - 1`` attempts are read, each with
+    one ``_entry_touched_paths`` pass and one ``events_from_entry``
+    projection -- no ``ShardReceipt`` is ever built here. Files reuse the
+    same touched-path evidence ``_score_group`` already reads, with an
+    absolute-path check on top since this is new surface rather than
+    already-reviewed rendering; tools come from each attempt's canonical
+    ``tool.invoked`` Events via ``event.tool_identity`` (structured fields
+    only, already sanitized at Event-construction time).
+    """
+    files: list[str] = []
+    tools: list[str] = []
+    seen_files: set[str] = set()
+    seen_tools: set[str] = set()
+    for pos in range(start + 1, end + 1):
+        _, entry = window[pos]
+        for p in _entry_touched_paths(entry):
+            if p in seen_files or is_absolute_path(p):
+                continue
+            seen_files.add(p)
+            if len(files) < _MAX_RECOVERY_FILES:
+                files.append(p)
+        for ev in events_from_entry(entry):
+            tool = tool_identity(ev)
+            if tool is None or tool in seen_tools:
+                continue
+            seen_tools.add(tool)
+            if len(tools) < _MAX_RECOVERY_TOOLS:
+                tools.append(tool)
+    return files, tools
+
+
+def _later_same_file_activity(window: list[tuple[int, dict]], end: int, files: list[str]) -> int:
+    """Count of attempts after position *end* (same Shard, within *window*)
+    that touched at least one of *files*.
+
+    Under the latest-state rule every attempt after the recovery attempt
+    is necessarily unverified (a later pass would itself be the recovery
+    attempt; a later failure would suppress the observation), so this
+    counts *unverified* follow-up activity on the same files. Context only
+    -- never rendered or read as confidence, validity, or staleness.
+    """
+    if not files:
+        return 0
+    normalized = {_normalize_path(f) for f in files}
+    count = 0
+    for pos in range(end + 1, len(window)):
+        touched = {_normalize_path(p) for p in _entry_touched_paths(window[pos][1])}
+        if touched & normalized:
+            count += 1
+    return count
+
+
+def _derive_recovery_observation(group: _ShardGroup) -> RecoveryObservation | None:
+    """Derive the ``RecoveryObservation`` for *group*'s latest recovered
+    state, or ``None`` (see the module docstring for the exact rule).
+
+    Only ever called for a Shard that already qualified as a
+    ``relevant_context`` match (see ``_build_relevant_match``) -- never a
+    second, broader retrieval pass.
+
+    Bounded-work guarantee: only the ``_MAX_RECOVERY_WINDOW`` most recent
+    attempts (file-append order, the repository's established chronology)
+    are examined at all, so the cost per match is fixed regardless of how
+    long the Shard's retry chain is. Within that window there are no
+    ``ShardReceipt`` builds and no history reads -- just per-entry field
+    reads (``_attempt_verification_state``, ``_entry_touched_paths``,
+    ``_verification_from_osn_contract``) and one ``events_from_entry``
+    projection per intervening attempt. A failure/pass pair that lies
+    entirely before the window is not reported: that is missing evidence
+    staying missing, not a synthesized answer.
+    """
+    if len(group.attempts) < 2:
+        return None
+    ordered = _ordered_attempts(group)
+    offset = max(0, len(ordered) - _MAX_RECOVERY_WINDOW)
+    window = ordered[offset:]
+    pair = _find_recovery_pair(window)
+    if pair is None:
+        return None
+    i, j = pair
+    _, f_entry = window[i]
+    _, r_entry = window[j]
+
+    failure_status, failure_detail = _entry_verification_evidence(f_entry, _STATE_FAILED)
+    recovery_status, recovery_detail = _entry_verification_evidence(r_entry, _STATE_PASSED)
+    intervening_files, intervening_tools = _intervening_evidence(window, i, j)
+
+    failed_ts = f_entry.get("timestamp")
+    recovery_ts = r_entry.get("timestamp")
+
+    return RecoveryObservation(
+        shard_id=group.shard_id,
+        failed_attempt_number=_attempt_number_or_position(f_entry, offset + i + 1),
+        recovery_attempt_number=_attempt_number_or_position(r_entry, offset + j + 1),
+        failed_run_id=_entry_run_id(f_entry) or None,
+        recovery_run_id=_entry_run_id(r_entry) or None,
+        failed_timestamp=failed_ts if isinstance(failed_ts, str) else None,
+        recovery_timestamp=recovery_ts if isinstance(recovery_ts, str) else None,
+        failure_status=failure_status,
+        failure_detail=failure_detail,
+        recovery_status=recovery_status,
+        recovery_detail=recovery_detail,
+        intervening_files=intervening_files,
+        intervening_tools=intervening_tools,
+        later_same_file_activity=_later_same_file_activity(window, j, intervening_files),
+    )
 
 
 def ranking_explanation() -> dict:
@@ -731,6 +979,52 @@ class RelevantAttempt:
 
 
 @dataclass
+class RecoveryObservation:
+    """The latest evidence-backed recovered state of one Shard: its most
+    recent verified failure, what was observed on the attempts after it,
+    and the latest verified pass that followed.
+
+    Semantics (latest-state, not first-pair -- see the module docstring's
+    "Recovery observations" section): present only when the Shard's most
+    recent verified attempt passed; the failure is the most recent verified
+    failure before that pass; attempts with no verification result are
+    skipped, never counted as evidence. A Shard whose latest verified state
+    is a failure has no observation, whatever recovered earlier.
+
+    ``intervening_files`` / ``intervening_tools`` are the files changed and
+    tools invoked on the attempts *after* the failed attempt up to and
+    including the passing one -- including the passing attempt's own
+    activity. They describe *what was observed between the two
+    verification results* -- never that they caused the later pass.
+    OpenShard has no evidence for that stronger claim and must not make it,
+    in code or in any rendered text. ``later_same_file_activity`` counts
+    unverified follow-up attempts touching those same files; it is context,
+    not confidence or staleness.
+
+    Every field here is either a bounded scalar (attempt numbers, status
+    tokens, a count) or has already passed through
+    ``openshard.safety.sanitize`` / the same touched-path evidence
+    ``_score_group`` reads -- no transcripts, prompts, stdout/stderr,
+    environment values, or absolute paths.
+    """
+
+    shard_id: str
+    failed_attempt_number: int
+    recovery_attempt_number: int
+    failed_run_id: str | None
+    recovery_run_id: str | None
+    failed_timestamp: str | None
+    recovery_timestamp: str | None
+    failure_status: str
+    failure_detail: str | None
+    recovery_status: str
+    recovery_detail: str | None
+    intervening_files: list[str] = field(default_factory=list)
+    intervening_tools: list[str] = field(default_factory=list)
+    later_same_file_activity: int = 0
+
+
+@dataclass
 class RelevantMatch:
     """One Shard relevant_context judged relevant, plus why and its attempt history."""
 
@@ -745,6 +1039,10 @@ class RelevantMatch:
     files: list[str] = field(default_factory=list)
     findings: list[ShardFinding] = field(default_factory=list)
     attempts: list[RelevantAttempt] = field(default_factory=list)
+    # PR11: observed failure -> later-pass chronology within this same Shard,
+    # when one exists. None is the common case -- most matches never had a
+    # recorded failure at all.
+    recovery: RecoveryObservation | None = None
 
 
 @dataclass
@@ -869,6 +1167,7 @@ def _build_relevant_match(group: _ShardGroup, score: int, signals: list[str]) ->
         files=list(receipt.files_touched[:_MAX_CONTEXT_FILES]),
         findings=findings,
         attempts=attempts,
+        recovery=_derive_recovery_observation(group),
     )
 
 
@@ -905,6 +1204,17 @@ def _render_context_text(task: str, matches: list[RelevantMatch]) -> str:
                 for n, a in enumerate(m.attempts, start=1)
             )
             lines.append(f"   Attempts: {attempt_summary}")
+        if m.recovery:
+            ro = m.recovery
+            lines.append(
+                f"   Recovery observed: attempt {ro.failed_attempt_number} failed verification; "
+                f"attempt {ro.recovery_attempt_number} later passed (chronology only, not a proven cause)"
+            )
+            if ro.intervening_files:
+                lines.append(f"     Files changed between failure and pass: {', '.join(ro.intervening_files)}")
+            if ro.intervening_tools:
+                lines.append(f"     Tools invoked between failure and pass: {', '.join(ro.intervening_tools)}")
+            lines.append(f"     Later same-file activity: {ro.later_same_file_activity}")
         if m.files:
             lines.append(f"   Files: {', '.join(m.files)}")
         for f in m.findings:
