@@ -28,14 +28,25 @@ CAPTURE_UNKNOWN = "unknown"
 VALID_CAPTURE_DEPTHS = frozenset({CAPTURE_FULL, CAPTURE_PARTIAL, CAPTURE_UNKNOWN})
 
 # Executors OpenShard did not run itself — it only observed the git state an
-# external coding agent left behind, or (for ``claude_code_hooks``) the
-# lifecycle evidence Claude Code's official hooks handed it. Never invents
-# verification, cost, or approval for these (see
-# openshard/adapters/claude_code_import.py, openshard/adapters/wrap_exec.py
-# and openshard/adapters/claude_hooks.py).
-_EXTERNAL_ADAPTER_EXECUTORS = frozenset({"claude_code_import", "claude_code_wrap", "claude_code_hooks"})
+# external coding agent left behind, or (for the ``*_hooks`` / ``*_plugin``
+# executors) the lifecycle evidence the agent's own hooks/plugin handed it.
+# Never invents verification, cost, or approval for these (see
+# openshard/adapters/claude_code_import.py, openshard/adapters/wrap_exec.py,
+# openshard/adapters/claude_hooks.py and openshard/adapters/capture_agents.py).
+# The label names the *agent that did the work* — never the model provider:
+# an OpenCode session observed through the plugin stays "OpenCode" whatever
+# provider/model it used (PR12), and is distinct from ``executor ==
+# "opencode"`` below, which is OpenShard *routing* work to OpenCode itself.
+_EXTERNAL_AGENT_LABELS: dict[str, str] = {
+    "claude_code_import": "Claude Code (external)",
+    "claude_code_wrap": "Claude Code (external)",
+    "claude_code_hooks": "Claude Code (external)",
+    "codex_hooks": "Codex (external)",
+    "opencode_plugin": "OpenCode (external)",
+}
+_EXTERNAL_ADAPTER_EXECUTORS = frozenset(_EXTERNAL_AGENT_LABELS)
 
-_EXTERNAL_AGENT_LABEL = "Claude Code (external)"
+_EXTERNAL_AGENT_LABEL = _EXTERNAL_AGENT_LABELS["claude_code_hooks"]
 
 
 @dataclass
@@ -64,7 +75,7 @@ def derive_shard_identity(entry: dict) -> tuple[str, str, str]:
     adapter = entry.get("adapter") or ""
 
     if executor in _EXTERNAL_ADAPTER_EXECUTORS:
-        return _EXTERNAL_AGENT_LABEL, ORIGIN_EXTERNAL_OBSERVED, CAPTURE_PARTIAL
+        return _EXTERNAL_AGENT_LABELS[executor], ORIGIN_EXTERNAL_OBSERVED, CAPTURE_PARTIAL
 
     if workflow == "native" or executor == "native":
         return "OpenShard Native", ORIGIN_OPENSHARD_ROUTED, CAPTURE_FULL

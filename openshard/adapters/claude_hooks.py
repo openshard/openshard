@@ -105,6 +105,38 @@ the raw prompt, absolute path or raw command text. Replays are idempotent
 queue replayed after a crash still records the right timestamps.
 ``handle_claude_hook`` / ``handle_claude_status`` remain the synchronous
 in-process path and are used as the fallback when no service is reachable.
+
+Codex and OpenCode (PR12)
+-------------------------
+The fold logic in this module is agent-neutral: Codex hooks
+(``adapters/codex_hooks.py``) and the OpenCode plugin
+(``adapters/opencode_plugin.py``) translate their own payloads into the very
+same ``HookPayload`` / ``StatusPayload`` shapes, and everything from
+``reduce_hook_payload`` on -- the queue line, the staging buffer, the fold,
+the receipt fields -- is shared. What differs per agent (labels, executor,
+Event source/actor, task placeholder) comes from one static table,
+``adapters/capture_agents.py``; the buffer remembers its ``agent`` and every
+label is looked up from it, so no branch below tests an agent name. Agent
+identity is preserved on the record (``executor``, ``capture.agent``,
+``capture.agent_vendor``, ``capture.provider``) and is never collapsed:
+an OpenCode session stays "OpenCode" even when its provider/model are
+known, and a Codex session records the model slug Codex reports without
+inventing cost or token figures Codex does not expose.
+
+Fail-closed tool semantics across agents: a ``tool.invoked`` Event for a
+file tool is ``passed`` -- and its path joins the hook-reported file list
+used when git is unavailable -- only when the *translator* attached a
+positive success signal (``HookPayload.tool_success``). Claude Code's
+``PostToolUse`` is documented to fire only after a tool completed
+successfully (failures go to ``PostToolUseFailure``), so its translator
+sets that flag; Codex's ``PostToolUse`` also fires for failed shell
+commands and OpenCode's ``tool.execute.after`` carries no outcome, so
+theirs never do and their file tools stay ``unknown``. OpenCode's own
+``file.edited`` event (published only after a successful write) is the
+positive signal that feeds its hook-reported file list. Git-observed
+changes are evidence on their own regardless of agent. OpenCode's
+``session.idle`` is a neutral activity boundary (``SessionIdle``): it
+snapshots the record but never counts as a completed turn.
 """
 
 from __future__ import annotations
@@ -119,17 +151,22 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-EXECUTOR = "claude_code_hooks"
-IMPORT_SOURCE = "claude_code"
-IMPORT_METHOD = "openshard_claude_hooks_v0"
-CAPTURE_SOURCE = "claude_code_hooks"
-IMPORT_NOTE = (
-    "Captured automatically from Claude Code lifecycle hooks. "
-    "Tool/file facts are as reported by Claude Code; files are inferred from git diff. "
-    "Model/cost/tokens are read from Claude Code's status line when one is configured "
-    "(see `openshard mcp install claude`); otherwise they stay Unknown/Not recorded. "
-    "Verification is never recorded by OpenShard for this capture path."
+from openshard.adapters.capture_agents import (
+    AGENT_CLAUDE_CODE,
+    CLAUDE_CODE_PROFILE,
+    AgentProfile,
+    agent_for_executor,
+    is_known_agent,
+    profile_for,
 )
+
+# Claude Code identity constants -- kept as module names for existing
+# callers/tests; the values are the Claude profile's (adapters/capture_agents.py).
+EXECUTOR = CLAUDE_CODE_PROFILE.executor
+IMPORT_SOURCE = CLAUDE_CODE_PROFILE.import_source
+IMPORT_METHOD = CLAUDE_CODE_PROFILE.import_method
+CAPTURE_SOURCE = CLAUDE_CODE_PROFILE.capture_source
+IMPORT_NOTE = CLAUDE_CODE_PROFILE.import_note
 
 SESSIONS_DIRNAME = "claude_sessions"
 BUFFER_SCHEMA_VERSION = 1
@@ -140,6 +177,15 @@ EVENT_POST_TOOL_USE = "PostToolUse"
 EVENT_POST_TOOL_USE_FAILURE = "PostToolUseFailure"
 EVENT_STOP = "Stop"
 EVENT_SESSION_END = "SessionEnd"
+# PR12: two canonical lifecycle events Claude Code never emits but Codex
+# (``Interrupt``) and OpenCode (``file.edited`` -> ``FileEdited``) do. They
+# are part of the neutral vocabulary every agent translator targets.
+EVENT_INTERRUPT = "Interrupt"
+EVENT_FILE_EDITED = "FileEdited"
+# A neutral "the session went idle" boundary (OpenCode ``session.idle``).
+# Unlike ``Stop`` it proves neither that an assistant turn completed nor
+# that anything succeeded, so it only snapshots the record.
+EVENT_SESSION_IDLE = "SessionIdle"
 SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_SESSION_START,
     EVENT_USER_PROMPT_SUBMIT,
@@ -147,19 +193,29 @@ SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_POST_TOOL_USE_FAILURE,
     EVENT_STOP,
     EVENT_SESSION_END,
+    EVENT_INTERRUPT,
+    EVENT_FILE_EDITED,
+    EVENT_SESSION_IDLE,
 )
 
 # Tools whose tool_input.file_path names a file Claude Code says it changed.
 FILE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
-_LOCAL_STATE_PREFIXES: tuple[str, ...] = (".openshard/", ".claude/")
+# Local agent/OpenShard state is never a task's work (see _git_changed_files).
+_LOCAL_STATE_PREFIXES: tuple[str, ...] = (".openshard/", ".claude/", ".codex/", ".opencode/")
 COMMAND_TOOLS: frozenset[str] = frozenset({"Bash"})
+# Agent-neutral tool classification carried on the reduced payload.
+TOOL_KIND_FILE = "file"
+TOOL_KIND_COMMAND = "command"
+TOOL_KIND_OTHER = "other"
 
 _TASK_CAP = 300
-_TASK_PLACEHOLDER = "Claude Code session (task not captured)"
+_TASK_PLACEHOLDER = CLAUDE_CODE_PROFILE.task_placeholder
 _COMMAND_CAP = 100
 _PATH_CAP = 200
 _MAX_BUFFERED_EVENTS = 200
 _MAX_HOOK_FILES = 50
+_MAX_FILE_TARGETS = 20  # files one tool call (e.g. a Codex apply_patch) may name
+_MAX_USAGE_KEYS = 200  # per-message usage reports remembered per session (OpenCode)
 _MAX_TOOL_FILE_EVENTS = 20  # fallback file.changed events when git is unavailable
 # Tool hooks normally only stage; at most one runs.jsonl snapshot per this
 # many seconds is taken from a tool hook, so an interrupted turn (Stop never
@@ -245,6 +301,17 @@ class HookPayload:
     file_path: str | None = None  # tool_input.file_path for file tools
     command: str | None = None  # tool_input.command for Bash
     stop_hook_active: bool = False  # Stop
+    # PR12 -- filled by the Codex / OpenCode translators, never by Claude Code:
+    agent: str = AGENT_CLAUDE_CODE
+    tool_kind: str | None = None  # file | command | other; None = classify by Claude tool name
+    file_paths: list[tuple[str, str]] = field(default_factory=list)  # (raw path, change_type)
+    model_id: str | None = None  # model slug the agent itself reports on the hook
+    provider_id: str | None = None  # model provider id, only when the agent exposes it
+    # Positive success signal for this tool call, set only by a translator
+    # whose provider *documents* that the event fires exclusively after a
+    # successful tool run (Claude Code's PostToolUse). None = not known;
+    # the fold then never marks the call ``passed`` nor trusts its paths.
+    tool_success: bool | None = None
 
 
 def parse_hook_payload(raw: object) -> dict | None:
@@ -315,6 +382,10 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
         file_path=_str_or_none(tool_input.get("file_path") or tool_input.get("notebook_path"), 2_000),
         command=_str_or_none(tool_input.get("command")),
         stop_hook_active=bool(data.get("stop_hook_active")),
+        # Claude Code documents PostToolUse as "runs immediately after a tool
+        # completes successfully" (failures fire PostToolUseFailure instead),
+        # so the event itself is the positive success signal for Claude.
+        tool_success=True if event == EVENT_POST_TOOL_USE else None,
     )
 
 
@@ -339,6 +410,14 @@ class StatusPayload:
     tokens_output: int | None = None
     tokens_cache_creation: int | None = None
     tokens_cache_read: int | None = None
+    # PR12: a usage report from another agent. ``usage_key`` (OpenCode: the
+    # assistant message id) makes the report *per message* rather than a
+    # cumulative session figure: the buffer keeps the latest value per key
+    # and sums them, so the same message re-reported while streaming never
+    # double counts. ``provider_id`` is the model provider when exposed.
+    agent: str = AGENT_CLAUDE_CODE
+    provider_id: str | None = None
+    usage_key: str | None = None
 
     def to_dict(self) -> dict:
         """Queue representation: every field except ``cwd`` (used for repo resolution only)."""
@@ -350,6 +429,9 @@ class StatusPayload:
             "tokens_output": self.tokens_output,
             "tokens_cache_creation": self.tokens_cache_creation,
             "tokens_cache_read": self.tokens_cache_read,
+            "agent": self.agent,
+            "provider_id": self.provider_id,
+            "usage_key": self.usage_key,
         }
 
     @classmethod
@@ -357,6 +439,7 @@ class StatusPayload:
         session_id = data.get("session_id")
         if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
             return None
+        agent = data.get("agent")
         return cls(
             session_id=session_id,
             cwd=None,
@@ -366,6 +449,9 @@ class StatusPayload:
             tokens_output=_int_or_none(data.get("tokens_output")),
             tokens_cache_creation=_int_or_none(data.get("tokens_cache_creation")),
             tokens_cache_read=_int_or_none(data.get("tokens_cache_read")),
+            agent=str(agent) if is_known_agent(agent) else AGENT_CLAUDE_CODE,
+            provider_id=_str_or_none(data.get("provider_id"), 80),
+            usage_key=_str_or_none(data.get("usage_key"), 80),
         )
 
 
@@ -542,21 +628,22 @@ def sanitize_task_excerpt(prompt: str | None) -> str | None:
     return text or None
 
 
-def summarize_command(command: str | None) -> tuple[str, str | None, str]:
-    """Return ``(action_text, target_program, command_kind)`` for a Bash command.
+def summarize_command(command: str | None, label: str = "Bash") -> tuple[str, str | None, str]:
+    """Return ``(action_text, target_program, command_kind)`` for a shell command.
 
     The command is secret-scrubbed, whitespace-collapsed and capped; if the
     scrubbed text still looks unsafe to ``sanitize_text`` (secret-like run,
     absolute path) the whole command text is replaced by a neutral label so
     nothing risky is stored. ``command_kind`` is a deterministic
     classification (``test`` / ``lint`` / ``other``) used as metadata only --
-    never as a verification result.
+    never as a verification result. *label* is the tool's own name
+    (``Bash`` for Claude Code/Codex, ``bash`` for OpenCode).
     """
     from openshard.safety.sanitize import sanitize_text
     from openshard.security.secret_scan import scrub_text_for_secrets
 
     if not isinstance(command, str) or not command.strip():
-        return "Bash command", None, "other"
+        return f"{label} command", None, "other"
     kind = "test" if _TEST_COMMAND_RE.search(command) else ("lint" if _LINT_COMMAND_RE.search(command) else "other")
     scrubbed, _ = scrub_text_for_secrets(command[:1_000], source_label="<hook-command>")
     collapsed = " ".join(scrubbed.split())
@@ -564,8 +651,8 @@ def summarize_command(command: str | None) -> tuple[str, str | None, str]:
     first = collapsed.split(" ", 1)[0] if collapsed else ""
     target = first if _FIRST_TOKEN_RE.match(first) else None
     if not safe:
-        return "Bash command (redacted)", target, kind
-    return f"Bash: {safe}", target, kind
+        return f"{label} command (redacted)", target, kind
+    return f"{label}: {safe}", target, kind
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +677,13 @@ class ReducedHookPayload:
     command_target: str | None = None
     command_kind: str | None = None  # test | lint | other
     stop_hook_active: bool = False
+    # PR12 (agent-neutral additions; absent on pre-PR12 queue lines):
+    agent: str = AGENT_CLAUDE_CODE
+    tool_kind: str | None = None  # file | command | other
+    file_targets: list[dict] = field(default_factory=list)  # [{"path", "change_type"}], repo-relative
+    model_id: str | None = None
+    provider_id: str | None = None
+    tool_success: bool | None = None  # see HookPayload.tool_success
 
     def to_dict(self) -> dict:
         return {
@@ -605,6 +699,12 @@ class ReducedHookPayload:
             "command_target": self.command_target,
             "command_kind": self.command_kind,
             "stop_hook_active": self.stop_hook_active,
+            "agent": self.agent,
+            "tool_kind": self.tool_kind,
+            "file_targets": list(self.file_targets),
+            "model_id": self.model_id,
+            "provider_id": self.provider_id,
+            "tool_success": self.tool_success,
         }
 
     @classmethod
@@ -616,6 +716,28 @@ class ReducedHookPayload:
             return None
         if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
             return None
+        agent = data.get("agent")
+        raw_targets = data.get("file_targets")
+        file_targets: list[dict] = []
+        if isinstance(raw_targets, list):
+            for item in raw_targets[:_MAX_FILE_TARGETS]:
+                if not isinstance(item, dict):
+                    continue
+                path = _str_or_none(item.get("path"), _PATH_CAP)
+                if path is None:
+                    continue
+                change_type = item.get("change_type")
+                if change_type not in ("create", "update", "delete"):
+                    change_type = "update"
+                file_targets.append({"path": path, "change_type": change_type})
+        tool_kind = data.get("tool_kind")
+        agent_key = str(agent) if is_known_agent(agent) else AGENT_CLAUDE_CODE
+        raw_success = data.get("tool_success")
+        tool_success: bool | None = raw_success if isinstance(raw_success, bool) else None
+        if "tool_success" not in data and agent_key == AGENT_CLAUDE_CODE and event == EVENT_POST_TOOL_USE:
+            # Queue line written before the flag existed: every such line is
+            # a Claude Code hook, whose PostToolUse is itself the success signal.
+            tool_success = True
         return cls(
             event=event,
             session_id=session_id,
@@ -629,7 +751,21 @@ class ReducedHookPayload:
             command_target=_str_or_none(data.get("command_target"), 40),
             command_kind=_str_or_none(data.get("command_kind"), 16),
             stop_hook_active=bool(data.get("stop_hook_active")),
+            agent=agent_key,
+            tool_kind=tool_kind if tool_kind in (TOOL_KIND_FILE, TOOL_KIND_COMMAND, TOOL_KIND_OTHER) else None,
+            file_targets=file_targets,
+            model_id=_str_or_none(data.get("model_id"), 200),
+            provider_id=_str_or_none(data.get("provider_id"), 80),
+            tool_success=tool_success,
         )
+
+
+def _classify_claude_tool(tool: str) -> str:
+    if tool in FILE_TOOLS:
+        return TOOL_KIND_FILE
+    if tool in COMMAND_TOOLS:
+        return TOOL_KIND_COMMAND
+    return TOOL_KIND_OTHER
 
 
 def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPayload | None:
@@ -638,6 +774,9 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
     This is the only place raw prompt / file path / command text is ever
     looked at; the result is what both the synchronous path and the capture
     service's queue carry from here on. Returns None without a session id.
+    Agent-neutral: a translator that already classified its tool
+    (``tool_kind``) or named several files (``file_paths``) is honoured;
+    a Claude Code payload is classified by tool name exactly as before.
     """
     if payload.session_id is None:
         return None
@@ -647,18 +786,36 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         source=payload.source,
         reason=payload.reason,
         stop_hook_active=payload.stop_hook_active,
+        agent=payload.agent if is_known_agent(payload.agent) else AGENT_CLAUDE_CODE,
+        model_id=_str_or_none(payload.model_id, 200),
+        provider_id=_str_or_none(payload.provider_id, 80),
+        tool_success=payload.tool_success if isinstance(payload.tool_success, bool) else None,
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
     elif payload.event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         tool = payload.tool_name or "unknown"
         reduced.tool_name = tool
-        if tool in FILE_TOOLS:
+        kind = payload.tool_kind or _classify_claude_tool(tool)
+        reduced.tool_kind = kind
+        if kind == TOOL_KIND_FILE:
             reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
             reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
-        elif tool in COMMAND_TOOLS:
-            action, target, kind = summarize_command(payload.command)
-            reduced.command_action, reduced.command_target, reduced.command_kind = action, target, kind
+            for raw_path, change_type in payload.file_paths[:_MAX_FILE_TARGETS]:
+                rel = _to_repo_relative(raw_path, repo_root)
+                if rel is None:
+                    reduced.file_dropped = True
+                    continue
+                ct = change_type if change_type in ("create", "update", "delete") else "update"
+                reduced.file_targets.append({"path": rel, "change_type": ct})
+            if reduced.file_target is None and reduced.file_targets:
+                reduced.file_target = reduced.file_targets[0]["path"]
+        elif kind == TOOL_KIND_COMMAND:
+            action, target, ckind = summarize_command(payload.command, label=tool)
+            reduced.command_action, reduced.command_target, reduced.command_kind = action, target, ckind
+    elif payload.event == EVENT_FILE_EDITED:
+        reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
+        reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
     return reduced
 
 
@@ -671,17 +828,36 @@ def sessions_dir(repo_root: Path) -> Path:
     return repo_root / ".openshard" / SESSIONS_DIRNAME
 
 
-def buffer_path(repo_root: Path, session_id: str) -> Path:
-    return sessions_dir(repo_root) / f"{session_id}.json"
+def buffer_path(repo_root: Path, session_id: str, agent: str = AGENT_CLAUDE_CODE) -> Path:
+    """Staging-buffer file for one agent session.
+
+    Scoped per agent (PR12): session ids are minted by the agents
+    themselves, so two different agents could in principle hand OpenShard
+    the same id, and their sessions must never share a buffer (they are
+    separate Shards with separate executors). Claude Code keeps the
+    pre-PR12 ``<sid>.json`` name so live buffers survive an upgrade.
+    """
+    if agent == AGENT_CLAUDE_CODE:
+        return sessions_dir(repo_root) / f"{session_id}.json"
+    return sessions_dir(repo_root) / f"{agent}.{session_id}.json"
 
 
-def _new_buffer(session_id: str, repo_root: Path, first_hook: str, *, now: str | None = None) -> dict:
+def _buffer_profile(buf: Mapping[str, Any]) -> AgentProfile:
+    """The agent profile a buffer belongs to (pre-PR12 buffers: Claude Code)."""
+    return profile_for(buf.get("agent"))
+
+
+def _new_buffer(
+    session_id: str, repo_root: Path, first_hook: str, *, now: str | None = None, agent: str = AGENT_CLAUDE_CODE
+) -> dict:
     from openshard.analysis.repo_map import collect_git_info
 
     git_info = collect_git_info(repo_root)
     now = now or _now()
+    profile = profile_for(agent)
     buf: dict = {
         "schema_version": BUFFER_SCHEMA_VERSION,
+        "agent": profile.key,
         "session_id": session_id,
         "started_at": now,
         "last_activity_at": now,
@@ -705,6 +881,10 @@ def _new_buffer(session_id: str, repo_root: Path, first_hook: str, *, now: str |
         # actual work, never the whole (possibly much longer-lived) session.
         "first_prompt_at": None,
         "last_stop_at": None,
+        # Neutral idle boundaries observed (OpenCode session.idle): counted
+        # and timestamped for visibility, never a completed turn.
+        "idle_count": 0,
+        "last_idle_at": None,
         # Model/cost/token capture -- populated opportunistically by the
         # Claude Code *status line* channel (see handle_claude_status), never
         # by hooks (no hook payload carries this data; see module docstring).
@@ -714,6 +894,13 @@ def _new_buffer(session_id: str, repo_root: Path, first_hook: str, *, now: str |
         "cost_baseline_usd": None,  # cost observed at the first status ping
         "tokens_current": None,  # {"input", "output", "cache_creation", "cache_read"}
         "status_last_seen_at": None,
+        # PR12: where the model id came from (status_line | codex_hook |
+        # opencode_plugin), the provider id when an agent exposes one, and
+        # per-message usage reports (OpenCode) keyed by message id.
+        "model_source": None,
+        "provider_current": None,
+        "usage_by_key": {},
+        "usage_provenance": None,
         # Ids of queued events already applied (capture service replay
         # idempotency; see apply_reduced_hook). Bounded, most recent last.
         "applied_ids": [],
@@ -721,7 +908,7 @@ def _new_buffer(session_id: str, repo_root: Path, first_hook: str, *, now: str |
     _append_event(
         buf,
         event_type="session.started",
-        action=f"Claude Code session observed (first hook: {first_hook})",
+        action=f"{profile.label} session observed (first hook: {first_hook})",
         status="started",
         evidence="directly_observed",
         metadata={"hook": first_hook},
@@ -746,21 +933,22 @@ def _append_event(
     occurred_at: str | None = None,
 ) -> None:
     """Build one canonical Event (occurred_at = *occurred_at* or now) and stage it."""
-    from openshard.history.event import SOURCE_CLAUDE_CODE_HOOKS, make_event
+    from openshard.history.event import make_event
 
     if len(buf["events"]) >= _MAX_BUFFERED_EVENTS:
         buf["dropped_events"] = int(buf.get("dropped_events") or 0) + 1
         return
     record = buf.get("record") or {}
+    profile = _buffer_profile(buf)
     ev = make_event(
         event_type=event_type,
-        source=SOURCE_CLAUDE_CODE_HOOKS,
+        source=profile.event_source,
         action=action,
         occurred_at=occurred_at or _now(),
         run_id=record.get("run_id"),
         shard_id=record.get("shard_id"),
         attempt_number=record.get("attempt_number"),
-        actor=IMPORT_SOURCE,
+        actor=profile.import_source,
         target=target,
         status=status,
         evidence=evidence,
@@ -824,13 +1012,18 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         f["path"]: f.get("change_type", "update")
         for f in files_detail
         if isinstance(f, dict) and isinstance(f.get("path"), str)
-        and f.get("summary") == "reported by Claude Code hook"
+        and isinstance(f.get("summary"), str) and f["summary"].startswith("reported by ")
     }
     ended = None
     if capture.get("session_end_observed"):
         ended = {"reason": capture.get("session_end_reason"), "at": capture.get("last_activity_at")}
+    raw_usage = capture.get("usage_by_key")
+    usage_by_key = {
+        k: v for k, v in raw_usage.items() if isinstance(k, str) and isinstance(v, dict)
+    } if isinstance(raw_usage, dict) else {}
     return {
         "schema_version": BUFFER_SCHEMA_VERSION,
+        "agent": agent_for_executor(entry.get("executor")),
         "session_id": session_id,
         "started_at": capture.get("started_at") or entry.get("timestamp") or _now(),
         "last_activity_at": capture.get("last_activity_at") or _now(),
@@ -856,6 +1049,8 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "ended": ended,
         "first_prompt_at": capture.get("first_prompt_at"),
         "last_stop_at": capture.get("last_turn_completed_at"),
+        "idle_count": int(capture.get("idle_count") or 0),
+        "last_idle_at": capture.get("last_idle_at") if isinstance(capture.get("last_idle_at"), str) else None,
         "model_current": entry.get("execution_model") if entry.get("execution_model") not in (None, "unknown") else None,
         "models_seen": [m for m in (capture.get("models_seen") or []) if isinstance(m, str)],
         "cost_total_usd": capture.get("cost_total_usd") if isinstance(capture.get("cost_total_usd"), (int, float)) else None,
@@ -873,20 +1068,27 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
             else None
         ),
         "status_last_seen_at": capture.get("last_status_ping_at"),
+        "model_source": capture.get("model_source") if capture.get("model_source") != "not_captured" else None,
+        "provider_current": capture.get("provider") if isinstance(capture.get("provider"), str) else None,
+        "usage_by_key": usage_by_key,
+        "usage_provenance": next(
+            (v for v in (entry.get("tokens_provenance"), entry.get("cost_provenance")) if isinstance(v, str)),
+            None,
+        ),
         "applied_ids": [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)],
     }
 
 
-def _is_session_entry(entry: dict, session_id: str) -> bool:
+def _is_session_entry(entry: dict, session_id: str, executor: str = EXECUTOR) -> bool:
     capture = entry.get("capture")
     return (
-        entry.get("executor") == EXECUTOR
+        entry.get("executor") == executor
         and isinstance(capture, dict)
         and capture.get("session_id") == session_id
     )
 
 
-def _find_persisted_entry(repo_root: Path, session_id: str) -> dict | None:
+def _find_persisted_entry(repo_root: Path, session_id: str, executor: str = EXECUTOR) -> dict | None:
     """One raw scan of runs.jsonl for this session's record (no coercion)."""
     path = repo_root / ".openshard" / "runs.jsonl"
     if not path.exists():
@@ -900,7 +1102,7 @@ def _find_persisted_entry(repo_root: Path, session_id: str) -> dict | None:
                 d = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(d, dict) and _is_session_entry(d, session_id):
+            if isinstance(d, dict) and _is_session_entry(d, session_id, executor):
                 return d
     except OSError:
         return None
@@ -908,21 +1110,22 @@ def _find_persisted_entry(repo_root: Path, session_id: str) -> dict | None:
 
 
 def _load_or_create_buffer(
-    repo_root: Path, session_id: str, first_hook: str, *, now: str | None = None
+    repo_root: Path, session_id: str, first_hook: str, *, now: str | None = None,
+    agent: str = AGENT_CLAUDE_CODE,
 ) -> dict:
-    path = buffer_path(repo_root, session_id)
+    path = buffer_path(repo_root, session_id, agent)
     buf = _read_buffer(path) if path.exists() else None
     if buf is not None:
         return buf
-    persisted = _find_persisted_entry(repo_root, session_id)
+    persisted = _find_persisted_entry(repo_root, session_id, profile_for(agent).executor)
     if persisted is not None:
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
             return rebuilt
-    return _new_buffer(session_id, repo_root, first_hook, now=now)
+    return _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent)
 
 
-def _load_buffer_light(repo_root: Path, session_id: str) -> dict | None:
+def _load_buffer_light(repo_root: Path, session_id: str, agent: str = AGENT_CLAUDE_CODE) -> dict | None:
     """Like ``_load_or_create_buffer``, but never creates a brand-new buffer.
 
     Used only by the status-line path (``handle_claude_status``), which must
@@ -935,10 +1138,11 @@ def _load_buffer_light(repo_root: Path, session_id: str) -> dict | None:
     the next real hook (SessionStart/UserPromptSubmit) creates the buffer
     normally, and a later status ping is then captured as usual.
     """
-    path = buffer_path(repo_root, session_id)
+    path = buffer_path(repo_root, session_id, agent)
     if path.exists():
         return _read_buffer(path)
-    return _buffer_from_entry(_find_persisted_entry(repo_root, session_id) or {}, session_id) or None
+    persisted = _find_persisted_entry(repo_root, session_id, profile_for(agent).executor) or {}
+    return _buffer_from_entry(persisted, session_id) or None
 
 
 # ---------------------------------------------------------------------------
@@ -1024,9 +1228,10 @@ def _git_changed_files(buf: dict, repo_root: Path) -> tuple[list[dict], str]:
 
 def _build_git_file_events(buf: dict, files: list[dict]) -> list[dict]:
     """file.changed Events for the current git diff, ids stable across folds."""
-    from openshard.history.event import SOURCE_CLAUDE_CODE_HOOKS, make_event
+    from openshard.history.event import make_event
 
     record = buf.get("record") or {}
+    profile = _buffer_profile(buf)
     ids: dict[str, str] = buf.setdefault("git_file_event_ids", {})
     fresh: dict[str, str] = {}
     events: list[dict] = []
@@ -1038,14 +1243,14 @@ def _build_git_file_events(buf: dict, files: list[dict]) -> list[dict]:
         key = f"{path}|{change_type}"
         ev = make_event(
             event_type="file.changed",
-            source=SOURCE_CLAUDE_CODE_HOOKS,
+            source=profile.event_source,
             action=f"file {change_type}",
             event_id=ids.get(key),
             occurred_at=_now(),
             run_id=record.get("run_id"),
             shard_id=record.get("shard_id"),
             attempt_number=record.get("attempt_number"),
-            actor=IMPORT_SOURCE,
+            actor=profile.import_source,
             target=path,
             status="unknown",
             evidence="git_observed",
@@ -1059,24 +1264,25 @@ def _build_git_file_events(buf: dict, files: list[dict]) -> list[dict]:
 
 def _hook_file_events(buf: dict) -> list[dict]:
     """Fallback file.changed Events from hook-reported paths (git unavailable)."""
-    from openshard.history.event import SOURCE_CLAUDE_CODE_HOOKS, make_event
+    from openshard.history.event import make_event
 
     record = buf.get("record") or {}
+    profile = _buffer_profile(buf)
     events: list[dict] = []
     for path, change_type in list(buf.get("hook_files", {}).items())[:_MAX_TOOL_FILE_EVENTS]:
         ev = make_event(
             event_type="file.changed",
-            source=SOURCE_CLAUDE_CODE_HOOKS,
+            source=profile.event_source,
             action=f"file {change_type}",
             occurred_at=_now(),
             run_id=record.get("run_id"),
             shard_id=record.get("shard_id"),
             attempt_number=record.get("attempt_number"),
-            actor=IMPORT_SOURCE,
+            actor=profile.import_source,
             target=path,
             status="unknown",
             evidence="agent_reported",
-            metadata={"evidence_source": "claude_hook"},
+            metadata={"evidence_source": profile.hook_evidence_source},
         )
         events.append(ev.to_dict())
     return events
@@ -1129,16 +1335,17 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
 
     _ensure_record(buf, repo_root)
     record = buf["record"]
+    profile = _buffer_profile(buf)
 
     changed_files, files_source = _git_changed_files(buf, repo_root)
     if files_source == "git_diff_inferred":
         file_events = _build_git_file_events(buf, changed_files)
     else:
         changed_files = [
-            {"path": p, "change_type": ct, "summary": "reported by Claude Code hook"}
+            {"path": p, "change_type": ct, "summary": f"reported by {profile.label} hook"}
             for p, ct in list(buf.get("hook_files", {}).items())[:_MAX_TOOL_FILE_EVENTS]
         ]
-        files_source = "claude_hook_reported" if changed_files else "not_available"
+        files_source = profile.files_source_label if changed_files else "not_available"
         file_events = _hook_file_events(buf) if changed_files else []
 
     ended = buf.get("ended") if isinstance(buf.get("ended"), dict) else None
@@ -1150,28 +1357,38 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     # completed turn already reads as "completed" even while the underlying
     # Claude session is still open. Session-end is appended as a trailing,
     # separate fact -- it never gates or qualifies the turn status above.
+    idle_count = int(buf.get("idle_count") or 0)
     _task_status_text = {
         "turn_completed": f"{turn_count} turn(s) completed",
         "in_progress": "in progress (no turn completed yet)",
         "ended_no_turn": "session ended before any turn completed",
     }[task_status]
+    if idle_count and turn_count == 0:
+        # Idle boundaries were seen but no completed turn was ever confirmed.
+        _task_status_text += f"; {idle_count} idle boundary(ies) observed, turn completion not confirmed"
     end_text = f" Session ended (reason={ended.get('reason') or 'unknown'})." if ended else ""
     # First sentence kept short: the receipt's Result line shows the first
     # complete sentence (see shard_contract._result_display).
     summary = (
-        f"Claude Code session: {len(changed_files)} file(s) changed, {tool_calls} tool call(s). "
+        f"{profile.label} session: {len(changed_files)} file(s) changed, {tool_calls} tool call(s). "
         f"{prompt_count} prompt(s), {_task_status_text}, observed via hooks.{end_text}"
     )
 
     task = buf.get("task") if isinstance(buf.get("task"), str) and buf.get("task") else None
 
     # Model/cost/tokens -- opportunistically populated by the Claude Code
-    # status line (handle_claude_status), never guessed from names/env vars.
-    # Absent entirely (not merely None) when never observed, so old readers
-    # and the "verification never fabricated" contract both stay honest.
+    # status line (handle_claude_status) or by what another agent's own hook
+    # stream reports (PR12), never guessed from names/env vars. Absent
+    # entirely (not merely None) when never observed, so old readers and
+    # the "verification never fabricated" contract both stay honest.
     models_seen = [m for m in (buf.get("models_seen") or []) if isinstance(m, str)][:5]
     model_current = buf.get("model_current") if isinstance(buf.get("model_current"), str) else None
     execution_model = model_current or "unknown"
+    model_source = buf.get("model_source") if isinstance(buf.get("model_source"), str) else None
+    provider_current = buf.get("provider_current") if isinstance(buf.get("provider_current"), str) else None
+    usage_provenance = (
+        buf.get("usage_provenance") if isinstance(buf.get("usage_provenance"), str) else profile.usage_provenance
+    )
 
     cost_total = buf.get("cost_total_usd")
     cost_baseline = buf.get("cost_baseline_usd")
@@ -1182,8 +1399,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # session by subtracting the value observed at the first status ping
         # (usually ~0, but some Claude Code versions carry cost over across
         # /clear -- see status-line docs). Never the raw whole-session total.
+        # For per-message usage reports (OpenCode) the baseline is 0 and the
+        # total is the sum over distinct message ids (see _apply_status).
         estimated_cost = round(max(0.0, float(cost_total) - float(cost_baseline)), 6)
-        cost_provenance = "provider_reported"
+        cost_provenance = usage_provenance
 
     tokens_current = buf.get("tokens_current") if isinstance(buf.get("tokens_current"), dict) else None
     prompt_tokens = completion_tokens = total_tokens = None
@@ -1195,19 +1414,20 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         total_tokens = prompt_tokens + completion_tokens
         cache_creation_tokens = int(tokens_current.get("cache_creation") or 0)
         cache_read_tokens = int(tokens_current.get("cache_read") or 0)
-        tokens_provenance = "provider_reported"
+        tokens_provenance = usage_provenance
 
     duration_seconds = _turn_duration_seconds(buf)
+    raw_usage = buf.get("usage_by_key") if isinstance(buf.get("usage_by_key"), dict) else {}
 
     entry: dict = {
         "schema_version": SHARD_SCHEMA_VERSION,
         "timestamp": record["timestamp"],
-        "task": task or _TASK_PLACEHOLDER,
+        "task": task or profile.task_placeholder,
         "execution_model": execution_model,
-        "executor": EXECUTOR,
-        "import_source": IMPORT_SOURCE,
-        "import_method": IMPORT_METHOD,
-        "import_note": IMPORT_NOTE,
+        "executor": profile.executor,
+        "import_source": profile.import_source,
+        "import_method": profile.import_method,
+        "import_note": profile.import_note,
         "files_source": files_source,
         "verification_attempted": False,
         "verification_passed": None,
@@ -1223,7 +1443,11 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         "shard_id": record["shard_id"],
         "attempt_number": record["attempt_number"],
         "capture": {
-            "source": CAPTURE_SOURCE,
+            "source": profile.capture_source,
+            # PR12: explicit agent identity, never inferred from the model.
+            "agent": profile.key,
+            "agent_vendor": profile.vendor,
+            "provider": provider_current,
             "session_id": buf.get("session_id"),
             "status": "ended" if ended else "in_progress",
             "session_end_observed": bool(ended),
@@ -1251,14 +1475,21 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "task_status": task_status,
             "first_prompt_at": buf.get("first_prompt_at"),
             "last_turn_completed_at": buf.get("last_stop_at"),
+            # Neutral idle boundaries (OpenCode): visibility only, never a turn.
+            "idle_count": idle_count,
+            "last_idle_at": buf.get("last_idle_at") if isinstance(buf.get("last_idle_at"), str) else None,
             # Model/cost/token provenance (status-line capture; see above).
             "models_seen": models_seen,
-            "model_source": "status_line" if model_current else "not_captured",
+            "model_source": (model_source or profile.model_source) if model_current else "not_captured",
             "cost_total_usd": cost_total if isinstance(cost_total, (int, float)) else None,
             "cost_baseline_usd": cost_baseline if isinstance(cost_baseline, (int, float)) else None,
             "last_status_ping_at": buf.get("status_last_seen_at"),
         },
     }
+    if raw_usage:
+        # Per-message usage memory (OpenCode), bounded; lets a buffer rebuilt
+        # from this record keep deduplicating re-reported messages.
+        entry["capture"]["usage_by_key"] = dict(list(raw_usage.items())[-_MAX_USAGE_KEYS:])
     if estimated_cost is not None:
         entry["estimated_cost"] = estimated_cost
         entry["cost_provenance"] = cost_provenance
@@ -1290,10 +1521,11 @@ def _fold(buf: dict, repo_root: Path) -> tuple[dict, str]:
 
     entry = build_hook_entry(buf, repo_root)
     session_id = str(buf.get("session_id"))
+    executor = _buffer_profile(buf).executor
     outcome = upsert_jsonl(
         repo_root / ".openshard" / "runs.jsonl",
         entry,
-        lambda e: _is_session_entry(e, session_id),
+        lambda e: _is_session_entry(e, session_id, executor),
         timeout=_LOCK_TIMEOUT_SECONDS,
     )
     buf["last_fold_at"] = _now()
@@ -1384,6 +1616,11 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     """
     buf["last_activity_at"] = now
     event = payload.event
+    profile = _buffer_profile(buf)
+    if payload.model_id:
+        # The agent's own hook stream names the model (Codex: every payload;
+        # OpenCode: the user message's selected model). Recorded as observed.
+        _observe_model(buf, payload.model_id, payload.provider_id, profile.model_source)
 
     if event == EVENT_SESSION_START:
         source = payload.source or "unknown"
@@ -1393,11 +1630,47 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
             buf["start_source"] = source
         if source == "resume":
             _append_event(
-                buf, event_type="session.activity", action="Claude Code session resumed",
+                buf, event_type="session.activity", action=f"{profile.label} session resumed",
                 status="unknown", evidence="directly_observed", metadata={"hook": event, "source": source},
                 occurred_at=now,
             )
         return f"session start ({source})", False, False
+
+    if event == EVENT_SESSION_IDLE:
+        # Neutral boundary: the agent's session went idle. Not a completed
+        # turn (turn_count / last_stop_at untouched), not a success; just a
+        # good moment to snapshot whatever evidence is already staged.
+        buf["idle_count"] = int(buf.get("idle_count") or 0) + 1
+        buf["last_idle_at"] = now
+        _append_event(
+            buf, event_type="session.activity", action="session idle (turn completion not confirmed)",
+            status="unknown", evidence="directly_observed",
+            metadata={"hook": event, "idle_index": buf["idle_count"]}, occurred_at=now,
+        )
+        if buf.get("record") and _has_activity(buf):
+            return "session idle; snapshot", True, False
+        return "session idle (no work yet; not recorded)", False, False
+
+    if event == EVENT_FILE_EDITED:
+        # A file the agent says it edited (OpenCode ``file.edited``, which
+        # OpenCode publishes only after the write succeeded -- the positive
+        # signal that lets the path into the hook-reported list). Used for
+        # the git-unavailable fallback only; the authoritative file.changed
+        # Events still come from git at fold time.
+        if payload.file_target:
+            files = buf.setdefault("hook_files", {})
+            if payload.file_target in files or len(files) < _MAX_HOOK_FILES:
+                files[payload.file_target] = files.get(payload.file_target) or "update"
+        return "file edit buffered", False, False
+
+    if event == EVENT_INTERRUPT:
+        _append_event(
+            buf, event_type="session.activity", action="assistant turn interrupted by user",
+            status="unknown", evidence="directly_observed", metadata={"hook": event}, occurred_at=now,
+        )
+        if buf.get("record") and _has_activity(buf):
+            return "turn interrupted", True, False
+        return "turn interrupted (no work yet; not recorded)", False, False
 
     if event == EVENT_USER_PROMPT_SUBMIT:
         buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
@@ -1428,18 +1701,32 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         target: str | None = None
         action = f"tool {tool}"
         status = "failed" if failed else "unknown"
-        if tool in FILE_TOOLS:
+        kind = payload.tool_kind or _classify_claude_tool(tool)
+        if kind == TOOL_KIND_FILE:
             target = payload.file_target
             if target is None and payload.file_dropped:
                 metadata["path_dropped"] = "outside repository"
-            if not failed:
-                status = "passed"  # PostToolUse only fires when Claude Code applied the edit
-                if target:
-                    files = buf.setdefault("hook_files", {})
-                    if target in files or len(files) < _MAX_HOOK_FILES:
-                        files[target] = files.get(target) or ("create" if tool == "Write" else "update")
-        elif tool in COMMAND_TOOLS:
-            action = payload.command_action or "Bash command"
+            targets = list(payload.file_targets) or ([{"path": target, "change_type": None}] if target else [])
+            if len(targets) > 1:
+                metadata["file_count"] = len(targets)
+            if not failed and payload.tool_success is True:
+                # Only a translator-attested success (Claude Code: PostToolUse
+                # fires solely after a successful tool run) makes the edit
+                # ``passed`` and lets its paths into the hook-reported list.
+                # Codex/OpenCode attach no such signal, so their file tools
+                # stay ``unknown`` and contribute no hook-reported paths;
+                # git-observed changes remain evidence on their own.
+                status = "passed"
+                files = buf.setdefault("hook_files", {})
+                for item in targets:
+                    path = item.get("path")
+                    if not isinstance(path, str) or not path:
+                        continue
+                    if path in files or len(files) < _MAX_HOOK_FILES:
+                        default_ct = "create" if tool == "Write" else "update"
+                        files[path] = files.get(path) or item.get("change_type") or default_ct
+        elif kind == TOOL_KIND_COMMAND:
+            action = payload.command_action or f"{tool} command"
             target = payload.command_target
             metadata["command_kind"] = payload.command_kind or "other"
             # A command exiting non-zero still fires PostToolUse; outcome unknown.
@@ -1474,13 +1761,45 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         if not _has_activity(buf):
             return "session ended with no work; nothing recorded", False, True
         _append_event(
-            buf, event_type="run.completed", action=f"Claude Code session ended (reason={reason})",
+            buf, event_type="run.completed", action=f"{profile.label} session ended (reason={reason})",
             status="unknown", evidence="directly_observed", metadata={"hook": event, "reason": reason},
             occurred_at=now,
         )
         return f"session ended ({reason})", True, True
 
     return "unsupported event", False, False
+
+
+def _observe_model(buf: dict, model_id: str | None, provider_id: str | None, source: str) -> bool:
+    """Record a model (and provider, when exposed) the agent reported. Returns True if changed.
+
+    The stored ``model_current`` is ``provider/model`` when a provider id is
+    known (OpenShard's usual slug convention) and the bare slug otherwise --
+    a provider is never guessed from the model name.
+    """
+    from openshard.adapters.claude_code_import import _sanitize_model
+
+    if not model_id:
+        return False
+    safe_model = _sanitize_model(model_id)
+    if safe_model == "unknown":
+        return False
+    safe_provider = _sanitize_model(provider_id) if provider_id else "unknown"
+    if safe_provider != "unknown":
+        if buf.get("provider_current") != safe_provider:
+            buf["provider_current"] = safe_provider
+        if "/" not in safe_model:
+            safe_model = f"{safe_provider}/{safe_model}"
+    changed = False
+    if buf.get("model_current") != safe_model:
+        buf["model_current"] = safe_model
+        buf["model_source"] = source
+        changed = True
+    seen = buf.setdefault("models_seen", [])
+    if safe_model not in seen and len(seen) < 5:
+        seen.append(safe_model)
+        changed = True
+    return changed
 
 
 def _already_applied(buf: dict, dedup_id: str | None) -> bool:
@@ -1521,9 +1840,11 @@ def apply_reduced_hook(
         now = at or _now()
         from openshard.history.jsonl_store import history_file_lock
 
-        path = buffer_path(repo_root, payload.session_id)
+        path = buffer_path(repo_root, payload.session_id, payload.agent)
         with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
-            buf = _load_or_create_buffer(repo_root, payload.session_id, payload.event, now=now)
+            buf = _load_or_create_buffer(
+                repo_root, payload.session_id, payload.event, now=now, agent=payload.agent
+            )
             if _already_applied(buf, dedup_id):
                 return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
                                    repo_root=repo_root, detail="duplicate event id")
@@ -1575,29 +1896,61 @@ def apply_reduced_hook(
                            detail=f"{type(exc).__name__}")
 
 
-def handle_claude_hook(
+def extract_agent_payload(
+    data: Mapping[str, Any], *, agent: str = AGENT_CLAUDE_CODE, event_override: str | None = None
+) -> HookPayload | StatusPayload | None:
+    """Translate one decoded payload from *agent* into the neutral payload shapes.
+
+    The single translator seam: Claude Code payloads are read here directly;
+    Codex and OpenCode ones are handed to their own small translators. A
+    ``StatusPayload`` result is a usage/model observation (no lifecycle
+    fact); a ``HookPayload`` is a lifecycle/tool fact; ``None`` is ignored.
+    """
+    if agent == AGENT_CLAUDE_CODE:
+        return extract_hook_payload(data, event_override=event_override)
+    if agent == "codex":
+        from openshard.adapters.codex_hooks import extract_codex_payload
+
+        return extract_codex_payload(data, event_override=event_override)
+    if agent == "opencode":
+        from openshard.adapters.opencode_plugin import extract_opencode_payload
+
+        return extract_opencode_payload(data)
+    return None
+
+
+def handle_hook(
     data: Mapping[str, Any],
     *,
     env: Mapping[str, str] | None = None,
     event_override: str | None = None,
+    agent: str = AGENT_CLAUDE_CODE,
 ) -> HookOutcome:
-    """Process one decoded Claude Code hook payload synchronously. Never raises.
+    """Process one decoded hook payload from *agent* synchronously. Never raises.
 
     Safe to call repeatedly: a repeated identical payload only bumps counts
     (tool/prompt/turn) -- it can never create a second record for the same
-    session, because the record is upserted by ``capture.session_id``.
+    session, because the record is upserted by ``capture.session_id`` and
+    the agent's executor.
     """
     try:
-        payload = extract_hook_payload(data, event_override=event_override)
+        payload = extract_agent_payload(data, agent=agent, event_override=event_override)
         if payload is None:
             return HookOutcome(event=str(data.get("hook_event_name") or event_override or ""), action="ignored",
                                detail="unsupported or missing hook_event_name")
         if payload.session_id is None:
-            return HookOutcome(event=payload.event, action="ignored", detail="missing or invalid session_id")
+            event = getattr(payload, "event", "status")
+            return HookOutcome(event=event, action="ignored", detail="missing or invalid session_id")
         repo_root = resolve_repo_root(payload, env)
         if repo_root is None:
-            return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
+            event = getattr(payload, "event", "status")
+            return HookOutcome(event=event, action="ignored", session_id=payload.session_id,
                                detail="could not resolve repository directory")
+        if isinstance(payload, StatusPayload):
+            recorded = apply_status_payload(payload, repo_root)
+            return HookOutcome(event="status", action="buffered" if recorded else "ignored",
+                               session_id=payload.session_id, repo_root=repo_root,
+                               detail="usage recorded" if recorded else "no session buffer yet")
         reduced = reduce_hook_payload(payload, repo_root)
         if reduced is None:
             return HookOutcome(event=payload.event, action="ignored", detail="missing or invalid session_id")
@@ -1605,6 +1958,16 @@ def handle_claude_hook(
     except Exception as exc:  # observational hook: never propagate
         return HookOutcome(event=str(data.get("hook_event_name") or ""), action="error",
                            detail=f"{type(exc).__name__}")
+
+
+def handle_claude_hook(
+    data: Mapping[str, Any],
+    *,
+    env: Mapping[str, str] | None = None,
+    event_override: str | None = None,
+) -> HookOutcome:
+    """Process one decoded Claude Code hook payload synchronously. Never raises."""
+    return handle_hook(data, env=env, event_override=event_override, agent=AGENT_CLAUDE_CODE)
 
 
 def run_hook_from_stream(
@@ -1648,21 +2011,57 @@ def _apply_status(payload: StatusPayload, buf: dict, *, now: str | None = None) 
     Event is appended for a status ping (it is not itself a lifecycle fact
     worth recording, just metadata about facts already recorded elsewhere).
     """
-    from openshard.adapters.claude_code_import import _sanitize_model
-
     changed = False
     buf["status_last_seen_at"] = now or _now()
+    profile = profile_for(payload.agent)
 
     if payload.model_id:
-        safe_model = _sanitize_model(payload.model_id)
-        if safe_model != "unknown":
-            if buf.get("model_current") != safe_model:
-                buf["model_current"] = safe_model
-                changed = True
-            seen = buf.setdefault("models_seen", [])
-            if safe_model not in seen and len(seen) < 5:
-                seen.append(safe_model)
-                changed = True
+        changed = _observe_model(buf, payload.model_id, payload.provider_id, profile.model_source) or changed
+
+    if payload.usage_key:
+        # Per-message usage (OpenCode): remember the latest report per
+        # message id and re-derive the session totals from the map, so a
+        # message re-reported while streaming replaces rather than adds.
+        usage = buf.get("usage_by_key")
+        if not isinstance(usage, dict):
+            usage = {}
+        report = {
+            "cost": payload.cost_total_usd,
+            "input": payload.tokens_input or 0,
+            "output": payload.tokens_output or 0,
+            "cache_creation": payload.tokens_cache_creation or 0,
+            "cache_read": payload.tokens_cache_read or 0,
+        }
+        if usage.get(payload.usage_key) != report:
+            usage[payload.usage_key] = report
+            if len(usage) > _MAX_USAGE_KEYS:
+                for stale in list(usage)[: len(usage) - _MAX_USAGE_KEYS]:
+                    del usage[stale]
+            changed = True
+        buf["usage_by_key"] = usage
+        buf["usage_provenance"] = profile.usage_provenance
+        # OpenCode reports ``cost: 0`` when it has no pricing for the model,
+        # which is "unknown", not "free": only strictly positive per-message
+        # costs are trustworthy. With none, no cost is recorded at all (the
+        # receipt shows Not recorded rather than a fabricated $0.00); with
+        # some, the sum of the positive ones is recorded -- a lower bound
+        # when other messages were unpriced. Tokens are kept regardless.
+        costs = [r.get("cost") for r in usage.values() if isinstance(r, dict)]
+        trusted = [float(c) for c in costs if isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0]
+        if trusted:
+            buf["cost_baseline_usd"] = 0.0
+            buf["cost_total_usd"] = round(sum(trusted), 6)
+        else:
+            buf["cost_baseline_usd"] = None
+            buf["cost_total_usd"] = None
+        totals = {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
+        for r in usage.values():
+            if isinstance(r, dict):
+                for k in totals:
+                    totals[k] += int(r.get(k) or 0)
+        if any(totals.values()):
+            buf["tokens_current"] = totals
+        return changed
 
     if payload.cost_total_usd is not None:
         if buf.get("cost_baseline_usd") is None:
@@ -1735,9 +2134,9 @@ def apply_status_payload(
             return False
         from openshard.history.jsonl_store import history_file_lock
 
-        path = buffer_path(repo_root, payload.session_id)
+        path = buffer_path(repo_root, payload.session_id, payload.agent)
         with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
-            buf = _load_buffer_light(repo_root, payload.session_id)
+            buf = _load_buffer_light(repo_root, payload.session_id, payload.agent)
             if buf is None:
                 return False
             if _already_applied(buf, dedup_id):

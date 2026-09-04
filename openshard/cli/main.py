@@ -409,10 +409,15 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
             recommended_next_action = (
                 f"Run `openshard setup` to switch from demo to {detected_providers[0]}."
             )
+        from openshard.adapters.agent_setup import detect_agent_integrations
         from openshard.adapters.claude_mcp_install import find_repo_root
         from openshard.adapters.claude_setup import detect_claude_integration
 
-        claude_status = detect_claude_integration(find_repo_root(repo_path))
+        _root = find_repo_root(repo_path)
+        claude_status = detect_claude_integration(_root)
+        agent_statuses = detect_agent_integrations(
+            _root, service_port=claude_status.capture_service.get("port") if claude_status.capture_service.get("running") else None,
+        )
         payload = {
             "mode": "agent",
             "interactive": False,
@@ -433,6 +438,8 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
                 "storage": ".openshard/",
             },
             "claude_code": claude_status.to_dict(),
+            "codex": agent_statuses["codex"].to_dict(),
+            "opencode": agent_statuses["opencode"].to_dict(),
             "next_actions": [
                 "openshard env --json",
                 'openshard run "explain this repo"',
@@ -501,21 +508,44 @@ def _render_setup_result(result) -> None:
             "unavailable": "not running (could not be started)",
         }.get(str(result.capture_service.get("state")), str(result.capture_service.get("state")))
         click.echo(f"  Capture:       {service_state}")
+    # PR12: one line per additional agent, whether or not it was found.
+    _agent_state_labels = {
+        "installed": "installed", "updated": "updated", "already_installed": "already configured",
+        "skipped": "not found (skipped)", "skipped_existing": "skipped (custom file present)",
+        "error": "NOT configured",
+    }
+    for key, label in (("codex", "Codex:        "), ("opencode", "OpenCode:     ")):
+        agent_result = (result.agents or {}).get(key)
+        if agent_result is None:
+            continue
+        click.echo(f"  {label} {_agent_state_labels.get(agent_result.status, agent_result.status)}")
+
+    from openshard.adapters.agent_setup import agent_label as _agent_label
+
+    configured = result.configured_agents()
+    agent_names = [
+        "Claude Code" if k == "claude_code" else _agent_label(k) for k in configured
+    ]
+    use_line = f"Use {', '.join(agent_names)} normally." if agent_names else "Use your coding agent normally."
+    open_line = (
+        f"Open {' or '.join(agent_names)} in this repository." if agent_names
+        else "Open your coding agent in this repository."
+    )
 
     click.echo("")
     if result.readiness == "ready":
-        click.echo("OpenShard is ready. Use Claude Code normally.")
+        click.echo(f"OpenShard is ready. {use_line}")
         click.echo("\nNext steps:")
-        click.echo("  1. Open Claude Code in this repository.")
+        click.echo(f"  1. {open_line}")
         click.echo("  2. Complete a normal coding task.")
         click.echo("  3. Run `openshard last` to see the captured Shard receipt.")
         for step in result.next_steps:
             click.echo(f"  ! {step}")
     elif result.readiness == "ready_partial":
-        click.echo("OpenShard is ready, with one limitation: model/cost/token capture is unavailable.")
-        click.echo("Use Claude Code normally -- Shards and receipts are still recorded.")
+        click.echo("OpenShard is ready, with limitations (see below).")
+        click.echo(f"{use_line} Shards and receipts are still recorded.")
         click.echo("\nNext steps:")
-        click.echo("  1. Open Claude Code in this repository.")
+        click.echo(f"  1. {open_line}")
         click.echo("  2. Complete a normal coding task.")
         click.echo("  3. Run `openshard last` to see the captured Shard receipt.")
         for step in result.next_steps:
@@ -2523,6 +2553,34 @@ def hooks_claude(event_override: str | None) -> None:
     run_hook_via_service(sys.stdin, env=os.environ, event_override=event_override)
 
 
+@hooks_group.command("codex")
+@click.option(
+    "--event",
+    "event_override",
+    default=None,
+    help="Hook event name to assume when the payload carries no hook_event_name.",
+)
+@click.option(
+    "--no-spawn",
+    "no_spawn",
+    is_flag=True,
+    default=False,
+    help="Never start the capture service from this hook (used for Codex's short-timeout events).",
+)
+def hooks_codex(event_override: str | None, no_spawn: bool) -> None:
+    """Codex hook entrypoint: read one Codex hook payload (JSON) from stdin and record it.
+
+    Installed into this repository's .codex/hooks.json by `openshard setup`
+    / `openshard capture install codex`. Observational only: never prompts,
+    never blocks Codex beyond a loopback POST to the local capture service,
+    never prints to stdout (Codex reads hook stdout as a decision); always
+    exits 0. Evidence lands in .openshard/runs.jsonl as normal Shard records.
+    """
+    from openshard.adapters.claude_capture_client import run_hook_via_service
+
+    run_hook_via_service(sys.stdin, env=os.environ, event_override=event_override, agent="codex", spawn=not no_spawn)
+
+
 @hooks_group.command("claude-status")
 def hooks_claude_status() -> None:
     """Claude Code status-line entrypoint: read status JSON from stdin, print a status line.
@@ -2540,7 +2598,88 @@ def hooks_claude_status() -> None:
 
 @cli.group("capture")
 def capture_group() -> None:
-    """The local Claude Code capture service (started automatically; rarely needed by hand)."""
+    """The local capture service shared by Claude Code, Codex and OpenCode, and its per-agent integrations."""
+
+
+_AGENT_CHOICE = click.Choice(["codex", "opencode"], case_sensitive=False)
+
+
+def _render_agent_result(result, *, verb: str) -> None:
+    from openshard.adapters.agent_setup import agent_label
+
+    label = agent_label(result.agent)
+    click.echo(f"{label} capture: {result.status.replace('_', ' ')}. {result.message}")
+    for w in result.warnings:
+        click.echo(f"  ! {w}")
+    for step in result.next_steps:
+        click.echo(f"  ! {step}")
+    if verb == "install" and result.configured:
+        click.echo(f"\n{label} sessions in this repository are now recorded as Shards automatically.")
+        click.echo(f"Restart {label} if it is already running.")
+    if verb == "uninstall":
+        click.echo("\nLocal Shard/Receipt history under .openshard/ was not touched.")
+
+
+@capture_group.command("install")
+@click.argument("agent", type=_AGENT_CHOICE)
+@click.option(
+    "--repo-path", "repo_path", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+    help="Repository to configure (default: current directory).",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
+    """Configure Codex hooks or the OpenCode plugin for this repository (what `openshard setup` does).
+
+    codex: merges `openshard hooks codex` into .codex/hooks.json (project-local;
+    unrelated hooks preserved). opencode: writes the OpenShard plugin to
+    .opencode/plugins/openshard.ts (never overwrites a file that is not
+    OpenShard's). Both are idempotent and target the shared local capture
+    service. Safe to re-run.
+    """
+    from openshard.adapters.agent_setup import install_agent
+    from openshard.adapters.claude_mcp_install import find_repo_root
+    from openshard.adapters.claude_setup import ensure_capture_service
+
+    root = find_repo_root(repo_path)
+    if root is None:
+        raise click.ClickException("Not inside a git repository. Run this from within a repository.")
+    service = ensure_capture_service()
+    result = install_agent(agent.lower(), repo_root=root, port=service.get("port") or None)
+    if as_json:
+        click.echo(json.dumps({**result.to_dict(), "capture_service": service}, indent=2))
+    else:
+        _render_agent_result(result, verb="install")
+    if result.status == "error":
+        raise SystemExit(1)
+
+
+@capture_group.command("uninstall")
+@click.argument("agent", type=_AGENT_CHOICE)
+@click.option(
+    "--repo-path", "repo_path", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+    help="Repository to remove the configuration from (default: current directory).",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool) -> None:
+    """Remove OpenShard's Codex hooks or OpenCode plugin from this repository.
+
+    Only OpenShard's own entries/files are removed; unrelated hooks, plugins
+    and settings survive. Local history under .openshard/ is never deleted.
+    The shared capture service keeps running for other agents.
+    """
+    from openshard.adapters.agent_setup import uninstall_agent
+    from openshard.adapters.claude_mcp_install import find_repo_root
+
+    root = find_repo_root(repo_path)
+    if root is None:
+        raise click.ClickException("Not inside a git repository. Run this from within a repository.")
+    result = uninstall_agent(agent.lower(), repo_root=root)
+    if as_json:
+        click.echo(json.dumps(result.to_dict(), indent=2))
+    else:
+        _render_agent_result(result, verb="uninstall")
+    if result.status == "error":
+        raise SystemExit(1)
 
 
 def _render_capture_status(status: dict) -> None:
@@ -5688,6 +5827,8 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     state = _current_state()
     state["git_repo"] = ob.detect_git_repo()
 
+    from openshard.adapters.agent_setup import agent_label, detect_agent_integrations
+
     root = find_repo_root(repo_path)
     base_dir = root if root is not None else (repo_path or Path.cwd())
     claude_status = detect_claude_integration(root)
@@ -5695,6 +5836,14 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     claude_dict = claude_status.to_dict()
     claude_dict["history_writable"] = history_writable
     state["claude_code"] = claude_dict
+    # PR12: Codex / OpenCode are reported independently -- none of the
+    # three agents is required for OpenShard to be "ready"; each is ready
+    # on its own terms and all share one capture service.
+    service_running = bool(claude_status.capture_service.get("running"))
+    service_port = claude_status.capture_service.get("port") if service_running else None
+    agent_statuses = detect_agent_integrations(root, service_port=service_port)
+    for key, status in agent_statuses.items():
+        state[key] = status.to_dict()
 
     if as_json:
         click.echo(json.dumps(state, indent=2))
@@ -5759,13 +5908,50 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
         and claude_status.mcp_configured and hooks_ok
     )
     fully_ready = core_ready and claude_status.statusline_state == "openshard"
-    click.echo("")
+
+    ready_agents: list[str] = []
+    limited_agents: list[str] = []
     if fully_ready:
-        click.echo("Ready -- use Claude Code normally.")
+        ready_agents.append("Claude Code")
     elif core_ready:
-        click.echo("Ready, with limited receipts -- use Claude Code normally. Run `openshard setup` for details.")
+        limited_agents.append("Claude Code")
+    service_detail_shared = (
+        f"running on 127.0.0.1:{claude_status.capture_service.get('port')}" if service_running
+        else "not running; it starts automatically at the next session (`openshard capture start`)"
+    )
+    for key, status in agent_statuses.items():
+        label = agent_label(key)
+        integration_label = "Auto-capture hooks" if key == "codex" else "Capture plugin"
+        integration_ok = status.configured
+        integration_detail = status.detail
+        if status.state == "openshard" and status.capture_port_mismatch:
+            integration_detail = (
+                f"plugin targets port {status.port} but the service listens on "
+                f"{claude_status.capture_service.get('port')}; run `openshard setup`"
+            )
+        agent_checks: list[tuple[str, bool, str]] = [
+            ("Repository", root is not None, "not a git repository"),
+            ("Local history", history_writable, f"{HISTORY_RELPATH.as_posix()} is not writable"),
+            (label, status.cli_available, "CLI not found on PATH"),
+            (integration_label, integration_ok, integration_detail),
+            ("Capture service", service_running, service_detail_shared),
+        ]
+        click.echo(f"\n{label}\n")
+        for check_label, ok, detail in agent_checks:
+            mark = "✓" if ok else "✗"
+            suffix = "" if ok else f" ({detail})"
+            click.echo(f"  {mark} {check_label}{suffix}")
+        if root is not None and history_writable and status.cli_available and integration_ok:
+            ready_agents.append(label)
+
+    click.echo("")
+    if ready_agents and not limited_agents:
+        click.echo(f"Ready -- use {', '.join(ready_agents)} normally.")
+    elif ready_agents or limited_agents:
+        names = ", ".join(ready_agents + limited_agents)
+        click.echo(f"Ready, with limited receipts -- use {names} normally. Run `openshard setup` for details.")
     else:
-        click.echo("Not ready -- run `openshard setup` to configure Claude Code capture.")
+        click.echo("Not ready -- run `openshard setup` to configure capture for the coding agents you use.")
     click.echo("")
 
 

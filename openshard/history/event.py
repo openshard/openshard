@@ -219,6 +219,11 @@ SOURCE_CLAUDE_CODE_WRAP = "claude_code_wrap"
 # adapter (``adapters/claude_hooks.py``) from official Claude Code hook
 # payloads. Same embedded-Events convention as import/wrap.
 SOURCE_CLAUDE_CODE_HOOKS = "claude_code_hooks"
+# PR12: the same observation-time Events, built by the shared hook adapter
+# from Codex hook payloads (``adapters/codex_hooks.py``) and from the
+# OpenShard OpenCode plugin (``adapters/opencode_plugin.py``).
+SOURCE_CODEX_HOOKS = "codex_hooks"
+SOURCE_OPENCODE_PLUGIN = "opencode_plugin"
 SOURCE_NATIVE_RUN = "native_run"
 
 _ACTION_LIMIT = 120

@@ -125,7 +125,7 @@ See [docs/install.md](docs/install.md) for upgrade instructions and notes.
 
 ## Quick start with Claude Code
 
-The fastest way to get value from OpenShard is to let it quietly record the Claude Code work you already do. No API key, account, or cloud service is needed — everything stays in the repository.
+The fastest way to get value from OpenShard is to let it quietly record the coding-agent work you already do — with Claude Code, Codex, or OpenCode, in any mix, in the same repository. No API key, account, or cloud service is needed — everything stays in the repository.
 
 ```bash
 pipx install openshard   # 1. Install (once per machine)
@@ -133,7 +133,7 @@ cd my-project            # 2. Go to a git repository
 openshard setup          # 3. Set up (once per repository)
 ```
 
-`openshard setup` detects your environment, configures Claude Code for this repository, and ends with:
+`openshard setup` detects which supported agents are installed (Claude Code, Codex, OpenCode), configures each one for this repository, and ends with:
 
 ```text
 OpenShard is ready. Use Claude Code normally.
@@ -160,14 +160,16 @@ All four work from the repository root or any subdirectory of it, read only this
 Useful follow-ups:
 
 ```bash
-openshard doctor                 # Is OpenShard actually working here? (✓/✗ checklist)
-openshard setup                  # Safe to re-run; already-configured parts are left alone
-openshard mcp uninstall claude   # Remove OpenShard's Claude Code configuration (history is kept)
+openshard doctor                    # Is OpenShard actually working here? One ✓/✗ checklist per agent
+openshard setup                     # Safe to re-run; already-configured parts are left alone
+openshard mcp uninstall claude      # Remove OpenShard's Claude Code configuration (history is kept)
+openshard capture uninstall codex   # Remove OpenShard's Codex hooks (history is kept)
+openshard capture uninstall opencode  # Remove OpenShard's OpenCode plugin (history is kept)
 ```
 
 If `setup` reports a limitation — most commonly a custom Claude Code status line already in place — it tells you exactly what stays unavailable (model/cost/token data on receipts) and the one step to enable it. It never replaces your existing settings.
 
-Under the hood, `setup` registers a local, read-only MCP server so Claude can look up your history, installs Claude Code hooks that record sessions as Shards, and configures the status line for receipt enrichment. You do not need to understand any of that to use it; the lower-level `openshard mcp install claude` command remains available if you want to.
+Under the hood, `setup` registers a local, read-only MCP server so Claude can look up your history, installs Claude Code hooks that record sessions as Shards, and configures the status line for receipt enrichment. For Codex it merges its hooks into the project-local `.codex/hooks.json`; for OpenCode it writes a small plugin to `.opencode/plugins/openshard.ts`. All three feed the same local capture service and the same `.openshard/runs.jsonl`, so `openshard history`, `openshard context` and `relevant_context` see work from every agent together, each Shard labelled with the agent that did it (see [docs/agent-capture.md](docs/agent-capture.md)). You do not need to understand any of that to use it; the lower-level `openshard mcp install claude` and `openshard capture install codex|opencode` commands remain available if you want them.
 
 ---
 Launch the TUI:

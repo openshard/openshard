@@ -52,6 +52,28 @@ def _parse_hooks_claude_argv(rest: list[str]) -> str | None | bool:
     return False
 
 
+def _parse_hooks_codex_argv(rest: list[str]) -> tuple[str | None, bool] | None:
+    """``(event_override, spawn)`` for ``hooks codex`` *rest* argv, or None to fall through.
+
+    Accepts exactly what the Click command does: an optional ``--no-spawn``
+    flag and an optional ``--event`` value, in either order.
+    """
+    spawn = True
+    event: str | None = None
+    args = list(rest)
+    while args:
+        head = args.pop(0)
+        if head == "--no-spawn":
+            spawn = False
+        elif head == "--event" and args:
+            event = args.pop(0)
+        elif head.startswith("--event="):
+            event = head.split("=", 1)[1]
+        else:
+            return None
+    return event, spawn
+
+
 def _try_fast_path(argv: list[str]) -> bool:
     """Handle *argv* without importing ``openshard.cli.main``. Returns True if handled."""
     if len(argv) < 2:
@@ -89,6 +111,22 @@ def _try_fast_path(argv: list[str]) -> bool:
 
         sys.stdout.write(run_status_via_service(sys.stdin, env=os.environ) + "\n")
         sys.stdout.flush()
+        return True
+
+    if sub == "codex":
+        # PR12: Codex only has command hooks, so every Codex event pays a
+        # process start; keeping it on the fast path is what keeps that
+        # start small.
+        parsed = _parse_hooks_codex_argv(rest)
+        if parsed is None:
+            return False
+        import os
+
+        from openshard.adapters.claude_capture_client import run_hook_via_service
+
+        run_hook_via_service(  # type: ignore[arg-type]
+            sys.stdin, env=os.environ, event_override=parsed[0], agent="codex", spawn=parsed[1],
+        )
         return True
 
     return False

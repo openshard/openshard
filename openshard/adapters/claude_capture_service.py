@@ -17,6 +17,7 @@ service's blocking path is deliberately tiny:
       -> decode + validate (session id, event name, repository root)
       -> reduce to the privacy-safe ``ReducedHookPayload``
       -> append one line to <repo>/.openshard/claude_sessions/<sid>.queue.jsonl
+         (Codex/OpenCode: <agent>.<sid>.queue.jsonl -- see queue_key)
          (fsync -- durable before the response is sent)
       -> 200 {}
 
@@ -80,6 +81,7 @@ from pathlib import Path
 from typing import Any
 
 from openshard.adapters import claude_capture_client as client
+from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.adapters.claude_hooks import (
     EVENT_SESSION_START,
     HookPayload,
@@ -87,12 +89,16 @@ from openshard.adapters.claude_hooks import (
     StatusPayload,
     apply_reduced_hook,
     apply_status_payload,
-    extract_hook_payload,
+    extract_agent_payload,
     extract_status_payload,
     reduce_hook_payload,
     resolve_repo_root,
     sessions_dir,
 )
+
+# PR12: receiver path -> agent key. One service, one queue format, one
+# fold; only the translator run on the blocking path differs.
+_HOOK_PATH_AGENTS: dict[str, str] = {path: agent for agent, path in client.AGENT_HOOK_PATHS.items()}
 
 DEFAULT_PORT = client.DEFAULT_PORT
 PORT_RANGE = client.PORT_RANGE
@@ -115,6 +121,21 @@ _RETRY_BACKOFF_SECONDS = 2.0
 
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def queue_key(session_id: str, agent: str = AGENT_CLAUDE_CODE) -> str:
+    """Queue-file stem for one agent session: ``<sid>`` for Claude Code, ``<agent>.<sid>`` otherwise.
+
+    Mirrors ``claude_hooks.buffer_path``: session ids are minted by the
+    agents, so two agents can hand the service the same id, and their
+    queues (replay order, rotation, crash recovery) must never couple.
+    Claude Code keeps the pre-PR12 name so leftover queues survive an
+    upgrade. Replay never parses a session id back out of the stem -- the
+    queued lines carry their own ``session_id`` and ``agent``.
+    """
+    if agent == AGENT_CLAUDE_CODE:
+        return session_id
+    return f"{agent}.{session_id}"
 
 
 def _log(message: str) -> None:
@@ -332,18 +353,25 @@ class CaptureRecorder:
         return root
 
     def record_hook(
-        self, data: dict, *, project_dir: str | None = None, event_override: str | None = None
+        self,
+        data: dict,
+        *,
+        project_dir: str | None = None,
+        event_override: str | None = None,
+        agent: str = AGENT_CLAUDE_CODE,
     ) -> tuple[str, str]:
         """Validate, reduce and durably queue one hook payload. Returns ``(action, detail)``.
 
         ``action`` is ``queued`` or ``ignored``. Never raises for bad input;
         an I/O failure propagates so the HTTP layer can answer 500 (Claude
         Code then reports a non-blocking hook error rather than OpenShard
-        silently acknowledging evidence it did not persist).
+        silently acknowledging evidence it did not persist). *agent* picks
+        the translator (PR12); a translator may yield a usage observation
+        (``StatusPayload``), which is queued exactly like a status ping.
         """
         t0 = time.perf_counter()
         self._bump("received")
-        payload = extract_hook_payload(data, event_override=event_override)
+        payload = extract_agent_payload(data, agent=agent, event_override=event_override)
         if payload is None:
             self._bump("ignored")
             return "ignored", "unsupported or missing hook_event_name"
@@ -354,15 +382,24 @@ class CaptureRecorder:
         if root is None:
             self._bump("ignored")
             return "ignored", "could not resolve repository directory"
+        if isinstance(payload, StatusPayload):
+            key = queue_key(payload.session_id, payload.agent)
+            line = {"id": self._next_id(), "kind": "status", "at": _now(), "data": payload.to_dict()}
+            self._queue_line(root, key, line)
+            self._bump("queued", "status")
+            self.timings.add(time.perf_counter() - t0)
+            self.enqueue(root, key)
+            return "queued", "status"
         reduced = reduce_hook_payload(payload, root)
         if reduced is None:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
+        key = queue_key(reduced.session_id, reduced.agent)
         line = {"id": self._next_id(), "kind": "hook", "at": _now(), "data": reduced.to_dict()}
-        self._queue_line(root, reduced.session_id, line)
+        self._queue_line(root, key, line)
         self._bump("queued", payload.event)
         self.timings.add(time.perf_counter() - t0)
-        self.enqueue(root, reduced.session_id)
+        self.enqueue(root, key)
         if payload.event == EVENT_SESSION_START:
             self._note_repo(root)
             self.recover(root)
@@ -379,17 +416,18 @@ class CaptureRecorder:
         if root is None:
             self._bump("ignored")
             return "ignored", "could not resolve repository directory"
+        key = queue_key(payload.session_id, payload.agent)
         line = {"id": self._next_id(), "kind": "status", "at": _now(), "data": payload.to_dict()}
-        self._queue_line(root, payload.session_id, line)
+        self._queue_line(root, key, line)
         self._bump("queued", "status")
         self.timings.add(time.perf_counter() - t0)
-        self.enqueue(root, payload.session_id)
+        self.enqueue(root, key)
         return "queued", "status"
 
-    def _queue_line(self, root: Path, session_id: str, line: dict) -> None:
-        path = sessions_dir(root) / f"{session_id}{QUEUE_SUFFIX}"
+    def _queue_line(self, root: Path, queue_key: str, line: dict) -> None:
+        path = sessions_dir(root) / f"{queue_key}{QUEUE_SUFFIX}"
         blob = (json.dumps(line, separators=(",", ":")) + "\n").encode("utf-8")
-        with self._session_lock(f"{root}|{session_id}"):
+        with self._session_lock(f"{root}|{queue_key}"):
             try:
                 fh = open(path, "ab")
             except FileNotFoundError:
@@ -702,7 +740,7 @@ class _Handler(BaseHTTPRequestHandler):
         if path == client.SHUTDOWN_PATH:
             self._handle_shutdown(body)
             return
-        if path not in (client.HOOK_PATH, client.STATUS_PATH):
+        if path not in _HOOK_PATH_AGENTS and path != client.STATUS_PATH:
             self._send(404, b'{"error":"not found"}')
             return
         if self.server.shutdown_requested.is_set():
@@ -720,9 +758,11 @@ class _Handler(BaseHTTPRequestHandler):
         project_dir = self.headers.get(client.PROJECT_DIR_HEADER)
         project_dir = project_dir.strip() if isinstance(project_dir, str) and project_dir.strip() else None
         try:
-            if path == client.HOOK_PATH:
+            if path in _HOOK_PATH_AGENTS:
                 event_override = params.get("event") or None
-                self.server.recorder.record_hook(data, project_dir=project_dir, event_override=event_override)
+                self.server.recorder.record_hook(
+                    data, project_dir=project_dir, event_override=event_override, agent=_HOOK_PATH_AGENTS[path],
+                )
             else:
                 self.server.recorder.record_status(data, project_dir=project_dir)
         except Exception as exc:

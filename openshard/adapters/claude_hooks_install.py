@@ -43,6 +43,7 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -121,11 +122,11 @@ def _hook_entry(spec: HookSpec, port: int = DEFAULT_PORT) -> dict:
     return entry
 
 
-def _group_entry(spec: HookSpec, port: int = DEFAULT_PORT) -> dict:
+def _group_entry(spec: HookSpec, port: int = DEFAULT_PORT, build_entry: Callable[[HookSpec, int], dict] | None = None) -> dict:
     group: dict = {}
     if spec.matcher:
         group["matcher"] = spec.matcher
-    group["hooks"] = [_hook_entry(spec, port)]
+    group["hooks"] = [(build_entry or _hook_entry)(spec, port)]
     return group
 
 
@@ -181,7 +182,14 @@ def installed_hook_port(settings: object) -> int | None:
     return None
 
 
-def merge_openshard_hooks(settings: dict, *, port: int = DEFAULT_PORT) -> tuple[dict, dict[str, str]]:
+def merge_openshard_hooks(
+    settings: dict,
+    *,
+    port: int = DEFAULT_PORT,
+    specs: tuple[HookSpec, ...] = HOOK_SPECS,
+    build_entry: Callable[[HookSpec, int], dict] | None = None,
+    is_ours: Callable[[object], bool] | None = None,
+) -> tuple[dict, dict[str, str]]:
     """Return ``(new_settings, changes)`` with OpenShard's hooks merged in.
 
     ``changes`` maps each event to ``"added"`` / ``"updated"`` /
@@ -190,7 +198,14 @@ def merge_openshard_hooks(settings: dict, *, port: int = DEFAULT_PORT) -> tuple[
     caller can refuse to write rather than clobber the file). An older
     command-form entry (pre-PR9.5) or an HTTP entry for a different port is
     reported as ``"updated"`` and replaced in place.
+
+    The ``hooks`` block shape (event -> matcher groups -> hook entries) is
+    shared by Claude Code and Codex, so the Codex installer
+    (``codex_hooks_install``) reuses this merge with its own *specs*,
+    *build_entry* and *is_ours* (PR12); the defaults are Claude Code's.
     """
+    build = build_entry or _hook_entry
+    ours_fn = is_ours or is_openshard_hook
     new_settings = copy.deepcopy(settings)
     hooks = new_settings.get("hooks")
     if hooks is None:
@@ -200,7 +215,7 @@ def merge_openshard_hooks(settings: dict, *, port: int = DEFAULT_PORT) -> tuple[
         raise ValueError("'hooks' is not a JSON object")
 
     changes: dict[str, str] = {}
-    for spec in HOOK_SPECS:
+    for spec in specs:
         groups = hooks.get(spec.event)
         if groups is None:
             groups = []
@@ -208,15 +223,15 @@ def merge_openshard_hooks(settings: dict, *, port: int = DEFAULT_PORT) -> tuple[
         if not isinstance(groups, list):
             raise ValueError(f"'hooks.{spec.event}' is not a JSON array")
 
-        desired_hook = _hook_entry(spec, port)
+        desired_hook = build(spec, port)
         kept = False
         changed = False
         for group in groups:
             if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
                 continue
             group_hooks: list = group["hooks"]
-            others = [h for h in group_hooks if not is_openshard_hook(h)]
-            ours = [h for h in group_hooks if is_openshard_hook(h)]
+            others = [h for h in group_hooks if not ours_fn(h)]
+            ours = [h for h in group_hooks if ours_fn(h)]
             if not ours:
                 continue
             if kept:
@@ -246,7 +261,7 @@ def merge_openshard_hooks(settings: dict, *, port: int = DEFAULT_PORT) -> tuple[
                     and not any(True for k in g if k not in ("hooks", "matcher")))
         ]
         if not kept:
-            groups.append(_group_entry(spec, port))
+            groups.append(_group_entry(spec, port, build))
             # "updated" when we had to move/dedupe an existing OpenShard entry.
             changes[spec.event] = "updated" if changed else "added"
         else:
@@ -254,22 +269,28 @@ def merge_openshard_hooks(settings: dict, *, port: int = DEFAULT_PORT) -> tuple[
     return new_settings, changes
 
 
-def remove_openshard_hooks(settings: dict) -> tuple[dict, dict[str, str]]:
+def remove_openshard_hooks(
+    settings: dict,
+    *,
+    specs: tuple[HookSpec, ...] = HOOK_SPECS,
+    is_ours: Callable[[object], bool] | None = None,
+) -> tuple[dict, dict[str, str]]:
     """Return ``(new_settings, changes)`` with OpenShard's hooks removed.
 
     ``changes`` maps each event to ``"removed"`` / ``"absent"``. Mirrors
     ``merge_openshard_hooks``'s identification (``is_openshard_hook``) so
     only OpenShard's own entries are ever removed -- unrelated hooks, their
     matchers, and every other settings key are left exactly as they were.
-    The input is never mutated.
+    The input is never mutated. *specs*/*is_ours* as for the merge.
     """
+    ours_fn = is_ours or is_openshard_hook
     new_settings = copy.deepcopy(settings)
     hooks = new_settings.get("hooks")
     if not isinstance(hooks, dict):
-        return new_settings, {spec.event: "absent" for spec in HOOK_SPECS}
+        return new_settings, {spec.event: "absent" for spec in specs}
 
     changes: dict[str, str] = {}
-    for spec in HOOK_SPECS:
+    for spec in specs:
         groups = hooks.get(spec.event)
         if not isinstance(groups, list):
             changes[spec.event] = "absent"
@@ -280,7 +301,7 @@ def remove_openshard_hooks(settings: dict) -> tuple[dict, dict[str, str]]:
             if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
                 new_groups.append(group)
                 continue
-            others = [h for h in group["hooks"] if not is_openshard_hook(h)]
+            others = [h for h in group["hooks"] if not ours_fn(h)]
             if len(others) != len(group["hooks"]):
                 removed_any = True
             if others:
@@ -293,17 +314,23 @@ def remove_openshard_hooks(settings: dict) -> tuple[dict, dict[str, str]]:
     return new_settings, changes
 
 
-def installed_events(settings: object) -> list[str]:
-    """Events (of HOOK_EVENTS) that already carry an OpenShard hook in *settings*."""
+def installed_events(
+    settings: object,
+    *,
+    events: tuple[str, ...] = HOOK_EVENTS,
+    is_ours: Callable[[object], bool] | None = None,
+) -> list[str]:
+    """Events (of *events*) that already carry an OpenShard hook in *settings*."""
+    ours_fn = is_ours or is_openshard_hook
     if not isinstance(settings, dict) or not isinstance(settings.get("hooks"), dict):
         return []
     found: list[str] = []
-    for event in HOOK_EVENTS:
+    for event in events:
         groups = settings["hooks"].get(event)
         if not isinstance(groups, list):
             continue
         for group in groups:
-            if isinstance(group, dict) and any(is_openshard_hook(h) for h in group.get("hooks") or []):
+            if isinstance(group, dict) and any(ours_fn(h) for h in group.get("hooks") or []):
                 found.append(event)
                 break
     return found
@@ -372,16 +399,19 @@ def _write_settings(path: Path, settings: dict) -> None:
         raise
 
 
-def ensure_local_settings_ignored(repo_root: Path) -> str | None:
-    """Make sure ``.claude/settings.local.json`` is git-ignored in *repo_root*.
+def ensure_local_settings_ignored(
+    repo_root: Path, rel: str | None = None, *, note: str = "added by openshard mcp install claude"
+) -> str | None:
+    """Make sure ``.claude/settings.local.json`` (or *rel*) is git-ignored in *repo_root*.
 
     Claude Code only adds the ignore rule when *it* creates the file, so
     OpenShard adds ``.claude/settings.local.json`` to the repository's
     local ``.git/info/exclude`` (documented git, never committed) when git
     does not already ignore it. Returns a warning string when that could
-    not be confirmed; never raises.
+    not be confirmed; never raises. The Codex/OpenCode installers pass
+    their own *rel* for the files they created (PR12).
     """
-    rel = SETTINGS_RELPATH.as_posix()
+    rel = rel or SETTINGS_RELPATH.as_posix()
     try:
         check = subprocess.run(
             ["git", "check-ignore", "-q", rel],
@@ -412,7 +442,7 @@ def ensure_local_settings_ignored(repo_root: Path) -> str | None:
         with exclude_path.open("a", encoding="utf-8") as fh:
             if existing and not existing.endswith("\n"):
                 fh.write("\n")
-            fh.write(f"# added by openshard mcp install claude\n{rel}\n")
+            fh.write(f"# {note}\n{rel}\n")
         return None
     except Exception:
         return f"Could not update .git/info/exclude; add {rel} to your gitignore."
