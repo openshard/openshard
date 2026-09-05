@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -41,6 +42,47 @@ else:
 # caller keeps).
 _POLL_INTERVAL_SECONDS = 0.02
 
+# Per-lock-path in-process gate -- see _intra_process_lock()'s docstring for
+# why this exists. Keyed by the string form of the resolved lock path so two
+# different history files never serialize against each other; guarded by its
+# own lock only for the get-or-create step, never held across a file lock.
+_intra_process_locks: dict[str, threading.Lock] = {}
+_intra_process_locks_registry_guard = threading.Lock()
+
+
+def _intra_process_lock(lock_path: Path) -> threading.Lock:
+    """Return the process-local lock guarding *lock_path*, creating it once.
+
+    Root cause this exists for: POSIX ``fcntl.flock()`` is scoped to the
+    *open file description*, so two threads of this same process that each
+    call ``open()`` on the same sidecar file get independent, correctly
+    queueable locks -- the kernel blocks the second thread until the first
+    unlocks, exactly like two separate processes would. Windows
+    ``msvcrt.locking()`` has no such per-handle scoping: its lock is
+    tracked by the OS against the file (effectively per-process), so two
+    threads of the *same* process racing to lock the same byte range is a
+    scenario the Windows CRT does not handle by queuing -- its blocking
+    mode (``LK_LOCK``) internally retries only a bounded number of times
+    and then raises ``OSError`` (errno 36, "Resource deadlock avoided"),
+    even though nothing is actually deadlocked.
+
+    Serializing same-process callers here, before any thread ever touches
+    the OS-level lock, removes the race entirely: at most one thread of
+    this process is ever inside the OS-lock section for a given path, so
+    the OS-level primitive only ever has to arbitrate *across* processes
+    -- which is what both ``fcntl.flock`` and the polling ``msvcrt``
+    fallback below do correctly. Applied on both platforms for one
+    uniform code path; on POSIX it is redundant with flock's own
+    same-process correctness but harmless (an uncontended acquire in the
+    single-writer-per-process common case).
+    """
+    key = str(lock_path)
+    lock = _intra_process_locks.get(key)
+    if lock is None:
+        with _intra_process_locks_registry_guard:
+            lock = _intra_process_locks.setdefault(key, threading.Lock())
+    return lock
+
 
 class LockTimeoutError(TimeoutError):
     """Raised when a bounded lock wait (``timeout=`` given) is not acquired in time.
@@ -53,78 +95,110 @@ class LockTimeoutError(TimeoutError):
 
 @contextmanager
 def _file_lock(lock_path: Path, *, timeout: float | None = None):
-    """Hold an exclusive cross-process lock on a sidecar ``.lock`` file.
+    """Hold an exclusive lock on a sidecar ``.lock`` file, safe both across
+    threads of this process and across separate processes.
 
-    With ``timeout=None`` (default, unchanged from before), acquisition
-    blocks on the OS's own blocking lock call until the lock is held -- this
-    is the behavior every existing caller relies on (a run/history write
-    that must not be silently skipped). With a numeric ``timeout``, this
-    instead polls a *non-blocking* lock attempt every
-    ``_POLL_INTERVAL_SECONDS`` and raises :class:`LockTimeoutError` once
-    *timeout* seconds have elapsed without acquiring it -- for callers (the
+    Two layers, always both held together:
+
+    1. An in-process :class:`threading.Lock` per *lock_path*
+       (:func:`_intra_process_lock`), acquired first. This is what makes
+       same-process multi-threaded callers safe on Windows -- see that
+       function's docstring for the exact failure it prevents.
+    2. The OS-level lock on the sidecar file itself, which is what makes
+       *separate processes* safe.
+
+    With ``timeout=None`` (default, unchanged from before), acquisition of
+    both layers blocks until held, with no deadline -- the behavior every
+    existing caller relies on (a run/history write that must not be
+    silently skipped). On POSIX the OS-level layer is the kernel's own
+    blocking call (``fcntl.flock``); on Windows it polls a *non-blocking*
+    lock attempt every ``_POLL_INTERVAL_SECONDS`` forever, since
+    ``msvcrt.locking``'s own "blocking" mode is not actually unbounded
+    (see :func:`_intra_process_lock`). With a numeric ``timeout``, both
+    platforms poll the same way but give up and raise
+    :class:`LockTimeoutError` once *timeout* seconds have elapsed in total
+    (across both layers) without acquiring the lock -- for callers (the
     Claude Code hook/status-line path) that must never hang Claude Code on
-    a stuck or contended lock, and would rather skip one capture than block.
+    a stuck or contended lock, and would rather skip one capture than
+    block.
 
-    Release is guaranteed in a ``finally`` even on exception, and the handle
-    is closed in a nested ``finally`` so the OS lock is freed even if the
-    unlock call itself raises. No path leaves a lock held, so there is no
-    deadlock.
+    Release is guaranteed in a ``finally`` even on exception, and the
+    handle is closed in a nested ``finally`` so the OS lock is freed even
+    if the unlock call itself raises. No path leaves a lock held, so there
+    is no deadlock.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "a+")
-    acquired = False
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    intra_lock = _intra_process_lock(lock_path)
+    if deadline is None:
+        intra_lock.acquire()
+    elif not intra_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise LockTimeoutError(f"timed out after {timeout}s waiting for lock: {lock_path}")
+
     try:
-        if sys.platform == "win32":
-            # msvcrt.locking locks a 1-byte range, so the sidecar must have at
-            # least one byte; empty-file byte-range behavior is ambiguous.
-            if os.fstat(fh.fileno()).st_size < 1:
-                fh.write("\0")
-                fh.flush()
-            fh.seek(0)
-            if timeout is None:
-                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)  # blocking exclusive
-                acquired = True
-            else:
-                deadline = time.monotonic() + timeout
+        fh = open(lock_path, "a+")
+        acquired = False
+        try:
+            if sys.platform == "win32":
+                # msvcrt.locking locks a 1-byte range, so the sidecar must have at
+                # least one byte; empty-file byte-range behavior is ambiguous.
+                if os.fstat(fh.fileno()).st_size < 1:
+                    fh.write("\0")
+                    fh.flush()
+                fh.seek(0)
+                # msvcrt.locking's own "blocking" mode (LK_LOCK) is not truly
+                # unbounded: the Windows CRT retries internally only about a
+                # dozen times over roughly a second, then raises OSError
+                # (errno 36, "Resource deadlock avoided") even though no
+                # deadlock exists -- just contention that outlasted its
+                # built-in retry budget. Poll a non-blocking attempt instead
+                # (forever when timeout is None), so "no timeout" actually
+                # means no timeout, the same as fcntl.flock(LOCK_EX) below.
+                # The intra-process lock above already rules out the
+                # same-process case this budget most reliably trips on;
+                # this loop is what keeps a genuine cross-process wait
+                # correct too, however long it takes.
                 while True:
                     try:
                         msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
                         acquired = True
                         break
                     except OSError:
-                        if time.monotonic() >= deadline:
+                        if deadline is not None and time.monotonic() >= deadline:
                             raise LockTimeoutError(
                                 f"timed out after {timeout}s waiting for lock: {lock_path}"
                             ) from None
                         time.sleep(_POLL_INTERVAL_SECONDS)
-        else:
-            if timeout is None:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-                acquired = True
             else:
-                deadline = time.monotonic() + timeout
-                while True:
-                    try:
-                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        acquired = True
-                        break
-                    except OSError:
-                        if time.monotonic() >= deadline:
-                            raise LockTimeoutError(
-                                f"timed out after {timeout}s waiting for lock: {lock_path}"
-                            ) from None
-                        time.sleep(_POLL_INTERVAL_SECONDS)
-        yield
-    finally:
-        try:
-            if acquired:
-                if sys.platform == "win32":
-                    fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                if deadline is None:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                    acquired = True
                 else:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    while True:
+                        try:
+                            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            acquired = True
+                            break
+                        except OSError:
+                            if time.monotonic() >= deadline:
+                                raise LockTimeoutError(
+                                    f"timed out after {timeout}s waiting for lock: {lock_path}"
+                                ) from None
+                            time.sleep(_POLL_INTERVAL_SECONDS)
+            yield
         finally:
-            fh.close()
+            try:
+                if acquired:
+                    if sys.platform == "win32":
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
+    finally:
+        intra_lock.release()
 
 
 def _lock_path_for(path: Path) -> Path:
