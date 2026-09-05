@@ -698,6 +698,8 @@ class TestPlaceboMcp:
         assert placebo_probe["tool_names"] == sorted(MCP_TOOLS) and placebo_probe["matches_expected"]
         assert placebo_probe["server_name"] == "openshard"
         openshard_exe = shutil.which("openshard", path=str(Path(sys.executable).parent))
+        if not openshard_exe and sys.platform == "win32":
+            openshard_exe = shutil.which("openshard", path=str(Path(sys.executable).parent / "Scripts"))
         assert openshard_exe, "openshard console script must sit next to the test interpreter"
         production_probe = probe_stdio_server(openshard_exe, build_server_argv(ws)[1:], cwd=ws, env=env)
         assert production_probe["tool_names"] == sorted(MCP_TOOLS)

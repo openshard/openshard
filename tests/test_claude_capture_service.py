@@ -379,8 +379,13 @@ class TestBlockingPath:
         assert service.server.recorder.wait_idle(20)
         timing = client.health(service.port)["blocking_ms"]
         assert timing["n"] >= 42
-        assert timing["p50_ms"] < 25, timing
-        assert timing["p95_ms"] < 50, timing
+        # Windows loopback/TCP-stack overhead on shared CI runners is
+        # substantially higher and noisier than Linux/macOS, so it gets a
+        # looser, still-meaningful budget (see test_opencode_capture.py's
+        # counterpart for the same reasoning and observed numbers).
+        p50_budget, p95_budget = (60, 120) if sys.platform == "win32" else (25, 50)
+        assert timing["p50_ms"] < p50_budget, timing
+        assert timing["p95_ms"] < p95_budget, timing
         roundtrips.sort()
         assert roundtrips[len(roundtrips) // 2] < 0.05, roundtrips
 

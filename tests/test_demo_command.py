@@ -50,9 +50,13 @@ class TestDemoCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Developer feedback capture", result.output)
 
-    def test_scenario_feedback_mentions_rating_option(self):
+    def test_scenario_feedback_mentions_real_subcommands(self):
         result = CliRunner().invoke(cli, ["demo", "--scenario", "feedback"])
-        self.assertIn("--rating", result.output)
+        self.assertIn("openshard feedback accept", result.output)
+        self.assertIn("openshard feedback retry --reason", result.output)
+        self.assertIn("openshard feedback reject --reason", result.output)
+        self.assertNotIn("--rating", result.output)
+        self.assertNotIn("--outcome", result.output)
 
     def test_invalid_scenario_rejected(self):
         result = CliRunner().invoke(cli, ["demo", "--scenario", "bad"])

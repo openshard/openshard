@@ -15,6 +15,7 @@ import pytest
 from openshard.history.jsonl_store import (
     LockTimeoutError,
     _file_lock,
+    _intra_process_lock,
     _lock_path_for,
     append_jsonl,
     history_file_lock,
@@ -107,6 +108,86 @@ def test_thread_appends_do_not_interleave(tmp_path: Path) -> None:
     lines = _read_lines(path)
     assert len(lines) == n_threads * _RECORDS_PER_WRITER
     assert all(isinstance(json.loads(ln), dict) for ln in lines)
+
+
+def test_thread_appends_do_not_interleave_under_repetition(tmp_path: Path) -> None:
+    """Same property as above, repeated: a single lucky pass isn't enough
+    confidence for a lock-contention regression (this is what caught the
+    Windows same-process msvcrt.locking() deadlock-avoidance bug -- see
+    test_file_lock_never_has_more_than_one_thread_inside_at_once for the
+    structural regression test, and _intra_process_lock's docstring in
+    jsonl_store.py for the full root-cause explanation)."""
+    n_threads = 6
+    records_per_writer = 10
+    for rep in range(15):
+        path = tmp_path / f"shared_{rep}.jsonl"
+        with ThreadPoolExecutor(max_workers=n_threads) as ex:
+            list(
+                ex.map(
+                    _append_worker,
+                    [(str(path), t, records_per_writer) for t in range(n_threads)],
+                )
+            )
+        lines = _read_lines(path)
+        assert len(lines) == n_threads * records_per_writer, f"rep {rep}"
+        assert all(isinstance(json.loads(ln), dict) for ln in lines), f"rep {rep}"
+
+
+def test_file_lock_never_has_more_than_one_thread_inside_at_once(tmp_path: Path) -> None:
+    """Structural regression test for the Windows same-process locking bug.
+
+    msvcrt.locking() is scoped per-process rather than per-handle (unlike
+    POSIX fcntl.flock, scoped to the open file description), so two threads
+    of the same process each opening their own handle and racing for the
+    same byte range is exactly the scenario that tripped the Windows CRT's
+    deadlock-avoidance check (OSError, errno 36) even though nothing was
+    really deadlocked. The fix serializes same-process callers with an
+    in-process lock (_intra_process_lock) before either thread ever touches
+    the OS-level lock, so at most one thread of this process can be "inside"
+    _file_lock for a given path at any instant -- this test asserts that
+    invariant directly and platform-independently (it does not need
+    msvcrt/Windows to fail if the invariant is ever broken: two threads
+    inside at once here means the same race this fix closed has reopened)."""
+    lock_path = tmp_path / "buffer.json.lock"
+    n_threads = 16
+    iterations_per_thread = 20
+    inside = 0
+    max_inside_seen = 0
+    guard = threading.Lock()
+
+    def worker() -> None:
+        nonlocal inside, max_inside_seen
+        for _ in range(iterations_per_thread):
+            with _file_lock(lock_path):
+                with guard:
+                    inside += 1
+                    max_inside_seen = max(max_inside_seen, inside)
+                # A small window with the lock held and nothing else
+                # synchronizing gives any race the chance to manifest.
+                time.sleep(0.001)
+                with guard:
+                    inside -= 1
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive(), "a worker thread hung -- possible lock leak/deadlock"
+
+    assert max_inside_seen == 1
+    assert inside == 0
+
+
+def test_intra_process_lock_registry_is_keyed_by_path(tmp_path: Path) -> None:
+    """Same path -> same lock object (real serialization); different paths
+    -> different lock objects (unrelated files never serialize against
+    each other)."""
+    a = tmp_path / "a.jsonl.lock"
+    b = tmp_path / "b.jsonl.lock"
+    assert _intra_process_lock(a) is _intra_process_lock(a)
+    assert _intra_process_lock(a) is not _intra_process_lock(b)
+    assert isinstance(_intra_process_lock(a), type(threading.Lock()))
 
 
 def test_append_round_trips_through_real_reader(tmp_path: Path) -> None:

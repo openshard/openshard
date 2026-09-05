@@ -6,6 +6,55 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- Modernized the local MCP server onto MCP SDK v2 (`mcp>=2.0,<3`, replacing
+  `mcp>=1.2,<2`'s `FastMCP`/`ValueError` API with `MCPServer`/`ToolError`).
+  No change to the server's tools, their arguments, or their output shape.
+- PR13 effectiveness benchmark (`evals/pr13/`): a local, no-network harness
+  that measures how much OpenShard's captured history actually helps an
+  agent, across Claude Code, Codex, and OpenCode, with its own README and
+  results summary. Not part of the shipped CLI.
+- Codex and OpenCode capture: `openshard setup` now detects and configures
+  Codex and OpenCode alongside Claude Code, in any mix, in the same
+  repository. Codex hooks are merged into the project-local
+  `.codex/hooks.json`; OpenCode gets a small plugin at
+  `.opencode/plugins/openshard.ts`. All three feed the same local capture
+  service and the same `.openshard/runs.jsonl`, so `openshard history`,
+  `openshard context`, and `relevant_context` see every agent's work
+  together, each Shard labelled with the agent that produced it. New
+  `openshard capture install|uninstall codex|opencode` commands; `doctor`
+  and `setup` report each agent's status independently. See
+  [docs/agent-capture.md](docs/agent-capture.md).
+- Evidence-backed recovery observations (PR11): when `relevant_context`
+  ranks a Shard whose most recent verified attempt passed after an earlier
+  verified failure, the match now includes a `recovery` observation —
+  the failed attempt, the files changed and tools invoked in between, and
+  the passing attempt. This is chronology, not causation: OpenShard never
+  claims the intervening activity *caused* the pass, only that it was
+  observed between the two verification results. No observation is added
+  when the Shard's latest verified state is a failure, or when neither
+  attempt has a real verification result.
+- Improved `relevant_context` ranking: scoring and result assembly in
+  `openshard/history/query.py` were reworked for better signal quality.
+  Every rendering path (`openshard context`, the MCP tool, `--text`) still
+  shares the exact same ranking. No embeddings, fuzzy matching, or model
+  calls.
+- Local stdio MCP server (`openshard.mcp.server`, `openshard mcp install
+  claude`): a read-only server scoped to one repository's local history,
+  exposing `recent_shards`, `get_shard`, `get_receipt`, `search_history`,
+  and `relevant_context` as MCP tools. No network access, no API key.
+- Local history query layer (`openshard/history/query.py`,
+  `openshard/history/locate.py`, `openshard/history/views.py`): the shared
+  read path behind `openshard history`, `openshard context`, `openshard
+  stats`, and the MCP server's tools, all built on one privacy-bounded dict
+  projection so the CLI and the MCP server can never diverge.
+- Canonical Shard/Attempt/Event model: run history now has one typed
+  `Event` model (`openshard/history/event.py`) instead of ad hoc dicts,
+  used consistently by native OSN runs, the Claude Code import path, and
+  receipts; and persistent Shard **attempt** grouping, so retries of the
+  same task are tracked as attempts of one Shard rather than unrelated
+  runs. This is the foundation the local history query layer,
+  `relevant_context`, and the richer receipts below are built on. No
+  change to `runs.jsonl`'s on-disk format for existing fields.
 - Near-zero blocking Claude Code capture (PR9.5): the hooks Claude Code waits
   on no longer spawn a Python process or fold a receipt. `UserPromptSubmit`,
   `PostToolUse`, `PostToolUseFailure`, `Stop` and `SessionEnd` are installed

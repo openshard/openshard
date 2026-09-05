@@ -4027,7 +4027,7 @@ def feedback_stats() -> None:
         click.echo("Developer feedback\n")
         click.echo(f"Runs: {total}")
         click.echo("Feedback: 0 recorded")
-        click.echo("\nTip: add feedback with 'openshard feedback --rating good'")
+        click.echo("\nTip: add feedback with 'openshard feedback accept'")
         return
 
     counts = {"good": 0, "mixed": 0, "bad": 0}
@@ -4447,8 +4447,8 @@ def _demo_default() -> None:
     click.echo("   cost, and file counts so you can review history later.")
     click.echo("")
     click.echo("6. Capture feedback")
-    click.echo("   After a run you can rate it with 'openshard feedback --rating good'.")
-    click.echo("   Ratings are stored alongside the run entry.")
+    click.echo("   After a run you can record feedback with 'openshard feedback accept'.")
+    click.echo("   Feedback is stored alongside the run entry.")
 
 
 def _demo_readonly() -> None:
@@ -4496,18 +4496,18 @@ def _demo_tier_dispatch() -> None:
 def _demo_feedback() -> None:
     click.echo("Scenario: feedback")
     click.echo("")
-    click.echo("After each run you can attach a developer rating to the run entry.")
+    click.echo("After each run you can attach developer feedback to the run entry.")
     click.echo("This lets you track which tasks and models produced good results.")
     click.echo("")
     click.echo("Developer feedback capture")
-    click.echo("  Rate the most recent run with one of three values:")
+    click.echo("  Record an outcome for the most recent run:")
     click.echo("")
-    click.echo("    openshard feedback --rating good")
-    click.echo("    openshard feedback --rating mixed")
-    click.echo("    openshard feedback --rating bad")
+    click.echo("    openshard feedback accept")
+    click.echo("    openshard feedback retry --reason \"...\"")
+    click.echo("    openshard feedback reject --reason \"...\"")
     click.echo("")
-    click.echo("  Add an optional note:")
-    click.echo('    openshard feedback --rating mixed --note "output was close but missed edge case"')
+    click.echo("  Add a reason to explain the outcome:")
+    click.echo('    openshard feedback retry --reason "output was close but missed edge case"')
     click.echo("")
     click.echo("  Feedback is stored in .openshard/runs.jsonl alongside the run entry.")
     click.echo("  You can view it with 'openshard last --more'.")
@@ -4731,7 +4731,7 @@ def _demo_run() -> None:
     click.echo("  Command: python -m pytest")
     click.echo("")
     click.echo("Time: 9.5s   Cost: $0.0133")
-    click.echo("Feedback: openshard feedback --rating good")
+    click.echo("Feedback: openshard feedback accept")
 
 
 @cli.command("demo-run")
@@ -6184,4 +6184,7 @@ def roster_reset() -> None:
 
 
 if __name__ == "__main__":
+    from openshard.cli.entrypoint import _harden_stdio_encoding
+
+    _harden_stdio_encoding()
     cli()

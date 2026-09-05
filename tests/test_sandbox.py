@@ -389,7 +389,11 @@ class TestSandboxPathSafety(unittest.TestCase):
 
     def test_safe_write_path_works_in_worktree(self):
         """resolve_safe_repo_path accepts a valid relative path inside the worktree root."""
-        target = self._tmpdir / "output" / "result.txt"
+        # resolve_safe_repo_path resolves both repo_root and the candidate
+        # (Path.resolve(), for containment checking), so compare against the
+        # resolved form too -- on Windows the raw temp path and its resolved
+        # form can differ (short vs. long name).
+        target = (self._tmpdir / "output" / "result.txt").resolve()
         resolved = resolve_safe_repo_path(self._tmpdir, "output/result.txt")
         self.assertEqual(resolved, target)
 

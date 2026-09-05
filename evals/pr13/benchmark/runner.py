@@ -243,6 +243,11 @@ def preflight(options: BenchmarkOptions) -> tuple[dict[str, Any], list[str], str
 
     scripts_dir = str(Path(options.python).parent)
     openshard_exe = shutil.which("openshard", path=scripts_dir)
+    if not openshard_exe and sys.platform == "win32":
+        # actions/setup-python's non-venv installs put console scripts in a
+        # "Scripts" subdirectory next to python.exe, not beside it.
+        scripts_dir = str(Path(options.python).parent / "Scripts")
+        openshard_exe = shutil.which("openshard", path=scripts_dir)
     if not openshard_exe:
         raise BenchmarkError(
             "openshard_cli_missing",
