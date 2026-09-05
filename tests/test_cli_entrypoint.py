@@ -191,7 +191,15 @@ class TestStdioEncodingHardening:
         import os
 
         env = {**os.environ, "PYTHONIOENCODING": encoding}
-        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=30)
+        # Decode the captured bytes with the same codec the child was told to
+        # use. `text=True` alone decodes with *this* process's own locale
+        # encoding, which is unrelated to the child's PYTHONIOENCODING and
+        # differs across platforms (e.g. UTF-8 on Linux, CP1252 on a Windows
+        # runner) -- passing `encoding=` keeps the assertion meaningful
+        # everywhere instead of exercising the wrong codec on Windows.
+        return subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, encoding=encoding, env=env, timeout=30,
+        )
 
     def test_cp1252_stdout_without_hardening_crashes(self):
         """Control: confirms the underlying bug still exists in plain click.echo."""

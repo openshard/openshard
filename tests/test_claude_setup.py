@@ -260,7 +260,10 @@ class TestRunSetup(_RepoCase):
         with patch(f"{_MCP_MODULE}.shutil.which", side_effect=_which), \
              patch(f"{_MCP_MODULE}.subprocess.run", side_effect=_subprocess_router()):
             result = run_setup(repo_path=self.root)
-        self.assertEqual(result.history_path, self.root / HISTORY_RELPATH)
+        # run_setup resolves repo_path (via find_repo_root -> Path.resolve()),
+        # so compare against the resolved form too -- on Windows the raw temp
+        # path and its resolved form can differ (short vs. long name).
+        self.assertEqual(result.history_path, self.root.resolve() / HISTORY_RELPATH)
         self.assertTrue(result.history_writable)
 
     def test_repo_path_with_spaces(self):
