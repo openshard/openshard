@@ -31,7 +31,8 @@ from openshard.history.views import (
 )
 
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError as exc:  # pragma: no cover - exercised via CLI, not tests
     raise ImportError(
         "The 'mcp' package is required for the OpenShard MCP server. "
@@ -72,7 +73,7 @@ def _clamp_limit(limit: int) -> int:
     return min(limit, MAX_LIMIT)
 
 
-def build_server(*, repo_path: Path | None = None) -> FastMCP:
+def build_server(*, repo_path: Path | None = None) -> MCPServer:
     """Build the OpenShard MCP server, scoped to one repository's history.
 
     ``repo_path`` fixes which checkout's ``.openshard/runs.jsonl`` every tool
@@ -81,7 +82,7 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
     per-call tool argument -- an MCP client can filter by ``repo`` identity
     but cannot point the server at an arbitrary filesystem path.
     """
-    mcp = FastMCP(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
+    mcp = MCPServer(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
 
     @mcp.tool()
     def recent_shards(limit: int = DEFAULT_LIMIT, repo: str | None = None) -> list[dict[str, Any]]:
@@ -103,11 +104,11 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
         as returned by recent_shards or search_history. Raises a clear error
         if no Shard with that id exists in this repository's history."""
         if not shard_id or not shard_id.strip():
-            raise ValueError("shard_id must be a non-empty string.")
+            raise ToolError("shard_id must be a non-empty string.")
         try:
             shard = history_query.get_shard(shard_id, repo_path=repo_path)
         except UnknownShardError as exc:
-            raise ValueError(str(exc)) from None
+            raise ToolError(str(exc)) from None
         return shard_to_dict(shard)
 
     @mcp.tool()
@@ -121,13 +122,13 @@ def build_server(*, repo_path: Path | None = None) -> FastMCP:
         least one of shard_id/run_id is required. Raises a clear error when
         the Shard or run is not found."""
         if not shard_id and not run_id:
-            raise ValueError("get_receipt requires shard_id and/or run_id.")
+            raise ToolError("get_receipt requires shard_id and/or run_id.")
         try:
             receipt = history_query.get_receipt(
                 shard_id, run_id=run_id, repo_path=repo_path
             )
         except (UnknownShardError, UnknownRunError) as exc:
-            raise ValueError(str(exc)) from None
+            raise ToolError(str(exc)) from None
         return receipt_to_dict(receipt)
 
     @mcp.tool()

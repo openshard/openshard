@@ -1016,7 +1016,8 @@ class TestRecoveryNativeToolEvidence:
 
 
 def _call(server, name: str, args: dict):
-    return asyncio.run(server.call_tool(name, args))
+    result = asyncio.run(server.call_tool(name, args))
+    return result.content, result.structured_content
 
 
 class TestRelevantContextMcpTool:
@@ -1030,7 +1031,7 @@ class TestRelevantContextMcpTool:
         server = build_server(repo_path=scenario)
         schema = asyncio.run(server.list_tools())
         tool = next(t for t in schema if t.name == "relevant_context")
-        assert "task" in tool.inputSchema.get("required", [])
+        assert "task" in tool.input_schema.get("required", [])
 
     def test_call_returns_matches_and_context_text(self, scenario: Path):
         server = build_server(repo_path=scenario)

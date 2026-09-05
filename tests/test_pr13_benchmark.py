@@ -607,16 +607,16 @@ class TestPlaceboMcp:
     @staticmethod
     def _tools(server) -> dict[str, dict]:
         listed = asyncio.run(server.list_tools())
-        return {t.name: {"description": t.description, "input_schema": t.inputSchema} for t in listed}
+        return {t.name: {"description": t.description, "input_schema": t.input_schema} for t in listed}
 
     @staticmethod
     def _call(server, name: str, arguments: dict):
         result = asyncio.run(server.call_tool(name, arguments))
-        content, structured = result if isinstance(result, tuple) else (result, None)
+        content, structured = result.content, result.structured_content
         text = "\n".join(getattr(c, "text", "") for c in content)
         if text.strip():
             return json.loads(text)
-        # FastMCP sends an empty list as structured output only.
+        # MCPServer sends an empty list as structured output only.
         return structured.get("result", structured) if isinstance(structured, dict) else structured
 
     def test_placebo_and_production_expose_the_same_tool_surface(self):
