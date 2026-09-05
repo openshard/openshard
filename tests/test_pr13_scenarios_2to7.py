@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.pr13.benchmark import capture, workspace
+from evals.pr13.benchmark import capture, cross_agent, workspace
 from evals.pr13.benchmark.config import BURN_IN_CAPTURE_KINDS, load_scenario
 from evals.pr13.benchmark.errors import BenchmarkError
 from evals.pr13.benchmark.runner import BenchmarkOptions, run_benchmark
@@ -278,15 +278,13 @@ def _install_fake_opencode_on_path(monkeypatch, tmp_path) -> None:
 
 class TestScenario7CrossAgentHandoff:
     def test_missing_opencode_cli_aborts_before_any_workspace(self, tmp_path, monkeypatch):
-        # Keep git/claude(fake)/openshard reachable; only hide the real
-        # `opencode` this machine has installed, by dropping the PATH entry
-        # that resolves it.
-        real_opencode = shutil.which("opencode")
-        assert real_opencode, "this test assumes opencode is normally on PATH"
-        opencode_dir = str(Path(real_opencode).parent)
-        kept = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p and p != opencode_dir]
-        monkeypatch.setenv("PATH", os.pathsep.join(kept))
-        assert shutil.which("opencode") is None, "test setup failed to hide opencode"
+        # Simulate "opencode not on PATH" directly at the harness's single
+        # detection seam (cross_agent.detect_opencode_cli), rather than
+        # mutating PATH based on where a real `opencode` happens to sit on
+        # this host. CI (Linux) has no OpenCode installed at all, so a
+        # PATH-based hide depended on a precondition that was never true
+        # there; patching the seam is deterministic on every platform.
+        monkeypatch.setattr(cross_agent, "detect_opencode_cli", lambda: None)
         env = _fake_env()
         outcome = run_benchmark(_options(SCENARIO_7, tmp_path, env))
         assert outcome.status == "aborted"
@@ -521,11 +519,19 @@ class TestScenario3Verification:
         mark = '    remove = commands.add_parser("remove", help="delete a job")\n    remove.add_argument("name")\n'
         text = text.replace(mark, mark + '\n    e = commands.add_parser("export", help="export as csv")\n    e.add_argument("path")\n')
         dispatch_mark = '        elif args.subcommand == "remove":\n            queue.remove(args.name)\n'
+        # Writes CRLF bytes directly (write_bytes never does newline
+        # translation) instead of relying on plain text-mode write_text(),
+        # whose CRLF-on-write behavior is a Windows-only OS default -- on
+        # Linux the same "naive" write_text call produces LF unchanged, so
+        # the bug this fixture models would silently stop reproducing there.
+        # Writing "\r\n" explicitly means the same CRLF-output condition on
+        # every platform, matching what QueueFile.save()'s newline="\n"
+        # discipline guards against.
         addition = (
             '        elif args.subcommand == "export":\n'
             '            lines = [f"{j.name},{j.command},{j.retries}" for j in queue.load()]\n'
             '            from pathlib import Path as _P\n'
-            '            _P(args.path).write_text("\\n".join(lines) + "\\n", encoding="utf-8")\n'
+            '            _P(args.path).write_bytes(("\\r\\n".join(lines) + "\\r\\n").encode("utf-8"))\n'
         )
         cli.write_text(text.replace(dispatch_mark, dispatch_mark + addition), encoding="utf-8")
         result = _run_hidden(SCENARIO_3, ws)
