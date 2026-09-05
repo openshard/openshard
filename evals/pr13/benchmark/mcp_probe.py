@@ -46,10 +46,10 @@ async def _probe_async(command: str, args: list[str], cwd: Path, env: dict[str, 
             init = await session.initialize()
             listed = await session.list_tools()
             tools = [
-                {"name": t.name, "description": t.description, "input_schema": t.inputSchema}
+                {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                 for t in listed.tools
             ]
-            server_name = init.serverInfo.name if init.serverInfo else None
+            server_name = init.server_info.name if init.server_info else None
             return {
                 "server_name": server_name,
                 "instructions": init.instructions,

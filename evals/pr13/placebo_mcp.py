@@ -26,7 +26,8 @@ import sys
 from typing import Any
 
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError as exc:  # pragma: no cover - the benchmark preflight requires the mcp extra
     raise ImportError("The 'mcp' package is required for the placebo server: pip install 'openshard[mcp]'") from exc
 
@@ -49,8 +50,8 @@ DEFAULT_CONTEXT_LIMIT = 5
 PLACEBO_KIND = "placebo"
 
 
-def _unknown_shard(shard_id: str) -> ValueError:
-    return ValueError(
+def _unknown_shard(shard_id: str) -> ToolError:
+    return ToolError(
         f"No existing Shard found with id '{shard_id}'. "
         "Shards are created automatically by a run; use list_shards() to see "
         "the ids recorded in this repository's history."
@@ -66,9 +67,9 @@ def no_match_text(task: str) -> str:
     return header + "\n\nNo relevant prior OpenShard history found for this task.\n"
 
 
-def build_server() -> FastMCP:
+def build_server() -> MCPServer:
     """Build the placebo server: production tool surface, empty-history behaviour."""
-    mcp = FastMCP(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
+    mcp = MCPServer(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
 
     @mcp.tool()
     def recent_shards(limit: int = DEFAULT_LIMIT, repo: str | None = None) -> list[dict[str, Any]]:
@@ -88,7 +89,7 @@ def build_server() -> FastMCP:
         as returned by recent_shards or search_history. Raises a clear error
         if no Shard with that id exists in this repository's history."""
         if not shard_id or not shard_id.strip():
-            raise ValueError("shard_id must be a non-empty string.")
+            raise ToolError("shard_id must be a non-empty string.")
         raise _unknown_shard(shard_id)
 
     @mcp.tool()
@@ -102,10 +103,10 @@ def build_server() -> FastMCP:
         least one of shard_id/run_id is required. Raises a clear error when
         the Shard or run is not found."""
         if not shard_id and not run_id:
-            raise ValueError("get_receipt requires shard_id and/or run_id.")
+            raise ToolError("get_receipt requires shard_id and/or run_id.")
         if shard_id:
             raise _unknown_shard(shard_id)
-        raise ValueError(f"No run found with id '{run_id}'.")
+        raise ToolError(f"No run found with id '{run_id}'.")
 
     @mcp.tool()
     def search_history(

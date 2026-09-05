@@ -1,6 +1,6 @@
 """Tests for openshard.mcp.server (Demo v1 PR2: local read-only MCP server).
 
-Exercises tools through the MCP tool-call boundary (``FastMCP.call_tool``)
+Exercises tools through the MCP tool-call boundary (``MCPServer.call_tool``)
 rather than the private ``_shard_dict``/``_receipt_dict`` helpers directly,
 so a regression in tool registration, argument validation, or MCP-level
 JSON conversion would be caught here too.
@@ -19,7 +19,7 @@ from openshard.mcp.server import DEFAULT_LIMIT, MAX_LIMIT, build_server
 
 pytest.importorskip("mcp")
 
-from mcp.server.fastmcp.exceptions import ToolError  # noqa: E402
+from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,7 +50,8 @@ def _write(repo_path: Path, entries: list[dict]) -> None:
 
 def _call(server, name: str, args: dict):
     """Call a tool through the MCP boundary; return (content_blocks, structured)."""
-    return asyncio.run(server.call_tool(name, args))
+    result = asyncio.run(server.call_tool(name, args))
+    return result.content, result.structured_content
 
 
 T1 = "2026-08-01T10:00:00Z"
@@ -107,14 +108,14 @@ class TestToolRegistration:
 
     def test_get_shard_schema_requires_shard_id(self, server):
         tools = {t.name: t for t in asyncio.run(server.list_tools())}
-        schema = tools["get_shard"].inputSchema
+        schema = tools["get_shard"].input_schema
         assert "shard_id" in schema.get("required", [])
 
     def test_get_receipt_schema_has_no_required_fields(self, server):
         """Both shard_id and run_id are optional at the schema level; the
         'at least one' rule is enforced at call time (see TestGetReceipt)."""
         tools = {t.name: t for t in asyncio.run(server.list_tools())}
-        schema = tools["get_receipt"].inputSchema
+        schema = tools["get_receipt"].input_schema
         assert not schema.get("required")
 
 
@@ -374,7 +375,7 @@ class TestJsonSerialization:
         assert parsed == structured
 
     def test_text_content_matches_structured_content_for_list(self, history: Path):
-        """List-returning tools emit one TextContent block per item (FastMCP's
+        """List-returning tools emit one TextContent block per item (MCPServer's
         default), so the *set* of parsed blocks must match structured["result"]."""
         server = build_server(repo_path=history)
         content, structured = _call(server, "recent_shards", {})
