@@ -218,7 +218,10 @@ openshard pr comment --output pr-comment.md  # write the PR comment to a file
 Leave feedback:
 
 ```bash
-openshard feedback --outcome accepted --reason "Useful review"
+openshard feedback accept                     # Mark the latest run as accepted
+openshard feedback reject --reason "..."      # Mark it as rejected, with a reason
+openshard feedback retry --reason "..."       # Mark it as needing a retry
+openshard feedback note "..."                 # Add a free-text note
 ```
 
 See the demo scripts for a recorded walkthrough:
@@ -412,11 +415,10 @@ openshard pr comment --output pr-comment.md        # Write the PR comment to a f
 Record feedback:
 
 ```bash
-openshard feedback --outcome accepted              # Mark the latest run as accepted
-openshard feedback --outcome partial               # Mark the latest run as partly useful
-openshard feedback --outcome rejected              # Mark the latest run as not useful
-openshard feedback --outcome abandoned             # Mark the latest run as abandoned
-openshard feedback --outcome accepted --reason "kept as-is"  # Optionally include a free-text reason
+openshard feedback accept                          # Mark the latest run as accepted
+openshard feedback reject --reason "..."           # Mark the latest run as rejected
+openshard feedback retry --reason "..."            # Mark the latest run as needing a retry
+openshard feedback note "kept as-is"                # Add a free-text note
 ```
 Infer local session signals:
 
@@ -507,7 +509,7 @@ Current features include:
 * `openshard pr comment` for local GitHub PR comment generation
 * TUI post-run command hints for reflect and pr comment
 * Production-shaped Terraform demo
-* 6,800+ passing tests and green CI
+* 8,700+ passing tests and green CI
 
 ---
 
@@ -525,7 +527,7 @@ Not built yet:
 * Ask Mode and Plan Mode are local deterministic v1 flows
 * Feedback advisory does not automatically change routing yet
 * Model lifecycle tags do not yet drive default routing behavior
-* External Claude Code, Codex, Cursor, and OpenCode receipt capture is not fully implemented yet
+* Claude Code, Codex, and OpenCode capture is implemented; Cursor capture is not
 * External harness adapters are experimental and not guaranteed
 * Not a full Claude Code, Codex, Cursor, or OpenCode replacement
 
@@ -537,7 +539,7 @@ OpenShard is still early, but it is not just a prototype.
 
 Current validation includes:
 
-* 6,800+ passing tests
+* 8,700+ passing tests
 * Green CI
 * Ruff-clean Python codebase
 * Clean `pipx install openshard` path from PyPI
@@ -563,7 +565,7 @@ Run the task -> inspect what happened -> verify the output -> keep the receipt
 Near-term roadmap:
 
 * More real-world developer testing
-* Better external-agent receipt capture, starting with Claude Code
+* External-agent receipt capture beyond Claude Code, Codex, and OpenCode (e.g. Cursor)
 * Better repo-aware planning
 * Stronger model/workflow ranking from real outcomes
 * More workflow packs

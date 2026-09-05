@@ -33,6 +33,32 @@ from __future__ import annotations
 import sys
 
 
+def _harden_stdio_encoding() -> None:
+    """Make ``stdout``/``stderr`` tolerant of encoding errors.
+
+    The CLI writes a handful of Unicode glyphs (arrows, checkmarks, dashes)
+    in normal output. On Windows, the console code page (or a redirected/
+    piped stdout with no explicit encoding) is often not UTF-8, and a plain
+    ``print``/``click.echo`` of those glyphs raises ``UnicodeEncodeError``
+    and kills the process mid-run. Reconfiguring the streams with
+    ``errors="replace"`` leaves the encoding itself untouched -- UTF-8
+    terminals keep rendering the real glyphs -- but any character the
+    stream can't encode is substituted instead of raising, so output on a
+    narrow encoding is degraded, never fatal.
+
+    This is a single output-boundary fix rather than hunting down and
+    replacing every Unicode glyph call site by hand.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="replace")
+        except Exception:
+            pass
+
+
 def _parse_hooks_claude_argv(rest: list[str]) -> str | None | bool:
     """Return the ``--event`` override for ``hooks claude`` *rest* argv.
 
@@ -133,6 +159,7 @@ def _try_fast_path(argv: list[str]) -> bool:
 
 
 def main() -> None:
+    _harden_stdio_encoding()
     if _try_fast_path(sys.argv[1:]):
         return
     from openshard.cli.main import cli

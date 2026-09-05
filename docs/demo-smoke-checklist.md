@@ -101,7 +101,7 @@ openshard last --more
 ## 6. Feedback
 
 ```bash
-openshard feedback --outcome accepted --note "Demo smoke test result"
+openshard feedback accept
 ```
 
 - [ ] Command runs cleanly

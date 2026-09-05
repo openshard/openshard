@@ -71,7 +71,7 @@ class TestFeedbackStats(unittest.TestCase):
             result = runner.invoke(cli, ["feedback-stats"])
             self.assertEqual(result.exit_code, 0)
             self.assertIn("0 recorded", result.output)
-            self.assertIn("openshard feedback --rating good", result.output)
+            self.assertIn("openshard feedback accept", result.output)
 
     def test_good_mixed_bad_counts(self):
         runner = CliRunner()

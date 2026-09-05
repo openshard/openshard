@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -171,3 +172,91 @@ class TestFastPathAvoidsHeavyImports:
         result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
         assert "CLI_MAIN=True" in result.stdout
+
+
+class TestStdioEncodingHardening:
+    """Regression tests for the Windows Unicode crash (narrow/legacy console
+    code pages such as CP1252 raising ``UnicodeEncodeError`` on output that
+    contains glyphs like "->", "OK" or dashes).
+
+    Click's own built-in safety net (``click._compat._stream_is_misconfigured``)
+    only recovers from a stream that reports pure ASCII; it does not cover
+    CP1252 and similar narrow encodings, which is exactly what a default
+    Windows console uses. ``_harden_stdio_encoding`` closes that gap at the
+    single real entrypoint (``openshard.cli.entrypoint:main``) instead of
+    hand-replacing every Unicode glyph in the CLI's output.
+    """
+
+    def _run_probe(self, code: str, encoding: str) -> subprocess.CompletedProcess:
+        import os
+
+        env = {**os.environ, "PYTHONIOENCODING": encoding}
+        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=30)
+
+    def test_cp1252_stdout_without_hardening_crashes(self):
+        """Control: confirms the underlying bug still exists in plain click.echo."""
+        result = self._run_probe("import click\nclick.echo('A \\u2192 B')\n", "cp1252")
+        assert result.returncode != 0
+        assert "UnicodeEncodeError" in result.stderr
+
+    def test_cp1252_stdout_with_hardening_does_not_crash(self):
+        code = (
+            "from openshard.cli.entrypoint import _harden_stdio_encoding\n"
+            "_harden_stdio_encoding()\n"
+            "import click\n"
+            "click.echo('A \\u2192 B')\n"
+        )
+        result = self._run_probe(code, "cp1252")
+        assert result.returncode == 0, result.stderr
+        assert "A" in result.stdout and "B" in result.stdout
+
+    def test_utf8_stdout_output_unaffected_by_hardening(self):
+        code = (
+            "from openshard.cli.entrypoint import _harden_stdio_encoding\n"
+            "_harden_stdio_encoding()\n"
+            "import click\n"
+            "click.echo('A \\u2192 B \\u2713 \\u2717')\n"
+        )
+        result = self._run_probe(code, "utf-8")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "A \u2192 B \u2713 \u2717"
+
+    def test_real_entrypoint_survives_cp1252_stdout(self, tmp_path: Path):
+        """End-to-end: a real CLI command with no Unicode-safe wrapping of
+        its own (`openshard roster validate`, which echoes an em dash)
+        must not crash when stdout reports CP1252, via the installed
+        console script or `python -m openshard.cli.entrypoint`."""
+        import os
+
+        env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+        result = subprocess.run(
+            _openshard_argv() + ["roster", "validate"],
+            cwd=tmp_path, capture_output=True, env=env, timeout=30,
+        )
+        stdout = result.stdout.decode("cp1252")
+        stderr = result.stderr.decode("cp1252")
+        assert result.returncode == 0, stderr
+        assert "UnicodeEncodeError" not in stderr
+        assert "nothing to validate" in stdout
+
+    def test_harden_skips_streams_without_reconfigure(self):
+        """Streams that don't support `.reconfigure()` (e.g. test capture
+        buffers) must be left alone rather than raising."""
+        import io
+
+        from openshard.cli.entrypoint import _harden_stdio_encoding
+
+        with patch.object(sys, "stdout", io.StringIO()), patch.object(sys, "stderr", io.StringIO()):
+            _harden_stdio_encoding()  # must not raise
+
+    def test_harden_swallows_reconfigure_errors(self):
+        """A stream whose `.reconfigure()` itself raises must not take down
+        the CLI at start-up."""
+        from openshard.cli.entrypoint import _harden_stdio_encoding
+
+        class _Boom:
+            def reconfigure(self, **kwargs: object) -> None:
+                raise ValueError("nope")
+
+        with patch.object(sys, "stdout", _Boom()), patch.object(sys, "stderr", _Boom()):
+            _harden_stdio_encoding()  # must not raise
