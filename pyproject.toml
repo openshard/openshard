@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openshard"
-version = "0.3.0"
+version = "0.4.0"
 description = "The control layer for AI coding agents."
 readme = "README.md"
 license = "Apache-2.0"
@@ -34,9 +34,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/MichaelObasa/openshard"
-Repository = "https://github.com/MichaelObasa/openshard"
-"Bug Tracker" = "https://github.com/MichaelObasa/openshard/issues"
+Homepage = "https://github.com/openshard/openshard"
+Repository = "https://github.com/openshard/openshard"
+"Bug Tracker" = "https://github.com/openshard/openshard/issues"
 
 [project.scripts]
 openshard = "openshard.cli.entrypoint:main"

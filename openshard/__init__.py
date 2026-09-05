@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-_FALLBACK_VERSION = "0.3.0-dev"
+_FALLBACK_VERSION = "0.4.0-dev"
 
 
 def __getattr__(name: str) -> Any:

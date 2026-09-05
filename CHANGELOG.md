@@ -2,7 +2,7 @@
 
 All notable changes to OpenShard are documented here.
 
-## Unreleased
+## 0.4.0 - 2026-09-05
 
 ### Added
 

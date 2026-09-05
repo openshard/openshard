@@ -42,5 +42,5 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-Then create a GitHub Release at https://github.com/MichaelObasa/openshard/releases/new
+Then create a GitHub Release at https://github.com/openshard/openshard/releases/new
 targeting the new tag.
