@@ -40,13 +40,13 @@ cd C:\Users\Michael\HarbourDocs\harbourdocs-infra
 
 **Do:**
 ```bash
-pipx install git+https://github.com/MichaelObasa/openshard.git
+pipx install openshard
 ```
 
 **Say:**
 > "For local development you'd clone and use `pip install -e .` — but for a standard install, pipx is the right path."
 
-**Viewer sees:** Install output. Single command, no package registry dependency.
+**Viewer sees:** Install output. Single command, published on PyPI.
 
 ---
 

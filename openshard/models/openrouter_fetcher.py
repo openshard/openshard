@@ -26,7 +26,7 @@ def fetch_openrouter_models() -> list[dict]:
     """Fetch model list from OpenRouter. Returns raw model dicts."""
     req = urllib.request.Request(
         OPENROUTER_MODELS_URL,
-        headers={"User-Agent": "openshard/1 (+https://github.com/MichaelObasa/openshard)"},
+        headers={"User-Agent": "openshard/1 (+https://github.com/openshard/openshard)"},
     )
     try:
         with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:

@@ -17,7 +17,7 @@ pip install pipx
 Then install OpenShard:
 
 ```sh
-pipx install git+https://github.com/MichaelObasa/openshard.git
+pipx install openshard
 ```
 
 Set up Claude Code capture for a repository (once per repository, safe to re-run):
@@ -55,13 +55,13 @@ pipx upgrade openshard
 If you use [uv](https://docs.astral.sh/uv/):
 
 ```sh
-uv tool install git+https://github.com/MichaelObasa/openshard.git
+uv tool install openshard
 ```
 
 ## Local development
 
 ```sh
-git clone https://github.com/MichaelObasa/openshard.git
+git clone https://github.com/openshard/openshard.git
 cd openshard
 pip install -e .
 ```
@@ -71,4 +71,4 @@ pip install -e .
 - **pipx** is recommended for CLI users — isolated environment, clean upgrades, no conflicts with system Python.
 - **uv tool** is also supported where available.
 - **pip install** works but is less ideal for end users (installs into the active environment).
-- PyPI, Homebrew, and curl installers are future release steps.
+- Homebrew and curl installers are future release steps.
