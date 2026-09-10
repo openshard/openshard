@@ -71,7 +71,7 @@ def _parse_git_changed_files(repo_path: Path) -> tuple[list[dict], str]:
     except Exception:
         return [], "not_available"
 
-    from openshard.safety.sanitize import sanitize_text
+    from openshard.safety.sanitize import sanitize_path
 
     files: list[dict] = []
     for line in lines:
@@ -83,7 +83,11 @@ def _parse_git_changed_files(repo_path: Path) -> tuple[list[dict], str]:
         status_raw, path_raw = parts[0].strip(), parts[1].strip()
         status_code = status_raw[0] if status_raw else "M"
         change_type = _STATUS_TO_CHANGE_TYPE.get(status_code, "update")
-        safe_path = sanitize_text(path_raw, _PATH_CAP)
+        # path_raw is repo-relative (git diff never emits absolute paths
+        # outside the repo); sanitize_path -- not sanitize_text, whose
+        # generic long-opaque-run heuristic false-positives on any
+        # ordinarily nested path (see sanitize_path docstring).
+        safe_path = sanitize_path(path_raw, _PATH_CAP)
         if not safe_path:
             continue
         files.append({
@@ -214,6 +218,7 @@ def _build_wrap_events(
                     source=SOURCE_CLAUDE_CODE_WRAP,
                     action=f"file {f.get('change_type', 'update')}",
                     target=f.get("path"),
+                    target_is_path=True,
                     status=STATUS_UNKNOWN,
                     evidence=file_evidence,
                     **common,

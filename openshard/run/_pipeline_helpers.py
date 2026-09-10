@@ -367,6 +367,7 @@ def _build_native_events(
                     source=SOURCE_NATIVE_RUN,
                     action=f"file {f.change_type}",
                     target=f.path,
+                    target_is_path=True,
                     status=STATUS_UNKNOWN,
                     **common,
                 )

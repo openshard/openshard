@@ -277,7 +277,9 @@ class TestCanonicalRecord:
         assert SECRET not in json.dumps(entry) and TRANSCRIPT not in json.dumps(entry)
         assert "All done" not in json.dumps(entry)
         # Evidence fails closed: nothing Codex does not expose is invented.
-        assert entry["verification_attempted"] is False and entry["verification_passed"] is None
+        # The session runs "python -m pytest -q" (command_kind "test"), so
+        # this is honestly "attempted" -- but its outcome is never invented.
+        assert entry["verification_attempted"] is True and entry["verification_passed"] is None
         for key in ("estimated_cost", "cost_provenance", "prompt_tokens", "tokens_provenance"):
             assert key not in entry
         assert "duration_seconds" in entry

@@ -138,7 +138,7 @@ def _parse_git_changed_files(
     if not lines:
         return [], "git_diff_inferred"
 
-    from openshard.safety.sanitize import sanitize_text
+    from openshard.safety.sanitize import sanitize_path
 
     files: list[dict] = []
     seen: set[str] = set()
@@ -151,7 +151,12 @@ def _parse_git_changed_files(
         status_raw, path_raw = parts[0].strip(), parts[1].strip()
         status_code = status_raw[0] if status_raw else "M"
         change_type = _STATUS_TO_CHANGE_TYPE.get(status_code, "update")
-        safe_path = sanitize_text(path_raw, _PATH_CAP)
+        # path_raw is repo-relative (git diff/ls-files never emit absolute
+        # paths outside the repo), so use sanitize_path -- not sanitize_text,
+        # whose generic long-opaque-run heuristic false-positives on any
+        # ordinarily nested path (see sanitize_path docstring), silently
+        # dropping real changed-file evidence.
+        safe_path = sanitize_path(path_raw, _PATH_CAP)
         if not safe_path or safe_path in seen:
             continue
         seen.add(safe_path)
@@ -282,6 +287,7 @@ def _build_import_events(entry: dict, changed_files: list[dict], files_source: s
                     source=SOURCE_CLAUDE_CODE_IMPORT,
                     action=f"file {f.get('change_type', 'update')}",
                     target=f.get("path"),
+                    target_is_path=True,
                     status=STATUS_UNKNOWN,
                     evidence=file_evidence,
                     **common,

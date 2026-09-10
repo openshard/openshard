@@ -702,8 +702,13 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         checks_display = "0/1 passed"
         status = "Failed"
     else:
-        checks_display = "Not run"
-        status = "No checks run"
+        # Attempted (a check-shaped command was directly observed running)
+        # but no pass/fail outcome was ever recorded -- e.g. an externally
+        # observed Claude Code/Codex/OpenCode session, where OpenShard never
+        # reads the command's stdout/exit code. Distinct from "Not run":
+        # something did happen, its result just wasn't verified.
+        checks_display = "Attempted (unverified)"
+        status = "Checks attempted, result not verified"
 
     (
         _v_status,

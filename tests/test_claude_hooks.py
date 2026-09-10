@@ -464,7 +464,10 @@ class TestLifecycle:
 
     def test_verification_never_fabricated(self, repo: Path):
         entry = _session(repo)
-        assert entry["verification_attempted"] is False
+        # _session() runs "python -m pytest -q" (command_kind "test"), which
+        # is honestly reported as *attempted* -- but its outcome is never
+        # fabricated: OpenShard did not read the command's stdout/exit code.
+        assert entry["verification_attempted"] is True
         assert entry["verification_passed"] is None
         assert _events(entry, EVENT_VERIFICATION_PASSED) == []
         assert _events(entry, EVENT_VERIFICATION_FAILED) == []
@@ -591,7 +594,10 @@ class TestEvidence:
         assert receipt.shard is not None
         assert receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED
         assert receipt.shard.capture_depth == CAPTURE_PARTIAL
-        assert receipt.status == "No checks run"
+        # _session() runs a "python -m pytest -q" Bash call (command_kind
+        # "test"): directly observed as *attempted*, but never verified --
+        # OpenShard never reads its stdout/exit code for an external session.
+        assert receipt.status == "Checks attempted, result not verified"
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +669,25 @@ class TestFiles:
     def test_relative_path_is_anchored_at_repo_root(self, repo: Path):
         assert ch._to_repo_relative("src/x.py", repo) == "src/x.py"
 
+    def test_nested_repo_relative_path_not_treated_as_opaque_secret(self, repo: Path):
+        # Regression: sanitize_text's generic long-opaque-run pattern
+        # (`[A-Za-z0-9_\-+/]{32,}`) counts "/" as part of the run, so any
+        # ordinarily nested relative path with >= 32 non-dot characters
+        # used to be dropped entirely by _to_repo_relative -> sanitize_text.
+        long_nested = "evals/basic/bug_fix/fixtures/word_utils.py"
+        assert len("evals/basic/bug_fix/fixtures/word_utils") >= 32  # would have tripped the old pattern
+        assert ch._to_repo_relative(long_nested, repo) == long_nested
+
+    def test_sanitize_path_still_rejects_real_secrets_and_absolute_paths(self):
+        from openshard.safety.sanitize import sanitize_path
+
+        assert sanitize_path("sk-ant-api03-abcdefgh12345678", 200) is None
+        assert sanitize_path("AKIAABCDEFGHIJKLMNOP", 200) is None
+        assert sanitize_path("api_key=abcdef123456", 200) is None
+        assert sanitize_path("/etc/passwd", 200) is None
+        assert sanitize_path("C:\\Users\\x\\secret.txt", 200) is None
+        assert sanitize_path("src/pkg/mod/component.py", 200) == "src/pkg/mod/component.py"
+
     def test_hook_reported_files_used_when_git_unavailable(self, tmp_path: Path):
         root = tmp_path / "plain"
         root.mkdir()
@@ -684,6 +709,69 @@ class TestFiles:
         ]
         fe = _events(entry, EVENT_FILE_CHANGED)[0]
         assert fe["evidence"] == EVIDENCE_AGENT_REPORTED
+
+    def test_deeply_nested_edited_file_is_not_dropped_as_secret_like(self, repo: Path):
+        """Regression: a real Edit under several nested directories used to
+        vanish from the receipt entirely ("Changed 0 files").
+
+        The repo-relative path (no dot, several "/"-joined segments) was
+        long enough to match sanitize_text's generic "long opaque key-like
+        run" secret pattern and get silently dropped -- both from the git
+        diff and from the hook-reported fallback. See sanitize_path.
+        """
+        nested = repo / "evals" / "basic" / "bug_fix" / "fixtures"
+        nested.mkdir(parents=True)
+        (nested / "word_utils.py").write_text("def count_words(s):\n    return 0\n", encoding="utf-8")
+        _git(repo, "add", "evals")
+        _git(repo, "commit", "-q", "-m", "add fixture")
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="Fix the empty-string bug in word_utils.py and run its tests")
+        (nested / "word_utils.py").write_text("def count_words(s):\n    return 1\n", encoding="utf-8")
+        _run(repo, "PostToolUse", tool_name="Edit",
+             tool_input={"file_path": str(nested / "word_utils.py"), "old_string": "0", "new_string": "1"})
+        _run(repo, "PostToolUse", tool_name="Bash",
+             tool_input={"command": "python -m pytest tests/test_bug_fix.py -q"},
+             tool_response={"stdout": "3 passed", "stderr": ""})
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["files_detail"] == [
+            {
+                "path": "evals/basic/bug_fix/fixtures/word_utils.py",
+                "change_type": "update",
+                "summary": "inferred from git diff",
+            }
+        ]
+        assert entry["files_updated"] == 1
+        edit_ev = next(e for e in _events(entry, EVENT_TOOL_INVOKED) if e["action"] == "tool Edit")
+        assert edit_ev["target"] == "evals/basic/bug_fix/fixtures/word_utils.py"
+        assert "path_dropped" not in edit_ev["metadata"]
+        # The pytest command is directly-observed as *attempted*; its
+        # pass/fail outcome is still never fabricated (see module docstring).
+        assert entry["verification_attempted"] is True
+        assert entry["verification_passed"] is None
+        receipt = build_shard_receipt(entry)
+        assert receipt.checks_display == "Attempted (unverified)"
+        assert set(receipt.files_touched) == {"evals/basic/bug_fix/fixtures/word_utils.py"}
+
+    def test_deeply_nested_hook_reported_path_survives_git_unavailable(self, tmp_path: Path):
+        """Same regression as above, but via the hook-reported fallback path
+        (git unavailable) rather than git diff."""
+        root = tmp_path / "plain"
+        root.mkdir()
+        env = {"CLAUDE_PROJECT_DIR": str(root)}
+        nested_rel = "evals/basic/bug_fix/fixtures/word_utils.py"
+        with patch("openshard.adapters.claude_mcp_install.find_repo_root", return_value=None), \
+             patch("openshard.adapters.claude_code_import.subprocess.run",
+                   side_effect=FileNotFoundError("no git")):
+            handle_claude_hook(_payload("UserPromptSubmit", root, prompt="task"), env=env)
+            handle_claude_hook(_payload("PostToolUse", root, tool_name="Write",
+                                        tool_input={"file_path": str(root / nested_rel)}), env=env)
+            handle_claude_hook(_payload("Stop", root), env=env)
+        entry = _runs_lines(root)[0]
+        assert entry["files_source"] == "claude_hook_reported"
+        assert entry["files_detail"] == [
+            {"path": nested_rel, "change_type": "create", "summary": "reported by Claude Code hook"}
+        ]
 
     def test_no_absolute_paths_anywhere_in_record(self, repo: Path):
         _session(repo)
@@ -921,7 +1009,7 @@ class TestHistoryIntegration:
         assert receipt.attempt_number == 1
         assert set(receipt.files_touched) == {"calc.py", "README.md"}
         assert {e.event_id for e in receipt.events} == {e["event_id"] for e in entry["events"]}
-        assert receipt.checks_display == "Not run"
+        assert receipt.checks_display == "Attempted (unverified)"
         assert receipt.cost_display == "Not recorded"
         by_run = get_receipt(run_id=entry["run_id"], repo_path=repo)
         assert by_run.shard_id == entry["shard_id"]
@@ -1014,9 +1102,16 @@ class TestTaskCompletion:
         assert entry["capture"]["turn_count"] == 2
 
     def test_checks_still_not_run_when_turn_completed(self, repo: Path):
-        entry = _session(repo, end=False)
+        entry = _session(repo, with_tools=False, end=False)
         receipt = build_shard_receipt(entry)
         assert receipt.checks_display == "Not run"
+        assert receipt.task_completion == "Completed"  # completion != verification
+
+    def test_checks_attempted_but_unverified_when_turn_completed(self, repo: Path):
+        # with_tools=True (default) drives a "python -m pytest -q" Bash call.
+        entry = _session(repo, end=False)
+        receipt = build_shard_receipt(entry)
+        assert receipt.checks_display == "Attempted (unverified)"
         assert receipt.task_completion == "Completed"  # completion != verification
 
 
