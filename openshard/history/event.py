@@ -393,7 +393,7 @@ def make_event(
     attempt_number: object = None,
     actor: object = None,
     target: object = None,
-    target_is_path: bool = False,
+    target_is_path: object = False,
     status: object = STATUS_UNKNOWN,
     evidence: object = EVIDENCE_UNKNOWN,
     metadata: object = None,
@@ -420,7 +420,9 @@ def make_event(
         _evidence = evidence if isinstance(evidence, str) and evidence in VALID_EVIDENCE else EVIDENCE_UNKNOWN
 
         _action = sanitize_text(action, _ACTION_LIMIT) or ""
-        _target_sanitizer = sanitize_path if target_is_path else sanitize_text
+        # Typed ``object`` like every other parameter: callers spread ``**common``
+        # dicts into make_event, which a strict ``bool`` annotation would reject.
+        _target_sanitizer = sanitize_path if bool(target_is_path) else sanitize_text
         _target = _target_sanitizer(target, _TARGET_LIMIT) if isinstance(target, str) else None
         _actor = sanitize_text(actor, _ACTOR_LIMIT) if isinstance(actor, str) and actor else None
         _source = source if isinstance(source, str) and source else "unknown"
