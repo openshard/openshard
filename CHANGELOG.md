@@ -2,6 +2,37 @@
 
 All notable changes to OpenShard are documented here.
 
+## 0.4.1 - 2026-09-08
+
+Patch release: receipt-capture correctness fixes for Claude Code, Codex,
+OpenCode, and `openshard wrap claude`. No new features, no schema or
+positioning changes.
+
+### Fixed
+
+- Nested repo-relative file paths (e.g. `evals/basic/bug_fix/fixtures/
+  word_utils.py`) were silently dropped from changed-file evidence,
+  showing "Changed 0 files" in the receipt even when a tool call had
+  genuinely edited the file. The generic secret-scrubbing heuristic used to
+  sanitize paths treated an ordinarily nested path's `/`-joined segments as
+  a "long opaque key-like run" and rejected it outright. Changed-file
+  detection (both git-diff-inferred and agent-reported) now uses a
+  dedicated path sanitizer that keeps the specific credential-shaped checks
+  (API keys, bearer tokens, `password=...`) without misfiring on ordinary
+  directory nesting. Fixes Claude Code hooks, Codex, OpenCode, and
+  `openshard wrap claude`, which all shared the same flaw.
+- A directly observed test or lint command (e.g. `pytest`, `ruff`) now
+  shows as **"Attempted (unverified)"** in the receipt instead of **"Not
+  run"**, when OpenShard saw the command execute but never read its
+  output. Previously this case was indistinguishable from a session where
+  no check ran at all.
+- The distinction between externally observed work and OpenShard-verified
+  execution is unchanged: OpenShard still never reads a Bash command's
+  stdout or exit code for a Claude Code/Codex/OpenCode session, so
+  `verification_passed` stays unset (`null`) for these captures regardless
+  of what the command's output said. "Attempted (unverified)" reflects only
+  that a check-shaped command was seen running — never a pass/fail result.
+
 ## 0.4.0 - 2026-09-05
 
 ### Added

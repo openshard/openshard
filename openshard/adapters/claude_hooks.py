@@ -594,7 +594,7 @@ def _to_repo_relative(raw_path: str | None, repo_root: Path) -> str | None:
     """
     if not raw_path or not isinstance(raw_path, str):
         return None
-    from openshard.safety.sanitize import sanitize_text
+    from openshard.safety.sanitize import sanitize_path
 
     try:
         candidate = Path(raw_path)
@@ -610,7 +610,7 @@ def _to_repo_relative(raw_path: str | None, repo_root: Path) -> str | None:
     posix = rel.as_posix()
     if not posix or posix == ".":
         return None
-    return sanitize_text(posix, _PATH_CAP)
+    return sanitize_path(posix, _PATH_CAP)
 
 
 # ---------------------------------------------------------------------------
@@ -929,10 +929,18 @@ def _append_event(
     status: str,
     evidence: str,
     target: str | None = None,
+    target_is_path: bool = False,
     metadata: dict | None = None,
     occurred_at: str | None = None,
 ) -> None:
-    """Build one canonical Event (occurred_at = *occurred_at* or now) and stage it."""
+    """Build one canonical Event (occurred_at = *occurred_at* or now) and stage it.
+
+    ``target_is_path``: pass True only when *target* is a repo-relative file
+    path (already produced by ``_to_repo_relative``), so it uses
+    ``sanitize_path`` instead of the free-text scrubber -- see
+    ``make_event``. Never set it for a Bash command's target (a short first
+    token, not a path).
+    """
     from openshard.history.event import make_event
 
     if len(buf["events"]) >= _MAX_BUFFERED_EVENTS:
@@ -950,6 +958,7 @@ def _append_event(
         attempt_number=record.get("attempt_number"),
         actor=profile.import_source,
         target=target,
+        target_is_path=target_is_path,
         status=status,
         evidence=evidence,
         metadata=metadata,
@@ -1076,6 +1085,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
             None,
         ),
         "applied_ids": [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)],
+        "check_command_seen": bool(entry.get("verification_attempted")),
     }
 
 
@@ -1252,6 +1262,7 @@ def _build_git_file_events(buf: dict, files: list[dict]) -> list[dict]:
             attempt_number=record.get("attempt_number"),
             actor=profile.import_source,
             target=path,
+            target_is_path=True,
             status="unknown",
             evidence="git_observed",
             metadata={"evidence_source": "git_diff"},
@@ -1280,6 +1291,7 @@ def _hook_file_events(buf: dict) -> list[dict]:
             attempt_number=record.get("attempt_number"),
             actor=profile.import_source,
             target=path,
+            target_is_path=True,
             status="unknown",
             evidence="agent_reported",
             metadata={"evidence_source": profile.hook_evidence_source},
@@ -1429,7 +1441,13 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         "import_method": profile.import_method,
         "import_note": profile.import_note,
         "files_source": files_source,
-        "verification_attempted": False,
+        # A test/lint command being *invoked* (see the TOOL_KIND_COMMAND
+        # branch of _apply) is directly-observable from the hook stream, so
+        # it is honestly reported as "attempted"; its outcome is not --
+        # OpenShard never reads Bash stdout/exit codes for an externally
+        # observed session -- so verification_passed stays None forever
+        # here (see module docstring "Evidence honesty").
+        "verification_attempted": bool(buf.get("check_command_seen")),
         "verification_passed": None,
         "files_created": sum(1 for f in changed_files if f.get("change_type") == "create"),
         "files_updated": sum(1 for f in changed_files if f.get("change_type") == "update"),
@@ -1731,8 +1749,16 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
             metadata["command_kind"] = payload.command_kind or "other"
             # A command exiting non-zero still fires PostToolUse; outcome unknown.
             status = "failed" if failed else "unknown"
+            if payload.command_kind in ("test", "lint"):
+                # A check-shaped command was directly observed running --
+                # enough to say "attempted" honestly. Its pass/fail outcome
+                # is never inferred from this (OpenShard does not read tool
+                # stdout/exit codes), so verification_passed stays None; see
+                # build_hook_entry.
+                buf["check_command_seen"] = True
         _append_event(
             buf, event_type="tool.invoked", action=action, target=target,
+            target_is_path=(kind == TOOL_KIND_FILE),
             status=status, evidence="agent_reported", metadata=metadata, occurred_at=now,
         )
         # Bounded periodic snapshot (see _TOOL_FOLD_INTERVAL_SECONDS): only

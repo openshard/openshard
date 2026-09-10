@@ -100,7 +100,7 @@ from openshard.history.shard import (
     derive_shard_identity,
 )
 from openshard.history.shard_schema import SHARD_BLOCKED_FIELDS
-from openshard.safety.sanitize import sanitize_metadata, sanitize_text
+from openshard.safety.sanitize import sanitize_metadata, sanitize_path, sanitize_text
 
 EVENT_SCHEMA_VERSION = 1
 
@@ -393,11 +393,21 @@ def make_event(
     attempt_number: object = None,
     actor: object = None,
     target: object = None,
+    target_is_path: object = False,
     status: object = STATUS_UNKNOWN,
     evidence: object = EVIDENCE_UNKNOWN,
     metadata: object = None,
 ) -> Event:
     """Safe Event constructor. Never raises.
+
+    ``target_is_path``: set True only when the caller knows *target* is a
+    repo-relative filesystem path (e.g. from ``git diff`` or
+    ``Path.relative_to()``), never text a person typed. Such a path uses
+    ``sanitize_path`` instead of ``sanitize_text``, so an ordinarily nested
+    path isn't dropped by the generic long-opaque-run secret heuristic (see
+    ``sanitize_path``). Defaults to False -- the full free-text scrubber --
+    because some callers (e.g. ``build_events_from_session_events``) pass a
+    raw command a user typed, which can legitimately contain a pasted secret.
 
     ``event_id``: pass the source record's own id when projecting a legacy
     event that already has one, or a value from ``_stable_event_id()`` when
@@ -410,7 +420,10 @@ def make_event(
         _evidence = evidence if isinstance(evidence, str) and evidence in VALID_EVIDENCE else EVIDENCE_UNKNOWN
 
         _action = sanitize_text(action, _ACTION_LIMIT) or ""
-        _target = sanitize_text(target, _TARGET_LIMIT) if isinstance(target, str) else None
+        # Typed ``object`` like every other parameter: callers spread ``**common``
+        # dicts into make_event, which a strict ``bool`` annotation would reject.
+        _target_sanitizer = sanitize_path if bool(target_is_path) else sanitize_text
+        _target = _target_sanitizer(target, _TARGET_LIMIT) if isinstance(target, str) else None
         _actor = sanitize_text(actor, _ACTOR_LIMIT) if isinstance(actor, str) and actor else None
         _source = source if isinstance(source, str) and source else "unknown"
 

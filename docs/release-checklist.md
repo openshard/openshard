@@ -5,6 +5,7 @@
 - [ ] Working tree is clean (`git status`)
 - [ ] All tests pass: `python -m pytest`
 - [ ] Linter passes: `python -m ruff check .`
+- [ ] Type check passes (CI runs it): `python -m mypy openshard/ --ignore-missing-imports`
 - [ ] Version bumped in `pyproject.toml`
 
 ## Build

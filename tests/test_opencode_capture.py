@@ -205,7 +205,9 @@ class TestCanonicalRecord:
         assert entry["prompt_tokens"] == 1500 and entry["completion_tokens"] == 300
         assert entry["cache_read_tokens"] == 20 and entry["cache_creation_tokens"] == 10
         assert set(cap["usage_by_key"]) == {"msg_1", "msg_2"}
-        assert entry["verification_attempted"] is False and entry["verification_passed"] is None
+        # _drive_inline() runs "python -m pytest -q" (command_kind "test"),
+        # so this is honestly "attempted" -- outcome still never invented.
+        assert entry["verification_attempted"] is True and entry["verification_passed"] is None
         assert {f["path"] for f in entry["files_detail"]} >= {"calc.py"}
 
     def test_events_carry_opencode_identity(self, repo):

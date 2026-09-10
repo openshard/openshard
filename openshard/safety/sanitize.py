@@ -63,6 +63,32 @@ def sanitize_text(s: object, limit: int) -> str | None:
     return cleaned[:limit]
 
 
+def sanitize_path(s: object, limit: int) -> str | None:
+    """Sanitise a filesystem path already known to be repo-relative.
+
+    Unlike ``sanitize_text``, this never applies the generic "long opaque
+    key-like run" heuristic (``SECRET_PATTERNS[-1]``). That pattern's
+    character class includes ``/`` (to catch base64-ish secrets), so it
+    false-positives on any ordinary repo-relative path with a handful of
+    nested directories -- e.g. ``evals/basic/bug_fix/fixtures/word_utils.py``
+    (39 non-dot characters) -- silently dropping real changed-file evidence.
+    A path passed here was already produced by ``git diff`` or
+    ``Path.relative_to()``, never typed as free text, so it cannot itself
+    embed a leaked secret; the specific credential-shaped patterns (API
+    keys, bearer tokens, ``password=...``) are still checked.
+    """
+    if not isinstance(s, str):
+        return None
+    cleaned = "".join(ch for ch in s if ch == " " or ch.isprintable()).strip()
+    if not cleaned:
+        return None
+    if is_absolute_path(cleaned) or ".codegraph" in cleaned:
+        return None
+    if any(pat.search(cleaned) for pat in SECRET_PATTERNS[:-1]):
+        return None
+    return cleaned[:limit]
+
+
 def sanitize_metadata(metadata: object) -> dict:
     """Keep only small, safe scalar metadata values.
 
