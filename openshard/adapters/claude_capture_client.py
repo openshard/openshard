@@ -82,11 +82,20 @@ STATUS_PATH = "/status/claude"
 # thing that tells the service which translator to run.
 CODEX_HOOK_PATH = "/hooks/codex"
 OPENCODE_HOOK_PATH = "/hooks/opencode"
+CURSOR_HOOK_PATH = "/hooks/cursor"
 AGENT_HOOK_PATHS: dict[str, str] = {
     "claude_code": HOOK_PATH,
     "codex": CODEX_HOOK_PATH,
     "opencode": OPENCODE_HOOK_PATH,
+    "cursor": CURSOR_HOOK_PATH,
 }
+# Cursor reads a hook's stdout as a *decision*. This is the one Cursor event
+# OpenShard subscribes to that is blocking, and the only reply it ever
+# needs: always continue. Every other subscribed Cursor event is
+# observe-only, where an empty object is the documented "no decision".
+CURSOR_PROMPT_EVENT = "beforeSubmitPrompt"
+CURSOR_ALLOW_RESPONSE = '{"continue": true}'
+CURSOR_EMPTY_RESPONSE = "{}"
 HEALTH_PATH = "/health"
 SHUTDOWN_PATH = "/shutdown"
 PROJECT_DIR_HEADER = "X-OpenShard-Project-Dir"
@@ -593,6 +602,18 @@ def run_hook_via_service(
     """
     env = os.environ if env is None else env
     raw = _read_all(stream)
+    return _run_hook_raw(raw, env, event_override=event_override, agent=agent, spawn=spawn)
+
+
+def _run_hook_raw(
+    raw: bytes,
+    env: dict | os._Environ,
+    *,
+    event_override: str | None,
+    agent: str,
+    spawn: bool,
+) -> str:
+    """``run_hook_via_service`` on an already-read payload. Never raises."""
     if not raw.strip():
         return "ignored"
     hook_path = AGENT_HOOK_PATHS.get(agent, HOOK_PATH)
@@ -611,6 +632,52 @@ def run_hook_via_service(
     except Exception:
         pass
     return _inline_hook(raw, env, event_override, agent)
+
+
+def cursor_hook_response(raw: bytes, event_override: str | None = None) -> str:
+    """The JSON ``openshard hooks cursor`` writes to stdout for one payload.
+
+    Decided from the event name alone, *before* and regardless of whether
+    the payload was captured: OpenShard is observational, so its answer to
+    Cursor's blocking ``beforeSubmitPrompt`` is always ``{"continue": true}``
+    and to everything else the empty object. Capture succeeding, failing,
+    or being disabled never changes the reply. Never raises.
+    """
+    event = event_override
+    if not event:
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+            value = data.get("hook_event_name") if isinstance(data, dict) else None
+            event = value if isinstance(value, str) else None
+        except Exception:
+            event = None
+    return CURSOR_ALLOW_RESPONSE if event == CURSOR_PROMPT_EVENT else CURSOR_EMPTY_RESPONSE
+
+
+def run_cursor_hook(
+    stream: object,
+    *,
+    env: dict | os._Environ | None = None,
+    event_override: str | None = None,
+    spawn: bool = True,
+) -> tuple[str, str]:
+    """Console-script body for ``openshard hooks cursor``: ``(outcome label, stdout reply)``.
+
+    The same forward-or-fold path as ``run_hook_via_service(agent="cursor")``,
+    plus the decision reply Cursor requires on stdout (see
+    ``cursor_hook_response``). Never raises.
+    """
+    env = os.environ if env is None else env
+    raw = _read_all(stream)
+    reply = cursor_hook_response(raw, event_override)
+    try:
+        label = _run_hook_raw(raw, env, event_override=event_override, agent="cursor", spawn=spawn)
+    except Exception:
+        # The reply is owed to Cursor whatever capture did; the in-process
+        # fallback is itself never expected to raise, but a blocking hook
+        # must not depend on that.
+        label = "error"
+    return label, reply
 
 
 def _fallback_status_text(raw: bytes) -> str:

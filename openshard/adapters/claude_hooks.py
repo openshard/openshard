@@ -201,7 +201,7 @@ SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
 # Tools whose tool_input.file_path names a file Claude Code says it changed.
 FILE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 # Local agent/OpenShard state is never a task's work (see _git_changed_files).
-_LOCAL_STATE_PREFIXES: tuple[str, ...] = (".openshard/", ".claude/", ".codex/", ".opencode/")
+_LOCAL_STATE_PREFIXES: tuple[str, ...] = (".openshard/", ".claude/", ".codex/", ".opencode/", ".cursor/")
 COMMAND_TOOLS: frozenset[str] = frozenset({"Bash"})
 # Agent-neutral tool classification carried on the reduced payload.
 TOOL_KIND_FILE = "file"
@@ -1942,6 +1942,10 @@ def extract_agent_payload(
         from openshard.adapters.opencode_plugin import extract_opencode_payload
 
         return extract_opencode_payload(data)
+    if agent == "cursor":
+        from openshard.adapters.cursor_hooks import extract_cursor_payload
+
+        return extract_cursor_payload(data, event_override=event_override)
     return None
 
 

@@ -43,6 +43,7 @@ _EXTERNAL_AGENT_LABELS: dict[str, str] = {
     "claude_code_hooks": "Claude Code (external)",
     "codex_hooks": "Codex (external)",
     "opencode_plugin": "OpenCode (external)",
+    "cursor_hooks": "Cursor (external)",
 }
 _EXTERNAL_ADAPTER_EXECUTORS = frozenset(_EXTERNAL_AGENT_LABELS)
 
