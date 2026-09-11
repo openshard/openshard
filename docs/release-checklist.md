@@ -1,47 +1,81 @@
 # OpenShard Release Checklist
 
-## Pre-release
+Releases are built and published **only** by the `Release` workflow
+(`.github/workflows/release.yml`), from the exact commit a pushed `v*` tag
+points at. Nothing is ever uploaded from a developer machine. This is what
+makes a PyPI artifact provably equal to its git tag.
 
-- [ ] Working tree is clean (`git status`)
-- [ ] All tests pass: `python -m pytest`
-- [ ] Linter passes: `python -m ruff check .`
-- [ ] Type check passes (CI runs it): `python -m mypy openshard/ --ignore-missing-imports`
-- [ ] Version bumped in `pyproject.toml`
+Why: PyPI `openshard==0.4.1` was built from a local working tree that
+contained uncommitted work, so the published package did not match the
+`v0.4.1` tag and had to be yanked. A clean runner checking out the tag
+cannot reproduce that.
 
-## Build
+## One-time setup (already done unless the project moves)
+
+- PyPI project `openshard` → Publishing → add a Trusted Publisher:
+  owner `openshard`, repository `openshard`, workflow `release.yml`,
+  environment `pypi`.
+- GitHub repository → Settings → Environments → `pypi`: require a reviewer
+  (the maintainer) so a pushed tag still needs one explicit approval before
+  anything is published.
+
+## Releasing a version
+
+On a branch, in one pull request to `main`:
+
+- [ ] Bump `version` in `pyproject.toml`.
+- [ ] Give the version a dated `## X.Y.Z - YYYY-MM-DD` section in
+      `CHANGELOG.md` (the workflow refuses `Unreleased`).
+- [ ] CI green (ruff, mypy, full pytest on Linux and Windows).
+- [ ] Manual smoke tests done where the change needs them (a fresh install
+      with each affected agent; see `docs/demo-smoke-checklist.md`).
+
+After the pull request is merged:
 
 ```bash
-pip install build
+git checkout main
+git pull --ff-only origin main
+git status --porcelain          # must print nothing
+git tag -a vX.Y.Z -m "OpenShard vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+The workflow then, in order:
+
+1. checks out the tag and verifies `vX.Y.Z` == `pyproject.toml` version and
+   that the tagged commit is on `main`;
+2. runs ruff, mypy and the full test suite on Linux and Windows;
+3. builds the wheel and sdist, checks the build left the tree untouched,
+   runs `twine check --strict`, and checks the artifact names carry the
+   tagged version;
+4. waits for the `pypi` environment approval, then publishes through PyPI
+   Trusted Publishing (OIDC; no token exists anywhere);
+5. creates the GitHub Release from the `CHANGELOG.md` section and attaches
+   the wheel and sdist.
+
+- [ ] Approve the `pypi` environment deployment when it pauses.
+- [ ] After it finishes: `pip install openshard==X.Y.Z` into a fresh venv,
+      `openshard --version`, and confirm the release page shows both files.
+
+If any step fails, fix it on `main` through a normal pull request, then
+**move to the next patch version**. Never delete and re-push a tag, and
+never re-upload a version to PyPI.
+
+## Emergency: publishing without the workflow
+
+Only if GitHub Actions is unavailable. Even then the artifact must come from
+the tag, never from a working tree:
+
+```bash
+git fetch origin --tags
+git worktree add /tmp/openshard-release vX.Y.Z      # a clean checkout of the tag
+cd /tmp/openshard-release
+python -c "import tomllib; v=tomllib.load(open('pyproject.toml','rb'))['project']['version']; assert 'vX.Y.Z' == 'v'+v, v"
+pip install build twine
 python -m build
+python -m twine check --strict dist/*
+python -m twine upload dist/*                        # needs a scoped API token
 ```
 
-## Inspect dist
-
-```bash
-pip install twine
-python -m twine check dist/*
-```
-
-## Optional: TestPyPI smoke test
-
-```bash
-twine upload --repository testpypi dist/*
-pip install --index-url https://test.pypi.org/simple/ openshard
-openshard --version
-```
-
-## Publish to PyPI
-
-```bash
-twine upload dist/*
-```
-
-## GitHub release
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-Then create a GitHub Release at https://github.com/openshard/openshard/releases/new
-targeting the new tag.
+Then create the GitHub Release by hand from the same `dist/` files, and
+remove the worktree (`git worktree remove /tmp/openshard-release`).

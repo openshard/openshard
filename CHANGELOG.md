@@ -2,6 +2,73 @@
 
 All notable changes to OpenShard are documented here.
 
+## 0.4.2 - 2026-09-11
+
+The clean recovery release that closes the v0.4.x external-agent receipt
+chapter. It contains everything in 0.4.1, two intentional additions, and a
+fix for the capture service's shutdown path.
+
+**Note on PyPI 0.4.1.** The `openshard==0.4.1` package on PyPI was built from
+a local working tree rather than from the `v0.4.1` git tag, and shipped an
+early, unreviewed copy of the Cursor and telemetry work below. It has been
+yanked. The `v0.4.1` GitHub tag and release are correct and remain valid.
+Releases are now built and published only from the pushed tag by the
+`release.yml` workflow (see `docs/release-checklist.md`).
+
+### Included from 0.4.1
+
+- All receipt-capture correctness fixes: nested repo-relative paths are no
+  longer dropped from changed-file evidence ("Changed 0 files"), and a
+  directly observed check command shows as "Attempted (unverified)" rather
+  than "Not run". See the 0.4.1 entry below for details.
+
+### Added
+
+- **Cursor support**, alongside Claude Code, Codex and OpenCode. `openshard
+  setup` detects Cursor and merges OpenShard's hooks into the project-local
+  `.cursor/hooks.json` (unrelated hooks preserved; Cursor reloads the file
+  without a restart). New `openshard capture install|uninstall cursor` and
+  the `openshard hooks cursor` entrypoint; `doctor` and `setup` report
+  Cursor's status like the other agents. Cursor sessions become Shards in
+  the same `.openshard/runs.jsonl`, labelled "Cursor (external)", and appear
+  in `openshard history`, `openshard context` and the MCP tools together
+  with every other agent's work. Every hook is installed fail-open
+  (`failClosed: false`), and the one blocking event OpenShard subscribes to
+  (`beforeSubmitPrompt`) is always answered `{"continue": true}` whether or
+  not capture succeeded: OpenShard observes Cursor, it never gates it.
+  Evidence honesty is preserved: Cursor does not expose a tool success
+  signal, cost or token counts, so a Cursor receipt records file tools as
+  unknown, never claims verification, and shows cost as Not recorded.
+- **Telemetry ("Help improve OpenShard"), added intentionally.** Consent is
+  `unset` on every install and nothing is sent in that state; it becomes
+  `on` only after a person sees the notice during `openshard setup` or the
+  onboarding flow (`--json`/`--agent` output never decides for a person),
+  and `openshard telemetry off` turns it off. What can be sent is a closed,
+  versioned schema of usage and reliability data only: counts, durations,
+  the OpenShard version, coarse OS/architecture/Python, fixed category
+  values and a random per-install id. Prompts, source code, diffs,
+  repository names, paths, file names, commands, model slugs, secrets,
+  receipt contents and any other free text are excluded by construction --
+  the schema has no free-text field. `OPENSHARD_TELEMETRY=off`,
+  `DO_NOT_TRACK=1`, a CI environment, or `telemetry: {enabled: false}` in a
+  repository's `.openshard/config.yml` also turn it off, and nothing can
+  turn it on except the person. `openshard telemetry status|on|off|reset|
+  sample`; `sample` prints the exact queued events verbatim. The complete
+  contract is in [docs/telemetry.md](docs/telemetry.md).
+
+### Fixed
+
+- The capture service could livelock on shutdown when a session's replay
+  had a retry pending: the worker re-read its own stop sentinel in a loop
+  that never fired the retry, spun until `stop()` gave up on the join, and
+  stayed alive as a daemon thread. On Windows the trigger is the antivirus
+  `PermissionError` that schedules such a retry; in the test suite the
+  leaked thread stalled whole CI jobs (#323). The drain now fires due
+  retries itself, waits in bounded slices instead of spinning, and ends at
+  a deadline derived from `stop()`'s timeout -- a session that still cannot
+  be replayed stays on disk for the next start to recover, as after a
+  crash. `serve()` also restores the interpreter's switch interval on exit.
+
 ## 0.4.1 - 2026-09-08
 
 Patch release: receipt-capture correctness fixes for Claude Code, Codex,
