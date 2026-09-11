@@ -729,6 +729,14 @@ def _log_run(
 
     log_path = Path.cwd() / _LOG_PATH
     append_jsonl(log_path, entry)
+    try:
+        # Telemetry (0.4.2): counts and enums about this run, never its content.
+        from openshard.telemetry import emit
+        from openshard.telemetry.events import receipt_properties
+
+        emit("receipt.completed", **receipt_properties(entry))
+    except Exception:
+        pass
 
 
 def _copy_cwd_to_workspace(workspace: Path) -> None:

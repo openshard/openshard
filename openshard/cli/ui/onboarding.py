@@ -257,6 +257,16 @@ def _write_onboarding_config(result: dict[str, Any]) -> None:
     save_config(base)
 
 
+def _record_telemetry_notice_seen() -> None:
+    """The local-first / telemetry notice was shown and accepted. Never raises."""
+    try:
+        from openshard.telemetry.state import consent_after_notice
+
+        consent_after_notice(source="onboarding")
+    except Exception:
+        pass
+
+
 def run_onboarding_flow() -> None:
     """Run the full interactive onboarding and write results to config.
 
@@ -332,10 +342,12 @@ def run_onboarding_flow() -> None:
         _write_onboarding_config(result)
         return
 
-    # Screen 6 — local-first notice
+    # Screen 6 — local-first notice (also the "Help improve OpenShard" notice:
+    # seeing it and continuing turns an undecided consent on; skipping does not)
     if _run_info(LOCAL_FIRST_NOTICE, footer="Enter finish setup   Esc skip"):
         _write_onboarding_config(result)
         return
+    _record_telemetry_notice_seen()
 
     # Finish screen
     _show_finish_screen(result, _InfoScreen)

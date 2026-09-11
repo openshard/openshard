@@ -112,6 +112,58 @@ from openshard.run.pipeline import (
 )
 
 
+def _telemetry_command(name: str):
+    """Emit ``command.invoked`` (name, duration, ok / error *category*) around a command (0.4.2).
+
+    Applied innermost (directly above ``def``) so Click's option decorators
+    attach to the wrapper. Never changes a command's behaviour: the
+    exception or ``SystemExit`` is re-raised unchanged and only its closed
+    category is recorded, never its message.
+    """
+    def decorate(fn):
+        import functools
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            from openshard.telemetry.client import timed_command
+
+            with timed_command(name):
+                return fn(*args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
+def _telemetry_emit(event_type: str, **properties) -> None:
+    """``telemetry.emit`` guarded against an import failure as well. Never raises."""
+    try:
+        from openshard.telemetry import emit
+
+        emit(event_type, **properties)
+    except Exception:
+        pass
+
+
+def _telemetry_status() -> dict:
+    try:
+        from openshard.telemetry.client import status
+
+        return status()
+    except Exception:
+        return {"enabled": False, "reason": "unavailable", "consent": "unset"}
+
+
+def _telemetry_line(status: dict) -> str:
+    """The one-line consent statement shown by ``openshard setup``/``doctor``."""
+    if status.get("enabled"):
+        return (
+            "on — anonymous usage & reliability data only. Never code, prompts,\n"
+            "                 file names, repo names or receipts. Off: openshard telemetry off"
+        )
+    return f"off ({status.get('reason', 'off')})"
+
+
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="openshard")
 @click.pass_context
@@ -382,6 +434,7 @@ def env_cmd() -> None:
     default=None,
     help="Repository to configure Claude Code for (default: current directory).",
 )
+@_telemetry_command("setup")
 def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path | None) -> None:
     """Set up OpenShard for this repository: the one command a new user needs.
 
@@ -440,6 +493,7 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
             "claude_code": claude_status.to_dict(),
             "codex": agent_statuses["codex"].to_dict(),
             "opencode": agent_statuses["opencode"].to_dict(),
+            "telemetry": _telemetry_status(),
             "next_actions": [
                 "openshard env --json",
                 'openshard run "explain this repo"',
@@ -461,8 +515,21 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
 
     result = run_setup(repo_path=repo_path)
 
+    if not as_json:
+        # A person is reading this: the "Help improve OpenShard" notice is
+        # part of the output rendered below, so an undecided consent becomes
+        # on now (before this command's own events are recorded). --json /
+        # --agent output is read by machines and never decides for a person.
+        try:
+            from openshard.telemetry.state import consent_after_notice
+
+            consent_after_notice(source="setup")
+        except Exception:
+            pass
+    _telemetry_after_setup(result)
+
     if as_json:
-        click.echo(json.dumps(result.to_dict(), indent=2))
+        click.echo(json.dumps({**result.to_dict(), "telemetry": _telemetry_status()}, indent=2))
         if result.readiness == "not_ready":
             raise SystemExit(1)
         return
@@ -470,6 +537,26 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
     _render_setup_result(result)
     if result.readiness == "not_ready":
         raise SystemExit(1)
+
+
+def _telemetry_after_setup(result) -> None:
+    """``setup.completed`` telemetry: which agents, whether MCP/capture worked. Never raises."""
+    try:
+        service = result.capture_service or {}
+        service_state = str(service.get("state") or "")
+        _telemetry_emit(
+            "setup.completed",
+            agents=[a for a in result.configured_agents() if a in ("claude_code", "codex", "opencode", "cursor")],
+            mcp=bool(result.mcp is not None and result.mcp.status in ("installed", "updated", "already_installed")),
+            capture_service=(
+                "ok" if service_state in ("running", "started")
+                else "disabled" if service_state == "disabled" else "failed"
+            ),
+            result="ok" if result.readiness != "not_ready" else "error",
+            error_category=None if result.readiness != "not_ready" else "unknown",
+        )
+    except Exception:
+        pass
 
 
 def _render_setup_result(result) -> None:
@@ -508,6 +595,7 @@ def _render_setup_result(result) -> None:
             "unavailable": "not running (could not be started)",
         }.get(str(result.capture_service.get("state")), str(result.capture_service.get("state")))
         click.echo(f"  Capture:       {service_state}")
+    click.echo(f"  Improve OpenShard: {_telemetry_line(_telemetry_status())}")
     # PR12: one line per additional agent, whether or not it was found.
     _agent_state_labels = {
         "installed": "installed", "updated": "updated", "already_installed": "already configured",
@@ -1787,6 +1875,7 @@ def _locate_history():
 @click.option("--more", is_flag=True, default=False, help="Show file list, model names, and token breakdown.")
 @click.option("--full", is_flag=True, default=False, help="Show all stored details including verification and workspace.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("last")
 def last(more: bool, full: bool, as_json: bool):
     """Show what just happened: the most recent Shard receipt for this repository.
 
@@ -1857,6 +1946,7 @@ def last(more: bool, full: bool, as_json: bool):
 @click.option("--repo", "repo_filter", default=None,
               help="Only Shards recorded for this repository identity, remote URL, or folder name.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("history")
 def history_cmd(limit: int, repo_filter: str | None, as_json: bool) -> None:
     """List recent work: a compact, newest-first view of this repository's Shards.
 
@@ -1869,7 +1959,10 @@ def history_cmd(limit: int, repo_filter: str | None, as_json: bool) -> None:
     from openshard.history.query import recent_shards
 
     loc = _locate_history()
+    _t0 = time.perf_counter()
     page = recent_shards(limit=limit, repo=repo_filter, repo_path=loc.root)
+    _telemetry_emit("history.queried", command="history", results=len(page.items),
+                    duration_ms=int((time.perf_counter() - _t0) * 1000))
 
     if as_json:
         status = "ok" if page.items else "not_found"
@@ -1895,6 +1988,7 @@ def history_cmd(limit: int, repo_filter: str | None, as_json: bool) -> None:
 @click.option("--text", "as_text", is_flag=True, default=False,
               help="Print only the context block an agent would receive, verbatim.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("context")
 def context_cmd(task: tuple[str, ...], limit: int | None, repo_filter: str | None, as_text: bool, as_json: bool) -> None:
     """Show what OpenShard would surface to an agent for TASK, and why.
 
@@ -1914,7 +2008,10 @@ def context_cmd(task: tuple[str, ...], limit: int | None, repo_filter: str | Non
     task_text = " ".join(task).strip()
     loc = _locate_history()
     effective_limit = limit if limit is not None else DEFAULT_CONTEXT_LIMIT
+    _t0 = time.perf_counter()
     ctx = relevant_context(task_text, limit=effective_limit, repo=repo_filter, repo_path=loc.root)
+    _telemetry_emit("history.queried", command="context", results=len(ctx.matches),
+                    duration_ms=int((time.perf_counter() - _t0) * 1000))
     # relevant_context already counted every Shard it considered; only a blank
     # task (which loads nothing) needs a separate count for an honest total.
     total = ctx.total_shards if task_text else recent_shards(limit=0, repo=repo_filter, repo_path=loc.root).total_shards
@@ -3115,6 +3212,7 @@ def repo_plan_cmd(task: str, as_json: bool, refresh: bool) -> None:
               help="Only Shards recorded for this repository identity, remote URL, or folder name.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 @click.pass_context
+@_telemetry_command("stats")
 def stats_group(ctx: click.Context, limit: int | None, repo_filter: str | None, as_json: bool) -> None:
     """Honest local counts over this repository's recorded Shards.
 
@@ -5817,6 +5915,7 @@ def init(as_json: bool, assume_yes: bool, mode: str | None, provider: str | None
     default=None,
     help="Repository to check Claude Code integration for (default: current directory).",
 )
+@_telemetry_command("doctor")
 def doctor(as_json: bool, repo_path: Path | None) -> None:
     """Diagnose OpenShard configuration and setup state, including Claude Code integration."""
     from openshard.adapters.claude_mcp_install import find_repo_root
@@ -5844,6 +5943,8 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     agent_statuses = detect_agent_integrations(root, service_port=service_port)
     for key, status in agent_statuses.items():
         state[key] = status.to_dict()
+    telemetry = _telemetry_status()
+    state["telemetry"] = telemetry
 
     if as_json:
         click.echo(json.dumps(state, indent=2))
@@ -5855,6 +5956,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     click.echo(f"  config path:  {state['config_path_display'] or '-'}")
     click.echo(f"  config valid: {'yes' if state['config_valid'] else 'no'}")
     click.echo(f"  git repo:     {'yes' if state['git_repo'] else 'no'}")
+    click.echo(f"  telemetry:    {'on' if telemetry.get('enabled') else 'off'} ({telemetry.get('reason')})")
     click.echo("\n  Onboarding:")
     click.echo(f"    mode:        {state['mode'] or '-'}")
     click.echo(f"    provider:    {state['provider'] or '-'}")
@@ -5953,6 +6055,97 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     else:
         click.echo("Not ready -- run `openshard setup` to configure capture for the coding agents you use.")
     click.echo("")
+
+
+@cli.group("telemetry")
+def telemetry_group() -> None:
+    """"Help improve OpenShard": anonymous usage and reliability data (docs/telemetry.md).
+
+    On by default after the notice shown by `openshard setup`. What is
+    sent is a closed schema of counts, versions, timings and category
+    values -- never code, prompts, file names, repository names, secrets or
+    receipt contents. `openshard telemetry sample` shows the exact queued
+    events; `off` stops it; OPENSHARD_TELEMETRY=off, DO_NOT_TRACK=1, a CI
+    environment, or `telemetry: {enabled: false}` in a repository's
+    .openshard/config.yml also stop it.
+    """
+
+
+def _render_telemetry_status(doc: dict) -> None:
+    click.echo(f"Help improve OpenShard: {'on' if doc.get('enabled') else 'off'} ({doc.get('reason')})")
+    click.echo(f"  consent:         {doc.get('consent')}"
+               + (f" (set by {doc.get('consent_source')} at {doc.get('consent_decided_at')})"
+                  if doc.get("consent_decided_at") else ""))
+    click.echo(f"  installation id: {doc.get('installation_id') or '(none yet)'}")
+    click.echo(f"  endpoint:        {doc.get('endpoint') or '(none: nothing is sent)'}")
+    click.echo(f"  queued events:   {doc.get('queued', 0)}"
+               + ("  (sending paused after a failure; retried later)" if doc.get("in_backoff") else ""))
+    click.echo("  never sent:      code, prompts, file names, repository names, secrets, receipt contents")
+    click.echo("  change:          openshard telemetry on | off | reset | sample   (docs/telemetry.md)")
+
+
+@telemetry_group.command("status")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("telemetry.status")
+def telemetry_status(as_json: bool) -> None:
+    """Show whether anonymous usage data is being shared, and why or why not."""
+    doc = _telemetry_status()
+    if as_json:
+        click.echo(json.dumps(doc, indent=2))
+    else:
+        _render_telemetry_status(doc)
+
+
+@telemetry_group.command("on")
+@_telemetry_command("telemetry.on")
+def telemetry_on() -> None:
+    """Turn "Help improve OpenShard" on for this user."""
+    from openshard.telemetry.state import set_consent
+
+    set_consent("on", source="cli")
+    _render_telemetry_status(_telemetry_status())
+
+
+@telemetry_group.command("off")
+@_telemetry_command("telemetry.off")
+def telemetry_off() -> None:
+    """Turn "Help improve OpenShard" off for this user. Nothing is sent from then on."""
+    from openshard.telemetry import queue as telemetry_queue
+    from openshard.telemetry.state import set_consent
+
+    set_consent("off", source="cli")
+    telemetry_queue.clear()  # anything still queued is discarded, not sent later
+    _render_telemetry_status(_telemetry_status())
+
+
+@telemetry_group.command("reset")
+@_telemetry_command("telemetry.reset")
+def telemetry_reset() -> None:
+    """Mint a new random installation id (consent is unchanged)."""
+    from openshard.telemetry.state import reset_installation_id
+
+    state = reset_installation_id()
+    click.echo(f"New installation id: {state.installation_id}")
+
+
+@telemetry_group.command("sample")
+@click.option("--limit", default=20, type=click.IntRange(min=1, max=200), show_default=True,
+              help="How many of the newest queued events to show.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("telemetry.sample")
+def telemetry_sample(limit: int, as_json: bool) -> None:
+    """Show the exact events waiting to be sent, verbatim -- what leaves this machine, nothing else."""
+    from openshard.telemetry import queue as telemetry_queue
+
+    events = telemetry_queue.peek(limit)
+    if as_json:
+        click.echo(json.dumps(events, indent=2))
+        return
+    if not events:
+        click.echo("No events queued.")
+        return
+    for event in events:
+        click.echo(json.dumps(event, sort_keys=True))
 
 
 @cli.group("config")
