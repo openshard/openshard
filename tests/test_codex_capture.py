@@ -525,11 +525,17 @@ class TestServicePath:
             # finish, never asserted on.
             service.server.recorder.wait_idle(60)
             timing = client.health(service.port)["blocking_ms"]
-            if timing["p50_ms"] < p50_budget and timing["p95_ms"] < p95_budget:
+            # Judge each attempt on its own round-trips: the service's
+            # blocking_ms window accumulates across attempts, so one early
+            # spike would sit in its p95 for every retry.
+            roundtrips.sort()
+            p50_ms = roundtrips[len(roundtrips) // 2] * 1000
+            p95_ms = roundtrips[int(round(0.95 * (len(roundtrips) - 1)))] * 1000
+            if p50_ms < p50_budget and p95_ms < p95_budget:
                 break
             if attempt == attempts:
-                assert timing["p50_ms"] < p50_budget, timing
-                assert timing["p95_ms"] < p95_budget, timing
+                assert p50_ms < p50_budget, (p50_ms, p95_ms, timing)
+                assert p95_ms < p95_budget, (p50_ms, p95_ms, timing)
         roundtrips.sort()
         assert roundtrips[len(roundtrips) // 2] < 0.05, roundtrips
 
