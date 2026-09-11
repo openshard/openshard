@@ -31,6 +31,18 @@ from openshard.adapters.codex_hooks_install import (
     load_codex_hooks,
     uninstall_codex_hooks,
 )
+from openshard.adapters.cursor_hooks_install import (
+    HOOK_EVENTS as CURSOR_HOOK_EVENTS,
+)
+from openshard.adapters.cursor_hooks_install import (
+    HOOKS_RELPATH as CURSOR_HOOKS_RELPATH,
+)
+from openshard.adapters.cursor_hooks_install import (
+    install_cursor_hooks,
+    installed_cursor_events,
+    load_cursor_hooks,
+    uninstall_cursor_hooks,
+)
 from openshard.adapters.opencode_plugin_install import (
     PLUGIN_RELPATH as OPENCODE_PLUGIN_RELPATH,
 )
@@ -43,13 +55,34 @@ from openshard.adapters.opencode_plugin_install import (
 
 AGENT_CODEX = "codex"
 AGENT_OPENCODE = "opencode"
-SUPPORTED_AGENTS: tuple[str, ...] = (AGENT_CODEX, AGENT_OPENCODE)
+AGENT_CURSOR = "cursor"
+SUPPORTED_AGENTS: tuple[str, ...] = (AGENT_CODEX, AGENT_OPENCODE, AGENT_CURSOR)
 
-_CLI_NAMES: dict[str, str] = {AGENT_CODEX: "codex", AGENT_OPENCODE: "opencode"}
-_LABELS: dict[str, str] = {AGENT_CODEX: "Codex", AGENT_OPENCODE: "OpenCode"}
+# Executables that mean "this agent is installed", first found wins. Cursor
+# is an IDE: its ``cursor`` shell command is added to PATH by the Windows
+# installer but only on request on macOS/Linux, and ``cursor-agent`` is its
+# CLI agent. Detection is PATH-only on purpose (deterministic, the same
+# rule as every other agent); ``openshard capture install cursor`` works
+# whether or not detection found it.
+_CLI_NAMES: dict[str, tuple[str, ...]] = {
+    AGENT_CODEX: ("codex",),
+    AGENT_OPENCODE: ("opencode",),
+    AGENT_CURSOR: ("cursor", "cursor-agent"),
+}
+_LABELS: dict[str, str] = {AGENT_CODEX: "Codex", AGENT_OPENCODE: "OpenCode", AGENT_CURSOR: "Cursor"}
 _INSTALL_GUIDANCE: dict[str, str] = {
     AGENT_CODEX: "npm install -g @openai/codex",
     AGENT_OPENCODE: "npm install -g opencode-ai",
+    AGENT_CURSOR: "install Cursor and enable its `cursor` shell command",
+}
+# Agents whose "not found" message is not "install it": Cursor may well be
+# installed without its shell command on PATH.
+_SKIPPED_MESSAGES: dict[str, str] = {
+    AGENT_CURSOR: (
+        "Cursor not found on PATH (`cursor` / `cursor-agent`); skipped. If you use Cursor, run "
+        "`openshard capture install cursor` in this repository (or enable Cursor's `cursor` shell "
+        "command and re-run `openshard setup`)."
+    ),
 }
 
 
@@ -59,14 +92,17 @@ def agent_label(agent: str) -> str:
 
 def detect_agent_cli(agent: str) -> tuple[bool, str | None]:
     """``(available, path)`` for the agent's CLI on PATH. Never raises."""
-    name = _CLI_NAMES.get(agent)
-    if not name:
+    names = _CLI_NAMES.get(agent)
+    if not names:
         return False, None
-    try:
-        found = shutil.which(name)
-    except Exception:
-        found = None
-    return bool(found), found
+    for name in names:
+        try:
+            found = shutil.which(name)
+        except Exception:
+            found = None
+        if found:
+            return True, found
+    return False, None
 
 
 @dataclass
@@ -170,10 +206,40 @@ def detect_opencode_integration(repo_root: Path | None, *, service_port: int | N
     )
 
 
+def detect_cursor_integration(repo_root: Path | None) -> AgentIntegrationStatus:
+    """Read-only snapshot of the Cursor hook integration for *repo_root*."""
+    available, path = detect_agent_cli(AGENT_CURSOR)
+    rel = CURSOR_HOOKS_RELPATH.as_posix()
+    if repo_root is None:
+        return AgentIntegrationStatus(
+            AGENT_CURSOR, available, path, None, "absent", "Not checked (no repository).", rel,
+            events_missing=list(CURSOR_HOOK_EVENTS),
+        )
+    config, err = load_cursor_hooks(repo_root)
+    if err or config is None:
+        return AgentIntegrationStatus(
+            AGENT_CURSOR, available, path, repo_root, "error", err or "unreadable", rel,
+            events_missing=list(CURSOR_HOOK_EVENTS), config_error=err,
+        )
+    installed = installed_cursor_events(config)
+    missing = [e for e in CURSOR_HOOK_EVENTS if e not in installed]
+    if not installed:
+        state, detail = "absent", "not configured"
+    elif missing:
+        state, detail = "partial", f"hooks missing for {', '.join(missing)}; run `openshard capture install cursor`"
+    else:
+        state, detail = "openshard", f"configured ({rel})"
+    return AgentIntegrationStatus(
+        AGENT_CURSOR, available, path, repo_root, state, detail, rel,
+        events_installed=installed, events_missing=missing,
+    )
+
+
 def detect_agent_integrations(repo_root: Path | None, *, service_port: int | None = None) -> dict[str, AgentIntegrationStatus]:
     return {
         AGENT_CODEX: detect_codex_integration(repo_root),
         AGENT_OPENCODE: detect_opencode_integration(repo_root, service_port=service_port),
+        AGENT_CURSOR: detect_cursor_integration(repo_root),
     }
 
 
@@ -223,6 +289,11 @@ def install_agent(agent: str, *, repo_root: Path, port: int | None = None) -> Ag
         steps = []
         if result.status == "skipped_existing":
             steps.append(result.message)
+    elif agent == AGENT_CURSOR:
+        result = install_cursor_hooks(repo_root=repo_root)
+        steps = []
+        if result.status in ("installed", "updated"):
+            steps.append("Cursor reloads .cursor/hooks.json automatically; no restart is needed.")
     else:
         return AgentSetupResult(agent, available, path, "error", f"unknown agent {agent!r}")
     if result.status == "error":
@@ -240,6 +311,8 @@ def uninstall_agent(agent: str, *, repo_root: Path) -> AgentSetupResult:
         result = uninstall_codex_hooks(repo_root=repo_root)
     elif agent == AGENT_OPENCODE:
         result = uninstall_opencode_plugin(repo_root=repo_root)
+    elif agent == AGENT_CURSOR:
+        result = uninstall_cursor_hooks(repo_root=repo_root)
     else:
         return AgentSetupResult(agent, available, path, "error", f"unknown agent {agent!r}")
     return AgentSetupResult(
@@ -260,11 +333,11 @@ def setup_detected_agents(*, repo_root: Path, port: int | None = None) -> dict[s
     for agent in SUPPORTED_AGENTS:
         available, path = detect_agent_cli(agent)
         if not available:
-            results[agent] = AgentSetupResult(
-                agent, False, None, "skipped",
+            message = _SKIPPED_MESSAGES.get(agent) or (
                 f"{agent_label(agent)} CLI not found on PATH; skipped (install it, e.g. "
-                f"`{_INSTALL_GUIDANCE[agent]}`, then re-run `openshard setup`).",
+                f"`{_INSTALL_GUIDANCE[agent]}`, then re-run `openshard setup`)."
             )
+            results[agent] = AgentSetupResult(agent, False, None, "skipped", message)
             continue
         results[agent] = install_agent(agent, repo_root=repo_root, port=port)
     return results

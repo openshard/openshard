@@ -27,6 +27,7 @@ from dataclasses import dataclass
 AGENT_CLAUDE_CODE = "claude_code"
 AGENT_CODEX = "codex"
 AGENT_OPENCODE = "opencode"
+AGENT_CURSOR = "cursor"
 
 
 @dataclass(frozen=True)
@@ -116,8 +117,31 @@ OPENCODE_PROFILE = AgentProfile(
     ),
 )
 
+CURSOR_PROFILE = AgentProfile(
+    key=AGENT_CURSOR,
+    label="Cursor",
+    vendor="Anysphere",
+    executor="cursor_hooks",
+    import_source="cursor",
+    import_method="openshard_cursor_hooks_v0",
+    event_source="cursor_hooks",
+    capture_source="cursor_hooks",
+    hook_evidence_source="cursor_hook",
+    files_source_label="cursor_hook_reported",
+    model_source="cursor_hook",
+    usage_provenance="agent_reported",
+    task_placeholder="Cursor session (task not captured)",
+    import_note=(
+        "Captured automatically from Cursor agent hooks. "
+        "Tool/file facts are as reported by Cursor; files are inferred from git diff. "
+        "The model name is the one Cursor reports in its hook payloads; cost and token "
+        "counts are not exposed by Cursor hooks and stay Not recorded. "
+        "Verification is never recorded by OpenShard for this capture path."
+    ),
+)
+
 AGENT_PROFILES: dict[str, AgentProfile] = {
-    p.key: p for p in (CLAUDE_CODE_PROFILE, CODEX_PROFILE, OPENCODE_PROFILE)
+    p.key: p for p in (CLAUDE_CODE_PROFILE, CODEX_PROFILE, OPENCODE_PROFILE, CURSOR_PROFILE)
 }
 CAPTURE_EXECUTORS: frozenset[str] = frozenset(p.executor for p in AGENT_PROFILES.values())
 

@@ -493,6 +493,7 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
             "claude_code": claude_status.to_dict(),
             "codex": agent_statuses["codex"].to_dict(),
             "opencode": agent_statuses["opencode"].to_dict(),
+            "cursor": agent_statuses["cursor"].to_dict(),
             "telemetry": _telemetry_status(),
             "next_actions": [
                 "openshard env --json",
@@ -602,7 +603,7 @@ def _render_setup_result(result) -> None:
         "skipped": "not found (skipped)", "skipped_existing": "skipped (custom file present)",
         "error": "NOT configured",
     }
-    for key, label in (("codex", "Codex:        "), ("opencode", "OpenCode:     ")):
+    for key, label in (("codex", "Codex:        "), ("opencode", "OpenCode:     "), ("cursor", "Cursor:       ")):
         agent_result = (result.agents or {}).get(key)
         if agent_result is None:
             continue
@@ -2678,6 +2679,37 @@ def hooks_codex(event_override: str | None, no_spawn: bool) -> None:
     run_hook_via_service(sys.stdin, env=os.environ, event_override=event_override, agent="codex", spawn=not no_spawn)
 
 
+@hooks_group.command("cursor")
+@click.option(
+    "--event",
+    "event_override",
+    default=None,
+    help="Cursor hook event name, used only when the payload carries no hook_event_name.",
+)
+@click.option(
+    "--no-spawn",
+    "no_spawn",
+    is_flag=True,
+    default=False,
+    help="Never start the capture service from this hook (used for Cursor's short-timeout sessionEnd).",
+)
+def hooks_cursor(event_override: str | None, no_spawn: bool) -> None:
+    """Cursor hook entrypoint: read one Cursor hook payload (JSON) from stdin and record it.
+
+    Installed into this repository's .cursor/hooks.json by `openshard setup`
+    / `openshard capture install cursor`. Observational only: never blocks
+    Cursor beyond a loopback POST to the local capture service, and its one
+    stdout line is the decision reply Cursor requires -- always
+    `{"continue": true}` for beforeSubmitPrompt and `{}` otherwise,
+    regardless of whether capture succeeded. Always exits 0. Evidence lands
+    in .openshard/runs.jsonl as normal Shard records.
+    """
+    from openshard.adapters.claude_capture_client import run_cursor_hook
+
+    _label, reply = run_cursor_hook(sys.stdin, env=os.environ, event_override=event_override, spawn=not no_spawn)
+    click.echo(reply)
+
+
 @hooks_group.command("claude-status")
 def hooks_claude_status() -> None:
     """Claude Code status-line entrypoint: read status JSON from stdin, print a status line.
@@ -2695,10 +2727,10 @@ def hooks_claude_status() -> None:
 
 @cli.group("capture")
 def capture_group() -> None:
-    """The local capture service shared by Claude Code, Codex and OpenCode, and its per-agent integrations."""
+    """The local capture service shared by Claude Code, Codex, OpenCode and Cursor, and its per-agent integrations."""
 
 
-_AGENT_CHOICE = click.Choice(["codex", "opencode"], case_sensitive=False)
+_AGENT_CHOICE = click.Choice(["codex", "opencode", "cursor"], case_sensitive=False)
 
 
 def _render_agent_result(result, *, verb: str) -> None:
@@ -2712,7 +2744,8 @@ def _render_agent_result(result, *, verb: str) -> None:
         click.echo(f"  ! {step}")
     if verb == "install" and result.configured:
         click.echo(f"\n{label} sessions in this repository are now recorded as Shards automatically.")
-        click.echo(f"Restart {label} if it is already running.")
+        if result.agent != "cursor":  # Cursor hot-reloads .cursor/hooks.json
+            click.echo(f"Restart {label} if it is already running.")
     if verb == "uninstall":
         click.echo("\nLocal Shard/Receipt history under .openshard/ was not touched.")
 
@@ -2725,13 +2758,15 @@ def _render_agent_result(result, *, verb: str) -> None:
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
-    """Configure Codex hooks or the OpenCode plugin for this repository (what `openshard setup` does).
+    """Configure Codex hooks, the OpenCode plugin or Cursor hooks for this repository (what `openshard setup` does).
 
     codex: merges `openshard hooks codex` into .codex/hooks.json (project-local;
     unrelated hooks preserved). opencode: writes the OpenShard plugin to
     .opencode/plugins/openshard.ts (never overwrites a file that is not
-    OpenShard's). Both are idempotent and target the shared local capture
-    service. Safe to re-run.
+    OpenShard's). cursor: merges `openshard hooks cursor` into
+    .cursor/hooks.json (project-local; unrelated hooks preserved; Cursor
+    reloads it without a restart). All are idempotent and target the shared
+    local capture service. Safe to re-run.
     """
     from openshard.adapters.agent_setup import install_agent
     from openshard.adapters.claude_mcp_install import find_repo_root
@@ -2758,7 +2793,7 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool) -> None:
-    """Remove OpenShard's Codex hooks or OpenCode plugin from this repository.
+    """Remove OpenShard's Codex hooks, OpenCode plugin or Cursor hooks from this repository.
 
     Only OpenShard's own entries/files are removed; unrelated hooks, plugins
     and settings survive. Local history under .openshard/ is never deleted.
@@ -6023,7 +6058,11 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     )
     for key, status in agent_statuses.items():
         label = agent_label(key)
-        integration_label = "Auto-capture hooks" if key == "codex" else "Capture plugin"
+        integration_label = "Auto-capture hooks" if key in ("codex", "cursor") else "Capture plugin"
+        cli_detail = (
+            "not found on PATH (`cursor` / `cursor-agent`); `openshard capture install cursor` still works"
+            if key == "cursor" else "CLI not found on PATH"
+        )
         integration_ok = status.configured
         integration_detail = status.detail
         if status.state == "openshard" and status.capture_port_mismatch:
@@ -6034,7 +6073,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
         agent_checks: list[tuple[str, bool, str]] = [
             ("Repository", root is not None, "not a git repository"),
             ("Local history", history_writable, f"{HISTORY_RELPATH.as_posix()} is not writable"),
-            (label, status.cli_available, "CLI not found on PATH"),
+            (label, status.cli_available, cli_detail),
             (integration_label, integration_ok, integration_detail),
             ("Capture service", service_running, service_detail_shared),
         ]
