@@ -73,6 +73,39 @@ def _clamp_limit(limit: int) -> int:
     return min(limit, MAX_LIMIT)
 
 
+class _ToolCall:
+    """Telemetry (0.4.2) for one MCP tool call: name, duration, result count, ok/error.
+
+    Never raises and never touches the tool's own result or error; only
+    ``results`` (a count) is read.
+    """
+
+    def __init__(self, tool: str) -> None:
+        self.tool = tool
+        self.results = 0
+        self._t0 = 0.0
+
+    def __enter__(self) -> _ToolCall:
+        import time
+
+        self._t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, _exc, _tb) -> None:
+        try:
+            import time
+
+            from openshard.telemetry import emit
+
+            emit(
+                "mcp.tool_called", tool=self.tool, results=int(self.results),
+                duration_ms=int((time.perf_counter() - self._t0) * 1000),
+                result="error" if exc_type is not None else "ok",
+            )
+        except Exception:
+            pass
+
+
 def build_server(*, repo_path: Path | None = None) -> MCPServer:
     """Build the OpenShard MCP server, scoped to one repository's history.
 
@@ -93,9 +126,11 @@ def build_server(*, repo_path: Path | None = None) -> MCPServer:
         detail. ``repo`` optionally filters by repository identity, remote
         URL, or legacy folder name -- omit to see all repositories recorded
         in this history file. Returns [] on empty history."""
-        shards = history_query.list_shards(
-            limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
-        )
+        with _ToolCall("recent_shards") as call:
+            shards = history_query.list_shards(
+                limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
+            )
+            call.results = len(shards)
         return [shard_to_dict(s) for s in shards]
 
     @mcp.tool()
@@ -105,10 +140,12 @@ def build_server(*, repo_path: Path | None = None) -> MCPServer:
         if no Shard with that id exists in this repository's history."""
         if not shard_id or not shard_id.strip():
             raise ToolError("shard_id must be a non-empty string.")
-        try:
-            shard = history_query.get_shard(shard_id, repo_path=repo_path)
-        except UnknownShardError as exc:
-            raise ToolError(str(exc)) from None
+        with _ToolCall("get_shard") as call:
+            try:
+                shard = history_query.get_shard(shard_id, repo_path=repo_path)
+            except UnknownShardError as exc:
+                raise ToolError(str(exc)) from None
+            call.results = 1
         return shard_to_dict(shard)
 
     @mcp.tool()
@@ -123,12 +160,14 @@ def build_server(*, repo_path: Path | None = None) -> MCPServer:
         the Shard or run is not found."""
         if not shard_id and not run_id:
             raise ToolError("get_receipt requires shard_id and/or run_id.")
-        try:
-            receipt = history_query.get_receipt(
-                shard_id, run_id=run_id, repo_path=repo_path
-            )
-        except (UnknownShardError, UnknownRunError) as exc:
-            raise ToolError(str(exc)) from None
+        with _ToolCall("get_receipt") as call:
+            try:
+                receipt = history_query.get_receipt(
+                    shard_id, run_id=run_id, repo_path=repo_path
+                )
+            except (UnknownShardError, UnknownRunError) as exc:
+                raise ToolError(str(exc)) from None
+            call.results = 1
         return receipt_to_dict(receipt)
 
     @mcp.tool()
@@ -141,9 +180,11 @@ def build_server(*, repo_path: Path | None = None) -> MCPServer:
         latest attempt (never summaries, notes, or any raw model output).
         Results are ordered by match strength, newest first. An empty query
         returns []. ``repo`` optionally filters by repository identity."""
-        hits = history_query.search_history(
-            query, limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
-        )
+        with _ToolCall("search_history") as call:
+            hits = history_query.search_history(
+                query, limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
+            )
+            call.results = len(hits)
         return [search_hit_to_dict(h) for h in hits]
 
     @mcp.tool()
@@ -167,9 +208,11 @@ def build_server(*, repo_path: Path | None = None) -> MCPServer:
         compact block suitable for pasting into another agent's context) —
         both honestly empty/explanatory when no prior Shard is relevant.
         ``repo`` optionally filters by repository identity."""
-        ctx = history_query.relevant_context(
-            task, limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
-        )
+        with _ToolCall("relevant_context") as call:
+            ctx = history_query.relevant_context(
+                task, limit=_clamp_limit(limit), repo=repo, repo_path=repo_path
+            )
+            call.results = len(ctx.matches)
         return {
             "task": ctx.task,
             "matches": [relevant_match_to_dict(m) for m in ctx.matches],

@@ -81,8 +81,12 @@ LOCAL_FIRST_NOTICE = (
     "OpenShard is local-first.\n\n"
     "  Your receipts stay on this machine by default.\n"
     "  API keys stay in your environment variables.\n"
-    "  OpenShard does not send telemetry or use your runs for training.\n\n"
-    "  You can enable team sync or telemetry later if you choose."
+    "  Your code, prompts, file names, repository names and receipt contents\n"
+    "  are never sent anywhere, and your runs are never used for training.\n\n"
+    "  Help improve OpenShard: on. OpenShard shares anonymous usage and\n"
+    "  reliability data (counts, versions, timings, errors by category) to\n"
+    "  improve the product. Turn it off any time:  openshard telemetry off\n"
+    "  Details: docs/telemetry.md"
 )
 
 NEXT_COMMANDS = (

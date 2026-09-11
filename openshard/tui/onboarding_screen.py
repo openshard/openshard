@@ -212,7 +212,7 @@ class OnboardingScreen(Screen):
             f"  Route:    {_l('provider_route')}\n"
             f"  Provider: {_l('provider')}\n"
             f"  Safety:   {_l('safety_profile')}\n"
-            f"  Data:     Local only\n\n"
+            f"  Data:     Local only (anonymous usage data: openshard telemetry status)\n\n"
             f"Next commands:\n{NEXT_COMMANDS}\n\n"
             "Run `openshard doctor` to review your config at any time."
         )
@@ -269,9 +269,21 @@ class OnboardingScreen(Screen):
         elif self._screen_idx == n_select + 1:
             self._show_local_first()
         elif self._screen_idx == n_select + 2:
+            # The local-first / "Help improve OpenShard" notice was seen and
+            # continued past: an undecided consent becomes on (skipping does not).
+            self._record_telemetry_notice_seen()
             self._show_finish()
         else:
             self._finish()
+
+    @staticmethod
+    def _record_telemetry_notice_seen() -> None:
+        try:
+            from openshard.telemetry.state import consent_after_notice
+
+            consent_after_notice(source="onboarding")
+        except Exception:
+            pass
 
     def _finish(self) -> None:
         self._write_config()

@@ -1847,6 +1847,22 @@ def _mark_applied(buf: dict, dedup_id: str | None) -> None:
     buf["applied_ids"] = applied
 
 
+def _emit_receipt_telemetry(entry: dict, action: str) -> None:
+    """Telemetry (0.4.2): one ``receipt.created`` when a session's record is
+    first written, one ``receipt.completed`` when it is finalized -- counts
+    and enums only (see ``telemetry/events.py``). Never raises; a periodic
+    snapshot (``record_updated``) emits nothing."""
+    if action not in ("record_created", "record_finalized"):
+        return
+    try:
+        from openshard.telemetry import emit
+        from openshard.telemetry.events import receipt_properties
+
+        emit("receipt.created" if action == "record_created" else "receipt.completed", **receipt_properties(entry))
+    except Exception:
+        pass
+
+
 def apply_reduced_hook(
     payload: ReducedHookPayload,
     repo_root: Path,
@@ -1911,6 +1927,7 @@ def apply_reduced_hook(
                 action = "record_created"
             else:
                 action = "record_updated"
+            _emit_receipt_telemetry(entry, action)
         else:
             action = "buffered" if not should_delete else "ignored"
         return HookOutcome(

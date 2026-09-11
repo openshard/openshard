@@ -22,6 +22,18 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path_factory.mktemp("openshard-home")))
     monkeypatch.setenv("OPENSHARD_CAPTURE_DISABLE", "1")
     monkeypatch.delenv("OPENSHARD_CAPTURE_PORT", raising=False)
+    # Telemetry (0.4.2) is off for the whole suite and never flushes on a
+    # background thread, so no test can send anything or leak a late flush
+    # into another test's RecordingTransport. tests/test_telemetry*.py turn
+    # it back on for themselves with an injected transport.
+    monkeypatch.setenv("OPENSHARD_TELEMETRY", "off")
+    monkeypatch.setenv("OPENSHARD_TELEMETRY_NO_BACKGROUND", "1")
+    # The other kill-switches are cleared so that "off" above is the *only*
+    # reason telemetry is off: a test that turns it on must then see it on,
+    # whether the suite runs on a laptop or on a CI runner (which sets CI /
+    # GITHUB_ACTIONS). Tests about CI detection set those variables themselves.
+    for var in ("DO_NOT_TRACK", "CI", "GITHUB_ACTIONS", "GITLAB_CI"):
+        monkeypatch.delenv(var, raising=False)
     yield
 
 

@@ -862,6 +862,30 @@ def _bind(env: dict | os._Environ, explicit: int | None, recorder: CaptureRecord
     return None
 
 
+def _telemetry_service_event(env: dict | os._Environ, state: str, recorder: CaptureRecorder, server: CaptureServer) -> None:
+    """``capture.service`` telemetry: lifecycle state plus this service's own counters. Never raises."""
+    try:
+        from openshard.telemetry import emit
+        from openshard.telemetry.client import flush
+
+        stats = dict(recorder.stats)
+        timing = server.health_document().get("blocking_ms") or {}
+
+        def _n(value: object) -> int:
+            return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else 0
+
+        emit(
+            "capture.service", env,
+            state=state, queued=_n(stats.get("queued")), folded=_n(stats.get("replayed")),
+            replay_errors=_n(stats.get("replay_errors")),
+            p50_ms=_n(timing.get("p50_ms")), p95_ms=_n(timing.get("p95_ms")),
+        )
+        if state != "started":
+            flush(env=env)
+    except Exception:
+        pass
+
+
 def serve(
     *,
     port: int | None = None,
@@ -947,6 +971,20 @@ def serve(
     if recovered:
         _log(f"recovering {recovered} session queue(s) left behind")
 
+    # Telemetry (0.4.2): the service is the natural long-running flusher for
+    # the local event queue, and reports its own lifecycle. Both run off the
+    # blocking path and never raise.
+    _telemetry_service_event(env, "started", recorder, server)
+    try:
+        from openshard.telemetry.client import flush_periodically
+
+        threading.Thread(
+            target=flush_periodically, args=(server.shutdown_requested,), kwargs={"env": env},
+            name="openshard-telemetry-flush-timer", daemon=True,
+        ).start()
+    except Exception:
+        pass
+
     def _idle_watch() -> None:
         while not server.shutdown_requested.wait(_IDLE_CHECK_SECONDS):
             if idle_timeout > 0 and server.idle_seconds() >= idle_timeout and recorder.pending == 0:
@@ -973,6 +1011,10 @@ def serve(
     finally:
         _log(f"stopping ({server.shutdown_reason or 'shutdown requested'}); draining queue")
         recorder.stop(drain=True)
+        _telemetry_service_event(
+            env, "idle_exit" if str(server.shutdown_reason or "").startswith("idle") else "stopped",
+            recorder, server,
+        )
         # Stdlib-recommended order: join the thread running serve_forever()
         # (shutdown() was already triggered by begin_shutdown()) before
         # closing the socket out from under it.
