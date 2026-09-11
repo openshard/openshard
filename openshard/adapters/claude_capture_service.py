@@ -269,6 +269,7 @@ class CaptureRecorder:
         # (_worker_loop), so no extra thread is needed.
         self._retry_lock = threading.Lock()
         self._retry_after: dict[tuple[str, str], float] = {}
+        self._drain_deadline = float("inf")
         self.timings = _Timings()
         self.stats: dict[str, Any] = {
             "received": 0, "queued": 0, "ignored": 0, "replayed": 0, "duplicates": 0,
@@ -282,13 +283,22 @@ class CaptureRecorder:
         self._worker.start()
 
     def stop(self, *, drain: bool = True, timeout: float = 30.0) -> None:
-        """Stop the worker; with *drain* every already-queued session is replayed first."""
+        """Stop the worker; with *drain* every already-queued session is replayed first.
+
+        The drain is bounded by *timeout*: a session whose replay keeps
+        failing (its retry never succeeds) is left on disk for the next
+        service start to recover, rather than keeping this worker alive
+        after the caller has stopped waiting for it.
+        """
         self._stop.set()
+        self._drain_deadline = time.monotonic() + (timeout if drain else 0.0)
         if drain:
             self._processing_enabled.set()
         self._pending.put(None)
         if self._worker.is_alive():
-            self._worker.join(timeout=timeout if drain else 0.5)
+            # A little past the deadline so the worker's final wake-up (it
+            # sleeps in short slices while a retry is pending) is covered.
+            self._worker.join(timeout=timeout + 1.0 if drain else 0.5)
 
     def pause_processing(self) -> None:
         """Tests: keep queued lines on disk instead of replaying them."""
@@ -519,14 +529,25 @@ class CaptureRecorder:
             if item is None:
                 with self._retry_lock:
                     retries_pending = bool(self._retry_after)
+                    next_due = min(self._retry_after.values(), default=None)
                 if self._stop.is_set() and self._pending.empty() and not retries_pending:
                     return
                 if retries_pending:
                     # A drain (stop()) is in progress with a retry still
-                    # scheduled: put the sentinel back so it is seen again
-                    # once the retry has had its chance, rather than
-                    # exiting and abandoning already-queued evidence to the
-                    # next service start.
+                    # scheduled. Give the retry its chance rather than
+                    # abandoning already-queued evidence -- but never by
+                    # spinning: re-reading our own sentinel skips the
+                    # queue.Empty branch above, so the due-retry check has
+                    # to happen here, and the wait until it is due has to
+                    # be a real sleep. Past the drain deadline the files
+                    # stay on disk for the next service start to recover.
+                    if self._stop.is_set() and time.monotonic() >= self._drain_deadline:
+                        return
+                    for root_str, sid in self._due_retries():
+                        self.enqueue(Path(root_str), sid)
+                    if next_due is not None:
+                        now = time.monotonic()
+                        time.sleep(max(0.0, min(next_due - now, self._drain_deadline - now, 0.2)))
                     self._pending.put(None)
                 continue
             if not self._processing_enabled.is_set():
@@ -885,12 +906,6 @@ def serve(
     except OSError as exc:
         _log(f"cannot create {home}: {type(exc).__name__}")
         return 1
-    # The worker thread is CPU-busy while folding; a short switch interval
-    # keeps request threads (the blocking path) responsive under the GIL.
-    try:
-        sys.setswitchinterval(0.001)
-    except (ValueError, AttributeError):
-        pass
     state_path = Path(client.state_path(env))
     instance_id = uuid.uuid4().hex[:12]
     started_at = _now()
@@ -942,6 +957,15 @@ def serve(
     if server_box is not None:
         server_box.append(server)
 
+    # The worker thread is CPU-busy while folding; a short switch interval
+    # keeps request threads (the blocking path) responsive under the GIL.
+    # It is process-wide, so it is restored on exit: an in-process service
+    # (tests) must not leave the interpreter on a 1 ms interval.
+    previous_switch = sys.getswitchinterval()
+    try:
+        sys.setswitchinterval(0.001)
+    except (ValueError, AttributeError):
+        pass
     recorder.start()
     recovered = recorder.recover_known_repos()
     if recovered:
@@ -996,6 +1020,10 @@ def serve(
         # closing the socket out from under it.
         serve_thread.join(timeout=10)
         server.server_close()
+        try:
+            sys.setswitchinterval(previous_switch)
+        except (ValueError, AttributeError):
+            pass
         current = client.read_state(env)
         if current and current.get("instance_id") == instance_id:
             try:
