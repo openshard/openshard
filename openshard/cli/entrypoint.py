@@ -155,6 +155,24 @@ def _try_fast_path(argv: list[str]) -> bool:
         )
         return True
 
+    if sub == "cursor":
+        # 0.4.2: Cursor, like Codex, only has command hooks; unlike Codex it
+        # reads stdout as a decision, so the reply is written here exactly
+        # as the Click command does it (see run_cursor_hook).
+        parsed = _parse_hooks_codex_argv(rest)
+        if parsed is None:
+            return False
+        import os
+
+        from openshard.adapters.claude_capture_client import run_cursor_hook
+
+        _label, reply = run_cursor_hook(  # type: ignore[arg-type]
+            sys.stdin, env=os.environ, event_override=parsed[0], spawn=parsed[1],
+        )
+        sys.stdout.write(reply + "\n")
+        sys.stdout.flush()
+        return True
+
     return False
 
 

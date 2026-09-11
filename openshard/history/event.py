@@ -224,6 +224,8 @@ SOURCE_CLAUDE_CODE_HOOKS = "claude_code_hooks"
 # OpenShard OpenCode plugin (``adapters/opencode_plugin.py``).
 SOURCE_CODEX_HOOKS = "codex_hooks"
 SOURCE_OPENCODE_PLUGIN = "opencode_plugin"
+# 0.4.2: Cursor agent hooks (``adapters/cursor_hooks.py``), same shared fold.
+SOURCE_CURSOR_HOOKS = "cursor_hooks"
 SOURCE_NATIVE_RUN = "native_run"
 
 _ACTION_LIMIT = 120

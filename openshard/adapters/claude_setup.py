@@ -336,7 +336,7 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
                         "to enable coding-agent capture for a project."],
         )
 
-    other_agents_present = [a for a in ("codex", "opencode") if detect_agent_cli(a)[0]]
+    other_agents_present = [a for a in ("codex", "opencode", "cursor") if detect_agent_cli(a)[0]]
     if not claude_avail.available and not other_agents_present:
         return SetupResult(
             repo_root=root, is_git=True, claude_cli=claude_avail,
@@ -345,7 +345,8 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
             next_steps=[
                 _claude_install_step(claude_avail),
                 "Or install Codex (`npm install -g @openai/codex`) or OpenCode "
-                "(`npm install -g opencode-ai`); `openshard setup` configures whichever agents it finds.",
+                "(`npm install -g opencode-ai`); `openshard setup` configures whichever agents it finds. "
+                "If you use Cursor, run `openshard capture install cursor` in this repository.",
             ],
         )
 
