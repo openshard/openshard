@@ -68,8 +68,10 @@ Confirmed against Cursor's hooks reference (``cursor.com/docs/agent/hooks``):
   ``output``), ``beforeReadFile`` (carries file ``content``),
   ``afterAgentResponse`` / ``afterAgentThought`` (assistant text),
   ``preToolUse`` / ``beforeShellExecution`` / ``beforeMCPExecution``
-  (permission decisions OpenShard must not make), the Tab hooks, and
-  ``workspaceOpen``.
+  (permission decisions OpenShard must not make), ``subagentStop``
+  (a sub-agent's turn is not the session's; its work still arrives as
+  tool/file events), ``preCompact`` (context housekeeping, no evidence),
+  the Tab hooks, and ``workspaceOpen``.
 
 Cost and token counts are not exposed by Cursor hooks, so a Cursor record
 never carries them. The model provider is not exposed either and is never
