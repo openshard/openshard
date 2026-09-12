@@ -498,7 +498,14 @@ class TestServicePath:
         # still-meaningful budget, and -- as in the Codex counterpart -- a
         # couple of retries so one noisy-neighbour spike does not fail the
         # job on its own.
-        p50_budget, p95_budget = (60, 120) if sys.platform == "win32" else (25, 50)
+        # The Windows p95 is wider still: with 40 samples it is the third-
+        # slowest round-trip, and on a shared runner two or three scheduler or
+        # loopback stalls per attempt are routine (observed on the v0.4.2
+        # release merge: p50 21 ms, p95 182 ms, service-side handler p50
+        # 10 ms, on all three attempts). The regression this test guards
+        # against -- folding on the hook path -- costs hundreds of ms per
+        # call and moves the median, which stays strict.
+        p50_budget, p95_budget = (60, 250) if sys.platform == "win32" else (25, 50)
         attempts = 3 if sys.platform == "win32" else 1
         for attempt in range(1, attempts + 1):
             roundtrips: list[float] = []
