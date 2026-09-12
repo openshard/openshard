@@ -150,10 +150,15 @@ def test_eval_validate_missing_suite_fails_cleanly():
     assert "nonexistent" in result.output or "Error" in result.output
 
 
-def test_readme_mentions_eval_commands():
-    readme = (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
-    assert "eval list" in readme
-    assert "eval validate" in readme
+def test_eval_commands_are_documented():
+    # The command-by-command reference lives in docs/cli-reference.md; the
+    # README keeps only the beginner flow and links to it.
+    root = Path(__file__).parent.parent
+    reference = (root / "docs" / "cli-reference.md").read_text(encoding="utf-8")
+    assert "eval list" in reference
+    assert "eval validate" in reference
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "docs/cli-reference.md" in readme
 
 
 # ---------------------------------------------------------------------------

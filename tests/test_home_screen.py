@@ -31,7 +31,9 @@ class TestHomeScreen(unittest.TestCase):
         result = CliRunner().invoke(cli, ["--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Usage:", result.output)
-        self.assertIn("Commands:", result.output)
+        # Root help is sectioned rather than a single "Commands:" list.
+        self.assertIn("Getting Started:", result.output)
+        self.assertIn("Advanced:", result.output)
 
     def test_existing_safe_subcommands_still_dispatch(self):
         runner = CliRunner()
