@@ -18,11 +18,18 @@ Consent has three values, and events are emitted only when it is ``on``:
   onboarding) stays here, silent, until the person next runs
   ``openshard setup`` and sees the new notice.
 * ``on`` -- the notice was shown (default-on with an obvious opt-out), or
-  ``openshard telemetry on`` was run.
+  ``openshard telemetry on`` was run. Both ``openshard setup`` for a person
+  and ``openshard setup --json`` for an agent count as showing the notice:
+  the JSON result carries the same notice for the agent to surface.
 * ``off`` -- ``openshard telemetry off`` was run.
 
+Only the basic "improve" level exists as a switch. ``richer`` (development
+data) is reserved and is always ``off``; nothing in v1 can turn it on.
+
 Nothing in this module can enable telemetry from an environment variable
-or a config file: those can only *disable* it (see ``effective_status``).
+or a config file: those can only *disable* it (see ``effective_status``),
+and while one of them is active, seeing the notice records no decision at
+all (a CI runner or a ``DO_NOT_TRACK`` shell is not a person opting in).
 """
 
 from __future__ import annotations
@@ -49,6 +56,23 @@ DISABLE_ENV = "OPENSHARD_TELEMETRY"  # "off"/"0"/"false" disables; nothing enabl
 DO_NOT_TRACK_ENV = "DO_NOT_TRACK"  # the cross-tool convention: any truthy value disables
 _CI_VARS = ("CI", "GITHUB_ACTIONS", "GITLAB_CI")
 _FALSEY = frozenset({"0", "off", "false", "no", "disabled"})
+
+# The one notice every setup path shows (or, for ``--json``/``--agent``,
+# returns for the calling agent to show its owner). Deliberately short and
+# deliberately not claiming anonymity: the installation id is a random,
+# pseudonymous token, and the data is privacy-safe by schema.
+PRIVACY_NOTICE = (
+    "OpenShard is set up and ready. Basic privacy-safe product telemetry is enabled "
+    "by default. It sends usage and reliability data such as counts, versions, timings "
+    "and error categories, not code, prompts, file names, repository names or receipt "
+    "contents. Disable it anytime with `openshard telemetry off`. "
+    "Richer development data remains off."
+)
+# What a machine-readable setup result tells the calling agent to do with it.
+AGENT_NOTICE_INSTRUCTION = (
+    "Show privacy_notice to your owner verbatim. Do not decide for them: "
+    "they can run `openshard telemetry off` at any time."
+)
 
 
 def _now() -> str:
@@ -174,10 +198,13 @@ def consent_after_notice(*, source: str, env: dict | os._Environ | None = None) 
     """The notice was shown: an ``unset`` consent becomes ``on`` (default-on).
 
     A decision already made (``on`` or ``off``) is never overridden by
-    showing the notice again.
+    showing the notice again, and no decision is recorded while an
+    environment kill-switch (``OPENSHARD_TELEMETRY=off``, ``DO_NOT_TRACK``,
+    CI) is active: telemetry is off there regardless, and a CI runner or an
+    opted-out shell seeing the notice is not a person opting in.
     """
     state, _ = ensure_state(env)
-    if state.improve == CONSENT_UNSET:
+    if state.improve == CONSENT_UNSET and environment_disables(env) is None:
         return set_consent(CONSENT_ON, source=source, env=env)
     return state
 
@@ -209,6 +236,24 @@ def _falsey(value: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in _FALSEY
 
 
+def environment_disables(env: dict | os._Environ | None = None) -> str | None:
+    """The environment kill-switch in effect, as a short reason, or None.
+
+    Checked in precedence order: ``OPENSHARD_TELEMETRY`` set to a false
+    value, ``DO_NOT_TRACK`` set, then a CI variable (``CI`` /
+    ``GITHUB_ACTIONS`` / ``GITLAB_CI``). Agent environments are not CI and
+    are never suppressed here.
+    """
+    env = os.environ if env is None else env
+    if _falsey(env.get(DISABLE_ENV)):
+        return f"disabled by {DISABLE_ENV}"
+    if _truthy(env.get(DO_NOT_TRACK_ENV)):
+        return f"disabled by {DO_NOT_TRACK_ENV}"
+    if any(_truthy(env.get(v)) for v in _CI_VARS):
+        return "disabled in CI"
+    return None
+
+
 @dataclass(frozen=True)
 class Effective:
     enabled: bool
@@ -232,12 +277,9 @@ def effective_status(
     working in that repository), then the person's consent.
     """
     env = os.environ if env is None else env
-    if _falsey(env.get(DISABLE_ENV)):
-        return Effective(False, f"disabled by {DISABLE_ENV}", (state or load_state(env) or _fresh()).improve)
-    if _truthy(env.get(DO_NOT_TRACK_ENV)):
-        return Effective(False, f"disabled by {DO_NOT_TRACK_ENV}", (state or load_state(env) or _fresh()).improve)
-    if any(_truthy(env.get(v)) for v in _CI_VARS):
-        return Effective(False, "disabled in CI", (state or load_state(env) or _fresh()).improve)
+    env_reason = environment_disables(env)
+    if env_reason is not None:
+        return Effective(False, env_reason, (state or load_state(env) or _fresh()).improve)
     block = repo_config.get("telemetry") if isinstance(repo_config, dict) else None
     if isinstance(block, dict) and block.get("enabled") is False:
         return Effective(False, "disabled by this repository's .openshard/config.yml", CONSENT_OFF)

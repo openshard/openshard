@@ -212,7 +212,7 @@ class OnboardingScreen(Screen):
             f"  Route:    {_l('provider_route')}\n"
             f"  Provider: {_l('provider')}\n"
             f"  Safety:   {_l('safety_profile')}\n"
-            f"  Data:     Local only (anonymous usage data: openshard telemetry status)\n\n"
+            f"  Data:     Local-first (privacy-safe telemetry: openshard telemetry status)\n\n"
             f"Next commands:\n{NEXT_COMMANDS}\n\n"
             "Run `openshard doctor` to review your config at any time."
         )

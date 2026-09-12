@@ -158,10 +158,28 @@ def _telemetry_line(status: dict) -> str:
     """The one-line consent statement shown by ``openshard setup``/``doctor``."""
     if status.get("enabled"):
         return (
-            "on — anonymous usage & reliability data only. Never code, prompts,\n"
-            "                 file names, repo names or receipts. Off: openshard telemetry off"
+            "on — privacy-safe usage & reliability data only (counts, versions,\n"
+            "                 timings, error categories). Never code, prompts, file names,\n"
+            "                 repo names or receipts. Richer development data: off.\n"
+            "                 Turn off any time: openshard telemetry off"
         )
     return f"off ({status.get('reason', 'off')})"
+
+
+def _telemetry_status_for_agents() -> dict:
+    """``_telemetry_status`` plus the human notice a machine-readable setup must surface.
+
+    ``openshard setup --json`` / ``--agent`` are read by an agent, not a
+    person, so the result carries the same notice a person would have seen
+    and tells the agent to show it to its owner.
+    """
+    from openshard.telemetry.state import AGENT_NOTICE_INSTRUCTION, PRIVACY_NOTICE
+
+    return {
+        **_telemetry_status(),
+        "privacy_notice": PRIVACY_NOTICE,
+        "agent_instruction": AGENT_NOTICE_INSTRUCTION,
+    }
 
 
 @click.group(invoke_without_command=True)
@@ -494,7 +512,7 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
             "codex": agent_statuses["codex"].to_dict(),
             "opencode": agent_statuses["opencode"].to_dict(),
             "cursor": agent_statuses["cursor"].to_dict(),
-            "telemetry": _telemetry_status(),
+            "telemetry": _telemetry_status_for_agents(),
             "next_actions": [
                 "openshard env --json",
                 'openshard run "explain this repo"',
@@ -516,21 +534,22 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
 
     result = run_setup(repo_path=repo_path)
 
-    if not as_json:
-        # A person is reading this: the "Help improve OpenShard" notice is
-        # part of the output rendered below, so an undecided consent becomes
-        # on now (before this command's own events are recorded). --json /
-        # --agent output is read by machines and never decides for a person.
-        try:
-            from openshard.telemetry.state import consent_after_notice
+    # Setup has run, so basic telemetry defaults on now (before this
+    # command's own events are recorded): a person sees the notice in the
+    # output rendered below, and an agent gets the same notice in the JSON
+    # result with an instruction to show it to its owner. A decision already
+    # made is never overridden, and nothing is recorded while
+    # OPENSHARD_TELEMETRY=off, DO_NOT_TRACK or a CI variable is set.
+    try:
+        from openshard.telemetry.state import consent_after_notice
 
-            consent_after_notice(source="setup")
-        except Exception:
-            pass
+        consent_after_notice(source="setup")
+    except Exception:
+        pass
     _telemetry_after_setup(result)
 
     if as_json:
-        click.echo(json.dumps({**result.to_dict(), "telemetry": _telemetry_status()}, indent=2))
+        click.echo(json.dumps({**result.to_dict(), "telemetry": _telemetry_status_for_agents()}, indent=2))
         if result.readiness == "not_ready":
             raise SystemExit(1)
         return
@@ -6098,12 +6117,14 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
 
 @cli.group("telemetry")
 def telemetry_group() -> None:
-    """"Help improve OpenShard": anonymous usage and reliability data (docs/telemetry.md).
+    """"Help improve OpenShard": privacy-safe usage and reliability data (docs/telemetry.md).
 
-    On by default after the notice shown by `openshard setup`. What is
-    sent is a closed schema of counts, versions, timings and category
-    values -- never code, prompts, file names, repository names, secrets or
-    receipt contents. `openshard telemetry sample` shows the exact queued
+    Basic telemetry is on by default after `openshard setup` (a person sees
+    the notice; `--json`/`--agent` results carry it for the agent to show
+    its owner). What is sent is a closed schema of counts, versions,
+    timings and category values -- never code, prompts, file names,
+    repository names, secrets or receipt contents. Richer development data
+    is a separate future level and stays off. `openshard telemetry sample` shows the exact queued
     events; `off` stops it; OPENSHARD_TELEMETRY=off, DO_NOT_TRACK=1, a CI
     environment, or `telemetry: {enabled: false}` in a repository's
     .openshard/config.yml also stop it.
@@ -6119,6 +6140,7 @@ def _render_telemetry_status(doc: dict) -> None:
     click.echo(f"  endpoint:        {doc.get('endpoint') or '(none: nothing is sent)'}")
     click.echo(f"  queued events:   {doc.get('queued', 0)}"
                + ("  (sending paused after a failure; retried later)" if doc.get("in_backoff") else ""))
+    click.echo("  richer dev data: off (reserved; not collected)")
     click.echo("  never sent:      code, prompts, file names, repository names, secrets, receipt contents")
     click.echo("  change:          openshard telemetry on | off | reset | sample   (docs/telemetry.md)")
 
@@ -6127,7 +6149,7 @@ def _render_telemetry_status(doc: dict) -> None:
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 @_telemetry_command("telemetry.status")
 def telemetry_status(as_json: bool) -> None:
-    """Show whether anonymous usage data is being shared, and why or why not."""
+    """Show whether privacy-safe usage data is being shared, and why or why not."""
     doc = _telemetry_status()
     if as_json:
         click.echo(json.dumps(doc, indent=2))

@@ -1,6 +1,6 @@
 # Telemetry ("Help improve OpenShard")
 
-OpenShard can share a small amount of anonymous usage and reliability data
+OpenShard shares a small amount of privacy-safe usage and reliability data
 so we can tell whether it works, which agents people use it with, and where
 it fails. This page is the complete contract: what is collected, what is
 never collected, how to see it, and how to turn it off.
@@ -10,10 +10,21 @@ The short version:
 - Only counts, versions, timings and fixed category values are sent. The
   schema has no free-text field, so code, prompts, file names, repository
   names, secrets and receipt contents cannot be sent even by mistake.
-- It is on after you have seen the notice (`openshard setup` or the
-  onboarding flow) and off the moment you say so: `openshard telemetry off`.
+- Basic telemetry is on by default once setup has run, whether a person ran
+  `openshard setup` (or the onboarding flow) or an agent ran
+  `openshard setup --json`. A person sees the notice in the output; an
+  agent receives it in the JSON result and is told to show it to its owner.
+- It is off the moment you say so (`openshard telemetry off`), and always
+  off in CI, under `DO_NOT_TRACK`, or with `OPENSHARD_TELEMETRY=off`.
+- Richer development data is a separate, future level and is off. Nothing
+  in this version can turn it on.
 - `openshard telemetry sample` shows you the exact events waiting to leave
   your machine, verbatim.
+
+"Privacy-safe" is a deliberate choice of words: the data is not claimed to
+be anonymous. Events carry a random installation id, so they are
+pseudonymous (events from one install can be grouped), but the id is never
+derived from, or sent with, anything that identifies you or your machine.
 
 ## What is collected
 
@@ -85,28 +96,58 @@ be sent, so you can check this yourself at any time.
 ## Installation id
 
 `installation_id` is a random uuid4 minted the first time telemetry state is
-created. It is stored user-globally in `telemetry.json` under your OpenShard
-home (`~/.openshard`, or `OPENSHARD_HOME`), never inside a repository, and it
-is never derived from a username, hostname, email, MAC address or repository
+created. It is a pseudonymous token, not an identity. It is stored
+user-globally in `telemetry.json` under your OpenShard home (`~/.openshard`,
+or `OPENSHARD_HOME`), never inside a repository, and it is never derived from a username, hostname, email, MAC address or repository
 path. `openshard telemetry reset` mints a new one and keeps your consent
 choice.
 
 ## Default behaviour and consent
 
-Consent has three states, kept in the same `telemetry.json`:
+Consent for basic telemetry has three states, kept in the same
+`telemetry.json`:
 
-- `unset` -- you have not seen the notice yet. Nothing is sent. An install
-  that predates telemetry stays here, silent, until you next run
-  `openshard setup` or the onboarding flow.
-- `on` -- you saw the "Help improve OpenShard" notice in `openshard setup`
-  or the onboarding flow and continued past it, or ran
-  `openshard telemetry on`. Events are queued and sent.
+- `unset` -- setup has not run yet. Nothing is sent. An install that
+  predates telemetry stays here, silent, until setup next runs.
+- `on` -- setup ran and the notice was shown or returned (see below), or you
+  ran `openshard telemetry on`. Events are queued and sent.
 - `off` -- you ran `openshard telemetry off`. Nothing is queued or sent, and
   anything still queued is discarded.
 
-Seeing the notice turns an `unset` consent on; it never overrides a decision
-already made. `openshard setup --json` and `openshard setup --agent` are read
-by machines and never decide for a person, so they leave consent `unset`.
+Setup turns an `unset` consent on; it never overrides a decision already
+made. Both kinds of setup do this:
+
+- **Human setup**: `openshard setup` and the onboarding flow show the
+  "Help improve OpenShard" notice in their output.
+- **Agent-driven setup**: `openshard setup --json` returns the same notice
+  in its result, as `telemetry.privacy_notice`, with
+  `telemetry.agent_instruction` telling the calling agent to show it to its
+  owner verbatim. The agent does not get to hide it. The notice reads:
+
+  > OpenShard is set up and ready. Basic privacy-safe product telemetry is
+  > enabled by default. It sends usage and reliability data such as counts,
+  > versions, timings and error categories, not code, prompts, file names,
+  > repository names or receipt contents. Disable it anytime with
+  > `openshard telemetry off`. Richer development data remains off.
+
+`openshard setup --agent` is a read-only status snapshot: it makes no
+changes, so it never decides, but its result carries the same
+`privacy_notice` and `agent_instruction`.
+
+No decision is recorded while an environment kill-switch is active. Running
+setup with `CI`, `GITHUB_ACTIONS` or `GITLAB_CI` set, with `DO_NOT_TRACK`
+set, or with `OPENSHARD_TELEMETRY=off` leaves consent `unset` and telemetry
+off: a CI runner or an opted-out shell seeing the notice is not a person
+opting in.
+
+### Richer development data
+
+`telemetry.json` also has a `richer` field, reserved for a future, separate
+"share richer development data" level. It is always `off`: no command,
+environment variable, config key or hand edit of the file can turn it on in
+this version, and the event names reserved for that level are rejected by
+the schema. When it exists it will be its own opt-in, never folded into the
+basic default.
 
 ### Turning it off
 
@@ -121,7 +162,8 @@ Any one of these disables telemetry, and none of them can enable it:
 | `telemetry: {enabled: false}` in a repository's `.openshard/config.yml` | everyone working in that repository |
 
 `openshard telemetry status` shows the effective state and which of these
-rules, if any, is turning it off.
+rules, if any, is turning it off. `openshard telemetry off` takes effect
+immediately: consent is recorded as `off` and the queue is discarded.
 
 ## How events leave the machine
 
@@ -160,7 +202,8 @@ openshard telemetry sample [--limit]  print the queued events verbatim
 ```
 
 `openshard setup` and `openshard doctor` also show the current state on one
-line.
+line, and `openshard setup --json` / `--agent` include it, with the notice,
+under `telemetry`.
 
 ## Changing the schema
 
