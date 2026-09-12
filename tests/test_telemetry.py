@@ -90,6 +90,30 @@ class TestState:
         with pytest.raises(ValueError):
             state.set_consent("maybe", source="cli", env=env)
 
+    @pytest.mark.parametrize("extra", [
+        {"OPENSHARD_TELEMETRY": "off"}, {"DO_NOT_TRACK": "1"},
+        {"CI": "true"}, {"GITHUB_ACTIONS": "true"}, {"GITLAB_CI": "true"},
+    ])
+    def test_notice_records_no_decision_while_a_kill_switch_is_active(self, env, extra):
+        killed = {**env, **extra}
+        assert state.environment_disables(killed) is not None
+        assert state.consent_after_notice(source="setup", env=killed).improve == "unset"
+        assert state.load_state(env).improve == "unset"
+        assert state.effective_status(env=killed, repo_config={}).enabled is False
+        # Without the kill-switch the same notice turns it on; an agent env is not a kill-switch.
+        assert state.environment_disables({**env, "OPENSHARD_AGENT": "1", "CI": "false"}) is None
+        assert state.consent_after_notice(source="setup", env=env).improve == "on"
+
+    def test_richer_is_reserved_and_always_off(self, env, home):
+        st = state.consent_after_notice(source="setup", env=env)
+        assert st.improve == "on" and st.richer == "off"
+        data = json.loads((home / "telemetry.json").read_text(encoding="utf-8"))
+        data["richer"] = "on"  # a hand-edited file cannot turn it on either
+        (home / "telemetry.json").write_text(json.dumps(data), encoding="utf-8")
+        assert state.load_state(env).richer == "off"
+        state.set_consent("on", source="cli", env=env)
+        assert json.loads((home / "telemetry.json").read_text(encoding="utf-8"))["richer"] == "off"
+
     def test_reset_mints_a_new_id_and_keeps_consent(self, env):
         before = _on(env)
         after = state.reset_installation_id(env)
