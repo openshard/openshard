@@ -126,10 +126,12 @@ class TestSetupNotice:
         assert state.load_state() is None
         with patch("shutil.which", return_value=None):
             out = CliRunner().invoke(cli, ["setup", "--yes", "--repo-path", str(repo)])
-        assert "Improve OpenShard: on" in out.output
+        assert "Improve OpenShard: on" in out.output and "privacy-safe" in out.output
+        assert "anonymous" not in out.output.lower()
         assert "Never code, prompts" in out.output and "openshard telemetry off" in out.output
+        assert "Richer development data: off" in out.output
         st = state.load_state()
-        assert st is not None and st.improve == "on" and st.improve_source == "setup"
+        assert st is not None and st.improve == "on" and st.improve_source == "setup" and st.richer == "off"
         events = _drain(telemetry_on)
         assert "setup.completed" in _types(events) and "telemetry.consent_changed" in _types(events)
         setup_ev = next(e for e in events if e["event_type"] == "setup.completed")
@@ -138,17 +140,83 @@ class TestSetupNotice:
         assert invoked["properties"]["command"] == "setup" and invoked["properties"]["result"] == "error"
         _assert_clean(events)
 
-    def test_machine_setup_never_decides_for_a_person(self, telemetry_on, repo):
+    def test_agent_setup_turns_basic_telemetry_on_and_returns_the_human_notice(self, telemetry_on, repo):
+        """``setup --json`` is agent-driven setup: same default as a person, plus the notice to surface."""
+        assert state.load_state() is None
+        with patch("shutil.which", return_value=None):
+            out = CliRunner().invoke(cli, ["setup", "--yes", "--json", "--repo-path", str(repo)])
+        data = json.loads(out.output)
+        tel = data["telemetry"]
+        assert tel["enabled"] is True and tel["consent"] == "on" and tel["consent_source"] == "setup"
+        assert tel["privacy_notice"] == state.PRIVACY_NOTICE
+        assert "privacy-safe" in tel["privacy_notice"] and "anonymous" not in tel["privacy_notice"].lower()
+        assert "openshard telemetry off" in tel["privacy_notice"]
+        assert "Richer development data remains off" in tel["privacy_notice"]
+        assert "owner" in tel["agent_instruction"] and "privacy_notice" in tel["agent_instruction"]
+        st = state.load_state()
+        assert st is not None and st.improve == "on" and st.richer == "off"
+        events = _drain(telemetry_on)
+        assert "setup.completed" in _types(events) and "telemetry.consent_changed" in _types(events)
+        _assert_clean(events)
+
+    def test_agent_status_snapshot_is_read_only_but_carries_the_notice(self, telemetry_on, repo):
+        """``setup --agent`` makes no changes, so it never decides; the notice still travels with it."""
+        with patch("shutil.which", return_value=None):
+            out = CliRunner().invoke(cli, ["setup", "--agent", "--repo-path", str(repo)])
+        tel = json.loads(out.output)["telemetry"]
+        assert tel["consent"] == "unset" and tel["enabled"] is False
+        assert tel["privacy_notice"] == state.PRIVACY_NOTICE and tel["agent_instruction"]
+        assert state.load_state() is None or state.load_state().improve == "unset"
+        assert _drain(telemetry_on) == []  # nothing is emitted while consent is unset
+
+    @pytest.mark.parametrize("var", ["CI", "GITHUB_ACTIONS", "GITLAB_CI"])
+    def test_ci_agent_setup_stays_off_and_records_no_decision(self, telemetry_on, repo, monkeypatch, var):
+        monkeypatch.setenv(var, "true")
+        with patch("shutil.which", return_value=None):
+            out = CliRunner().invoke(cli, ["setup", "--yes", "--json", "--repo-path", str(repo)])
+        tel = json.loads(out.output)["telemetry"]
+        assert tel["enabled"] is False and tel["reason"] == "disabled in CI" and tel["consent"] == "unset"
+        assert tel["privacy_notice"]  # the notice is still returned; it just is not in effect here
+        assert state.load_state() is None or state.load_state().improve == "unset"
+        assert _drain(telemetry_on) == []
+
+    def test_do_not_track_keeps_setup_off(self, telemetry_on, repo, monkeypatch):
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
         runner = CliRunner()
         with patch("shutil.which", return_value=None):
-            out = runner.invoke(cli, ["setup", "--yes", "--json", "--repo-path", str(repo)])
-        data = json.loads(out.output)
-        assert data["telemetry"]["consent"] == "unset" and data["telemetry"]["enabled"] is False
+            human = runner.invoke(cli, ["setup", "--yes", "--repo-path", str(repo)])
+            data = json.loads(runner.invoke(cli, ["setup", "--yes", "--json", "--repo-path", str(repo)]).output)
+        assert "Improve OpenShard: off (disabled by DO_NOT_TRACK)" in human.output
+        assert data["telemetry"]["enabled"] is False and data["telemetry"]["reason"] == "disabled by DO_NOT_TRACK"
         assert state.load_state() is None or state.load_state().improve == "unset"
+        assert _drain(telemetry_on) == []
+
+    def test_openshard_telemetry_off_env_keeps_setup_off(self, telemetry_on, repo, monkeypatch):
+        monkeypatch.setenv("OPENSHARD_TELEMETRY", "off")
+        runner = CliRunner()
         with patch("shutil.which", return_value=None):
-            out = runner.invoke(cli, ["setup", "--agent", "--json", "--repo-path", str(repo)])
-        assert json.loads(out.output)["telemetry"]["consent"] == "unset"
-        assert _drain(telemetry_on) == []  # nothing is emitted while consent is unset
+            human = runner.invoke(cli, ["setup", "--yes", "--repo-path", str(repo)])
+            data = json.loads(runner.invoke(cli, ["setup", "--yes", "--json", "--repo-path", str(repo)]).output)
+        assert "Improve OpenShard: off (disabled by OPENSHARD_TELEMETRY)" in human.output
+        assert data["telemetry"]["enabled"] is False
+        assert data["telemetry"]["reason"] == "disabled by OPENSHARD_TELEMETRY"
+        assert state.load_state() is None or state.load_state().improve == "unset"
+        assert _drain(telemetry_on) == []
+
+    def test_richer_development_data_stays_off_after_setup(self, telemetry_on, repo):
+        runner = CliRunner()
+        with patch("shutil.which", return_value=None):
+            runner.invoke(cli, ["setup", "--yes", "--repo-path", str(repo)])
+            runner.invoke(cli, ["setup", "--yes", "--json", "--repo-path", str(repo)])
+        st = state.load_state()
+        assert st.improve == "on" and st.richer == "off" and st.to_dict()["richer"] == "off"
+        # The richer layer's event names are rejected even with basic telemetry on.
+        from openshard.telemetry.schema import RESERVED_EVENT_TYPES
+
+        for name in RESERVED_EVENT_TYPES:
+            assert client.emit(name, anything=1) is False
+        assert "richer dev data: off" in runner.invoke(cli, ["telemetry", "status"]).output
+        assert all(e["consent_level"] == "improve" for e in _drain(telemetry_on))
 
     def test_setup_shows_off_when_decided_off(self, telemetry_on, repo):
         state.set_consent("off", source="cli")
@@ -311,8 +379,9 @@ class TestOnboardingConsent:
         from openshard.onboarding.choices import LOCAL_FIRST_NOTICE
         from openshard.tui.onboarding_screen import OnboardingScreen
 
-        assert "does not send telemetry" not in LOCAL_FIRST_NOTICE
+        assert "does not send telemetry" not in LOCAL_FIRST_NOTICE and "anonymous" not in LOCAL_FIRST_NOTICE
         assert "Help improve OpenShard: on" in LOCAL_FIRST_NOTICE and "openshard telemetry off" in LOCAL_FIRST_NOTICE
+        assert "Richer development data stays off" in LOCAL_FIRST_NOTICE
         _record_telemetry_notice_seen()
         assert state.load_state().improve == "on" and state.load_state().improve_source == "onboarding"
         state.set_consent("off", source="cli")

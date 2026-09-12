@@ -83,9 +83,10 @@ LOCAL_FIRST_NOTICE = (
     "  API keys stay in your environment variables.\n"
     "  Your code, prompts, file names, repository names and receipt contents\n"
     "  are never sent anywhere, and your runs are never used for training.\n\n"
-    "  Help improve OpenShard: on. OpenShard shares anonymous usage and\n"
+    "  Help improve OpenShard: on. OpenShard shares privacy-safe usage and\n"
     "  reliability data (counts, versions, timings, errors by category) to\n"
-    "  improve the product. Turn it off any time:  openshard telemetry off\n"
+    "  improve the product. Richer development data stays off.\n"
+    "  Turn it off any time:  openshard telemetry off\n"
     "  Details: docs/telemetry.md"
 )
 
