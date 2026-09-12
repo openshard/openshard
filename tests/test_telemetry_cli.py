@@ -374,6 +374,23 @@ class TestEmissionFromCapture:
 
 
 class TestOnboardingConsent:
+    def test_finish_screen_reports_receipts_local_and_the_effective_telemetry_state(self, telemetry_on, monkeypatch):
+        from openshard.cli.ui.onboarding import _finish_summary_body, _record_telemetry_notice_seen
+        from openshard.onboarding.choices import telemetry_summary_line
+
+        body = _finish_summary_body({"executor": "native"})
+        assert "Receipts:  Local only" in body and "Data:     Local only" not in body
+        assert "Telemetry: Off (not yet asked" in body  # the finish screen is truthful before the notice
+        _record_telemetry_notice_seen()
+        body = _finish_summary_body({"executor": "native"})
+        assert "Telemetry: Basic product telemetry - On (openshard telemetry off to disable)" in body
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        assert telemetry_summary_line() == "Off (disabled by DO_NOT_TRACK)"
+        monkeypatch.delenv("DO_NOT_TRACK")
+        state.set_consent("off", source="cli")
+        assert telemetry_summary_line().startswith("Off (off")
+        assert "anonymous" not in body.lower() and "local only" not in telemetry_summary_line().lower()
+
     def test_cli_and_tui_notice_hooks(self, telemetry_on):
         from openshard.cli.ui.onboarding import _record_telemetry_notice_seen
         from openshard.onboarding.choices import LOCAL_FIRST_NOTICE

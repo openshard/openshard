@@ -125,7 +125,7 @@ See [docs/install.md](docs/install.md) for upgrade instructions and notes.
 
 ## Quick start with Claude Code
 
-The fastest way to get value from OpenShard is to let it quietly record the coding-agent work you already do — with Claude Code, Codex, or OpenCode, in any mix, in the same repository. No API key, account, or cloud service is needed — everything stays in the repository.
+The fastest way to get value from OpenShard is to let it quietly record the coding-agent work you already do — with Claude Code, Codex, OpenCode, or Cursor, in any mix, in the same repository. No API key, account, or cloud service is needed. Your receipts, history and code stay in the repository. The one thing that can leave your machine is basic privacy-safe product telemetry after setup: counts, versions, timings and error categories, never code, prompts, file names or receipt contents. `openshard telemetry off` disables it; see [docs/telemetry.md](docs/telemetry.md).
 
 ```bash
 pipx install openshard   # 1. Install (once per machine)
@@ -133,7 +133,7 @@ cd my-project            # 2. Go to a git repository
 openshard setup          # 3. Set up (once per repository)
 ```
 
-`openshard setup` detects which supported agents are installed (Claude Code, Codex, OpenCode), configures each one for this repository, and ends with:
+`openshard setup` detects which supported agents are installed (Claude Code, Codex, OpenCode, Cursor), configures each one for this repository, and ends with:
 
 ```text
 OpenShard is ready. Use Claude Code normally.
@@ -527,7 +527,7 @@ Not built yet:
 * Ask Mode and Plan Mode are local deterministic v1 flows
 * Feedback advisory does not automatically change routing yet
 * Model lifecycle tags do not yet drive default routing behavior
-* Claude Code, Codex, and OpenCode capture is implemented; Cursor capture is not
+* Claude Code, Codex, OpenCode, and Cursor capture is implemented; other agents are not
 * External harness adapters are experimental and not guaranteed
 * Not a full Claude Code, Codex, Cursor, or OpenCode replacement
 
@@ -565,7 +565,7 @@ Run the task -> inspect what happened -> verify the output -> keep the receipt
 Near-term roadmap:
 
 * More real-world developer testing
-* External-agent receipt capture beyond Claude Code, Codex, and OpenCode (e.g. Cursor)
+* External-agent receipt capture beyond Claude Code, Codex, OpenCode, and Cursor
 * Better repo-aware planning
 * Stronger model/workflow ranking from real outcomes
 * More workflow packs
