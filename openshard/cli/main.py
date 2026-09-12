@@ -6133,7 +6133,7 @@ def telemetry_group() -> None:
 
 def _render_telemetry_status(doc: dict) -> None:
     click.echo(f"Help improve OpenShard: {'on' if doc.get('enabled') else 'off'} ({doc.get('reason')})")
-    click.echo(f"  consent:         {doc.get('consent')}"
+    click.echo(f"  preference:      {doc.get('consent')}"
                + (f" (set by {doc.get('consent_source')} at {doc.get('consent_decided_at')})"
                   if doc.get("consent_decided_at") else ""))
     click.echo(f"  installation id: {doc.get('installation_id') or '(none yet)'}")
