@@ -2,7 +2,7 @@
 
 All notable changes to OpenShard are documented here.
 
-## 0.4.2 - 2026-09-11
+## 0.4.2 - 2026-09-12
 
 The clean recovery release that closes the v0.4.x external-agent receipt
 chapter. It contains everything in 0.4.1, two intentional additions, and a
@@ -39,9 +39,9 @@ Releases are now built and published only from the pushed tag by the
   Evidence honesty is preserved: Cursor does not expose a tool success
   signal, cost or token counts, so a Cursor receipt records file tools as
   unknown, never claims verification, and shows cost as Not recorded.
-- **Telemetry ("Help improve OpenShard"), added intentionally.** Consent is
-  `unset` on every install and nothing is sent in that state. Basic
-  privacy-safe telemetry becomes `on` once setup has run: a person sees the
+- **Telemetry ("Help improve OpenShard"), added intentionally.** The
+  telemetry preference is `unset` on every install and nothing is sent in
+  that state. Basic privacy-safe telemetry becomes `on` once setup has run: a person sees the
   notice during `openshard setup` or the onboarding flow, and an agent
   running `openshard setup --json` gets the same notice back in the result
   (`telemetry.privacy_notice`, with `telemetry.agent_instruction` telling
