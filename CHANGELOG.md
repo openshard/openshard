@@ -40,21 +40,28 @@ Releases are now built and published only from the pushed tag by the
   signal, cost or token counts, so a Cursor receipt records file tools as
   unknown, never claims verification, and shows cost as Not recorded.
 - **Telemetry ("Help improve OpenShard"), added intentionally.** Consent is
-  `unset` on every install and nothing is sent in that state; it becomes
-  `on` only after a person sees the notice during `openshard setup` or the
-  onboarding flow (`--json`/`--agent` output never decides for a person),
-  and `openshard telemetry off` turns it off. What can be sent is a closed,
+  `unset` on every install and nothing is sent in that state. Basic
+  privacy-safe telemetry becomes `on` once setup has run: a person sees the
+  notice during `openshard setup` or the onboarding flow, and an agent
+  running `openshard setup --json` gets the same notice back in the result
+  (`telemetry.privacy_notice`, with `telemetry.agent_instruction` telling
+  it to show the notice to its owner verbatim), so agent-driven setup can
+  never hide it from the person. `openshard setup --agent` stays a
+  read-only snapshot that never decides. `openshard telemetry off` turns it
+  off immediately and discards the queue. What can be sent is a closed,
   versioned schema of usage and reliability data only: counts, durations,
   the OpenShard version, coarse OS/architecture/Python, fixed category
-  values and a random per-install id. Prompts, source code, diffs,
-  repository names, paths, file names, commands, model slugs, secrets,
-  receipt contents and any other free text are excluded by construction --
-  the schema has no free-text field. `OPENSHARD_TELEMETRY=off`,
-  `DO_NOT_TRACK=1`, a CI environment, or `telemetry: {enabled: false}` in a
-  repository's `.openshard/config.yml` also turn it off, and nothing can
-  turn it on except the person. `openshard telemetry status|on|off|reset|
-  sample`; `sample` prints the exact queued events verbatim. The complete
-  contract is in [docs/telemetry.md](docs/telemetry.md).
+  values and a random pseudonymous per-install id. Prompts, source code,
+  diffs, repository names, paths, file names, commands, model slugs,
+  secrets, receipt contents and any other free text are excluded by
+  construction -- the schema has no free-text field. `OPENSHARD_TELEMETRY=off`,
+  `DO_NOT_TRACK=1`, a CI environment (`CI`, `GITHUB_ACTIONS`, `GITLAB_CI`),
+  or `telemetry: {enabled: false}` in a repository's `.openshard/config.yml`
+  also turn it off, and setup records no decision while one of those is
+  set. Richer development data is a separate future level and stays off.
+  `openshard telemetry status|on|off|reset|sample`; `sample` prints the
+  exact queued events verbatim. The complete contract is in
+  [docs/telemetry.md](docs/telemetry.md).
 
 ### Fixed
 
