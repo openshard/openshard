@@ -99,13 +99,13 @@ be sent, so you can check this yourself at any time.
 created. It is a pseudonymous token, not an identity. It is stored
 user-globally in `telemetry.json` under your OpenShard home (`~/.openshard`,
 or `OPENSHARD_HOME`), never inside a repository, and it is never derived from a username, hostname, email, MAC address or repository
-path. `openshard telemetry reset` mints a new one and keeps your consent
-choice.
+path. `openshard telemetry reset` mints a new one and keeps your telemetry
+preference.
 
-## Default behaviour and consent
+## Default behaviour and telemetry preference
 
-Consent for basic telemetry has three states, kept in the same
-`telemetry.json`:
+The basic telemetry preference has three states, kept in the same
+`telemetry.json` (the file and the JSON output call the field `consent`):
 
 - `unset` -- setup has not run yet. Nothing is sent. An install that
   predates telemetry stays here, silent, until setup next runs.
@@ -114,8 +114,8 @@ Consent for basic telemetry has three states, kept in the same
 - `off` -- you ran `openshard telemetry off`. Nothing is queued or sent, and
   anything still queued is discarded.
 
-Setup turns an `unset` consent on; it never overrides a decision already
-made. Both kinds of setup do this:
+Setup turns an `unset` preference on; it never overrides a preference
+already set. Both kinds of setup do this:
 
 - **Human setup**: `openshard setup` and the onboarding flow show the
   "Help improve OpenShard" notice in their output.
@@ -136,8 +136,8 @@ changes, so it never decides, but its result carries the same
 
 No decision is recorded while an environment kill-switch is active. Running
 setup with `CI`, `GITHUB_ACTIONS` or `GITLAB_CI` set, with `DO_NOT_TRACK`
-set, or with `OPENSHARD_TELEMETRY=off` leaves consent `unset` and telemetry
-off: a CI runner or an opted-out shell seeing the notice is not a person
+set, or with `OPENSHARD_TELEMETRY=off` leaves the preference `unset` and
+telemetry off: a CI runner or an opted-out shell seeing the notice is not a person
 opting in.
 
 ### Richer development data
@@ -163,12 +163,12 @@ Any one of these disables telemetry, and none of them can enable it:
 
 `openshard telemetry status` shows the effective state and which of these
 rules, if any, is turning it off. `openshard telemetry off` takes effect
-immediately: consent is recorded as `off` and the queue is discarded.
+immediately: the preference is recorded as `off` and the queue is discarded.
 
 ## How events leave the machine
 
 - `emit` never blocks, never prints and never raises. When telemetry is off
-  it returns after an environment/consent check. When on, the event is
+  it returns after an environment/preference check. When on, the event is
   validated and appended to a local queue file (`telemetry.queue.jsonl` in
   your OpenShard home).
 - The queue is bounded: at most 500 events or 256 KiB, dropping the oldest
@@ -194,10 +194,10 @@ sent.
 ## Commands
 
 ```
-openshard telemetry status [--json]   effective state, consent, installation id, endpoint, queue size
+openshard telemetry status [--json]   effective state, preference, installation id, endpoint, queue size
 openshard telemetry on                turn on for this user
 openshard telemetry off               turn off for this user and discard the queue
-openshard telemetry reset             mint a new installation id (consent unchanged)
+openshard telemetry reset             mint a new installation id (preference unchanged)
 openshard telemetry sample [--limit]  print the queued events verbatim
 ```
 
@@ -212,5 +212,5 @@ Adding an event type or property is a deliberate change: add it to
 changes, and update the tables on this page in the same change. The names
 under `RESERVED_EVENT_TYPES` (`attempt.outcome`, `context.retrieval.outcome`,
 `developer.correction`, `agent.handoff`) belong to a future, separate,
-off-by-default "richer development data" consent and are rejected by the
+off-by-default "richer development data" preference and are rejected by the
 current schema.

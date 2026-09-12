@@ -90,6 +90,24 @@ LOCAL_FIRST_NOTICE = (
     "  Details: docs/telemetry.md"
 )
 
+def telemetry_summary_line() -> str:
+    """The finish screen's telemetry line, reflecting the effective state right now.
+
+    "On" only when events would actually be sent; otherwise the reason it
+    is off (a preference, a kill-switch, CI, or a repository config). Never
+    raises: if telemetry cannot be inspected the line says so.
+    """
+    try:
+        from openshard.telemetry.client import status
+
+        doc = status()
+    except Exception:
+        return "Off (unavailable)"
+    if doc.get("enabled"):
+        return "Basic product telemetry - On (openshard telemetry off to disable)"
+    return f"Off ({doc.get('reason', 'off')})"
+
+
 NEXT_COMMANDS = (
     "  openshard demo shard\n"
     "  openshard env\n"
