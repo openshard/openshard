@@ -96,42 +96,34 @@ Record whether the result was accepted, partial, rejected, or needs more work.
 
 ---
 
-## Quick install
-
-**Recommended: `pipx`**
-
-```bash
-# Install pipx first if you don't have it: brew install pipx  or  pip install pipx
-pipx install openshard
-openshard tui
-```
-
-**Alternative: `uv`**
-
-```bash
-uv tool install openshard
-openshard tui
-```
-
-**Upgrade later:**
-
-```bash
-pipx upgrade openshard
-```
-
-See [docs/install.md](docs/install.md) for upgrade instructions and notes.
-
----
-
-## Quick start with Claude Code
+## Getting started
 
 The fastest way to get value from OpenShard is to let it quietly record the coding-agent work you already do — with Claude Code, Codex, OpenCode, or Cursor, in any mix, in the same repository. No API key, account, or cloud service is needed. Your receipts, history and code stay in the repository. The one thing that can leave your machine is basic privacy-safe product telemetry after setup: counts, versions, timings and error categories, never code, prompts, file names or receipt contents. `openshard telemetry off` disables it; see [docs/telemetry.md](docs/telemetry.md).
 
 ```bash
-pipx install openshard   # 1. Install (once per machine)
+pip install openshard   # 1. Install (once per machine)
 cd my-project            # 2. Go to a git repository
 openshard setup          # 3. Set up (once per repository)
+# 4. Use Claude Code, Codex, OpenCode, or Cursor normally
+openshard last           # 5. See the receipt for what just happened
 ```
+
+<details>
+<summary>Alternative installers (<code>pipx</code>, <code>uv</code>)</summary>
+
+```bash
+# pipx keeps OpenShard in its own isolated environment
+pipx install openshard
+
+# uv
+uv tool install openshard
+```
+
+Upgrade later with `pipx upgrade openshard` (or `pip install -U openshard`). See [docs/install.md](docs/install.md) for details.
+
+</details>
+
+---
 
 `openshard setup` detects which supported agents are installed (Claude Code, Codex, OpenCode, Cursor), configures each one for this repository, and ends with:
 
@@ -144,11 +136,9 @@ Next steps:
   3. Run `openshard last` to see the captured Shard receipt.
 ```
 
-That is the whole loop: use Claude Code as you normally would, then look at what OpenShard captured. You never have to trust that it is "working in the background" -- four commands show exactly what it knows, locally and offline:
+That is the whole loop: use Claude Code as you normally would, then look at what OpenShard captured. You never have to trust that it is "working in the background" -- these commands show exactly what it knows, locally and offline:
 
 ```bash
-openshard setup
-# use Claude Code normally
 openshard last                    # What just happened? The newest receipt: task, agent, model, cost, files, checks
 openshard history                 # Recent work: a compact newest-first list of Shards for this repository
 openshard context "add caching"   # What OpenShard would surface to an agent for this task, and why each item matched
@@ -370,102 +360,13 @@ Workflow packs make common review patterns repeatable without forcing users to r
 ---
 
 ## Command reference
-Set up and check Claude Code capture:
 
-```bash
-openshard setup                                    # Configure Claude Code capture for this repo (safe to re-run)
-openshard setup --json                             # Same, with a machine-readable result
-openshard setup --agent --json                     # Read-only status snapshot; never writes (CI/agents)
-openshard doctor                                   # Health check: repo, history, Claude Code, MCP, hooks, enrichment
-openshard mcp install claude                       # Lower-level: MCP server + hooks + status line only
-openshard mcp uninstall claude                     # Remove OpenShard's Claude Code config; history is never deleted
-```
-Most developers who want the interactive experience should start with the TUI:
-
-```bash
-openshard tui                                      # Launch the OpenShard terminal UI
-```
-Run tasks:
-
-```bash
-openshard run "Review this repo for risks"         # Run a task through OpenShard from the shell
-openshard run --workflow native "Fix this bug"     # Run using the native workflow path
-```
-Inspect what OpenShard captured (local, offline, works from any subdirectory of the repo):
-
-```bash
-openshard last                                     # Show the latest run summary
-openshard last --more                              # Show the expanded Shard receipt
-openshard last --full                              # Show full stored/debug details
-openshard history                                  # Recent Shards for this repo, newest first
-openshard history --limit 20 --json                # Same, more rows, machine-readable
-openshard context "fix the flaky auth test"        # What relevant_context would give an agent, and why
-openshard context --text "fix the flaky auth test" # Just the block an agent would receive
-openshard stats                                    # Counts over recorded Shards (agents, models, checks, est. cost)
-openshard stats completeness                       # Receipt completeness heuristic
-openshard stats failures                           # Failure categories over recent runs
-```
-Reflect and export:
-
-```bash
-openshard reflect last                             # Advisory reflection on the last run (local, no model calls)
-openshard pr comment                               # Generate a GitHub-ready PR comment from the last run
-openshard pr comment --output pr-comment.md        # Write the PR comment to a file
-```
-Record feedback:
-
-```bash
-openshard feedback accept                          # Mark the latest run as accepted
-openshard feedback reject --reason "..."           # Mark the latest run as rejected
-openshard feedback retry --reason "..."            # Mark the latest run as needing a retry
-openshard feedback note "kept as-is"                # Add a free-text note
-```
-Infer local session signals:
-
-```bash
-openshard session infer                            # Infer local behavioural/session signals from run history
-```
-Workflow packs:
-
-```bash
-openshard packs list                               # List available workflow packs
-openshard packs show production-iac-hardening      # Show details for a workflow pack
-openshard packs prompt production-iac-hardening    # Print the pack prompt
-```
-Model registry and policy:
-
-```bash
-openshard models list                              # List registered models
-openshard models role reasoning                    # Show reasoning-capable models
-openshard models role cheap_control                # Show low-cost/control models
-openshard models mode ask                          # Show Ask Mode model policy
-openshard models mode plan                         # Show Plan Mode model policy
-```
-Local evals:
-
-```bash
-openshard eval list                                # List eval suites
-openshard eval validate --suite basic              # Validate an eval suite
-openshard eval run --suite basic                   # Run an eval suite
-openshard eval report                              # Show latest eval report
-openshard eval compare                             # Compare models by eval results
-openshard eval stats                               # Show eval stats
-```
-Useful TUI commands:
-
-```text
-/ask what models do you support?                   # Ask OpenShard product/model questions
-/plan review this repo for production readiness    # Generate a local plan without writing files
-/packs                                             # List workflow packs inside the TUI
-/pack production-iac-hardening                     # Load a workflow pack inside the TUI
-/last                                              # Show the latest run
-/last more                                         # Show expanded run details
-/last full                                         # Show full debug/audit details
-/feedback accepted                                 # Record feedback for the latest run
-/clear                                             # Clear the output panel
-/quit                                              # Exit the TUI
-```
-After a run completes, the TUI shows command hints for `openshard reflect last` and `openshard pr comment`.
+The beginner flow is just `openshard setup` and `openshard last` (above). For
+everything else -- running tasks directly, workflow packs, model registry
+inspection, evals, feedback, TUI slash commands -- see
+[docs/cli-reference.md](docs/cli-reference.md), or run `openshard --help`
+(commands are grouped: Getting Started, Receipts, Diagnostics, Integrations,
+Advanced) and `openshard <command> --help` for any command.
 
 ---
 

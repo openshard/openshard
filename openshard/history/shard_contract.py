@@ -1242,11 +1242,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     lines.append(_row(model_label, model_value))
     if receipt.duration_seconds is not None:
         lines.append(_row("Duration", f"{receipt.duration_seconds:.1f}s"))
-    lines += [
-        _row("Risk", receipt.risk),
-        _row("Sandbox", receipt.sandbox),
-        _row("Changed", file_str),
-    ]
+    lines.append(_row("Changed", file_str))
     if receipt.files_detail:
         lines.append(f"{_INDENT}Files")
         for _fd in receipt.files_detail[:10]:
@@ -1267,6 +1263,8 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
             lines.append(f"{_INDENT}  {tool} × {count}")
     lines += [
         _row("Checks", receipt.checks_display),
+        _row("Risk", receipt.risk),
+        _row("Sandbox", receipt.sandbox),
         _row("Approval", receipt.approval),
         _row("Cost", receipt.cost_display),
     ]
@@ -1651,6 +1649,37 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
             lines.append(f"{_INDENT}  +{len(receipt.evidence_capsules) - _ec_cap} more")
         lines.append("")
 
+    lines.append(f"{_INDENT}CHANGES")
+    file_str = f"{receipt.files_changed} file{'s' if receipt.files_changed != 1 else ''}"
+    if receipt.diff_added is not None and receipt.diff_removed is not None:
+        file_str += f" changed (+{receipt.diff_added} / -{receipt.diff_removed})"
+    elif receipt.files_changed > 0:
+        file_str += " changed"
+    lines.append(f"{_INDENT}{file_str}")
+    for _fd in receipt.files_detail[:10]:
+        if isinstance(_fd, dict) and "path" in _fd:
+            lines.append(f"{_INDENT}  {_fd['path']}")
+    if len(receipt.files_detail) > 10:
+        lines.append(f"{_INDENT}  (+{len(receipt.files_detail) - 10} more)")
+    lines.append("")
+
+    lines.append(f"{_INDENT}COST")
+    lines.append(f"{_INDENT}{receipt.cost_display}")
+    if receipt.tokens_input is not None or receipt.tokens_output is not None:
+        _tok_in = _format_token_count(receipt.tokens_input or 0)
+        _tok_out = _format_token_count(receipt.tokens_output or 0)
+        lines.append(_row("Tokens", f"{_tok_in} input / {_tok_out} output"))
+    lines.append("")
+
+    lines.append(f"{_INDENT}CHECKS")
+    if receipt.check_results:
+        for cr in receipt.check_results:
+            _cr = cr if detail == "full" else _truncate_compact(cr, 90)
+            lines.append(f"{_INDENT}  {_cr}")
+    else:
+        lines.append(f"{_INDENT}{receipt.checks_display}")
+    lines.append("")
+
     lines.append(f"{_INDENT}POLICY")
     lines.append(_row("Risk", receipt.risk))
     lines.append(_row("Sandbox", receipt.sandbox))
@@ -1686,15 +1715,6 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         if len(receipt.policy_decisions) > _pd_cap:
             lines.append(f"{_INDENT}  +{len(receipt.policy_decisions) - _pd_cap} more")
         lines.append("")
-
-    lines.append(f"{_INDENT}CHECKS")
-    if receipt.check_results:
-        for cr in receipt.check_results:
-            _cr = cr if detail == "full" else _truncate_compact(cr, 90)
-            lines.append(f"{_INDENT}  {_cr}")
-    else:
-        lines.append(f"{_INDENT}{receipt.checks_display}")
-    lines.append("")
 
     if receipt.execution_spans:
         lines.append(f"{_INDENT}EXECUTION SPANS")
@@ -1784,28 +1804,6 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         if _sig_parts:
             lines.append(f"{_INDENT}  Signals         {', '.join(_sig_parts)}")
         lines.append("")
-
-    lines.append(f"{_INDENT}CHANGES")
-    file_str = f"{receipt.files_changed} file{'s' if receipt.files_changed != 1 else ''}"
-    if receipt.diff_added is not None and receipt.diff_removed is not None:
-        file_str += f" changed (+{receipt.diff_added} / -{receipt.diff_removed})"
-    elif receipt.files_changed > 0:
-        file_str += " changed"
-    lines.append(f"{_INDENT}{file_str}")
-    for _fd in receipt.files_detail[:10]:
-        if isinstance(_fd, dict) and "path" in _fd:
-            lines.append(f"{_INDENT}  {_fd['path']}")
-    if len(receipt.files_detail) > 10:
-        lines.append(f"{_INDENT}  (+{len(receipt.files_detail) - 10} more)")
-    lines.append("")
-
-    lines.append(f"{_INDENT}COST")
-    lines.append(f"{_INDENT}{receipt.cost_display}")
-    if receipt.tokens_input is not None or receipt.tokens_output is not None:
-        _tok_in = _format_token_count(receipt.tokens_input or 0)
-        _tok_out = _format_token_count(receipt.tokens_output or 0)
-        lines.append(_row("Tokens", f"{_tok_in} input / {_tok_out} output"))
-    lines.append("")
 
     lines += [_SEP, f"{_INDENT}RECEIPT"]
     lines.append(_row("Shard ID", receipt.shard_id))

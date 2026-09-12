@@ -808,7 +808,7 @@ class TestShardFindings(unittest.TestCase):
         self.assertEqual(findings[0].message, "Missing lifecycle rules on storage buckets")
 
     # ------------------------------------------------------------------ #
-    # Test 5: Findings appear after CHECKS and before CHANGES             #
+    # Test 5: Findings appear after CHANGES and CHECKS                     #
     # ------------------------------------------------------------------ #
     def test_findings_section_position_in_full_receipt(self):
         entry = {
@@ -818,11 +818,11 @@ class TestShardFindings(unittest.TestCase):
         }
         receipt = build_shard_receipt(entry)
         out = render_full_shard_receipt(receipt)
+        changes_idx = out.index("CHANGES")
         checks_idx = out.index("CHECKS")
         findings_idx = out.index("FINDINGS")
-        changes_idx = out.index("CHANGES")
+        self.assertLess(changes_idx, checks_idx)
         self.assertLess(checks_idx, findings_idx)
-        self.assertLess(findings_idx, changes_idx)
 
     # ------------------------------------------------------------------ #
     # Test 6: Findings grouped in severity order (Critical before High)   #
@@ -1123,10 +1123,10 @@ class TestContextProvenancePolish(unittest.TestCase):
         out = render_full_shard_receipt(receipt)
         idx = {s: out.index(s) for s in ["CONTEXT", "FILE EVIDENCE", "POLICY", "CHECKS", "FINDINGS", "CHANGES"]}
         self.assertLess(idx["CONTEXT"], idx["FILE EVIDENCE"])
-        self.assertLess(idx["FILE EVIDENCE"], idx["POLICY"])
-        self.assertLess(idx["POLICY"], idx["CHECKS"])
-        self.assertLess(idx["CHECKS"], idx["FINDINGS"])
-        self.assertLess(idx["FINDINGS"], idx["CHANGES"])
+        self.assertLess(idx["FILE EVIDENCE"], idx["CHANGES"])
+        self.assertLess(idx["CHANGES"], idx["CHECKS"])
+        self.assertLess(idx["CHECKS"], idx["POLICY"])
+        self.assertLess(idx["POLICY"], idx["FINDINGS"])
 
 
 class TestFileEvidence(unittest.TestCase):
@@ -1349,10 +1349,10 @@ class TestCompactReceiptExactFormat(unittest.TestCase):
             "  Task        Review Terraform networking change",
             "  Executor    OpenShard Native",
             "  Model       claude-sonnet-4-5",
-            "  Risk        High",
-            "  Sandbox     On",
             "  Changed     0 files",
             "  Checks      3/3 passed",
+            "  Risk        High",
+            "  Sandbox     On",
             "  Approval    Required → Granted",
             "  Cost        $0.0041",
             "  Result      3 risks flagged",
