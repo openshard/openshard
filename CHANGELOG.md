@@ -2,6 +2,35 @@
 
 All notable changes to OpenShard are documented here.
 
+## 0.4.3 - 2026-09-12
+
+A DX cleanup pass around the external-agent receipt loop. No commands were
+removed or renamed, and no behaviour changed beyond presentation.
+
+### Changed
+
+- `openshard --help` now groups commands into sections (Getting Started,
+  Receipts, Diagnostics, Integrations, Advanced) instead of one flat
+  alphabetical list. Every command still runs exactly as before; this only
+  changes what `--help` shows.
+- `openshard setup` is now the one command the README and grouped help point
+  new users at. `openshard init` (a lower-level onboarding-preferences
+  command) keeps working unchanged; its `--help` text now points to `setup`.
+- Terminal receipt output (`openshard last --more/--full`, `openshard report`,
+  etc.) reorders existing fields so files/changes and checks appear before
+  the policy/approval block, matching the target receipt layout. No fields
+  were added, removed, or renamed; `--json` output is unchanged.
+- README now leads with the beginner flow (`pip install openshard` ->
+  `openshard setup` -> use your coding agent -> `openshard last`); the full
+  command-by-command reference moved to `docs/cli-reference.md`.
+
+### Internal
+
+- `hooks claude|codex|cursor|claude-status`, `capture serve`, and
+  `shard verify last` are now hidden from `--help` (they are automation
+  entrypoints and a documented alias, respectively). They remain fully
+  callable and documented in `docs/cli-reference.md`.
+
 ## 0.4.2 - 2026-09-12
 
 The clean recovery release that closes the v0.4.x external-agent receipt

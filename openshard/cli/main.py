@@ -182,7 +182,49 @@ def _telemetry_status_for_agents() -> dict:
     }
 
 
-@click.group(invoke_without_command=True)
+_HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
+    ("Getting Started", ("setup", "doctor")),
+    ("Receipts", ("last", "history", "report", "context")),
+    ("Diagnostics", ("env", "stats", "trust", "proof")),
+    ("Integrations", ("mcp", "capture", "import", "wrap", "adapters", "telemetry")),
+    # Everything else (run, plan, models, roster, eval, packs, ...) falls
+    # into "Advanced" below rather than needing to be named here.
+]
+
+
+class OpenShardRootGroup(click.Group):
+    """Root Click group whose ``--help`` buckets commands into named sections.
+
+    Purely presentational: command names, options, and behaviour are
+    unchanged; this only changes how the flat command list is displayed.
+    Any hidden command is skipped exactly as Click's default formatter would.
+    """
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        visible: dict[str, click.Command] = {}
+        for name in self.list_commands(ctx):
+            cmd = self.get_command(ctx, name)
+            if cmd is None or cmd.hidden:
+                continue
+            visible[name] = cmd
+
+        sectioned = {name for _, names in _HELP_SECTIONS for name in names}
+        remaining = sorted(set(visible) - sectioned)
+        sections = [*_HELP_SECTIONS, ("Advanced", tuple(remaining))]
+
+        limit = formatter.width - 6 - max((len(n) for n in visible), default=0)
+        for title, names in sections:
+            rows = [
+                (name, visible[name].get_short_help_str(limit))
+                for name in names
+                if name in visible
+            ]
+            if rows:
+                with formatter.section(title):
+                    formatter.write_dl(rows)
+
+
+@click.group(cls=OpenShardRootGroup, invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="openshard")
 @click.pass_context
 def cli(ctx: click.Context):
@@ -2298,7 +2340,7 @@ def shard_group() -> None:
     """Inspect Shard proof records."""
 
 
-@shard_group.group("verify")
+@shard_group.group("verify", hidden=True)
 def shard_verify_group() -> None:
     """Verify a Shard proof record against the Shard Proof Contract."""
 
@@ -2644,7 +2686,7 @@ def mcp_uninstall_claude(repo_path: Path | None, as_json: bool) -> None:
         raise SystemExit(1)
 
 
-@cli.group("hooks")
+@cli.group("hooks", hidden=True)
 def hooks_group() -> None:
     """Non-interactive hook entrypoints for coding agents (installed by `openshard mcp install claude`)."""
 
@@ -2909,7 +2951,7 @@ def capture_stop(as_json: bool) -> None:
         raise SystemExit(1)
 
 
-@capture_group.command("serve")
+@capture_group.command("serve", hidden=True)
 @click.option("--port", "port", type=int, default=None, help="Bind this port instead of the default range.")
 @click.option("--idle-timeout", "idle_timeout", type=float, default=None,
               help="Exit after this many seconds without a request (default: 4 hours; 0 = never).")
@@ -5857,7 +5899,12 @@ def _echo_warnings_next_steps(state: dict) -> None:
 @click.option("--force", is_flag=True, default=False, help="Overwrite existing onboarding without prompting.")
 def init(as_json: bool, assume_yes: bool, mode: str | None, provider: str | None,
          model_mode: str | None, output_mode: str | None, force: bool) -> None:
-    """Set up OpenShard for first use (interactive, or --yes / --json)."""
+    """Set OpenShard's onboarding preferences (mode/provider/model-mode/output-mode).
+
+    Kept for compatibility and scripting. New users should run `openshard
+    setup` instead -- it covers this same onboarding step plus coding-agent
+    capture configuration in one command.
+    """
     from openshard.config import onboarding as ob
 
     mode_keys = [k for k, _, _ in ob.MODES]
