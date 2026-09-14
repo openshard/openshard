@@ -18,6 +18,7 @@ from openshard.history.shard import (
     build_shard,
     derive_shard_identity,
 )
+from openshard.history.shard_hash import verify_shard_hash
 from openshard.run.timeline import normalize_timeline
 
 _PROFILE_TO_STRATEGY: dict[str, str] = {
@@ -522,6 +523,11 @@ class ShardReceipt:
     # {"status": full|partial|incomplete|unknown, "reasons": [...], "derived": bool}.
     # Always populated by build_shard_receipt; None only for hand-built receipts.
     capture_completeness: dict | None = None
+    # v0.4.4 integrity: "Matches (content hash)" | "Mismatch (content hash)" |
+    # "Not recorded" from history/shard_hash.verify_shard_hash. An unkeyed
+    # content hash is tamper-evidence for the stored record only; it never
+    # proves who wrote it, and the wording never says "signed".
+    integrity: str = "Not recorded"
     # v0.4.4 change provenance (adapters/claude_hooks._classify_changed_files):
     # counts per attribution plus the session-start baseline summary. None for
     # records written before attribution existed. ``files_detail`` holds the
@@ -681,6 +687,25 @@ def _changes_summary(block: dict | None) -> dict | None:
     }
 
 
+def integrity_display(entry: dict) -> str:
+    """``Matches (content hash)`` / ``Mismatch (content hash)`` / ``Not recorded``.
+
+    Technically precise on purpose: the hash is an unkeyed SHA-256 over the
+    stored record (``shard_hash``). "Matches" means the record's content is
+    what it was when the hash was written; it says nothing about authorship.
+    """
+    try:
+        result = verify_shard_hash(entry)
+    except Exception:
+        return "Not recorded"
+    status = result.get("status")
+    if status == "valid":
+        return "Matches (content hash)"
+    if status == "mismatch":
+        return "Mismatch (content hash)"
+    return "Not recorded"
+
+
 def changed_files_display(receipt: ShardReceipt) -> str:
     """``2 files (1 agent-reported, 1 git-observed)`` when provenance is known, else ``2 files``."""
     n = receipt.files_changed
@@ -754,9 +779,9 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     plan = entry.get("plan") or {}
     risk_raw = form_factor.get("risk_level") or plan.get("risk")
     risk = _RISK_LABELS.get(str(risk_raw).lower(), str(risk_raw).capitalize()) if risk_raw else "Not recorded"
-    # Mirror the live-receipt review task risk floor: review runs are always at least High
-    if entry.get("is_review_task") and risk in ("Not recorded", "Low"):
-        risk = "High"
+    # v0.4.4: the receipt shows the risk that was *recorded*. The former
+    # display-time rule that raised a review task's missing/Low risk to High
+    # silently turned one fact into another; a Receipt never does that.
 
     write_path = entry.get("write_path")
     ff_read_only = form_factor.get("read_only")
@@ -1121,15 +1146,18 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     _capture_for_status: dict = entry.get("capture") or {}
     _capture_for_status = _capture_for_status if isinstance(_capture_for_status, dict) else {}
     _task_status_raw = _capture_for_status.get("task_status")
+    # v0.4.4 wording: a Stop hook proves the agent's *turn* ended, not that
+    # the task is complete or its result correct. Never "Completed" alone.
     _task_completion_display = (
         {
-            "turn_completed": "Completed",
+            "turn_completed": "Turn completed (unverified)",
             "in_progress": "In progress",
-            "ended_no_turn": "Ended (no turn observed)",
+            "ended_no_turn": "Session ended (no turn observed)",
         }.get(_task_status_raw)
         if isinstance(_task_status_raw, str)
         else None
     )
+    _integrity_val = integrity_display(entry)
 
     # Token usage -- only ever surfaced on the receipt when a producer stamped
     # an explicit provenance token alongside the counts (see build_hook_entry).
@@ -1226,6 +1254,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         cost_provenance=cost_provenance,
         receipt_id=_receipt_id_val,
         capture_completeness=_capture_completeness_val,
+        integrity=_integrity_val,
         changes=_changes_summary(_changes_block),
         files_excluded=_files_excluded,
         shard=build_shard(
@@ -1391,6 +1420,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
             lines.append(f"{_INDENT}  {tool} × {count}")
     lines += [
         _row("Checks", receipt.checks_display),
+        _row("Integrity", receipt.integrity),
         _row("Risk", receipt.risk),
         _row("Sandbox", receipt.sandbox),
         _row("Approval", receipt.approval),
@@ -1951,6 +1981,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append(_row("Receipt ID", receipt.receipt_id))
     lines.append(_row("Shard ID", receipt.shard_id))
     lines.append(_row("Created", _fmt_timestamp(receipt.created_at)))
+    lines.append(_row("Integrity", receipt.integrity))
     lines.append(_row("Result", receipt.result))
     lines.append(_SEP)
 

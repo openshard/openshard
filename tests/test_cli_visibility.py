@@ -169,7 +169,7 @@ class TestLast:
         out = _ok(_invoke(["last"], repo))
         assert "$0.42 est." in out
         assert "14k input / 2.5k output" in out
-        assert "Completed" in out
+        assert "Turn completed (unverified)" in out
         assert "Evidence" in out
         assert "api/middleware.py" in out
 
@@ -212,7 +212,7 @@ class TestHistory:
         from openshard.cli.visibility import _DOT
 
         assert f" {_DOT} Passed {_DOT} " in out and f" {_DOT} Failed {_DOT} " in out  # verified outcomes
-        assert "Completed" in out and "In progress" in out        # turn status (not verification)
+        assert "Turn completed (unverified)" in out and "In progress" in out  # turn status (not verification)
         assert "checks: not run" in out
         assert "checks: 1 failed" in out
         assert "$0.0123 est." in out and "$0.42 est." in out
@@ -238,7 +238,7 @@ class TestHistory:
         assert full["cost"] == "$0.42 est." and full["cost_is_estimate"] is True
         assert full["cost_provenance"] == "provider_reported"
         assert full["tokens_input"] == 14000 and full["tokens_provenance"] == "provider_reported"
-        assert full["task_completion"] == "Completed"
+        assert full["task_completion"] == "Turn completed (unverified)"
         unknown = rows["shard-hooks-2"]
         assert unknown["model"] == "Unknown" and unknown["cost"] == "Not recorded"
         assert unknown["cost_usd"] is None and unknown["tokens_input"] is None
@@ -383,7 +383,7 @@ class TestStats:
         assert "full 2" in out and "partial 2" in out
         assert "Claude Sonnet 4.6 2" in out and "DeepSeek V4 Pro 1" in out and "unknown 1" in out
         assert "passed 1" in out and "failed 1" in out and "not run 2" in out
-        assert "completed 1" in out and "in progress 1" in out and "not verification" in out
+        assert "turn completed (unverified) 1" in out and "in progress 1" in out and "not verification" in out
         assert "$0.44 estimated across 3 Shards (1 agent-reported); not recorded for 1" in out
         assert "14k input / 2.5k output (+30k cache read)" in out
         assert "provider-reported for 1 Shard" in out

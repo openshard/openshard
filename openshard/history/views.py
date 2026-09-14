@@ -112,6 +112,7 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         "shard_id": receipt.shard_id,
         "receipt_id": receipt.receipt_id,
         "capture_completeness": _completeness_to_dict(receipt.capture_completeness),
+        "integrity": receipt.integrity,
         "run_id": receipt.run_id,
         "attempt_number": receipt.attempt_number,
         "created_at": receipt.created_at,

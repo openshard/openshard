@@ -1080,9 +1080,9 @@ class TestTaskCompletion:
         assert entry["capture"]["session_end_observed"] is False
         assert entry["capture"]["task_status"] == "turn_completed"
         receipt = build_shard_receipt(entry)
-        assert receipt.task_completion == "Completed"
+        assert receipt.task_completion == "Turn completed (unverified)"
         out = render_compact_shard_receipt(receipt)
-        assert "Completed" in out
+        assert "Turn completed (unverified)" in out
 
     def test_in_progress_before_any_stop(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")
@@ -1111,14 +1111,14 @@ class TestTaskCompletion:
         entry = _session(repo, with_tools=False, end=False)
         receipt = build_shard_receipt(entry)
         assert receipt.checks_display == "Not run"
-        assert receipt.task_completion == "Completed"  # completion != verification
+        assert receipt.task_completion == "Turn completed (unverified)"  # completion != verification
 
     def test_checks_attempted_but_unverified_when_turn_completed(self, repo: Path):
         # with_tools=True (default) drives a "python -m pytest -q" Bash call.
         entry = _session(repo, end=False)
         receipt = build_shard_receipt(entry)
         assert receipt.checks_display == "Attempted (unverified)"
-        assert receipt.task_completion == "Completed"  # completion != verification
+        assert receipt.task_completion == "Turn completed (unverified)"  # completion != verification
 
 
 # ---------------------------------------------------------------------------

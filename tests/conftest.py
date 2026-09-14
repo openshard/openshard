@@ -1,9 +1,16 @@
 """Shared pytest fixtures for the OpenShard test suite."""
 from __future__ import annotations
 
+import socket
 from unittest.mock import patch
 
 import pytest
+
+
+def _free_loopback_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +29,18 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path_factory.mktemp("openshard-home")))
     monkeypatch.setenv("OPENSHARD_CAPTURE_DISABLE", "1")
     monkeypatch.delenv("OPENSHARD_CAPTURE_PORT", raising=False)
+    # v0.4.4: the *default* port is repointed at a free ephemeral port too.
+    # Tests that re-enable the service (no state file yet, or a state file
+    # for a port that has since closed) fall back to DEFAULT_PORT, and with
+    # the real value that is the developer's own live capture service --
+    # `ensure_service` would report it "running", `stop_service` would stop
+    # it. No test may depend on whether a real OpenShard service is up.
+    from openshard.adapters import claude_capture_client as _client
+    from openshard.adapters import claude_capture_service as _service
+
+    _isolated_default = _free_loopback_port()
+    monkeypatch.setattr(_client, "DEFAULT_PORT", _isolated_default)
+    monkeypatch.setattr(_service, "DEFAULT_PORT", _isolated_default)
     # Telemetry (0.4.2) is off for the whole suite and never flushes on a
     # background thread, so no test can send anything or leak a late flush
     # into another test's RecordingTransport. tests/test_telemetry*.py turn
