@@ -96,6 +96,7 @@ from openshard.adapters.claude_hooks import (
     HookPayload,
     ReducedHookPayload,
     StatusPayload,
+    _snapshot_baseline,
     apply_capture_loss,
     apply_reduced_hook,
     apply_status_payload,
@@ -457,6 +458,12 @@ class CaptureRecorder:
         if reduced is None:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
+        if payload.event == EVENT_SESSION_START:
+            # v0.4.4: anchor change attribution at the moment the session was
+            # observed, not at replay time (the worker may lag behind the
+            # agent's first edits). SessionStart is a command hook for every
+            # agent that has one, so this one-off git call is off the hot path.
+            reduced.baseline = _snapshot_baseline(root, _now())
         key = queue_key(reduced.session_id, reduced.agent)
         line = {"id": self._next_id(), "kind": "hook", "at": _now(), "data": reduced.to_dict()}
         self._queue_line(root, key, line)

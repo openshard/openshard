@@ -91,6 +91,7 @@ def _parse_git_changed_files(
     repo_path: Path,
     base_ref: str = "HEAD",
     include_untracked: bool = False,
+    max_files: int = _MAX_FILES,
 ) -> tuple[list[dict], str]:
     """Return changed files from ``git diff <base_ref> --name-status`` in *repo_path*.
 
@@ -143,7 +144,7 @@ def _parse_git_changed_files(
     files: list[dict] = []
     seen: set[str] = set()
     for line in lines:
-        if len(files) >= _MAX_FILES:
+        if len(files) >= max_files:
             break
         parts = line.split("\t", maxsplit=1)
         if len(parts) < 2:

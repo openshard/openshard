@@ -299,7 +299,7 @@ class TestGetReceipt:
             "shard_id", "receipt_id", "capture_completeness", "run_id", "attempt_number", "created_at", "task_short",
             "task_full", "agent", "origin", "capture_depth", "model",
             "model_stages", "strategy", "risk", "sandbox", "files_changed",
-            "files", "diff_added", "diff_removed", "checks", "status",
+            "files", "changes", "files_excluded", "diff_added", "diff_removed", "checks", "status",
             "verification_status", "verification_reason",
             "verification_returncode", "verification_duration_seconds",
             "approval", "cost", "result", "repo", "branch", "git_state",

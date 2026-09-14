@@ -345,7 +345,8 @@ class TestCanonicalRecord:
         entry = _lines(root)[0]
         assert entry["files_source"] == "cursor_hook_reported"
         assert entry["files_detail"] == [
-            {"path": "made.py", "change_type": "update", "summary": "reported by Cursor hook"}
+            {"path": "made.py", "change_type": "update", "summary": "reported by Cursor hook",
+             "attribution": "agent_reported", "pre_existing": False}
         ]
         fe = [e for e in entry["events"] if e["event_type"] == "file.changed"]
         assert fe and fe[0]["evidence"] == "agent_reported" and fe[0]["metadata"]["evidence_source"] == "cursor_hook"

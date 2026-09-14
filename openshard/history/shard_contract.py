@@ -522,6 +522,13 @@ class ShardReceipt:
     # {"status": full|partial|incomplete|unknown, "reasons": [...], "derived": bool}.
     # Always populated by build_shard_receipt; None only for hand-built receipts.
     capture_completeness: dict | None = None
+    # v0.4.4 change provenance (adapters/claude_hooks._classify_changed_files):
+    # counts per attribution plus the session-start baseline summary. None for
+    # records written before attribution existed. ``files_detail`` holds the
+    # changes counted as this run's; ``files_excluded`` the pre-existing /
+    # other-session changes git also showed, kept for provenance only.
+    changes: dict | None = None
+    files_excluded: list[dict] = field(default_factory=list)
 
 
 def _verification_from_osn_contract(
@@ -637,6 +644,83 @@ def _workspace_folder_name(raw: object) -> str | None:
     if "\\" in value:
         return PureWindowsPath(value).name or None
     return Path(value).name or None
+
+
+_EXCLUDED_ATTRIBUTIONS = frozenset({"pre_existing", "other_session"})
+_ATTRIBUTION_TAGS: dict[str, str] = {
+    "agent_reported": "agent-reported",
+    "git_observed": "git-observed",
+    "pre_existing": "pre-existing",
+    "other_session": "other session",
+}
+
+
+def _changes_summary(block: dict | None) -> dict | None:
+    """The bounded, path-free ``changes`` block for a receipt (None for old records)."""
+    if not isinstance(block, dict):
+        return None
+
+    def _n(key: str) -> int:
+        value = block.get(key)
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    _baseline_raw = block.get("baseline")
+    baseline: dict = _baseline_raw if isinstance(_baseline_raw, dict) else {}
+    return {
+        "agent_reported": _n("agent_reported"),
+        "git_observed": _n("git_observed"),
+        "pre_existing_excluded": _n("pre_existing_excluded"),
+        "other_session_excluded": _n("other_session_excluded"),
+        "files_truncated": bool(block.get("files_truncated")),
+        "baseline": {
+            "source": str(baseline.get("source") or "not_available"),
+            "at": baseline.get("at") if isinstance(baseline.get("at"), str) else None,
+            "dirty_paths": int(baseline.get("dirty_paths") or 0),
+            "truncated": bool(baseline.get("truncated")),
+        },
+    }
+
+
+def changed_files_display(receipt: ShardReceipt) -> str:
+    """``2 files (1 agent-reported, 1 git-observed)`` when provenance is known, else ``2 files``."""
+    n = receipt.files_changed
+    text = f"{n} file{'s' if n != 1 else ''}"
+    changes = receipt.changes
+    if changes and n > 0:
+        parts = []
+        if changes.get("agent_reported"):
+            parts.append(f"{changes['agent_reported']} agent-reported")
+        if changes.get("git_observed"):
+            parts.append(f"{changes['git_observed']} git-observed, actor not established")
+        if parts:
+            text += f" ({'; '.join(parts)})"
+    return text
+
+
+def excluded_changes_rows(receipt: ShardReceipt) -> list[str]:
+    """Rows for changes git showed that are *not* counted as this run's work."""
+    rows: list[str] = []
+    changes = receipt.changes
+    if not changes:
+        return rows
+    pre = changes.get("pre_existing_excluded") or 0
+    other = changes.get("other_session_excluded") or 0
+    if pre:
+        rows.append(_row("Pre-existing", f"{pre} excluded (changed before the session)"))
+    if other:
+        rows.append(_row("Other session", f"{other} excluded (reported by another agent session)"))
+    return rows
+
+
+def _file_line(fd: dict) -> str | None:
+    path = fd.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    change_type = fd.get("change_type")
+    letter = _FILE_CHANGE_LETTERS.get(change_type, "M") if isinstance(change_type, str) else "M"
+    attribution = fd.get("attribution")
+    tag = _ATTRIBUTION_TAGS.get(attribution) if isinstance(attribution, str) else None
+    return f"{_INDENT}  {letter} {path}" + (f"  {_EM} {tag}" if tag else "")
 
 
 def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
@@ -808,8 +892,11 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     else:
         result = _result_display(summary) or "Not recorded"
 
-    files_detail_raw = entry.get("files_detail") or []
-    files_touched = [f["path"] for f in files_detail_raw if isinstance(f, dict) and "path" in f]
+    _files_all = [f for f in (entry.get("files_detail") or []) if isinstance(f, dict)]
+    files_detail_raw = [f for f in _files_all if f.get("attribution") not in _EXCLUDED_ATTRIBUTIONS]
+    _files_excluded = [f for f in _files_all if f.get("attribution") in _EXCLUDED_ATTRIBUTIONS]
+    _changes_block = entry.get("changes") if isinstance(entry.get("changes"), dict) else None
+    files_touched = [f["path"] for f in files_detail_raw if "path" in f]
 
     diff_review = entry.get("diff_review") or {}
     if not files_touched:
@@ -1139,6 +1226,8 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         cost_provenance=cost_provenance,
         receipt_id=_receipt_id_val,
         capture_completeness=_capture_completeness_val,
+        changes=_changes_summary(_changes_block),
+        files_excluded=_files_excluded,
         shard=build_shard(
             entry,
             shard_id=_shard_id_val,
@@ -1266,7 +1355,6 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
 
 def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     """Render a bordered, column-aligned RECEIPT block. Pure, no I/O."""
-    file_str = f"{receipt.files_changed} file{'s' if receipt.files_changed != 1 else ''}"
     model_label, model_value = _models_label_and_value(receipt)
 
     lines = [
@@ -1284,18 +1372,16 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     lines.append(_row(model_label, model_value))
     if receipt.duration_seconds is not None:
         lines.append(_row("Duration", f"{receipt.duration_seconds:.1f}s"))
-    lines.append(_row("Changed", file_str))
+    lines.append(_row("Changed", changed_files_display(receipt)))
+    lines += excluded_changes_rows(receipt)
     if receipt.files_detail:
         lines.append(f"{_INDENT}Files")
         for _fd in receipt.files_detail[:10]:
             if not isinstance(_fd, dict):
                 continue
-            path = _fd.get("path")
-            if not isinstance(path, str) or not path:
-                continue
-            change_type = _fd.get("change_type")
-            letter = _FILE_CHANGE_LETTERS.get(change_type, "M") if isinstance(change_type, str) else "M"
-            lines.append(f"{_INDENT}  {letter} {path}")
+            _line = _file_line(_fd)
+            if _line:
+                lines.append(_line)
         if len(receipt.files_detail) > 10:
             lines.append(f"{_INDENT}  +{len(receipt.files_detail) - 10} more")
     _activity = _tool_activity_counts(receipt)
@@ -1688,17 +1774,34 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append("")
 
     lines.append(f"{_INDENT}CHANGES")
-    file_str = f"{receipt.files_changed} file{'s' if receipt.files_changed != 1 else ''}"
+    file_str = changed_files_display(receipt)
     if receipt.diff_added is not None and receipt.diff_removed is not None:
         file_str += f" changed (+{receipt.diff_added} / -{receipt.diff_removed})"
-    elif receipt.files_changed > 0:
+    elif receipt.files_changed > 0 and not receipt.changes:
         file_str += " changed"
     lines.append(f"{_INDENT}{file_str}")
     for _fd in receipt.files_detail[:10]:
         if isinstance(_fd, dict) and "path" in _fd:
-            lines.append(f"{_INDENT}  {_fd['path']}")
+            _line = _file_line(_fd)
+            if _line:
+                lines.append(_line)
     if len(receipt.files_detail) > 10:
         lines.append(f"{_INDENT}  (+{len(receipt.files_detail) - 10} more)")
+    lines += excluded_changes_rows(receipt)
+    if receipt.files_excluded:
+        lines.append(f"{_INDENT}  Not counted (git showed these; not this run's work):")
+        for _fd in receipt.files_excluded[:10]:
+            _line = _file_line(_fd)
+            if _line:
+                lines.append("  " + _line)
+        if len(receipt.files_excluded) > 10:
+            lines.append(f"{_INDENT}    (+{len(receipt.files_excluded) - 10} more)")
+    if receipt.changes and receipt.changes.get("baseline", {}).get("source") == "git_status":
+        _bl = receipt.changes["baseline"]
+        _bl_text = f"{_bl.get('dirty_paths', 0)} path(s) already changed at session start"
+        if _bl.get("truncated"):
+            _bl_text += " (list truncated)"
+        lines.append(_row("Baseline", _bl_text))
     lines.append("")
 
     lines.append(f"{_INDENT}COST")

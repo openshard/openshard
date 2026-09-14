@@ -309,7 +309,8 @@ class TestCanonicalRecord:
         a, b = _lines(with_edit)[0], _lines(without)[0]
         assert a["files_source"] == "opencode_plugin_reported"
         assert a["files_detail"] == [{"path": "made.py", "change_type": "update",
-                                      "summary": "reported by OpenCode hook"}]
+                                      "summary": "reported by OpenCode hook",
+                                      "attribution": "agent_reported", "pre_existing": False}]
         assert b["files_source"] == "not_available" and b["files_detail"] == []
         for entry in (a, b):
             tool = next(e for e in entry["events"] if e["event_type"] == "tool.invoked")

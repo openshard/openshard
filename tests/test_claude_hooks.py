@@ -705,7 +705,8 @@ class TestFiles:
         entry = _runs_lines(root)[0]
         assert entry["files_source"] == "claude_hook_reported"
         assert entry["files_detail"] == [
-            {"path": "made.py", "change_type": "create", "summary": "reported by Claude Code hook"}
+            {"path": "made.py", "change_type": "create", "summary": "reported by Claude Code hook",
+             "attribution": "agent_reported", "pre_existing": False}
         ]
         fe = _events(entry, EVENT_FILE_CHANGED)[0]
         assert fe["evidence"] == EVIDENCE_AGENT_REPORTED
@@ -738,7 +739,11 @@ class TestFiles:
             {
                 "path": "evals/basic/bug_fix/fixtures/word_utils.py",
                 "change_type": "update",
-                "summary": "inferred from git diff",
+                # v0.4.4: the Edit hook (PostToolUse fires only on success) is the
+                # positive signal, so git's diff row is attributed to the agent.
+                "summary": "reported by Claude Code hook",
+                "attribution": "agent_reported",
+                "pre_existing": False,
             }
         ]
         assert entry["files_updated"] == 1
@@ -770,7 +775,8 @@ class TestFiles:
         entry = _runs_lines(root)[0]
         assert entry["files_source"] == "claude_hook_reported"
         assert entry["files_detail"] == [
-            {"path": nested_rel, "change_type": "create", "summary": "reported by Claude Code hook"}
+            {"path": nested_rel, "change_type": "create", "summary": "reported by Claude Code hook",
+             "attribution": "agent_reported", "pre_existing": False}
         ]
 
     def test_no_absolute_paths_anywhere_in_record(self, repo: Path):
