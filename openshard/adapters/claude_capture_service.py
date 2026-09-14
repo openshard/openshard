@@ -121,6 +121,9 @@ QUEUE_SUFFIX = ".queue.jsonl"
 QUARANTINE_DIRNAME = "quarantine"
 _QUARANTINE_LINE_CAP = 4096  # bytes of one damaged line kept for diagnosis
 _QUARANTINE_MAX_FILES = 200
+# Refused-request log throttle (see _Handler._reject).
+_REJECT_LOG_FIRST = 20
+_REJECT_LOG_EVERY = 100
 IDLE_TIMEOUT_SECONDS = 4 * 60 * 60
 MAX_BODY_BYTES = 16 * 1024 * 1024
 MAX_RECENT_REPOS = 50
@@ -909,7 +912,7 @@ class _Handler(BaseHTTPRequestHandler):
         # the repository root is known (record_hook/record_status) so a
         # repository-scoped capability can be matched against the right root.
         if auth.has_browser_headers(self.headers):
-            self.server.recorder._bump("rejected")
+            self._reject(path, "browser headers present")
             self._send(403, b'{"error":"browser origin refused"}')
             return
         presented = self.headers.get(auth.TOKEN_HEADER)
@@ -917,11 +920,11 @@ class _Handler(BaseHTTPRequestHandler):
         if token is None:
             # No token on disk: nothing can be authorised. The hook clients and
             # `capture start` create it; until then every POST is refused.
-            self.server.recorder._bump("rejected")
+            self._reject(path, "no capture token on disk")
             self._send(503, b'{"error":"capture token unavailable"}')
             return
         if not auth.looks_like_credential(presented):
-            self.server.recorder._bump("rejected")
+            self._reject(path, "no credential presented" if not presented else "malformed credential")
             self._send(401, b'{"error":"unauthenticated"}')
             return
         if path == client.SHUTDOWN_PATH:
@@ -961,16 +964,30 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(500, b'{"error":"record failed"}')
             return
         if action == "rejected":
+            self._reject(path, "credential does not match the token or this repository", counted=True)
             self._send(401, b'{"error":"unauthenticated"}')
             return
         self._send(200, b"{}")
+
+    def _reject(self, path: str, reason: str, *, counted: bool = False) -> None:
+        """Count a refused request and log why (path and reason only; never the credential).
+
+        Logging is throttled so a misbehaving local process cannot fill the
+        service log: the first ``_REJECT_LOG_FIRST`` refusals are logged, then
+        one in every ``_REJECT_LOG_EVERY``.
+        """
+        if not counted:
+            self.server.recorder._bump("rejected")
+        n = int(self.server.recorder.stats.get("rejected") or 0)
+        if n <= _REJECT_LOG_FIRST or n % _REJECT_LOG_EVERY == 0:
+            _log(f"refused POST {path}: {reason} (refused so far: {n})")
 
     def _handle_shutdown(self, body: bytes, presented: object, token: str) -> None:
         # Shutdown is a control action: only the capture token itself may
         # authorise it, never a repository capability and never anything
         # readable from /health.
         if auth.verify_presented(presented, token, None) != "token":
-            self.server.recorder._bump("rejected")
+            self._reject(path=client.SHUTDOWN_PATH, reason="shutdown needs the capture token")
             self._send(401, b'{"error":"unauthenticated"}')
             return
         try:
