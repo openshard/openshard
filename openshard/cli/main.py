@@ -6612,6 +6612,7 @@ def sync_group() -> None:
 
 def _sync_status_doc() -> dict:
     from openshard.sync import load_sync_state, resolve_sync_config
+    from openshard.sync.client import run_key
 
     loc = _locate_history()
     cfg = resolve_sync_config(os.environ, load_config_safe()[0])
@@ -6622,7 +6623,7 @@ def _sync_status_doc() -> dict:
     for e in entries:
         if not isinstance(e, dict):
             continue
-        key = e.get("run_id") or e.get("timestamp")
+        key = run_key(e)
         prev = pushed.get(key) if isinstance(key, str) else None
         if not prev or prev.get("content_hash") != e.get("content_hash"):
             pending += 1

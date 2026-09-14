@@ -185,9 +185,17 @@ class SyncPushSummary:
         }
 
 
-def _run_key(entry: dict) -> str | None:
+def run_key(entry: dict) -> str | None:
+    """Sync-state key for one run record: ``<shard_id>:<run_id>``.
+
+    ``run_id`` alone is a timestamp for pipeline runs and can collide across
+    Shards written in the same second; the pair is unique per attempt.
+    """
     rid = entry.get("run_id") or entry.get("timestamp")
-    return rid if isinstance(rid, str) and rid else None
+    if not isinstance(rid, str) or not rid:
+        return None
+    sid = entry.get("shard_id")
+    return f"{sid}:{rid}" if isinstance(sid, str) and sid else rid
 
 
 def push_entries(
@@ -218,7 +226,7 @@ def push_entries(
         if not isinstance(entry, dict):
             continue
         summary.considered += 1
-        key = _run_key(entry)
+        key = run_key(entry)
         content_hash = entry.get("content_hash") if isinstance(entry.get("content_hash"), str) else None
         previous = pushed.get(key) if key else None
         if not force and previous and content_hash and previous.get("content_hash") == content_hash:
