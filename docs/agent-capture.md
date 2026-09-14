@@ -1,23 +1,144 @@
-# Codex and OpenCode capture (PR12)
+# Agent capture: Claude Code, Codex, Cursor and OpenCode
 
-OpenShard records the coding-agent work you already do. Since PR12 that
-covers three agents through **one** capture path:
+OpenShard records the coding-agent work you already do. Four agents feed
+**one** capture path:
 
 ```text
 Claude Code hooks (HTTP + SessionStart command) ─┐
-Codex hooks (command)  ──────────────────────────┼──> local capture service (127.0.0.1)
-OpenCode plugin (fetch) ─────────────────────────┘        POST /hooks/{claude,codex,opencode}
-                                                               │  blocking path: validate -> translate -> reduce -> fsync queue -> 200
-                                                               ▼  background: replay through the shared fold
+Codex hooks (command)  ──────────────────────────┤
+Cursor hooks (command) ──────────────────────────┼──> local capture service (127.0.0.1, authenticated)
+OpenCode plugin (fetch) ─────────────────────────┘        POST /hooks/{claude,codex,cursor,opencode}
+                                                               │  blocking path: authenticate -> validate -> translate -> reduce -> fsync queue -> 200
+                                                               ▼  background: replay through the shared fold (undecodable lines quarantined)
                                                     canonical Events -> Run/Attempt -> Shard -> Receipt
                                                     (.openshard/runs.jsonl, one history per repository)
 ```
 
+## Trust boundary and authentication (v0.4.4)
+
+The service binds to loopback only, but loopback is not a user boundary:
+another local account, a sandboxed process or a web page's cross-origin
+`fetch` can all reach `127.0.0.1`. So every `POST` is authenticated, and
+`GET /health` -- the only open endpoint -- authorises nothing.
+
+| Credential | Where it lives | Who presents it | Authorises |
+|---|---|---|---|
+| **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, the OpenCode plugin (reads the file at delivery time), `openshard capture stop` | every endpoint, including `/shutdown` |
+| **Repository capability** -- `r1.` + HMAC-SHA256(token, normalised repo root) | the `X-OpenShard-Capture-Token` header of the Claude Code HTTP hook entries in `.claude/settings.local.json` | Claude Code's HTTP hooks (no process of ours runs, no file can be read) | hook and status events **for that repository only**; never shutdown |
+
+Rules the service enforces (`adapters/claude_capture_service.py`,
+`adapters/capture_auth.py`):
+
+* No plausible credential -> `401` before the body is parsed; nothing is
+  recorded; `stats.rejected` increments. A credential for a different
+  repository -> `401` as well.
+* `Origin` / `Referer` / `Sec-Fetch-*` present -> `403` (browser defence
+  in depth; the primary check is still the credential).
+* `/shutdown` needs the token *and* the instance id; the instance id in
+  `/health` is informational and cannot authorise anything on its own.
+* The token never appears in telemetry (the schema has no free-text
+  field), in logs, in `/health`, or in normal CLI output.
+* `openshard capture rotate-token` replaces the token and invalidates
+  every repository capability; re-run `openshard setup` in each Claude
+  Code repository.
+
+Why the capability lives in a repository-local file at all: Claude Code's
+documented HTTP hooks can send static headers or interpolate a variable
+from Claude Code's own process environment, and nothing else. The installer
+keeps that file out of git (`.git/info/exclude`) and refuses to write a
+credential into it if git tracks it. A leaked capability can only inject
+events for that one repository and cannot stop the service.
+
+**Migration.** Hooks installed before v0.4.4 carry no credential and are
+refused by an upgraded service. `openshard setup` rewrites them; a
+`SessionStart` of an upgraded OpenShard also upgrades the repository's
+hook entries itself (Claude Code snapshots hooks per session, so the fix
+applies from the next session, and the in-process fallback fold still
+records the current one). `openshard doctor` reports hooks with a missing
+or stale credential and shows the service's `refused` counters.
+
+**Agents stay fail-open.** A refused or unreachable service never blocks
+the agent: command hooks exit 0 (Cursor still receives its decision reply),
+HTTP hook failures are non-blocking in Claude Code, the OpenCode plugin
+buffers and retries. Only evidence is lost, and the loss is counted.
+
+## Change attribution (v0.4.4)
+
+Git proves the repository changed. It does not prove which process changed
+it, so the fold no longer calls every difference since session start
+"changed by the agent". At the first observed hook (SessionStart where the
+agent has one) the service snapshots the working tree (`git status
+--porcelain -z --untracked-files=all` plus blob ids, bounded to 500 paths)
+into the session's baseline. At every fold each path in the git diff is
+classified:
+
+| `attribution` | Meaning | Counted in `Changed N files`? |
+|---|---|---|
+| `agent_reported` | the agent's own positive success signal names this path (Claude `PostToolUse` success, Cursor `afterFileEdit`, OpenCode `file.edited`) | yes |
+| `git_observed` | the repository changed; no agent signal; actor not established (a human, another tool, or an agent without a success signal such as Codex) | yes, labelled as git-observed |
+| `pre_existing` | already dirty/untracked at session start and content unchanged since | **no** -- listed as excluded |
+| `other_session` | reported by another live agent session in the same repository | **no** -- listed as excluded |
+
+A pre-existing file that changed again during the session is
+`git_observed` with `pre_existing: true` (never hidden); a pre-existing
+file the agent reports editing is `agent_reported` with the same flag. A
+Codex `apply_patch` target that appears in the diff is `git_observed` with
+`agent_attempted: true` -- Codex reports the attempt, not its success.
+
+The record carries `files_detail[].attribution` and a `changes` block
+(counts, `baseline.source`, `baseline.dirty_paths`, `baseline.truncated`,
+`files_truncated`). The receipt reads `Changed  2 files (1 agent-reported;
+1 git-observed, actor not established)` with separate `Pre-existing` /
+`Other session` exclusion rows; `--full` lists the excluded files and the
+baseline. Limits: a session whose first observed hook is not a start hook
+(Cursor background agents) gets its baseline at that first hook; an
+*ended* sibling session's files become `git_observed`, never this
+session's.
+
+## Capture completeness (v0.4.4)
+
+`capture_depth` says how deep a capture could ever be (`partial` for every
+hook-observed session: OpenShard did not execute or verify). Completeness
+says what is *known to be missing*:
+
+| `capture.completeness.status` | Meaning |
+|---|---|
+| `full` | OpenShard ran the work itself; nothing known missing |
+| `partial` | observed through an integration, no known loss |
+| `incomplete` | evidence is known lost; `reasons[]` says why |
+| `unknown` | origin unknown |
+
+Reasons: `corrupt_queued_event` (a durable queue line could not be
+decoded; the bytes are kept, bounded, under
+`.openshard/claude_sessions/quarantine/` and the service counts
+`corrupt_lines`), `dropped_hook_events` (buffer cap of 200 staged events
+reached), `session_end_not_observed` (the buffer was swept after an hour
+idle without a SessionEnd), `integration_limitation`. Valid lines next to
+a corrupt one are still applied; transient I/O errors keep the retry path
+and are never counted as corruption. The receipt shows
+`Capture  Incomplete — 1 queued event could not be decoded` above the
+usual `partial — OpenShard did not execute or verify this run` line.
+Records written before v0.4.4 derive their status at read time from the
+counters they already carry and are labelled `derived`.
+
+## Identity (v0.4.4)
+
+Every new record carries `receipt_id` (`rcpt_` + 32 hex; a UUID4),
+minted at creation and safe across repositories, machines and
+organisations. `shard_id` (`shard-YYYYMMDD-NNNN`, history position) is
+unchanged and remains the grouping key for attempts. Task identity across
+retries is a separate, unsolved problem: no `task_id` exists and none is
+inferred from prompt similarity. Owner / Requested by / Approved by are not
+recorded locally and are never inferred from git config or the OS user;
+only the executing agent is known.
+
 Nothing in the fold, the Shard model, the receipt renderer, `history`/
-`context`/`relevant_context` or the MCP server was redesigned. What was
-added is the smallest thing that lets the existing fold serve three
-producers: a static agent-profile table, two translators, two installers,
-and per-agent readiness in `setup`/`doctor`.
+`context`/`relevant_context` or the MCP server was redesigned for
+multi-agent capture. What was added is the smallest thing that lets the
+existing fold serve several producers: a static agent-profile table, one
+translator and one installer per agent, and per-agent readiness in
+`setup`/`doctor`. Cursor's translator is documented in
+`adapters/cursor_hooks.py`.
 
 ## Agent identity (never inferred from the model)
 
@@ -49,7 +170,7 @@ looks every label up from the profile; it never branches on an agent name.
 | Codex `Interrupt` | `Interrupt` | `session.activity` "turn interrupted by user"; fold | directly_observed |
 | Codex `SessionEnd` / OpenCode `session.deleted` | `SessionEnd` | `run.completed` status **unknown**; fold; buffer removed | directly_observed |
 | OpenCode `message.updated` (assistant, completed) | usage report | none; provider/model, cost and tokens recorded per message id | agent_reported |
-| fold (every Stop/SessionEnd, throttled tool hooks) | — | `file.changed` from `git diff` against the session-start HEAD | git_observed |
+| fold (every Stop/SessionEnd, throttled tool hooks) | — | `file.changed` from `git diff` against the session-start HEAD, each with `metadata.attribution` (see *Change attribution*) | git_observed |
 
 Codex's `apply_patch` names its files in patch headers (`*** Add File:`,
 `*** Update File:`, `*** Delete File:`, `*** Move to:`); only those header

@@ -104,7 +104,7 @@ class TestBaselineAndAttribution:
         receipt = build_shard_receipt(entry)
         assert receipt.files_changed == 1
         rendered = render_compact_shard_receipt(receipt)
-        assert "Pre-existing" in rendered and "1 excluded" in rendered
+        assert "Excluded" in rendered and "1 pre-existing" in rendered
         # The event stream does not claim README.md as this session's change.
         changed_targets = [e["target"] for e in entry["events"] if e["event_type"] == "file.changed"]
         assert "README.md" not in changed_targets
@@ -224,4 +224,4 @@ class TestCompatibility:
         assert receipt.files_changed == 1
         rendered = render_compact_shard_receipt(receipt)
         assert "1 file" in rendered
-        assert "Pre-existing" not in rendered
+        assert "Excluded" not in rendered

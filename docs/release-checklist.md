@@ -29,6 +29,13 @@ On a branch, in one pull request to `main`:
 - [ ] CI green (ruff, mypy, full pytest on Linux and Windows).
 - [ ] Manual smoke tests done where the change needs them (a fresh install
       with each affected agent; see `docs/demo-smoke-checklist.md`).
+- [ ] Capture upgrade smoke: with a pre-upgrade `.claude/settings.local.json`
+      (no `X-OpenShard-Capture-Token` header), run `openshard setup` and
+      confirm `doctor` no longer reports "no valid capture credential", then
+      complete one Claude Code turn and confirm `openshard last` shows the
+      session with `Capture  partial` (not `Incomplete`) and a `Receipt ID`.
+- [ ] `openshard capture status` shows `refused: 0 unauthenticated` after a
+      normal session; a non-zero count means some hook still lacks a credential.
 
 After the pull request is merged:
 

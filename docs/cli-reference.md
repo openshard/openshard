@@ -16,6 +16,7 @@ openshard setup --json                             # Same, with a machine-readab
 openshard setup --agent --json                     # Read-only status snapshot; never writes (CI/agents)
 openshard doctor                                   # Health check: repo, history, Claude Code, MCP, hooks, enrichment
 openshard mcp install claude                       # Lower-level: MCP server + hooks + status line only
+openshard capture rotate-token                     # Replace the local capture token (then re-run setup per repo)
 openshard mcp uninstall claude                     # Remove OpenShard's Claude Code config; history is never deleted
 ```
 

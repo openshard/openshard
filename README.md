@@ -159,7 +159,7 @@ openshard capture uninstall opencode  # Remove OpenShard's OpenCode plugin (hist
 
 If `setup` reports a limitation — most commonly a custom Claude Code status line already in place — it tells you exactly what stays unavailable (model/cost/token data on receipts) and the one step to enable it. It never replaces your existing settings.
 
-Under the hood, `setup` registers a local, read-only MCP server so Claude can look up your history, installs Claude Code hooks that record sessions as Shards, and configures the status line for receipt enrichment. For Codex it merges its hooks into the project-local `.codex/hooks.json`; for OpenCode it writes a small plugin to `.opencode/plugins/openshard.ts`. All three feed the same local capture service and the same `.openshard/runs.jsonl`, so `openshard history`, `openshard context` and `relevant_context` see work from every agent together, each Shard labelled with the agent that did it (see [docs/agent-capture.md](docs/agent-capture.md)). You do not need to understand any of that to use it; the lower-level `openshard mcp install claude` and `openshard capture install codex|opencode` commands remain available if you want them.
+Under the hood, `setup` registers a local, read-only MCP server so Claude can look up your history, installs Claude Code hooks that record sessions as Shards, and configures the status line for receipt enrichment. For Codex it merges its hooks into the project-local `.codex/hooks.json`; for OpenCode it writes a small plugin to `.opencode/plugins/openshard.ts`. For Cursor it merges hooks into `.cursor/hooks.json`. All four feed the same local, authenticated capture service and the same `.openshard/runs.jsonl`, so `openshard history`, `openshard context` and `relevant_context` see work from every agent together, each Shard labelled with the agent that did it (see [docs/agent-capture.md](docs/agent-capture.md)). You do not need to understand any of that to use it; the lower-level `openshard mcp install claude` and `openshard capture install codex|opencode` commands remain available if you want them.
 
 ---
 Launch the TUI:
@@ -268,12 +268,19 @@ It can show:
 * Cost
 * Actions timeline
 * Result
-* Trust score
-* Content hash status
+* Receipt ID (global) and Shard ID (this repository's history)
+* Capture completeness -- whether evidence is known to be missing, and why
+* Integrity -- whether the stored record still matches its content hash
+
+Changed files are attributed, not assumed: files the agent reported
+editing, files git shows changed without an agent signal (actor not
+established), and files that were already dirty before the session or
+belong to another agent session are shown separately. A finished agent
+turn is shown as `Turn completed (unverified)`, never as "Completed".
 
 A Shard does not prove the code is perfect. Nothing can.
 
-What it proves is more practical: what OpenShard recorded during the run, what changed, what checks passed or failed, whether anything risky was blocked, and whether the saved record changed later.
+What it proves is more practical: what OpenShard recorded during the run, what changed and on whose report, what checks passed or failed, whether anything risky was blocked, whether OpenShard knows it missed evidence, and whether the saved record changed later. Where OpenShard cannot establish something, the receipt says so rather than guessing.
 
 OpenShard can also record feedback and infer session signals around a run.
 
@@ -384,7 +391,9 @@ Current features include:
 * Task classification and risk handling
 * Model registry and model policy inspection
 * Routing across models/workflows where available
-* Shard receipts with model, risk, files, checks, cost, result, and trust signals
+* Shard receipts with model, risk, attributed file changes, checks, capture completeness, integrity, cost and result
+* Authenticated local capture service (per-user token; repository-scoped capability for Claude Code HTTP hooks)
+* Global `receipt_id` on every new record alongside the historic `shard_id`
 * `/last`, `/last more`, and `/last --full`
 * Local visibility commands: `openshard history`, `openshard context "<task>"`, `openshard stats` (offline, per-repository, explainable, `--json`)
 * `openshard proof last` for latest-run proof inspection

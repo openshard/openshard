@@ -730,10 +730,11 @@ def excluded_changes_rows(receipt: ShardReceipt) -> list[str]:
         return rows
     pre = changes.get("pre_existing_excluded") or 0
     other = changes.get("other_session_excluded") or 0
+    # Label fits the receipt's 12-column label gutter; the value names the kind.
     if pre:
-        rows.append(_row("Pre-existing", f"{pre} excluded (changed before the session)"))
+        rows.append(_row("Excluded", f"{pre} pre-existing (changed before the session)"))
     if other:
-        rows.append(_row("Other session", f"{other} excluded (reported by another agent session)"))
+        rows.append(_row("Excluded", f"{other} other-session (reported by another agent session)"))
     return rows
 
 
