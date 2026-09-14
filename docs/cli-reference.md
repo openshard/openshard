@@ -55,6 +55,15 @@ openshard pr comment                               # Generate a GitHub-ready PR 
 openshard pr comment --output pr-comment.md        # Write the PR comment to a file
 ```
 
+Record what happened afterwards, and sync receipts (v0.5, opt-in):
+
+```bash
+openshard outcome record shard-20260914-0001 merged --reference "PR #341"   # Outcome beside the run record; hash stays valid
+openshard sync status                              # Is sync configured? How many receipts are pending?
+openshard sync push --dry-run                      # Show what would be sent (nothing leaves the machine)
+openshard sync push                                # Needs OPENSHARD_SYNC_ENDPOINT and OPENSHARD_SYNC_TOKEN (docs/sync.md)
+```
+
 Record feedback:
 
 ```bash

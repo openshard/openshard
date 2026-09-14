@@ -421,7 +421,7 @@ OpenShard is early and intentionally local-first.
 Not built yet:
 
 * No hosted team platform yet
-* No cloud sync yet
+* Cloud sync is an opt-in client only (`openshard sync`, off unless configured); the hosted service is not yet available
 * No hosted dashboard for teams yet
 * No IDE integration yet
 * No Homebrew, winget, or one-line shell installer yet

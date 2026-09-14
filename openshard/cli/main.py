@@ -1507,7 +1507,7 @@ def metrics():
     click.echo(f"    not attempted    {v['unknown']}")
 
 
-def _render_log_entry(entry: dict, detail: str, index: int | None = None) -> None:
+def _render_log_entry(entry: dict, detail: str, index: int | None = None, repo_path: Path | None = None) -> None:
     """Render a stored run log entry at the requested detail level."""
     ts = entry.get("timestamp", "").rstrip("Z").replace("T", " ").split(".")[0]
     task = entry.get("task", "")
@@ -1634,7 +1634,7 @@ def _render_log_entry(entry: dict, detail: str, index: int | None = None) -> Non
                 _sid = entry.get("shard_id")
                 _contract = _brc(
                     entry, index=index,
-                    outcome_record=_ofs(_sid) if isinstance(_sid, str) and _sid else None,
+                    outcome_record=_ofs(_sid, repo_path) if isinstance(_sid, str) and _sid else None,
                 )
                 click.echo("")
                 click.echo("  RECEIPT ANSWERS")
@@ -2026,7 +2026,7 @@ def last(more: bool, full: bool, as_json: bool):
         return
     for line in repo_note_lines(loc):
         click.echo(line)
-    _render_log_entry(entries[-1], detail, index=len(entries) - 1)
+    _render_log_entry(entries[-1], detail, index=len(entries) - 1, repo_path=loc.root)
 
 
 @cli.group("outcome")
