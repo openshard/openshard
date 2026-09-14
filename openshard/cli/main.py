@@ -182,11 +182,14 @@ def _telemetry_status_for_agents() -> dict:
     }
 
 
+ENDPOINT_ENV_NAME = "OPENSHARD_SYNC_ENDPOINT"
+TOKEN_ENV_NAME = "OPENSHARD_SYNC_TOKEN"
+
 _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Getting Started", ("setup", "doctor")),
     ("Receipts", ("last", "history", "report", "context")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
-    ("Integrations", ("mcp", "capture", "import", "wrap", "adapters", "telemetry")),
+    ("Integrations", ("mcp", "capture", "import", "wrap", "adapters", "telemetry", "sync", "outcome")),
     # Everything else (run, plan, models, roster, eval, packs, ...) falls
     # into "Advanced" below rather than needing to be named here.
 ]
@@ -6588,3 +6591,117 @@ if __name__ == "__main__":
 
     _harden_stdio_encoding()
     cli()
+
+
+# ---------------------------------------------------------------------------
+# sync (v0.5): opt-in local -> OpenShard Cloud receipt sync
+# ---------------------------------------------------------------------------
+
+
+@cli.group("sync")
+def sync_group() -> None:
+    """Push local Shard receipts to an OpenShard Cloud endpoint (opt-in, docs/sync.md).
+
+    Nothing is sent unless OPENSHARD_SYNC_ENDPOINT (or `sync: {endpoint: ...}`
+    in .openshard/config.yml) and OPENSHARD_SYNC_TOKEN are set. Only the
+    privacy-bounded receipt projections leave the machine: never raw prompts,
+    diffs, transcripts, absolute paths or secrets. Sync never runs from an
+    agent hook; only `openshard sync push` sends.
+    """
+
+
+def _sync_status_doc() -> dict:
+    from openshard.sync import load_sync_state, resolve_sync_config
+
+    loc = _locate_history()
+    cfg = resolve_sync_config(os.environ, load_config_safe()[0])
+    state = load_sync_state(loc.root)
+    entries = _load_run_entries(loc.runs_path) if loc.runs_path.exists() else []
+    pushed = state.get("pushed", {})
+    pending = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        key = e.get("run_id") or e.get("timestamp")
+        prev = pushed.get(key) if isinstance(key, str) else None
+        if not prev or prev.get("content_hash") != e.get("content_hash"):
+            pending += 1
+    return {
+        "enabled": cfg.enabled,
+        "reason": cfg.reason,
+        "endpoint": cfg.endpoint,
+        "endpoint_source": cfg.source,
+        "token_present": cfg.token_present,
+        "receipts_local": len(entries),
+        "receipts_pushed": len(pushed),
+        "receipts_pending": pending,
+        "last_endpoint": state.get("endpoint"),
+        "repo": loc.to_dict(),
+    }
+
+
+@sync_group.command("status")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def sync_status(as_json: bool) -> None:
+    """Show whether sync is configured and how many receipts are pending."""
+    doc = _sync_status_doc()
+    if as_json:
+        click.echo(json.dumps(_machine_envelope("sync status", "ok", **doc), indent=2))
+        return
+    click.echo(f"Receipt sync: {'on' if doc['enabled'] else 'off'} ({doc['reason']})")
+    click.echo(f"  endpoint:   {doc['endpoint'] or '(none: nothing is sent)'}"
+               + (f"  [from {doc['endpoint_source']}]" if doc["endpoint"] else ""))
+    click.echo(f"  token:      {'present (OPENSHARD_SYNC_TOKEN)' if doc['token_present'] else 'not set'}")
+    click.echo(f"  receipts:   {doc['receipts_local']} local, {doc['receipts_pushed']} pushed, "
+               f"{doc['receipts_pending']} pending")
+    click.echo("  never sent: raw prompts, diffs, transcripts, absolute paths, secrets")
+    click.echo("  push:       openshard sync push [--dry-run]   (docs/sync.md)")
+
+
+@sync_group.command("push")
+@click.option("--last", "last_n", type=click.IntRange(min=1), default=None,
+              help="Only consider the most recent N run records.")
+@click.option("--force", is_flag=True, default=False, help="Re-send receipts already pushed unchanged.")
+@click.option("--dry-run", is_flag=True, default=False, help="Build envelopes and report; send nothing.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def sync_push(last_n: int | None, force: bool, dry_run: bool, as_json: bool) -> None:
+    """Send local receipts that are new or changed since the last push."""
+    from openshard.history.outcomes import load_outcomes
+    from openshard.sync import HttpsSyncTransport, push_entries, resolve_sync_config
+
+    loc = _locate_history()
+    cfg = resolve_sync_config(os.environ, load_config_safe()[0])
+    entries = _load_run_entries(loc.runs_path) if loc.runs_path.exists() else []
+    if last_n:
+        entries = entries[-last_n:]
+
+    if not dry_run and not cfg.enabled:
+        msg = f"Sync is off: {cfg.reason}. Set {ENDPOINT_ENV_NAME} and {TOKEN_ENV_NAME}, or use --dry-run."
+        if as_json:
+            click.echo(json.dumps(_machine_envelope("sync push", "skipped", warnings=[msg],
+                                                    endpoint=cfg.endpoint), indent=2))
+        else:
+            click.echo(msg)
+        raise SystemExit(2)
+
+    transport = None
+    if not dry_run and cfg.endpoint:
+        transport = HttpsSyncTransport(cfg.endpoint, os.environ.get(TOKEN_ENV_NAME, ""))
+    summary = push_entries(
+        entries, transport, repo_path=loc.root, endpoint=cfg.endpoint, force=force, dry_run=dry_run,
+        outcomes=load_outcomes(loc.root),
+    )
+    status = "ok" if summary.failed == 0 else "error"
+    if as_json:
+        click.echo(json.dumps(_machine_envelope("sync push", status, **summary.to_dict()), indent=2))
+    else:
+        verb = "Would send" if dry_run else "Sent"
+        click.echo(f"{verb} {len([r for r in summary.results if r['status'] in ('would_send', 'created', 'updated', 'unchanged')])} "
+                   f"of {summary.considered} receipt(s); {summary.skipped_unchanged} unchanged, "
+                   f"{summary.failed} failed" + (f" -> {cfg.endpoint}" if cfg.endpoint else "") + ".")
+        for r in summary.results:
+            if r.get("status") not in ("would_send", "created", "updated", "unchanged"):
+                click.echo(f"  {r.get('shard_id') or r.get('run_id')}: {r.get('status')}"
+                           + (f" ({r.get('error_category')})" if r.get("error_category") else ""))
+    if summary.failed:
+        raise SystemExit(1)

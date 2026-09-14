@@ -29,6 +29,18 @@ All notable changes to OpenShard are documented here.
 - Representative fixtures under `tests/fixtures/receipts/v2/` (verified,
   approval required, blocked by policy, verification failed, escalation).
 - `docs/architecture/V050_FOUNDATION_AUDIT.md`.
+- Architecture contracts (`openshard/contracts/`): Protocols and
+  request/result types for verification, policy evaluation (ALLOW/DENY/ASK
+  with policy identity), approvals (approver as a separate principal), sync,
+  Managed Compute and outcome reporting, each mapping onto a receipt block.
+  Only trivial implementations ship. See `docs/architecture/V050_CONTRACTS.md`.
+- `openshard outcome record <shard> <status>`: record merged / deployed /
+  rolled back / ... beside the run record (`.openshard/outcomes.jsonl`) so the
+  receipt's content hash stays valid.
+- `openshard sync status|push`: opt-in push of receipt projections to an
+  OpenShard Cloud endpoint (`OPENSHARD_SYNC_ENDPOINT` + `OPENSHARD_SYNC_TOKEN`;
+  HTTPS only; idempotent via `.openshard/sync_state.json`; never on a hook
+  path). See `docs/sync.md`.
 
 ### Fixed
 
