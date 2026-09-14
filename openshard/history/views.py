@@ -34,6 +34,17 @@ def truncate_text(text: str | None, limit: int = MAX_TEXT) -> str | None:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _completeness_to_dict(block: dict | None) -> dict[str, Any] | None:
+    """``{"status", "reasons": [{kind, count, detail}], "derived"}`` -- static vocabulary only."""
+    if not isinstance(block, dict):
+        return None
+    reasons = [
+        {"kind": str(r.get("kind")), "count": int(r.get("count") or 1), "detail": truncate_text(str(r.get("detail") or ""))}
+        for r in (block.get("reasons") or []) if isinstance(r, dict)
+    ][:8]
+    return {"status": str(block.get("status") or "unknown"), "reasons": reasons, "derived": bool(block.get("derived"))}
+
+
 def shard_to_dict(shard: Shard) -> dict[str, Any]:
     """Canonical Shard -> bounded dict. Identity/origin only -- no evidence fields."""
     return {
@@ -97,6 +108,7 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
     d: dict[str, Any] = {
         "shard_id": receipt.shard_id,
         "receipt_id": receipt.receipt_id,
+        "capture_completeness": _completeness_to_dict(receipt.capture_completeness),
         "run_id": receipt.run_id,
         "attempt_number": receipt.attempt_number,
         "created_at": receipt.created_at,

@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 
+from openshard.history.capture_completeness import (
+    COMPLETENESS_INCOMPLETE,
+    completeness_display,
+    derive_capture_completeness,
+)
 from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.shard import (
     ORIGIN_EXTERNAL_OBSERVED,
@@ -513,6 +518,10 @@ class ShardReceipt:
     # minted at display time. ``shard_id`` above keeps its historic,
     # history-position meaning.
     receipt_id: str | None = None
+    # v0.4.4 capture completeness (history/capture_completeness.py):
+    # {"status": full|partial|incomplete|unknown, "reasons": [...], "derived": bool}.
+    # Always populated by build_shard_receipt; None only for hand-built receipts.
+    capture_completeness: dict | None = None
 
 
 def _verification_from_osn_contract(
@@ -1014,6 +1023,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
 
     _shard_id_val = entry.get("shard_id") or _make_shard_id(timestamp, index)
     _receipt_id_val = stored_receipt_id(entry)
+    _capture_completeness_val = derive_capture_completeness(entry)
     _task_short_val = _trunc(task, 70)
     _run_id_val = entry.get("run_id") or timestamp or None
     _attempt_number_val = entry.get("attempt_number") if isinstance(entry.get("attempt_number"), int) else None
@@ -1128,6 +1138,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         tokens_provenance=_tokens_provenance,
         cost_provenance=cost_provenance,
         receipt_id=_receipt_id_val,
+        capture_completeness=_capture_completeness_val,
         shard=build_shard(
             entry,
             shard_id=_shard_id_val,
@@ -1228,6 +1239,31 @@ def _evidence_summary(receipt: ShardReceipt) -> list[str]:
     return [_EVIDENCE_DISPLAY[k] for k in order if k in seen]
 
 
+def _capture_rows(receipt: ShardReceipt) -> list[str]:
+    """The ``Capture`` line(s): depth for observed runs, plus any known loss.
+
+    An externally observed run always says OpenShard did not execute or
+    verify it. When the capture is *incomplete* the line names the loss
+    (``Incomplete -- 1 queued event could not be decoded``) so a receipt
+    with missing evidence never looks like a normally complete one.
+    """
+    rows: list[str] = []
+    block = receipt.capture_completeness or {}
+    incomplete = block.get("status") == COMPLETENESS_INCOMPLETE
+    if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
+        if incomplete:
+            rows.append(_row("Capture", completeness_display(block)))
+            rows.append(_row("", f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run"))
+        else:
+            rows.append(_row(
+                "Capture",
+                f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
+            ))
+    elif incomplete:
+        rows.append(_row("Capture", completeness_display(block)))
+    return rows
+
+
 def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     """Render a bordered, column-aligned RECEIPT block. Pure, no I/O."""
     file_str = f"{receipt.files_changed} file{'s' if receipt.files_changed != 1 else ''}"
@@ -1242,11 +1278,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     ]
     if receipt.receipt_id:
         lines.append(_row("Receipt ID", receipt.receipt_id))
-    if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
-        lines.append(_row(
-            "Capture",
-            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
-        ))
+    lines += _capture_rows(receipt)
     if receipt.task_completion:
         lines.append(_row("Status", receipt.task_completion))
     lines.append(_row(model_label, model_value))
@@ -1507,11 +1539,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     lines.append(_row("Status", receipt.status))
     if receipt.attempt_number is not None:
         lines.append(_row("Attempt", f"{receipt.attempt_number} (Shard {receipt.shard_id})"))
-    if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
-        lines.append(_row(
-            "Capture",
-            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
-        ))
+    lines += _capture_rows(receipt)
     lines.append("")
 
     if receipt.adapter:

@@ -4386,6 +4386,11 @@ def _routing_truth_export(entry: dict) -> dict:
 
 
 def _export_run_entry(entry: dict, include_notes: bool = False, include_timeline: bool = False, receipt=None) -> dict:  # receipt: ShardReceipt | None
+    from openshard.history.capture_completeness import (
+        derive_capture_completeness as _derive_capture_completeness,
+    )
+    from openshard.history.receipt_identity import stored_receipt_id as _stored_receipt_id
+
     stage_runs = entry.get("stage_runs") or []
     is_ro = entry.get("routing_rationale") == "read-only analysis"
 
@@ -4440,6 +4445,13 @@ def _export_run_entry(entry: dict, include_notes: bool = False, include_timeline
         "import_source":             entry.get("import_source"),
         "import_method":             entry.get("import_method"),
         "executor":                  entry.get("executor"),
+        # v0.4.4 additive fields: global identity, what the capture knows it
+        # is missing, and per-file change provenance (None/[] for old records).
+        "shard_id":                  entry.get("shard_id"),
+        "receipt_id":                _stored_receipt_id(entry),
+        "capture_completeness":      _derive_capture_completeness(entry),
+        "changes":                   entry.get("changes") if isinstance(entry.get("changes"), dict) else None,
+        "files_detail":              [f for f in (entry.get("files_detail") or []) if isinstance(f, dict)][:200],
         **_baseline_export_fields(
             entry.get("prompt_tokens") or 0,
             entry.get("completion_tokens") or 0,

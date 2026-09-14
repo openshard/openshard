@@ -96,6 +96,7 @@ from openshard.adapters.claude_hooks import (
     HookPayload,
     ReducedHookPayload,
     StatusPayload,
+    apply_capture_loss,
     apply_reduced_hook,
     apply_status_payload,
     extract_agent_payload,
@@ -104,6 +105,7 @@ from openshard.adapters.claude_hooks import (
     resolve_repo_root,
     sessions_dir,
 )
+from openshard.history.capture_completeness import REASON_CORRUPT_QUEUED_EVENT
 
 # PR12: receiver path -> agent key. One service, one queue format, one
 # fold; only the translator run on the blocking path differs.
@@ -113,6 +115,11 @@ DEFAULT_PORT = client.DEFAULT_PORT
 PORT_RANGE = client.PORT_RANGE
 SERVICE_NAME = client.SERVICE_NAME
 QUEUE_SUFFIX = ".queue.jsonl"
+# v0.4.4: undecodable queue lines are moved here (bounded copies) instead of
+# being skipped; see _replay_file / _quarantine.
+QUARANTINE_DIRNAME = "quarantine"
+_QUARANTINE_LINE_CAP = 4096  # bytes of one damaged line kept for diagnosis
+_QUARANTINE_MAX_FILES = 200
 IDLE_TIMEOUT_SECONDS = 4 * 60 * 60
 MAX_BODY_BYTES = 16 * 1024 * 1024
 MAX_RECENT_REPOS = 50
@@ -238,6 +245,33 @@ class _Timings:
             "p95_ms": round(pct(0.95) * 1000, 3),
             "max_ms": round(xs[-1] * 1000, 3),
         }
+
+
+class _ReplayResult:
+    """Outcome of replaying one queue file (see ``CaptureRecorder._replay_file``)."""
+
+    __slots__ = ("ok", "corrupt", "session")
+
+    def __init__(self, *, ok: bool) -> None:
+        self.ok = ok
+        self.corrupt = 0
+        self.session: tuple[str, str] | None = None
+
+
+def _session_from_stem(path: Path) -> tuple[str | None, str]:
+    """``(session_id, agent)`` from a queue file name, for a file with no decodable line.
+
+    ``<sid>.queue[.<ns>].jsonl`` is Claude Code; ``<agent>.<sid>.queue...`` the
+    others (see ``queue_key``). Only the known agent keys are accepted as a
+    prefix, so a session id that itself contains a dot is not mis-split.
+    """
+    from openshard.adapters.capture_agents import AGENT_PROFILES
+
+    stem = path.name.split(".queue", 1)[0]
+    for agent in AGENT_PROFILES:
+        if agent != AGENT_CLAUDE_CODE and stem.startswith(agent + "."):
+            return stem[len(agent) + 1:] or None, agent
+    return (stem or None), AGENT_CLAUDE_CODE
 
 
 class CaptureRecorder:
@@ -615,54 +649,80 @@ class CaptureRecorder:
         needs_retry = False
         for path in files:
             # A file is only ever removed once every line in it has been
-            # durably applied (or is a confirmed duplicate/malformed line,
-            # neither of which represents evidence still waiting to be
-            # recorded). A transient failure (observed cause: a Windows
-            # PermissionError from antivirus briefly holding runs.jsonl open
-            # right after the atomic replace) must never make already
-            # durably-queued evidence disappear -- the file is left in
+            # durably applied, is a confirmed duplicate, or has been
+            # quarantined as undecodable (v0.4.4: never silently skipped --
+            # see _replay_file). A transient failure (observed cause: a
+            # Windows PermissionError from antivirus briefly holding
+            # runs.jsonl open right after the atomic replace) must never make
+            # already durably-queued evidence disappear -- the file is left in
             # place and this session is retried after a short backoff (see
             # _schedule_retry) instead of being unlinked unconditionally.
-            if self._replay_file(root, path):
+            result = self._replay_file(root, path)
+            if result.ok:
                 try:
                     path.unlink()
                 except OSError:
                     needs_retry = True
             else:
                 needs_retry = True
+            if result.corrupt and result.ok:
+                # Only once the file is fully settled (so a retried file does
+                # not count its damage twice): make the loss visible on the
+                # session's record. The session comes from a valid neighbour
+                # line when there is one, else from the queue-file stem.
+                sid, agent = result.session or _session_from_stem(path)
+                if sid:
+                    apply_capture_loss(
+                        sid, root, kind=REASON_CORRUPT_QUEUED_EVENT, count=result.corrupt, agent=agent,
+                    )
         if needs_retry:
             self._schedule_retry(root, session_id)
 
-    def _replay_file(self, root: Path, path: Path) -> bool:
-        """Apply every line in *path*. Returns True only if none failed."""
+    def _replay_file(self, root: Path, path: Path) -> _ReplayResult:
+        """Apply every line in *path*.
+
+        ``ok`` is True only when no line hit a *transient* failure (those keep
+        the file for retry). An undecodable or structurally unusable line is
+        not transient: it is copied to the quarantine directory, counted in
+        ``corrupt_lines`` and reported in ``corrupt`` so the caller can mark
+        the session's capture incomplete. Valid neighbours are still applied.
+        """
         try:
-            text = path.read_text(encoding="utf-8")
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return False
-        ok = True
-        for raw in text.splitlines():
+            return _ReplayResult(ok=False)
+        result = _ReplayResult(ok=True)
+        for lineno, raw in enumerate(text.splitlines(), start=1):
             raw = raw.strip()
             if not raw:
                 continue
             try:
                 line = json.loads(raw)
             except ValueError:
+                self._quarantine(root, path, lineno, raw, "not valid JSON")
+                result.corrupt += 1
                 continue
             if not isinstance(line, dict) or not isinstance(line.get("data"), dict):
+                self._quarantine(root, path, lineno, raw, "not a queue line object")
+                result.corrupt += 1
                 continue
             dedup_id = line.get("id") if isinstance(line.get("id"), str) else None
             at = line.get("at") if isinstance(line.get("at"), str) else None
             kind = line.get("kind")
+            data = line["data"]
             if kind == "hook":
-                reduced = ReducedHookPayload.from_dict(line["data"])
+                reduced = ReducedHookPayload.from_dict(data)
                 if reduced is None:
+                    self._quarantine(root, path, lineno, raw, "unusable hook payload")
+                    result.corrupt += 1
                     continue
+                result.session = (reduced.session_id, reduced.agent)
                 outcome = apply_reduced_hook(reduced, root, dedup_id=dedup_id, at=at)
                 if outcome.action == "error":
                     with self._stats_lock:
                         self.stats["replay_errors"] = int(self.stats.get("replay_errors") or 0) + 1
                         self.stats["last_error"] = outcome.detail
-                    ok = False
+                    result.ok = False
                 elif outcome.detail == "duplicate event id":
                     self._bump("duplicates")
                 else:
@@ -672,12 +732,53 @@ class CaptureRecorder:
                 # this capture path: the status line only ever supplements
                 # hook evidence, never replaces it) -- a failure here is not
                 # worth the same retry-forever treatment as a hook event.
-                status = StatusPayload.from_dict(line["data"])
+                status = StatusPayload.from_dict(data)
                 if status is None:
+                    self._quarantine(root, path, lineno, raw, "unusable status payload")
+                    result.corrupt += 1
                     continue
+                if result.session is None and isinstance(status.session_id, str):
+                    result.session = (status.session_id, status.agent)
                 apply_status_payload(status, root, dedup_id=dedup_id, at=at)
                 self._bump("replayed")
-        return ok
+            else:
+                self._quarantine(root, path, lineno, raw, "unknown line kind")
+                result.corrupt += 1
+        return result
+
+    def _quarantine(self, root: Path, source: Path, lineno: int, raw: str, reason: str) -> None:
+        """Preserve one undecodable queue line for diagnosis. Never raises.
+
+        The copy is bounded (``_QUARANTINE_LINE_CAP`` bytes) and lives next
+        to the queues, under ``.openshard/claude_sessions/quarantine/``. A
+        queue line only ever holds reduced material (see module docstring),
+        so a damaged one holds at most a damaged copy of that; no raw prompt,
+        transcript or absolute path is introduced here, and the header names
+        the queue file by its repo-relative name only.
+        """
+        self._bump("corrupt_lines")
+        try:
+            directory = sessions_dir(root) / QUARANTINE_DIRNAME
+            directory.mkdir(parents=True, exist_ok=True)
+            existing = sorted(directory.glob("*.jsonl"))
+            if len(existing) >= _QUARANTINE_MAX_FILES:
+                _log("quarantine directory is full; an undecodable queue line was counted but not kept")
+                return
+            target = directory / f"{source.name}.quarantine.jsonl"
+            record = {
+                "quarantined_at": _now(),
+                "queue_file": source.name,
+                "line": lineno,
+                "reason": reason,
+                "truncated": len(raw.encode("utf-8", "replace")) > _QUARANTINE_LINE_CAP,
+                "raw": raw.encode("utf-8", "replace")[:_QUARANTINE_LINE_CAP].decode("utf-8", "replace"),
+            }
+            with target.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError as exc:
+            _log(f"could not quarantine an undecodable queue line: {type(exc).__name__}")
 
 
 # ---------------------------------------------------------------------------

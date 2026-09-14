@@ -159,6 +159,11 @@ from openshard.adapters.capture_agents import (
     is_known_agent,
     profile_for,
 )
+from openshard.history.capture_completeness import (
+    REASON_SESSION_END_NOT_OBSERVED,
+    build_completeness,
+    make_reason,
+)
 
 # Claude Code identity constants -- kept as module names for existing
 # callers/tests; the values are the Claude profile's (adapters/capture_agents.py).
@@ -904,6 +909,10 @@ def _new_buffer(
         # Ids of queued events already applied (capture service replay
         # idempotency; see apply_reduced_hook). Bounded, most recent last.
         "applied_ids": [],
+        # v0.4.4: evidence known to be lost for this session -- each item is
+        # a completeness reason ({kind, count, detail}); see
+        # history/capture_completeness.py and apply_capture_loss.
+        "capture_losses": [],
     }
     _append_event(
         buf,
@@ -1090,7 +1099,15 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         ),
         "applied_ids": [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)],
         "check_command_seen": bool(entry.get("verification_attempted")),
+        "capture_losses": _stored_losses(capture),
     }
+
+
+def _stored_losses(capture: dict) -> list[dict]:
+    """The loss reasons a persisted record already carries (none for pre-0.4.4 records)."""
+    block = capture.get("completeness")
+    reasons = block.get("reasons") if isinstance(block, dict) else None
+    return [r for r in reasons if isinstance(r, dict)] if isinstance(reasons, list) else []
 
 
 def _is_session_entry(entry: dict, session_id: str, executor: str = EXECUTOR) -> bool:
@@ -1308,6 +1325,15 @@ def _hook_file_events(buf: dict) -> list[dict]:
     return events
 
 
+def _all_losses(buf: dict) -> list[dict]:
+    """Every loss reason for *buf*: recorded losses plus the buffer's own drop counter."""
+    losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
+    dropped = int(buf.get("dropped_events") or 0)
+    if dropped > 0:
+        losses.append(make_reason("dropped_hook_events", dropped))
+    return losses
+
+
 def _turn_duration_seconds(buf: dict) -> float | None:
     """Task-boundary duration: first prompt -> most recent Stop. Never the whole session.
 
@@ -1487,6 +1513,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "tool_failure_count": int(buf.get("tool_failure_count") or 0),
             "task_source": "first_user_prompt_excerpt" if task else "not_captured",
             "hook_events_dropped": int(buf.get("dropped_events") or 0),
+            # v0.4.4: what this capture knows it is missing. Hook capture is
+            # ``partial`` by nature (OpenShard observed, it did not execute or
+            # verify); any known loss makes it ``incomplete`` with reasons.
+            "completeness": build_completeness(_all_losses(buf)),
             # Dedup ids applied so far (capture-service replay idempotency).
             # Persisted (bounded to a small tail, not the full in-memory cap)
             # so a session's dedup memory survives the buffer being deleted
@@ -1601,6 +1631,12 @@ def sweep_stale_buffers(repo_root: Path, *, max_age_seconds: float = _STALE_BUFF
                     if age is None or age < max_age_seconds:
                         continue
                     if _has_activity(buf):
+                        # Swept without a SessionEnd: say so on the record
+                        # instead of leaving it looking normally finished.
+                        losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
+                        if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
+                            losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
+                        buf["capture_losses"] = losses
                         _fold(buf, repo_root)
                     path.unlink()
                 folded.append(sid)
@@ -1949,6 +1985,61 @@ def apply_reduced_hook(
     except Exception as exc:  # observational hook: never propagate
         return HookOutcome(event=payload.event, action="error", session_id=payload.session_id,
                            detail=f"{type(exc).__name__}")
+
+
+def apply_capture_loss(
+    session_id: str,
+    repo_root: Path,
+    *,
+    kind: str,
+    count: int = 1,
+    agent: str = AGENT_CLAUDE_CODE,
+    at: str | None = None,
+) -> HookOutcome:
+    """Record that evidence for *session_id* is known to be lost. Never raises.
+
+    Called by the capture service when a queued line could not be decoded
+    (see ``claude_capture_service._replay_file``). The loss is staged on the
+    session buffer and, when the session already has a record, folded so
+    ``capture.completeness`` becomes ``incomplete`` at once. A session with
+    no activity yet gets no fabricated record; the loss stays on its buffer
+    and lands on the record the moment the session shows work.
+    """
+    try:
+        if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+            return HookOutcome(event="CaptureLoss", action="ignored", detail="invalid session id")
+        now = at or _now()
+        from openshard.history.jsonl_store import history_file_lock
+
+        path = buffer_path(repo_root, session_id, agent)
+        with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
+            buf = _load_or_create_buffer(repo_root, session_id, "CaptureLoss", now=now, agent=agent)
+            losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
+            losses.append(make_reason(kind, count))
+            buf["capture_losses"] = losses[-_MAX_BUFFERED_EVENTS:]
+            buf["last_activity_at"] = now
+            if buf.get("record") and _has_activity(buf):
+                entry, outcome = _fold(buf, repo_root)
+                action = "record_updated" if outcome == "replaced" else "record_created"
+            else:
+                action = "buffered"
+            if buf.get("ended") and _has_activity(buf):
+                # The session had already ended and its buffer was rebuilt
+                # only to record this loss: fold done above, drop it again.
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError:
+                    pass
+            else:
+                _write_buffer(path, buf)
+        record = buf.get("record") or {}
+        return HookOutcome(
+            event="CaptureLoss", action=action, session_id=session_id, repo_root=repo_root,
+            shard_id=record.get("shard_id"), run_id=record.get("run_id"), detail=f"{kind} x{count}",
+        )
+    except Exception as exc:  # observational: never propagate
+        return HookOutcome(event="CaptureLoss", action="error", session_id=session_id, detail=f"{type(exc).__name__}")
 
 
 def extract_agent_payload(

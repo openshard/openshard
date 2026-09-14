@@ -716,7 +716,10 @@ class TestRecovery:
         finally:
             running.stop()
 
-    def test_corrupt_queue_lines_are_skipped(self, service, repo):
+    def test_corrupt_queue_lines_are_quarantined_not_skipped(self, service, repo):
+        # v0.4.4: undecodable lines are no longer silently skipped -- they are
+        # quarantined and counted, the valid neighbour is still applied, and
+        # the record says its capture is incomplete. Never a transient error.
         directory = _session_dir(repo)
         directory.mkdir(parents=True)
         (directory / f"{SID}{svc.QUEUE_SUFFIX}").write_text(
@@ -724,9 +727,14 @@ class TestRecovery:
             + json.dumps({"id": "bad-2", "kind": "hook", "at": "x", "data": {"event": "Nope", "session_id": SID}}) + "\n",
             encoding="utf-8")
         service.server.recorder.recover(repo)
-        assert _wait_for(lambda: len(_lines(repo)) == 1)
+        assert _wait_for(lambda: len(_lines(repo)) == 1 and _lines(repo)[0]["capture"].get("completeness"))
+        assert service.server.recorder.wait_idle(20)
         assert _lines(repo)[0]["task"] == "fine"
-        assert client.health(service.port)["stats"]["replay_errors"] == 0
+        assert _lines(repo)[0]["capture"]["completeness"]["status"] == "incomplete"
+        stats = client.health(service.port)["stats"]
+        assert stats["replay_errors"] == 0
+        assert stats["corrupt_lines"] == 3
+        assert len(list((directory / svc.QUARANTINE_DIRNAME).glob("*.jsonl"))) == 1
 
 
 # ---------------------------------------------------------------------------
