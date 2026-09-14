@@ -21,7 +21,7 @@ import pytest
 
 from openshard.adapters.claude_hooks import HookOutcome, handle_claude_hook
 from openshard.history.shard_contract import build_shard_receipt, render_compact_shard_receipt
-from tests.test_claude_capture_service import SID, SID2, _git, _make_repo
+from tests.test_claude_capture_service import SID, SID2, _make_repo
 
 
 @pytest.fixture

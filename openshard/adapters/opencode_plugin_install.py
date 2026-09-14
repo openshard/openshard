@@ -47,7 +47,7 @@ from openshard.adapters.claude_hooks_install import (
     ensure_local_settings_ignored,
 )
 
-PLUGIN_VERSION = 2
+PLUGIN_VERSION = 3
 PLUGIN_MARKER = "// openshard-capture-plugin"
 PLUGIN_RELPATH = Path(".opencode") / "plugins" / "openshard.ts"
 _MAX_PLUGIN_BYTES = 64 * 1024
@@ -58,8 +58,23 @@ PLUGIN_SOURCE = r'''__MARKER__ v__VERSION__ -- managed by `openshard setup`; edi
 // Sends bounded lifecycle facts about this OpenCode session to the local
 // OpenShard capture service (127.0.0.1 only). Never sends message bodies,
 // tool output, or file contents. Remove with `openshard capture uninstall opencode`.
+import { readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
+
 const PORT = __PORT__
 const PATH = "__HOOK_PATH__"
+// The per-user capture token (see openshard/adapters/capture_auth.py):
+// read on every delivery so a rotation takes effect immediately. The value
+// never leaves this machine and is never logged.
+const TOKEN_PATH = join(process.env.OPENSHARD_HOME || join(homedir(), ".openshard"), "capture-token")
+const readToken = (): string => {
+  try {
+    return readFileSync(TOKEN_PATH, "utf8").trim()
+  } catch {
+    return ""
+  }
+}
 const MAX_TEXT = 400
 const MAX_PENDING = 200
 // A failed delivery may ask `openshard capture start` to (re)start the
@@ -94,10 +109,13 @@ export const OpenShardCapture = async ({ directory, worktree, $ }: any) => {
     try {
       const r = await fetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-openshard-capture-token": readToken() },
         body,
         signal: AbortSignal.timeout(1500),
       })
+      // 401 means the token file is missing or stale here: buffering and
+      // asking `openshard capture start` (which creates the token) is the
+      // same bounded recovery as a service that is down.
       return r.ok
     } catch {
       return false

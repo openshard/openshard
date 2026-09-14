@@ -8,20 +8,20 @@ I/O failure keeps the existing retry path and is never treated as
 corruption.
 """
 
+# ruff: noqa: F811 -- pytest fixtures are re-exported by import from the service test module
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
-
-from openshard.adapters import claude_capture_client as client
-from openshard.adapters import claude_capture_service as svc
 from openshard.history.capture_completeness import (
     COMPLETENESS_INCOMPLETE,
     COMPLETENESS_PARTIAL,
     derive_capture_completeness,
 )
+
+from openshard.adapters import claude_capture_client as client
+from openshard.adapters import claude_capture_service as svc
 from openshard.history.shard_contract import build_shard_receipt, render_compact_shard_receipt
 from tests.test_claude_capture_service import (  # noqa: F401 - fixtures re-exported for pytest
     SID,

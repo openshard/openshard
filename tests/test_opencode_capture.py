@@ -534,7 +534,8 @@ class TestServicePath:
 
     def test_malformed_documents_never_error(self, service, repo):
         for body in (b"", b"[]", b'{"event":"session.idle"}', b'{"event":"nope","session_id":"x"}'):
-            status, reply = client._request("POST", service.port, client.OPENCODE_HOOK_PATH, body)
+            status, reply = client._request("POST", service.port, client.OPENCODE_HOOK_PATH, body,
+                                            client._auth_headers(None, None))
             assert status == 200 and reply == b"{}", body
         assert client.health(service.port)["stats"]["queued"] == 0
 

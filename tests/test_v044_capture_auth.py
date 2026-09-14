@@ -7,10 +7,10 @@ otherwise nothing is recorded. ``/health`` stays unauthenticated and must
 not expose anything that authorises a control action.
 """
 
+# ruff: noqa: F811 -- pytest fixtures are re-exported by import from the service test module
 from __future__ import annotations
 
 import json
-import os
 import stat
 import sys
 from pathlib import Path
@@ -19,7 +19,6 @@ import pytest
 
 from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
-from openshard.adapters import claude_capture_service as svc
 from openshard.adapters.claude_hooks import resolve_repo_root
 from tests.test_claude_capture_service import (  # noqa: F401 - fixtures re-exported for pytest
     SID,
@@ -238,8 +237,11 @@ class TestFailOpen:
         to the in-process fold, which needs no token."""
         import io
 
-        monkeypatch.setattr(auth, "load_token", lambda env=None: "0" * 64)  # a wrong token
-        monkeypatch.setattr(auth, "ensure_token", lambda env=None: "0" * 64)
+        # The client presents a wrong token (the service keeps the real one).
+        monkeypatch.setattr(
+            client, "_auth_headers",
+            lambda env, project_dir: {client.PROJECT_DIR_HEADER: project_dir or "", auth.TOKEN_HEADER: "0" * 64},
+        )
         label = client.run_hook_via_service(
             io.BytesIO(_payload("UserPromptSubmit", repo, prompt="fallback")),
             env={**service.env, "CLAUDE_PROJECT_DIR": str(repo)}, spawn=False,

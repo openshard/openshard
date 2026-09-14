@@ -2887,6 +2887,13 @@ def _render_capture_status(status: dict) -> None:
                 f"  events:   {stats.get('queued', 0)} queued, {stats.get('replayed', 0)} folded, "
                 f"{status.get('pending', 0)} pending, {stats.get('replay_errors', 0)} errors"
             )
+            rejected = stats.get("rejected", 0)
+            corrupt = stats.get("corrupt_lines", 0)
+            if rejected or corrupt:
+                click.echo(
+                    f"  refused:  {rejected} unauthenticated request(s) refused, "
+                    f"{corrupt} queued event(s) quarantined as undecodable"
+                )
         timing = status.get("blocking_ms") or {}
         if timing.get("n"):
             click.echo(
@@ -2948,6 +2955,31 @@ def capture_stop(as_json: bool) -> None:
     else:
         click.echo("Capture service did not stop in time; it may still be draining. Re-run to check.")
     if result["was_running"] and not result["stopped"]:
+        raise SystemExit(1)
+
+
+@capture_group.command("rotate-token")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def capture_rotate_token(as_json: bool) -> None:
+    """Replace the local capture token; re-run `openshard setup` in each repository afterwards.
+
+    The token authenticates hook events to the local capture service. It
+    is never printed. Claude Code hooks carry a repository-scoped
+    capability derived from it, so after rotating you must re-run setup
+    (or start a new Claude Code session, which upgrades the hooks itself)
+    in every repository that captures Claude Code sessions.
+    """
+    from openshard.adapters.capture_auth import rotate_token, token_path
+
+    new = rotate_token()
+    result = {"rotated": new is not None, "token_path": token_path()}
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    elif new is None:
+        click.echo(f"Could not write a new capture token to {token_path()}.")
+    else:
+        click.echo("Capture token rotated. Re-run `openshard setup` in each repository that captures Claude Code.")
+    if new is None:
         raise SystemExit(1)
 
 
@@ -6072,7 +6104,13 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     hooks_detail = claude_status.hooks_settings_error or "not configured"
     if hooks_ok and claude_status.hooks_need_upgrade:
         hooks_ok = False
-        hooks_detail = "older hook configuration; run `openshard setup` to switch to the fast capture path"
+        if claude_status.hooks_auth_state in ("missing", "stale"):
+            hooks_detail = (
+                "hooks carry no valid capture credential (they are refused by the service); "
+                "run `openshard setup` or start a new Claude Code session to upgrade them"
+            )
+        else:
+            hooks_detail = "older hook configuration; run `openshard setup` to switch to the fast capture path"
     service_ok = bool(claude_status.capture_service.get("running"))
     if service_ok and claude_status.capture_port_mismatch:
         service_ok = False

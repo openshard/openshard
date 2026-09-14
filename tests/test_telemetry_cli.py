@@ -364,7 +364,8 @@ class TestEmissionFromCapture:
         events = telemetry_on.events or _drain(telemetry_on)
         props = [e["properties"] for e in events if e["event_type"] == "capture.service"]
         assert [p["state"] for p in props] == ["started", "idle_exit"]
-        assert props[0] == {"state": "started", "queued": 15, "folded": 15, "replay_errors": 0, "p50_ms": 9, "p95_ms": 66}
+        assert props[0] == {"state": "started", "queued": 15, "folded": 15, "replay_errors": 0,
+                            "rejected": 0, "corrupt_lines": 0, "p50_ms": 9, "p95_ms": 66}
         _assert_clean(events)
 
 

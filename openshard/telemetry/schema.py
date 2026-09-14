@@ -192,6 +192,9 @@ EVENT_TYPES: dict[str, dict[str, Validator]] = {
         "queued": _int(),
         "folded": _int(),
         "replay_errors": _int(),
+        # v0.4.4: bounded counters only -- never the credential or any line content.
+        "rejected": _int(),
+        "corrupt_lines": _int(),
         "p50_ms": _int(),
         "p95_ms": _int(),
     },

@@ -44,6 +44,7 @@ from openshard.adapters.claude_hooks_install import (
     HTTP_EVENTS,
     SETTINGS_RELPATH,
     ClaudeHooksInstallResult,
+    capability_state,
     install_claude_hooks,
     install_claude_statusline,
     installed_events,
@@ -95,6 +96,8 @@ class ClaudeIntegrationStatus:
     capture_service: dict = field(default_factory=dict)  # service_status() snapshot
     hooks_port: int | None = None  # port the installed HTTP hooks target
     hooks_need_upgrade: bool = False  # pre-PR9.5 command-form hooks still installed
+    # v0.4.4: "ok" | "missing" | "stale" | "no_token" | "n/a" (no HTTP hooks installed)
+    hooks_auth_state: str = "n/a"
     capture_port_mismatch: bool = False  # hooks target a port the service is not on
 
     def to_dict(self) -> dict:
@@ -113,6 +116,7 @@ class ClaudeIntegrationStatus:
             "capture_service_port": self.capture_service.get("port"),
             "hooks_port": self.hooks_port,
             "hooks_need_upgrade": self.hooks_need_upgrade,
+            "hooks_auth_state": self.hooks_auth_state,
             "capture_port_mismatch": self.capture_port_mismatch,
         }
 
@@ -171,6 +175,7 @@ def detect_claude_integration(repo_root: Path | None) -> ClaudeIntegrationStatus
     statusline_state = "absent"
     hooks_port: int | None = None
     hooks_need_upgrade = False
+    hooks_auth_state = "n/a"
 
     if repo_root is not None:
         settings, err = load_settings(repo_root)
@@ -184,6 +189,11 @@ def detect_claude_integration(repo_root: Path | None) -> ClaudeIntegrationStatus
             hooks_need_upgrade = bool(hook_events_installed) and any(
                 e in hook_events_installed and e not in http_installed for e in HTTP_EVENTS
             )
+            # v0.4.4: HTTP hooks without (or with a stale) repository
+            # capability are refused by the authenticated service.
+            hooks_auth_state = capability_state(settings, repo_root) if hooks_port is not None else "n/a"
+            if hooks_auth_state in ("missing", "stale"):
+                hooks_need_upgrade = True
             status_line = settings.get("statusLine")
             if is_openshard_statusline(status_line):
                 statusline_state = "openshard"
@@ -206,6 +216,7 @@ def detect_claude_integration(repo_root: Path | None) -> ClaudeIntegrationStatus
         hooks_port=hooks_port,
         hooks_need_upgrade=hooks_need_upgrade,
         capture_port_mismatch=mismatch,
+        hooks_auth_state=hooks_auth_state,
     )
 
 

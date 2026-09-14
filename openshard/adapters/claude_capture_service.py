@@ -54,14 +54,21 @@ Lifecycle
   queued line carries a unique id that the session buffer remembers, so a
   replay never double-counts.
 
-Trust boundary
---------------
-Loopback only; no authentication. Anything running as this user can
-already write ``.openshard/`` directly, so the service does not widen the
-existing local trust model. Nothing is ever *returned* beyond ``{}``, a
-health document without paths, and shutdown acknowledgement. Queue lines
-hold only the reduced payload (scrubbed excerpt, repo-relative path,
-summarized command), never raw prompts, transcripts or absolute paths.
+Trust boundary (v0.4.4)
+-----------------------
+Loopback only, **and** authenticated: every ``POST`` must present the
+per-user capture token or the repository-scoped capability derived from it
+in ``X-OpenShard-Capture-Token`` (``adapters/capture_auth.py``). A request
+without a valid credential is answered ``401`` before its body is looked at
+and leaves no trace beyond a ``rejected`` counter; a request carrying
+browser-only headers (``Origin``/``Referer``/``Sec-Fetch-*``) is answered
+``403``. ``POST /shutdown`` accepts the token only, never a repository
+capability. ``GET /health`` is the single unauthenticated endpoint and
+returns counters and an informational ``instance_id`` -- nothing that
+authorises anything. Nothing is ever *returned* beyond ``{}``, that health
+document (no paths), and shutdown acknowledgement. Queue lines hold only
+the reduced payload (scrubbed excerpt, repo-relative path, summarized
+command), never raw prompts, transcripts or absolute paths.
 """
 
 from __future__ import annotations
@@ -75,11 +82,13 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.adapters.claude_hooks import (
@@ -274,6 +283,9 @@ class CaptureRecorder:
         self.stats: dict[str, Any] = {
             "received": 0, "queued": 0, "ignored": 0, "replayed": 0, "duplicates": 0,
             "replay_errors": 0, "last_error": None, "last_event": None,
+            # v0.4.4: requests refused for lack of a valid credential (nothing
+            # recorded), and queued lines that could not be decoded (quarantined).
+            "rejected": 0, "corrupt_lines": 0,
         }
         self._stats_lock = threading.Lock()
 
@@ -369,15 +381,19 @@ class CaptureRecorder:
         project_dir: str | None = None,
         event_override: str | None = None,
         agent: str = AGENT_CLAUDE_CODE,
+        authorize: Callable[[Path], bool] | None = None,
     ) -> tuple[str, str]:
         """Validate, reduce and durably queue one hook payload. Returns ``(action, detail)``.
 
-        ``action`` is ``queued`` or ``ignored``. Never raises for bad input;
-        an I/O failure propagates so the HTTP layer can answer 500 (Claude
-        Code then reports a non-blocking hook error rather than OpenShard
-        silently acknowledging evidence it did not persist). *agent* picks
-        the translator (PR12); a translator may yield a usage observation
-        (``StatusPayload``), which is queued exactly like a status ping.
+        ``action`` is ``queued``, ``ignored`` or ``rejected``. Never raises
+        for bad input; an I/O failure propagates so the HTTP layer can
+        answer 500 (Claude Code then reports a non-blocking hook error
+        rather than OpenShard silently acknowledging evidence it did not
+        persist). *agent* picks the translator (PR12); a translator may
+        yield a usage observation (``StatusPayload``), which is queued
+        exactly like a status ping. *authorize* (v0.4.4) is consulted with
+        the resolved repository root before anything is written; a refusal
+        records nothing and returns ``rejected``.
         """
         t0 = time.perf_counter()
         self._bump("received")
@@ -392,6 +408,9 @@ class CaptureRecorder:
         if root is None:
             self._bump("ignored")
             return "ignored", "could not resolve repository directory"
+        if authorize is not None and not authorize(root):
+            self._bump("rejected")
+            return "rejected", "unauthenticated"
         if isinstance(payload, StatusPayload):
             key = queue_key(payload.session_id, payload.agent)
             line = {"id": self._next_id(), "kind": "status", "at": _now(), "data": payload.to_dict()}
@@ -415,7 +434,13 @@ class CaptureRecorder:
             self.recover(root)
         return "queued", payload.event
 
-    def record_status(self, data: dict, *, project_dir: str | None = None) -> tuple[str, str]:
+    def record_status(
+        self,
+        data: dict,
+        *,
+        project_dir: str | None = None,
+        authorize: Callable[[Path], bool] | None = None,
+    ) -> tuple[str, str]:
         t0 = time.perf_counter()
         self._bump("received")
         payload = extract_status_payload(data)
@@ -426,6 +451,9 @@ class CaptureRecorder:
         if root is None:
             self._bump("ignored")
             return "ignored", "could not resolve repository directory"
+        if authorize is not None and not authorize(root):
+            self._bump("rejected")
+            return "rejected", "unauthenticated"
         key = queue_key(payload.session_id, payload.agent)
         line = {"id": self._next_id(), "kind": "status", "at": _now(), "data": payload.to_dict()}
         self._queue_line(root, key, line)
@@ -664,10 +692,16 @@ class CaptureServer(ThreadingHTTPServer):
     # have; POSIX semantics of the flag are safe (and avoid TIME_WAIT stalls).
     allow_reuse_address = sys.platform != "win32"
 
-    def __init__(self, port: int, recorder: CaptureRecorder, *, instance_id: str, started_at: str) -> None:
+    def __init__(
+        self, port: int, recorder: CaptureRecorder, *, instance_id: str, started_at: str,
+        env: dict | os._Environ | None = None,
+    ) -> None:
         self.recorder = recorder
         self.instance_id = instance_id
         self.started_at = started_at
+        # Where the capture token lives (OPENSHARD_HOME). Read per request so
+        # a rotation takes effect without a restart.
+        self.env: dict | os._Environ = os.environ if env is None else env
         self.started_monotonic = time.monotonic()
         self.last_request_monotonic = time.monotonic()
         self.shutdown_requested = threading.Event()
@@ -758,11 +792,32 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(413, b'{"error":"payload too large"}')
             return
         body = self.rfile.read(length) if length else b""
-        if path == client.SHUTDOWN_PATH:
-            self._handle_shutdown(body)
-            return
-        if path not in _HOOK_PATH_AGENTS and path != client.STATUS_PATH:
+        if path not in _HOOK_PATH_AGENTS and path != client.STATUS_PATH and path != client.SHUTDOWN_PATH:
             self._send(404, b'{"error":"not found"}')
+            return
+        # v0.4.4 authentication -- before the body is looked at. Browser
+        # contexts are refused outright (defence in depth); everything else
+        # needs a syntactically plausible credential, checked for real once
+        # the repository root is known (record_hook/record_status) so a
+        # repository-scoped capability can be matched against the right root.
+        if auth.has_browser_headers(self.headers):
+            self.server.recorder._bump("rejected")
+            self._send(403, b'{"error":"browser origin refused"}')
+            return
+        presented = self.headers.get(auth.TOKEN_HEADER)
+        token = auth.load_token(self.server.env)
+        if token is None:
+            # No token on disk: nothing can be authorised. The hook clients and
+            # `capture start` create it; until then every POST is refused.
+            self.server.recorder._bump("rejected")
+            self._send(503, b'{"error":"capture token unavailable"}')
+            return
+        if not auth.looks_like_credential(presented):
+            self.server.recorder._bump("rejected")
+            self._send(401, b'{"error":"unauthenticated"}')
+            return
+        if path == client.SHUTDOWN_PATH:
+            self._handle_shutdown(body, presented, token)
             return
         if self.server.shutdown_requested.is_set():
             self._send(503, b'{"error":"shutting down"}')
@@ -778,21 +833,38 @@ class _Handler(BaseHTTPRequestHandler):
             return
         project_dir = self.headers.get(client.PROJECT_DIR_HEADER)
         project_dir = project_dir.strip() if isinstance(project_dir, str) and project_dir.strip() else None
+
+        def authorize(root: Path) -> bool:
+            return auth.verify_presented(presented, token, root) is not None
+
         try:
             if path in _HOOK_PATH_AGENTS:
                 event_override = params.get("event") or None
-                self.server.recorder.record_hook(
+                action, _detail = self.server.recorder.record_hook(
                     data, project_dir=project_dir, event_override=event_override, agent=_HOOK_PATH_AGENTS[path],
+                    authorize=authorize,
                 )
             else:
-                self.server.recorder.record_status(data, project_dir=project_dir)
+                action, _detail = self.server.recorder.record_status(
+                    data, project_dir=project_dir, authorize=authorize,
+                )
         except Exception as exc:
             _log(f"record failed: {type(exc).__name__}")
             self._send(500, b'{"error":"record failed"}')
             return
+        if action == "rejected":
+            self._send(401, b'{"error":"unauthenticated"}')
+            return
         self._send(200, b"{}")
 
-    def _handle_shutdown(self, body: bytes) -> None:
+    def _handle_shutdown(self, body: bytes, presented: object, token: str) -> None:
+        # Shutdown is a control action: only the capture token itself may
+        # authorise it, never a repository capability and never anything
+        # readable from /health.
+        if auth.verify_presented(presented, token, None) != "token":
+            self.server.recorder._bump("rejected")
+            self._send(401, b'{"error":"unauthenticated"}')
+            return
         try:
             data = json.loads(body.decode("utf-8", "replace")) if body.strip() else {}
         except ValueError:
@@ -852,7 +924,7 @@ def _bind(env: dict | os._Environ, explicit: int | None, recorder: CaptureRecord
           instance_id: str, started_at: str) -> CaptureServer | None:
     for port in _candidate_ports(env, explicit):
         try:
-            return CaptureServer(port, recorder, instance_id=instance_id, started_at=started_at)
+            return CaptureServer(port, recorder, instance_id=instance_id, started_at=started_at, env=env)
         except OSError:
             if _wait_for_owner_health(port, timeout=_FOREIGN_PORT_GRACE_SECONDS):
                 _log(f"another OpenShard capture service already listens on {port}; exiting")
@@ -878,6 +950,7 @@ def _telemetry_service_event(env: dict | os._Environ, state: str, recorder: Capt
             "capture.service", env,
             state=state, queued=_n(stats.get("queued")), folded=_n(stats.get("replayed")),
             replay_errors=_n(stats.get("replay_errors")),
+            rejected=_n(stats.get("rejected")), corrupt_lines=_n(stats.get("corrupt_lines")),
             p50_ms=_n(timing.get("p50_ms")), p95_ms=_n(timing.get("p95_ms")),
         )
         if state != "started":
@@ -907,6 +980,11 @@ def serve(
         _log(f"cannot create {home}: {type(exc).__name__}")
         return 1
     state_path = Path(client.state_path(env))
+    if auth.ensure_token(env) is None:
+        # Without a credential nothing could ever be accepted; say so once
+        # (the value itself is never logged) and keep going -- clients and
+        # `capture start` retry creating it, and requests are refused until then.
+        _log("could not create the capture token file; requests will be refused until it exists")
     instance_id = uuid.uuid4().hex[:12]
     started_at = _now()
     previous = client.read_state(env) or {}
