@@ -1,0 +1,133 @@
+{
+  "name": "01_verified_coding_task",
+  "description": "A normal coding task, verified by an independent test run, later merged.",
+  "seed_label": "DEMO DATA: synthetic fixture, not a real run",
+  "entries": [
+    {
+      "schema_version": "1.2",
+      "timestamp": "2026-09-14T09:00:00Z",
+      "run_id": "2026-09-14T09:00:00Z",
+      "shard_id": "shard-20260914-0001",
+      "attempt_number": 1,
+      "task": "Add input validation to the signup form",
+      "workflow": "native",
+      "executor": "native",
+      "execution_model": "anthropic/claude-sonnet-4.6",
+      "routing_selected_model": "anthropic/claude-sonnet-4.6",
+      "routing_selected_provider": "anthropic",
+      "retry_triggered": false,
+      "duration_seconds": 42.5,
+      "repo_name": "openshard",
+      "repo_identity": "github.com/openshard/openshard",
+      "git_branch": "feat/v050-foundation",
+      "git_head_commit_hash": "3172443abcdef0",
+      "git_base_branch": "main",
+      "git_base_commit_hash": "25de0b6abcdef0",
+      "git_dirty": false,
+      "files_created": 0,
+      "files_updated": 2,
+      "files_deleted": 0,
+      "files_detail": [
+        {
+          "path": "src/signup.py",
+          "change_type": "update",
+          "summary": "validate email"
+        },
+        {
+          "path": "tests/test_signup.py",
+          "change_type": "update",
+          "summary": "add cases"
+        }
+      ],
+      "verification_attempted": true,
+      "verification_passed": true,
+      "summary": "Added email and password validation with tests. All tests pass.",
+      "actors": {
+        "owner": {
+          "kind": "team",
+          "id": "team:platform",
+          "display": "Platform team"
+        },
+        "requested_by": {
+          "kind": "user",
+          "id": "user:michael",
+          "display": "Michael"
+        }
+      },
+      "permissions": {
+        "requested": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "used": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "denied": [],
+        "source": "policy:default-coding"
+      },
+      "policy": {
+        "policy_id": "pol-default-coding",
+        "policy_version": "3",
+        "name": "default-coding",
+        "source": "openshard.policy",
+        "evaluated_at": "2026-09-14T09:00:00Z",
+        "decision": "allow",
+        "reason": "paths within allowed scope"
+      },
+      "verification_command_summary": "pytest tests/test_signup.py",
+      "prompt_tokens": 12000,
+      "completion_tokens": 2400,
+      "total_tokens": 14400,
+      "estimated_cost": 0.0412,
+      "policy_decisions": [
+        {
+          "decision_id": "pd-1",
+          "action": "write",
+          "resource": null,
+          "decision": "allow",
+          "reason": "paths within allowed scope",
+          "source": "path_policy",
+          "severity": null,
+          "approval_required": false,
+          "approval_granted": null,
+          "created_at": "2026-09-14T09:00:00Z"
+        }
+      ],
+      "verifiers": [
+        {
+          "check": "pytest",
+          "status": "passed",
+          "verifier_kind": "test_runner",
+          "verifier_id": "openshard.native",
+          "independent": true,
+          "duration_seconds": 8.2,
+          "cost_usd": 0.0
+        }
+      ],
+      "cost_breakdown": {
+        "generation_usd": 0.0412,
+        "verification_usd": 0.0,
+        "retry_usd": 0.0,
+        "total_usd": 0.0412,
+        "provenance": "provider_reported"
+      },
+      "outcome": {
+        "status": "merged",
+        "source": "github",
+        "reference": "PR #341",
+        "recorded_at": "2026-09-14T11:00:00Z"
+      },
+      "content_hash": "sha256:cfd96972f77c8b52c6706cd3accfa975b69abf923a62d938ae70d0b969e7d7ff"
+    }
+  ],
+  "expected": {
+    "state": "VERIFIED",
+    "verified": true,
+    "cost_per_verified_success_usd": 0.0412,
+    "independent": true,
+    "outcome": "merged"
+  }
+}

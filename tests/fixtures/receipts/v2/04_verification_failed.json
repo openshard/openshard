@@ -1,0 +1,118 @@
+{
+  "name": "04_verification_failed",
+  "description": "The change was made but the independent test run failed.",
+  "seed_label": "DEMO DATA: synthetic fixture, not a real run",
+  "entries": [
+    {
+      "schema_version": "1.2",
+      "timestamp": "2026-09-14T09:00:00Z",
+      "run_id": "2026-09-14T09:00:00Z",
+      "shard_id": "shard-20260914-0005",
+      "attempt_number": 1,
+      "task": "Refactor the payment retry loop",
+      "workflow": "native",
+      "executor": "native",
+      "execution_model": "anthropic/claude-sonnet-4.6",
+      "routing_selected_model": "anthropic/claude-sonnet-4.6",
+      "routing_selected_provider": "anthropic",
+      "retry_triggered": false,
+      "duration_seconds": 42.5,
+      "repo_name": "openshard",
+      "repo_identity": "github.com/openshard/openshard",
+      "git_branch": "feat/v050-foundation",
+      "git_head_commit_hash": "3172443abcdef0",
+      "git_base_branch": "main",
+      "git_base_commit_hash": "25de0b6abcdef0",
+      "git_dirty": false,
+      "files_created": 0,
+      "files_updated": 1,
+      "files_deleted": 0,
+      "files_detail": [
+        {
+          "path": "src/payments/retry.py",
+          "change_type": "update",
+          "summary": "refactor"
+        }
+      ],
+      "verification_attempted": true,
+      "verification_passed": false,
+      "summary": "Refactor applied but 2 tests fail.",
+      "actors": {
+        "owner": {
+          "kind": "team",
+          "id": "team:platform",
+          "display": "Platform team"
+        },
+        "requested_by": {
+          "kind": "user",
+          "id": "user:michael",
+          "display": "Michael"
+        }
+      },
+      "permissions": {
+        "requested": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "used": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "denied": [],
+        "source": "policy:default-coding"
+      },
+      "policy": {
+        "policy_id": "pol-default-coding",
+        "policy_version": "3",
+        "name": "default-coding",
+        "source": "openshard.policy",
+        "evaluated_at": "2026-09-14T09:00:00Z",
+        "decision": "allow"
+      },
+      "verification_command_summary": "pytest tests/payments",
+      "estimated_cost": 0.052,
+      "osn_verification_contract": {
+        "enabled": true,
+        "status": "failed",
+        "required": true,
+        "expected_checks": [
+          "pytest tests/payments"
+        ],
+        "attempted_checks": [
+          "pytest tests/payments"
+        ],
+        "passed_checks": [],
+        "failed_checks": [
+          "pytest tests/payments"
+        ],
+        "skipped_checks": [],
+        "missing_checks": [],
+        "skipped_reason": "",
+        "manual_review_required": true,
+        "summary": "pytest tests/payments failed (exit 1)",
+        "returncode": 1,
+        "duration_seconds": 11.4,
+        "raw_output_stored": false
+      },
+      "verifiers": [
+        {
+          "check": "pytest tests/payments",
+          "status": "failed",
+          "verifier_kind": "test_runner",
+          "verifier_id": "openshard.native",
+          "independent": true,
+          "duration_seconds": 11.4,
+          "cost_usd": 0.0
+        }
+      ],
+      "content_hash": "sha256:c67138c8db41c4edcfbbe2824ac882a6260b02aa4b9b15df85e081f25757e8e2"
+    }
+  ],
+  "expected": {
+    "state": "VERIFICATION_FAILED",
+    "verification_status": "failed",
+    "cost_per_verified_success_usd": null
+  }
+}

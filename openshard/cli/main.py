@@ -1617,6 +1617,28 @@ def _render_log_entry(entry: dict, detail: str, index: int | None = None) -> Non
         click.echo(render_compact_shard_receipt(_shard))
         click.echo("")
         click.echo(render_full_shard_receipt(_shard, detail=detail))
+        if detail == "full":
+            # v0.5: the questions a receipt answers, only in the full view so
+            # the default and --more receipts stay compact.
+            from openshard.history.receipt_contract import (
+                build_receipt_contract as _brc,
+            )
+            from openshard.history.receipt_contract import (
+                receipt_questions as _rq,
+            )
+            try:
+                from openshard.history.outcomes import outcome_for_shard as _ofs
+                _sid = entry.get("shard_id")
+                _contract = _brc(
+                    entry, index=index,
+                    outcome_record=_ofs(_sid) if isinstance(_sid, str) and _sid else None,
+                )
+                click.echo("")
+                click.echo("  RECEIPT ANSWERS")
+                for _q, _a in _rq(_contract):
+                    click.echo(f"  {_q:<26}{_a}")
+            except Exception:
+                pass
         from openshard.history.routing_truth import (
             build_routing_truth as _brt,
         )
@@ -1686,15 +1708,16 @@ def _render_log_entry(entry: dict, detail: str, index: int | None = None) -> Non
             click.echo(f"    Reason: {_reason}")
 
     # Form factor (--full only)
-    if detail == "full" and "form_factor" in entry:
+    if detail == "full" and isinstance(entry.get("form_factor"), dict):
         _ff = entry["form_factor"]
-        _ff_pub = _PUBLIC_MODE_LABEL.get(_ff["public_mode"], _ff["public_mode"].title())
+        _ff_pub_raw = str(_ff.get("public_mode") or "unknown")
+        _ff_pub = _PUBLIC_MODE_LABEL.get(_ff_pub_raw, _ff_pub_raw.title())
         click.echo("\n  Form factor")
         click.echo(f"    Public mode:  {_ff_pub}")
-        click.echo(f"    Internal:     {_ff['internal_form_factor']}")
-        click.echo(f"    Reason:       {_ff['reason']}")
-        click.echo(f"    Confidence:   {_ff['confidence']}")
-        click.echo(f"    Risk:         {_ff['risk_level']}")
+        click.echo(f"    Internal:     {_ff.get('internal_form_factor', 'unknown')}")
+        click.echo(f"    Reason:       {_ff.get('reason', '')}")
+        click.echo(f"    Confidence:   {_ff.get('confidence', 'unknown')}")
+        click.echo(f"    Risk:         {_ff.get('risk_level', 'unknown')}")
         if _ff.get("context_quality"):
             click.echo(f"    Context:      {_ff['context_quality']}")
         for _w in _ff.get("warnings", []):
@@ -1983,6 +2006,7 @@ def last(more: bool, full: bool, as_json: bool):
             },
             proof_contract=build_shard_proof_contract(entry),
             shard_quality=build_shard_quality_summary(entry, receipt),
+            receipt_contract=_receipt_contract_payload(entry, entries, loc.root),
             **_content_hash_fields(entry),
         )
         click.echo(json.dumps(payload, indent=2))
@@ -2000,6 +2024,60 @@ def last(more: bool, full: bool, as_json: bool):
     for line in repo_note_lines(loc):
         click.echo(line)
     _render_log_entry(entries[-1], detail, index=len(entries) - 1)
+
+
+@cli.group("outcome")
+def outcome_group() -> None:
+    """Record what happened to a Shard's work afterwards (merged, deployed, ...)."""
+
+
+@outcome_group.command("record")
+@click.argument("shard_id")
+@click.argument("status", type=click.Choice(sorted(
+    {"pending", "accepted", "rejected", "merged", "deployed", "rolled_back", "reverted", "partial"}
+)))
+@click.option("--reference", default=None, help="Short reference, e.g. 'PR #341' or a deploy id.")
+@click.option("--source", default="cli", show_default=True, help="Where the outcome was observed.")
+@click.option("--by", "recorded_by", default=None, help="Who recorded it (an id such as user:alice).")
+@click.option("--human-intervention/--no-human-intervention", default=None,
+              help="Whether a person had to intervene to reach this outcome.")
+@click.option("--note", default=None, help="Short note (no secrets, no paths).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def outcome_record_cmd(
+    shard_id: str, status: str, reference: str | None, source: str, recorded_by: str | None,
+    human_intervention: bool | None, note: str | None, as_json: bool,
+) -> None:
+    """Append an outcome for SHARD_ID beside the run record.
+
+    The run record is never edited, so its content hash stays valid. The
+    outcome shows in ``openshard last --full`` / ``--json`` as the receipt's
+    final outcome.
+    """
+    from openshard.contracts.outcomes import OutcomeReport
+    from openshard.history.outcomes import record_outcome
+
+    loc = _locate_history()
+    entries = _load_run_entries(loc.runs_path) if loc.runs_path.exists() else []
+    if not any(isinstance(e, dict) and e.get("shard_id") == shard_id for e in entries):
+        msg = f"No Shard '{shard_id}' found in {loc.display_name}."
+        if as_json:
+            click.echo(json.dumps(_machine_envelope("outcome record", "not_found", shard_id=shard_id,
+                                                    warnings=[msg]), indent=2))
+        else:
+            click.echo(msg)
+        raise SystemExit(1)
+    report = OutcomeReport(
+        shard_id=shard_id, status=status, source=source, reference=reference,
+        recorded_by={"kind": "user", "id": recorded_by, "display": recorded_by, "source": "cli"} if recorded_by else None,
+        human_intervention=human_intervention, note=note,
+    )
+    record_outcome(report, repo_path=loc.root)
+    if as_json:
+        click.echo(json.dumps(_machine_envelope(
+            "outcome record", "ok", shard_id=shard_id, outcome=report.to_receipt_block(),
+        ), indent=2))
+        return
+    click.echo(f"Recorded outcome '{status}' for {shard_id}" + (f" ({reference})" if reference else "") + ".")
 
 
 @cli.command("history")
@@ -3807,6 +3885,27 @@ def _load_run_entries(log_path: Path) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return entries
+
+
+def _sibling_attempts(entry: dict, entries: list[dict]) -> list[dict]:
+    """Other persisted attempts of *entry*'s Shard (same ``shard_id``)."""
+    sid = entry.get("shard_id")
+    if not isinstance(sid, str) or not sid:
+        return []
+    return [e for e in entries if isinstance(e, dict) and e.get("shard_id") == sid and e is not entry]
+
+
+def _receipt_contract_payload(entry: dict, entries: list[dict], repo_path: Path | None = None) -> dict:
+    """Receipt Contract v2 block for ``--json`` envelopes (v0.5, additive)."""
+    from openshard.history.outcomes import outcome_for_shard
+    from openshard.history.receipt_contract import build_receipt_contract
+
+    sid = entry.get("shard_id")
+    outcome = outcome_for_shard(sid, repo_path) if isinstance(sid, str) and sid else None
+    return build_receipt_contract(
+        entry, index=len(entries) - 1, siblings=_sibling_attempts(entry, entries),
+        outcome_record=outcome,
+    ).to_dict()
 
 
 def _content_hash_fields(entry: dict) -> dict:

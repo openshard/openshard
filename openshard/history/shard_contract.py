@@ -507,6 +507,14 @@ class ShardReceipt:
     # Cost provenance -- distinguishes a provider-reported figure from an
     # OpenShard-calculated or OpenShard-estimated one (see cost_display).
     cost_provenance: str | None = None
+    # Receipt Contract v2 (v0.5) -- derived at read time from explicit
+    # evidence (see openshard.history.receipt_contract). ``receipt_state`` is
+    # one of the VALID_STATES tokens; ``receipt_v2_fields`` lists which of the
+    # optional v2 blocks the producer actually wrote, so renderers can keep
+    # the compact view unchanged for records that predate them.
+    receipt_state: str | None = None
+    receipt_state_reason: str = ""
+    receipt_v2_fields: list[str] = field(default_factory=list)
 
 
 def _verification_from_osn_contract(
@@ -1038,7 +1046,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     _tokens_cache_creation = entry.get("cache_creation_tokens") if _tokens_provenance else None
     _tokens_cache_read = entry.get("cache_read_tokens") if _tokens_provenance else None
 
-    return ShardReceipt(
+    _receipt = ShardReceipt(
         shard_id=_shard_id_val,
         created_at=timestamp,
         task_short=_task_short_val,
@@ -1128,6 +1136,19 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
             task_full=task,
         ),
     )
+    # Receipt state (v0.5): derived from the receipt just built, never raises.
+    from openshard.history.receipt_contract import (
+        entry_has_v2_fields as _v2_fields,
+    )
+    from openshard.history.receipt_contract import (
+        receipt_state_for_receipt as _state_for,
+    )
+    try:
+        _receipt.receipt_state, _receipt.receipt_state_reason = _state_for(entry, _receipt)
+        _receipt.receipt_v2_fields = _v2_fields(entry)
+    except Exception:
+        pass
+    return _receipt
 
 
 def _row(label: str, value: str, width: int = _COL) -> str:
@@ -1239,6 +1260,8 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         ))
     if receipt.task_completion:
         lines.append(_row("Status", receipt.task_completion))
+    if receipt.receipt_v2_fields and receipt.receipt_state:
+        lines.append(_row("State", receipt.receipt_state))
     lines.append(_row(model_label, model_value))
     if receipt.duration_seconds is not None:
         lines.append(_row("Duration", f"{receipt.duration_seconds:.1f}s"))
@@ -1475,6 +1498,13 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append("")
 
     lines += [f"{_INDENT}TASK", f"{_INDENT}{receipt.task_full}", ""]
+
+    if receipt.receipt_state:
+        lines.append(f"{_INDENT}RECEIPT STATE")
+        lines.append(_row("State", receipt.receipt_state))
+        if receipt.receipt_state_reason:
+            lines.append(_row("Because", receipt.receipt_state_reason))
+        lines.append("")
 
     lines.append(f"{_INDENT}EXECUTION")
     lines.append(_row("Executor", receipt.agent))

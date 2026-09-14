@@ -1,0 +1,145 @@
+{
+  "name": "02_high_risk_approval_required",
+  "description": "A high-risk infra change: policy said ASK, a named human approved it in the dashboard, then checks passed.",
+  "seed_label": "DEMO DATA: synthetic fixture, not a real run",
+  "entries": [
+    {
+      "schema_version": "1.2",
+      "timestamp": "2026-09-14T09:00:00Z",
+      "run_id": "2026-09-14T09:00:00Z",
+      "shard_id": "shard-20260914-0002",
+      "attempt_number": 1,
+      "task": "Rotate the production database credentials in infra/",
+      "workflow": "native",
+      "executor": "native",
+      "execution_model": "anthropic/claude-opus-4.7",
+      "routing_selected_model": "anthropic/claude-opus-4.7",
+      "routing_selected_provider": "anthropic",
+      "retry_triggered": false,
+      "duration_seconds": 42.5,
+      "repo_name": "openshard",
+      "repo_identity": "github.com/openshard/openshard",
+      "git_branch": "feat/v050-foundation",
+      "git_head_commit_hash": "3172443abcdef0",
+      "git_base_branch": "main",
+      "git_base_commit_hash": "25de0b6abcdef0",
+      "git_dirty": false,
+      "files_created": 0,
+      "files_updated": 1,
+      "files_deleted": 0,
+      "files_detail": [
+        {
+          "path": "infra/db.tf",
+          "change_type": "update",
+          "summary": "rotate creds"
+        }
+      ],
+      "verification_attempted": true,
+      "verification_passed": true,
+      "summary": "Rotated credentials; terraform validate passes.",
+      "actors": {
+        "owner": {
+          "kind": "team",
+          "id": "team:platform",
+          "display": "Platform team"
+        },
+        "requested_by": {
+          "kind": "user",
+          "id": "user:michael",
+          "display": "Michael"
+        }
+      },
+      "permissions": {
+        "requested": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "used": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "denied": [],
+        "source": "policy:default-coding"
+      },
+      "policy": {
+        "policy_id": "pol-high-risk-infra",
+        "policy_version": "3",
+        "name": "high-risk-infra",
+        "source": "openshard.policy",
+        "evaluated_at": "2026-09-14T09:00:00Z",
+        "decision": "ask",
+        "reason": "infra/** requires human approval"
+      },
+      "verification_command_summary": "terraform validate",
+      "estimated_cost": 0.31,
+      "form_factor": {
+        "public_mode": "run",
+        "internal_form_factor": "native-loop-candidate",
+        "reason": "high-risk infra write",
+        "confidence": "high",
+        "risk_level": "high",
+        "read_only": false,
+        "write_requested": true,
+        "verification_available": true,
+        "context_quality": "good",
+        "warnings": []
+      },
+      "approval_request": {
+        "requires_approval": true,
+        "action": "write",
+        "prompt": "High-risk path infra/db.tf"
+      },
+      "approval_receipt": {
+        "granted": true,
+        "reason": "reviewed rotation plan"
+      },
+      "approval": {
+        "required": true,
+        "status": "granted",
+        "mechanism": "dashboard",
+        "approved_at": "2026-09-14T09:05:00Z",
+        "approver": {
+          "kind": "user",
+          "id": "user:ops-lead",
+          "display": "Ops lead"
+        },
+        "reason": "reviewed rotation plan",
+        "request_action": "write",
+        "request_id": "apr-77"
+      },
+      "policy_decisions": [
+        {
+          "decision_id": "pd-2",
+          "action": "write",
+          "resource": null,
+          "decision": "allow",
+          "reason": "approval granted",
+          "source": "approval_gate",
+          "severity": null,
+          "approval_required": true,
+          "approval_granted": true,
+          "created_at": "2026-09-14T09:00:00Z"
+        }
+      ],
+      "verifiers": [
+        {
+          "check": "terraform validate",
+          "status": "passed",
+          "verifier_kind": "static_check",
+          "verifier_id": "openshard.native",
+          "independent": true,
+          "duration_seconds": 3.1
+        }
+      ],
+      "content_hash": "sha256:76201b0ad9e470f74b53f0b54fdff3da8932e3f054a2ccab1d7d35cccdf0fc9c"
+    }
+  ],
+  "expected": {
+    "state": "VERIFIED",
+    "approval_status": "granted",
+    "approver_id": "user:ops-lead",
+    "mechanism": "dashboard"
+  }
+}

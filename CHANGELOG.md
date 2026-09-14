@@ -2,6 +2,39 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased (v0.5.0 foundation)
+
+### Added
+
+- Receipt Contract v2 (`openshard/history/receipt_contract.py`): a read-time,
+  evidence-derived projection of a run record that answers who owns the work,
+  who requested it, which agent/model executed it, what it was allowed to do,
+  which policy governed it, whether and by whom it was approved, which checks
+  were independent, whether capture was complete, what generation /
+  verification / retries cost, the cost per verified successful task, what
+  happened afterwards, and whether the record was altered. Receipt states:
+  `VERIFIED`, `UNVERIFIED`, `VERIFICATION_FAILED`, `BLOCKED`,
+  `APPROVAL_REQUIRED`, `APPROVED`, `VERIFIED_AFTER_RETRY`,
+  `VERIFIED_AFTER_ESCALATION`, always with a reason. See
+  `docs/architecture/RECEIPT_CONTRACT_V2.md`.
+- Optional, additive run-record blocks `actors`, `permissions`, `policy`,
+  `approval`, `verifiers`, `escalation`, `cost_breakdown`, `outcome`,
+  `attestation`. Records without them (every v0.4.3 record) still build a
+  complete contract with honest gaps; `schema_version` stays `"1.2"`.
+- `openshard last --json` gains `receipt_contract`; `openshard history --json`
+  gains `state` / `state_reason`; `openshard last --full` prints a
+  `RECEIPT ANSWERS` block; the full receipt gains a `RECEIPT STATE` section.
+  The compact receipt shows a `State` row only for records that carry a v2
+  block, so existing output is unchanged.
+- Representative fixtures under `tests/fixtures/receipts/v2/` (verified,
+  approval required, blocked by policy, verification failed, escalation).
+- `docs/architecture/V050_FOUNDATION_AUDIT.md`.
+
+### Fixed
+
+- `openshard last --full` no longer crashes on a `form_factor` block that is
+  missing `public_mode`.
+
 ## 0.4.3 - 2026-09-12
 
 A DX cleanup pass around the external-agent receipt loop. No commands were

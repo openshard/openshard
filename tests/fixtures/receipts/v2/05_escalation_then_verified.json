@@ -1,0 +1,196 @@
+{
+  "name": "05_escalation_then_verified",
+  "description": "Attempt 1 on a cheap model failed verification; attempt 2 escalated to a stronger model and passed. Cost per verified success covers both attempts.",
+  "seed_label": "DEMO DATA: synthetic fixture, not a real run",
+  "entries": [
+    {
+      "schema_version": "1.2",
+      "timestamp": "2026-09-14T10:00:00Z",
+      "run_id": "2026-09-14T10:00:00Z",
+      "shard_id": "shard-20260914-0006",
+      "attempt_number": 1,
+      "task": "Fix the flaky date parsing in reports",
+      "workflow": "native",
+      "executor": "native",
+      "execution_model": "anthropic/claude-haiku-4.5",
+      "routing_selected_model": "anthropic/claude-haiku-4.5",
+      "routing_selected_provider": "anthropic",
+      "retry_triggered": false,
+      "duration_seconds": 42.5,
+      "repo_name": "openshard",
+      "repo_identity": "github.com/openshard/openshard",
+      "git_branch": "feat/v050-foundation",
+      "git_head_commit_hash": "3172443abcdef0",
+      "git_base_branch": "main",
+      "git_base_commit_hash": "25de0b6abcdef0",
+      "git_dirty": false,
+      "files_created": 0,
+      "files_updated": 1,
+      "files_deleted": 0,
+      "files_detail": [
+        {
+          "path": "src/reports/dates.py",
+          "change_type": "update",
+          "summary": "attempt"
+        }
+      ],
+      "verification_attempted": true,
+      "verification_passed": false,
+      "summary": "First attempt on the cheap model; tests still fail.",
+      "actors": {
+        "owner": {
+          "kind": "team",
+          "id": "team:platform",
+          "display": "Platform team"
+        },
+        "requested_by": {
+          "kind": "user",
+          "id": "user:michael",
+          "display": "Michael"
+        }
+      },
+      "permissions": {
+        "requested": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "used": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "denied": [],
+        "source": "policy:default-coding"
+      },
+      "policy": {
+        "policy_id": "pol-default-coding",
+        "policy_version": "3",
+        "name": "default-coding",
+        "source": "openshard.policy",
+        "evaluated_at": "2026-09-14T10:00:00Z",
+        "decision": "allow"
+      },
+      "verification_command_summary": "pytest tests/reports",
+      "estimated_cost": 0.006,
+      "verifiers": [
+        {
+          "check": "pytest tests/reports",
+          "status": "failed",
+          "verifier_kind": "test_runner",
+          "verifier_id": "openshard.native",
+          "independent": true,
+          "duration_seconds": 6.0,
+          "cost_usd": 0.0
+        }
+      ],
+      "content_hash": "sha256:9ce2c0c745bf5ee839dec1cc1ec533b729a273568e02f8c39dfe3531a16c8f1e"
+    },
+    {
+      "schema_version": "1.2",
+      "timestamp": "2026-09-14T10:06:00Z",
+      "run_id": "2026-09-14T10:06:00Z",
+      "shard_id": "shard-20260914-0006",
+      "attempt_number": 2,
+      "task": "Fix the flaky date parsing in reports",
+      "workflow": "native",
+      "executor": "native",
+      "execution_model": "anthropic/claude-sonnet-4.6",
+      "routing_selected_model": "anthropic/claude-sonnet-4.6",
+      "routing_selected_provider": "anthropic",
+      "retry_triggered": true,
+      "duration_seconds": 42.5,
+      "repo_name": "openshard",
+      "repo_identity": "github.com/openshard/openshard",
+      "git_branch": "feat/v050-foundation",
+      "git_head_commit_hash": "3172443abcdef0",
+      "git_base_branch": "main",
+      "git_base_commit_hash": "25de0b6abcdef0",
+      "git_dirty": false,
+      "files_created": 0,
+      "files_updated": 1,
+      "files_deleted": 0,
+      "files_detail": [
+        {
+          "path": "src/reports/dates.py",
+          "change_type": "update",
+          "summary": "timezone-aware parse"
+        }
+      ],
+      "verification_attempted": true,
+      "verification_passed": true,
+      "summary": "Escalated to a stronger model; timezone-aware parsing, tests pass.",
+      "actors": {
+        "owner": {
+          "kind": "team",
+          "id": "team:platform",
+          "display": "Platform team"
+        },
+        "requested_by": {
+          "kind": "user",
+          "id": "user:michael",
+          "display": "Michael"
+        }
+      },
+      "permissions": {
+        "requested": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "used": [
+          "read:repo",
+          "write:src/**",
+          "shell:pytest"
+        ],
+        "denied": [],
+        "source": "policy:default-coding"
+      },
+      "policy": {
+        "policy_id": "pol-default-coding",
+        "policy_version": "3",
+        "name": "default-coding",
+        "source": "openshard.policy",
+        "evaluated_at": "2026-09-14T10:06:00Z",
+        "decision": "allow"
+      },
+      "verification_command_summary": "pytest tests/reports",
+      "estimated_cost": 0.048,
+      "escalation": {
+        "occurred": true,
+        "from_model": "anthropic/claude-haiku-4.5",
+        "to_model": "anthropic/claude-sonnet-4.6",
+        "from_attempt": 1,
+        "to_attempt": 2,
+        "reason": "verification failed on attempt 1"
+      },
+      "verifiers": [
+        {
+          "check": "pytest tests/reports",
+          "status": "passed",
+          "verifier_kind": "test_runner",
+          "verifier_id": "openshard.native",
+          "independent": true,
+          "duration_seconds": 6.4,
+          "cost_usd": 0.0
+        }
+      ],
+      "cost_breakdown": {
+        "generation_usd": 0.048,
+        "verification_usd": 0.0,
+        "retry_usd": 0.0,
+        "total_usd": 0.048,
+        "provenance": "provider_reported"
+      },
+      "content_hash": "sha256:3aabf0d8411dd3a3b5a12c18e474a425da7483edc85c499307fc5dca6fd9d4c5"
+    }
+  ],
+  "expected": {
+    "state": "VERIFIED_AFTER_ESCALATION",
+    "attempts_observed": 2,
+    "retries": 1,
+    "from_model": "anthropic/claude-haiku-4.5",
+    "to_model": "anthropic/claude-sonnet-4.6",
+    "cost_per_verified_success_usd": 0.054
+  }
+}

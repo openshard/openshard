@@ -1,0 +1,101 @@
+{
+  "name": "03_blocked_by_policy",
+  "description": "The agent asked for a denied permission; policy said DENY with a reason and nothing ran.",
+  "seed_label": "DEMO DATA: synthetic fixture, not a real run",
+  "entries": [
+    {
+      "schema_version": "1.2",
+      "timestamp": "2026-09-14T09:00:00Z",
+      "run_id": "2026-09-14T09:00:00Z",
+      "shard_id": "shard-20260914-0004",
+      "attempt_number": 1,
+      "task": "Push the hotfix directly to main and force-push",
+      "workflow": "native",
+      "executor": "native",
+      "execution_model": "anthropic/claude-sonnet-4.6",
+      "routing_selected_model": "anthropic/claude-sonnet-4.6",
+      "routing_selected_provider": "anthropic",
+      "retry_triggered": false,
+      "duration_seconds": 42.5,
+      "repo_name": "openshard",
+      "repo_identity": "github.com/openshard/openshard",
+      "git_branch": "feat/v050-foundation",
+      "git_head_commit_hash": "3172443abcdef0",
+      "git_base_branch": "main",
+      "git_base_commit_hash": "25de0b6abcdef0",
+      "git_dirty": false,
+      "files_created": 0,
+      "files_updated": 0,
+      "files_deleted": 0,
+      "files_detail": [],
+      "verification_attempted": false,
+      "verification_passed": null,
+      "summary": "Blocked: policy denies force-push to protected branches.",
+      "actors": {
+        "owner": {
+          "kind": "team",
+          "id": "team:platform",
+          "display": "Platform team"
+        },
+        "requested_by": {
+          "kind": "user",
+          "id": "user:michael",
+          "display": "Michael"
+        }
+      },
+      "permissions": {
+        "requested": [
+          "shell:git push --force"
+        ],
+        "used": [],
+        "denied": [
+          "shell:git push --force"
+        ],
+        "source": "policy:protected-branches"
+      },
+      "policy": {
+        "policy_id": "pol-protected-branches",
+        "policy_version": "3",
+        "name": "protected-branches",
+        "source": "openshard.policy",
+        "evaluated_at": "2026-09-14T09:00:00Z",
+        "decision": "deny",
+        "reason": "force-push to protected branch main is denied"
+      },
+      "policy_decisions": [
+        {
+          "decision_id": "pd-4",
+          "action": "shell",
+          "resource": null,
+          "decision": "deny",
+          "reason": "force-push to protected branch main is denied",
+          "source": "path_policy",
+          "severity": "critical",
+          "approval_required": false,
+          "approval_granted": null,
+          "created_at": "2026-09-14T09:00:00Z"
+        }
+      ],
+      "command_policy": {
+        "allowed_paths": [
+          "src/**"
+        ],
+        "blocked_paths": [
+          ".github/**"
+        ],
+        "blocked_commands": [
+          "git push --force"
+        ]
+      },
+      "estimated_cost": 0.004,
+      "content_hash": "sha256:3a45bdb9e5eaaf39f19258ec6138ef3d8c07e9577582408009b7f2ec92c79779"
+    }
+  ],
+  "expected": {
+    "state": "BLOCKED",
+    "policy_decision": "deny",
+    "denied_permissions": [
+      "shell:git push --force"
+    ]
+  }
+}
