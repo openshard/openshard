@@ -1970,7 +1970,7 @@ def last(more: bool, full: bool, as_json: bool):
             interaction_event_types=_interaction_event_types(entry.get("timestamp", "")),
         )
         payload = _machine_envelope(
-            "last", "ok", shard_id=receipt.shard_id,
+            "last", "ok", shard_id=receipt.shard_id, receipt_id=receipt.receipt_id,
             repo=loc.to_dict(),
             run=_export_run_entry(entry, include_timeline=True, receipt=receipt),
             trust={

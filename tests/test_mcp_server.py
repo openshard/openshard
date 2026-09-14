@@ -294,8 +294,9 @@ class TestGetReceipt:
     def test_receipt_fields_present_and_bounded(self, history: Path):
         server = build_server(repo_path=history)
         _, structured = _call(server, "get_receipt", {"shard_id": "shard-a"})
+        # v0.4.4: receipt_id is an additive key (None for records written before it existed).
         expected_keys = {
-            "shard_id", "run_id", "attempt_number", "created_at", "task_short",
+            "shard_id", "receipt_id", "run_id", "attempt_number", "created_at", "task_short",
             "task_full", "agent", "origin", "capture_depth", "model",
             "model_stages", "strategy", "risk", "sandbox", "files_changed",
             "files", "diff_added", "diff_removed", "checks", "status",

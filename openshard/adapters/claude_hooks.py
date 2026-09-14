@@ -1052,6 +1052,10 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "record": {
             "run_id": entry.get("run_id"),
             "shard_id": entry.get("shard_id"),
+            # An old record (pre-0.4.4) has no receipt_id; the rebuilt buffer
+            # keeps None and build_hook_entry then leaves the field absent,
+            # so history is never given an identity after the fact.
+            "receipt_id": entry.get("receipt_id") if isinstance(entry.get("receipt_id"), str) else None,
             "attempt_number": entry.get("attempt_number") if isinstance(entry.get("attempt_number"), int) else 1,
             "timestamp": entry.get("timestamp"),
         },
@@ -1180,6 +1184,7 @@ def _ensure_record(buf: dict, repo_root: Path) -> None:
     """
     if buf.get("record"):
         return
+    from openshard.history.receipt_identity import new_receipt_id
     from openshard.history.shard_contract import _make_shard_id
 
     timestamp = buf.get("started_at") or _now()
@@ -1188,6 +1193,9 @@ def _ensure_record(buf: dict, repo_root: Path) -> None:
     buf["record"] = {
         "run_id": f"{timestamp}-{sid[:8]}" if sid else timestamp,
         "shard_id": _make_shard_id(timestamp, run_index),
+        # v0.4.4: the global identity of this record. Minted once here, at
+        # creation, and carried through every fold; never position-derived.
+        "receipt_id": new_receipt_id(),
         "attempt_number": 1,
         "timestamp": timestamp,
     }
@@ -1504,6 +1512,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "last_status_ping_at": buf.get("status_last_seen_at"),
         },
     }
+    if isinstance(record.get("receipt_id"), str) and record["receipt_id"]:
+        # v0.4.4 global identity -- present on every record created by this
+        # version; absent (never back-filled) on records rebuilt from older history.
+        entry["receipt_id"] = record["receipt_id"]
     if raw_usage:
         # Per-message usage memory (OpenCode), bounded; lets a buffer rebuilt
         # from this record keep deduplicating re-reported messages.

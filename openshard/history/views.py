@@ -96,6 +96,7 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
 
     d: dict[str, Any] = {
         "shard_id": receipt.shard_id,
+        "receipt_id": receipt.receipt_id,
         "run_id": receipt.run_id,
         "attempt_number": receipt.attempt_number,
         "created_at": receipt.created_at,

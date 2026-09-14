@@ -698,6 +698,9 @@ def _log_run(
         from openshard.history.shard_contract import _make_shard_id as _msi
         entry["shard_id"] = _msi(entry["timestamp"], run_index)
     entry["attempt_number"] = attempt_number
+    # v0.4.4: global receipt identity, minted at creation (see receipt_identity).
+    from openshard.history.receipt_identity import ensure_receipt_id as _erid
+    _erid(entry)
 
     if effective_executor == "native":
         entry["events"] = _build_native_events(

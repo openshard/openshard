@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 
+from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.shard import (
     ORIGIN_EXTERNAL_OBSERVED,
     Shard,
@@ -507,6 +508,11 @@ class ShardReceipt:
     # Cost provenance -- distinguishes a provider-reported figure from an
     # OpenShard-calculated or OpenShard-estimated one (see cost_display).
     cost_provenance: str | None = None
+    # v0.4.4 global Receipt identity (history/receipt_identity.py). Read
+    # from the record only -- None for records written before 0.4.4, never
+    # minted at display time. ``shard_id`` above keeps its historic,
+    # history-position meaning.
+    receipt_id: str | None = None
 
 
 def _verification_from_osn_contract(
@@ -1007,6 +1013,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         _events = []
 
     _shard_id_val = entry.get("shard_id") or _make_shard_id(timestamp, index)
+    _receipt_id_val = stored_receipt_id(entry)
     _task_short_val = _trunc(task, 70)
     _run_id_val = entry.get("run_id") or timestamp or None
     _attempt_number_val = entry.get("attempt_number") if isinstance(entry.get("attempt_number"), int) else None
@@ -1120,6 +1127,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         tokens_cache_read=_tokens_cache_read if isinstance(_tokens_cache_read, int) else None,
         tokens_provenance=_tokens_provenance,
         cost_provenance=cost_provenance,
+        receipt_id=_receipt_id_val,
         shard=build_shard(
             entry,
             shard_id=_shard_id_val,
@@ -1232,6 +1240,8 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         _row("Task", receipt.task_short),
         _row("Executor", receipt.agent),
     ]
+    if receipt.receipt_id:
+        lines.append(_row("Receipt ID", receipt.receipt_id))
     if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
         lines.append(_row(
             "Capture",
@@ -1806,6 +1816,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append("")
 
     lines += [_SEP, f"{_INDENT}RECEIPT"]
+    if receipt.receipt_id:
+        lines.append(_row("Receipt ID", receipt.receipt_id))
     lines.append(_row("Shard ID", receipt.shard_id))
     lines.append(_row("Created", _fmt_timestamp(receipt.created_at)))
     lines.append(_row("Result", receipt.result))
