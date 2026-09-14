@@ -252,3 +252,22 @@ Signing / attestation chains, real policy evaluation engines, RBAC
 enforcement beyond membership roles, Managed Compute providers, outcome
 webhooks (merged/deployed) and outcome-aware routing are given interfaces
 and TODOs only.
+
+## Appendix: adapter capability matrix (from the code survey)
+
+| | Claude hooks | Codex hooks | Cursor hooks | OpenCode plugin | wrap_exec | claude_code_import |
+| --- | --- | --- | --- | --- | --- | --- |
+| Builder | `build_hook_entry` | same | same | same | `build_wrap_entry` | `build_claude_code_import_entry` |
+| `executor` | `claude_code_hooks` | `codex_hooks` | `cursor_hooks` | `opencode_plugin` | `claude_code_wrap` | `claude_code_import` |
+| Model | status line | hook `model` | `model_id` | `model_id` | `--model` only | `--model` only |
+| Provider | no | no | no | `provider_id` | no | no |
+| Cost | cumulative minus baseline | no | no | per-message sum | no | no |
+| Tokens | 4 counters | no | no | 4 counters | no | no |
+| Tool success attested | `PostToolUse` | no | no | `file.edited` | n/a | n/a |
+| Run success | none (`run.completed`/unknown) | none | none | none | exit code | none |
+| `verification_passed` | always `None` | `None` | `None` | `None` | absent | `None` |
+| Write mode | upsert by `(executor, session_id)` | same | same | same | append | append |
+
+Consequence for v0.5: every externally observed adapter yields
+`capture.coverage = partial` and `verification.independent = False` unless a
+producer adds `verifiers`; only OpenShard-executed runs can reach `complete`.
