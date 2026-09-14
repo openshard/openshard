@@ -88,9 +88,9 @@ Baseline before edits: 8834 passed, 3 skipped; ruff and mypy clean.
 
 After all functional changes (this branch, Linux, Python 3.11,
 `pip install -e ".[dev]"` as CI): 8900 passed, 3 skipped, 883 subtests
-passed (303 s). ruff: clean. mypy: clean (191 files). A confirmation run
-after the two trailing changes (receipt label, refused-request logging) is
-recorded in the final commit of this branch.
+passed (303 s). Final confirmation run on the pushed branch head (after the
+receipt-label and refused-request-logging changes): 8900 passed, 3 skipped,
+883 subtests passed (302 s). ruff: clean. mypy: clean (191 files).
 
 Windows and Python 3.12 were not run here (no Windows runner in this
 environment); CI runs both. Windows-specific paths touched: token file
