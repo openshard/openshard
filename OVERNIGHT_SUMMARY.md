@@ -102,7 +102,7 @@ No secrets are in it; `.env.example` lists names only.
 - openshard-cloud: 19 passed (ingest, API, dashboard, operator CLI, live
   loopback end-to-end with the public sync client). Ruff clean.
 
-FINAL_PUBLIC_TEST_LINE
+Final public run after all changes: **8909 passed, 3 skipped** (883 subtests passed), ruff and mypy clean.
 
 ## 7. Important architecture decisions
 

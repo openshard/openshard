@@ -50,9 +50,9 @@ Private repo: `openshard-cloud` (local git repo in this session; see Blocked).
 ## Tests
 
 - Public repo baseline (before changes): 8834 passed, 3 skipped.
-- Public repo after Stage 1: 8877 passed, 3 skipped. Final run recorded in
-  OVERNIGHT_SUMMARY.md.
-- openshard-cloud: 16 passed (ingest, API, dashboard, live e2e).
+- Public repo after Stage 1: 8877 passed, 3 skipped. Final run after all
+  changes: 8909 passed, 3 skipped.
+- openshard-cloud: 19 passed (ingest, API, dashboard, operator CLI, live e2e).
 - Lint (ruff) and mypy clean in both repos.
 
 ## Architecture decisions
