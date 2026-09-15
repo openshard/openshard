@@ -143,9 +143,19 @@ def _file_lock(lock_path: Path, *, timeout: float | None = None):
             if sys.platform == "win32":
                 # msvcrt.locking locks a 1-byte range, so the sidecar must have at
                 # least one byte; empty-file byte-range behavior is ambiguous.
+                # Several processes can open a brand-new sidecar while it is
+                # still empty; the first to seed it then locks byte 0, and
+                # Windows locks are mandatory, so a second seeding write into
+                # that byte fails with PermissionError (errno 13). That failure
+                # only ever means "someone else already seeded and holds the
+                # lock", so it is ignored and the polling loop below waits for
+                # the lock like any other contention. The seed is written
+                # unbuffered so no pending byte can fail again on close.
                 if os.fstat(fh.fileno()).st_size < 1:
-                    fh.write("\0")
-                    fh.flush()
+                    try:
+                        os.write(fh.fileno(), b"\0")
+                    except OSError:
+                        pass
                 fh.seek(0)
                 # msvcrt.locking's own "blocking" mode (LK_LOCK) is not truly
                 # unbounded: the Windows CRT retries internally only about a

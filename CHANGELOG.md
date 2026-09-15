@@ -66,6 +66,15 @@ Receipt never claims more than its evidence supports.
   and `CONTRIBUTING.md`; trust-boundary, attribution and completeness
   sections in `docs/agent-capture.md`.
 
+### Fixed
+
+- On Windows, several processes opening a brand-new history lock file at
+  once could fail with `PermissionError`: the first process seeded and
+  locked the sidecar's first byte while a second process's buffered seed
+  write landed in that mandatory-locked range. The seed is now written
+  unbuffered and a failed seed (which only ever means another process
+  already holds the lock) falls through to the normal wait.
+
 ### Compatibility
 
 - Records written before 0.4.4 render unchanged: no `receipt_id` is
