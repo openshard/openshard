@@ -22,8 +22,9 @@ deployed. The private Platform repository was not touched.
 | 9 | `capture: log refused requests (throttled); v0.4.4 reports` | rejection logging; this report and the review checklist |
 | 10 | `report: record the final confirmation test run` | report only |
 | 11 | `capture: scope capabilities to repository and agent; separate depth from completeness` | final hardening pass (see "Final hardening pass" below) |
+| 12 | `report: record the final hardening pass test run` | report only |
 
-## Final hardening pass (commit 11)
+## Final hardening pass (commits 11-12)
 
 Requested after an independent review of commits 1-10. Scope limited to
 the five items below; no unrelated refactoring.
@@ -106,7 +107,7 @@ Baseline before edits: 8834 passed, 3 skipped; ruff and mypy clean.
 Commits 1-10 (Linux, Python 3.11, `pip install -e ".[dev]"` as CI): 8900
 passed, 3 skipped, 883 subtests passed. Final hardening pass (commit 11),
 same environment: focused `tests/test_v044_*.py` 73 passed; then
-the full suite result is recorded in the follow-up report commit; ruff: clean; mypy: clean (191 files).
+full suite 8907 passed, 3 skipped, 883 subtests passed (299 s); ruff: clean; mypy: clean (191 files).
 
 Windows and Python 3.12 were not run here (no Windows runner in this
 environment); CI runs both. Windows-specific paths touched: token file
