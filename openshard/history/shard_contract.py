@@ -8,8 +8,8 @@ from pathlib import Path, PureWindowsPath
 
 from openshard.history.capture_completeness import (
     COMPLETENESS_INCOMPLETE,
-    completeness_display,
     derive_capture_completeness,
+    gaps_display,
 )
 from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.shard import (
@@ -520,8 +520,11 @@ class ShardReceipt:
     # history-position meaning.
     receipt_id: str | None = None
     # v0.4.4 capture completeness (history/capture_completeness.py):
-    # {"status": full|partial|incomplete|unknown, "reasons": [...], "derived": bool}.
-    # Always populated by build_shard_receipt; None only for hand-built receipts.
+    # {"depth": full|partial|unknown, "status": complete|incomplete|unknown,
+    #  "reasons": [...], "derived": bool}. ``depth`` is how much could be
+    # observed (also on ``shard.capture_depth``); ``status`` whether evidence
+    # is known lost. Always populated by build_shard_receipt; None only for
+    # hand-built receipts.
     capture_completeness: dict | None = None
     # v0.4.4 integrity: "Matches (content hash)" | "Mismatch (content hash)" |
     # "Not recorded" from history/shard_hash.verify_shard_hash. An unkeyed
@@ -1359,28 +1362,45 @@ def _evidence_summary(receipt: ShardReceipt) -> list[str]:
 
 
 def _capture_rows(receipt: ShardReceipt) -> list[str]:
-    """The ``Capture`` line(s): depth for observed runs, plus any known loss.
+    """The compact ``Capture`` / ``Gaps`` rows.
 
-    An externally observed run always says OpenShard did not execute or
-    verify it. When the capture is *incomplete* the line names the loss
-    (``Incomplete -- 1 queued event could not be decoded``) so a receipt
-    with missing evidence never looks like a normally complete one.
+    ``Capture`` answers "how deep could OpenShard see?" (the unchanged
+    capture depth; an externally observed run always says OpenShard did not
+    execute or verify it). ``Gaps`` answers "is evidence known lost?":
+    ``None known``, the loss itself (``1 queued event could not be decoded``),
+    or ``Unknown`` for records written before loss tracking. The row is
+    shown whenever the answer is not the default expectation, so a receipt
+    with missing or unknowable evidence never looks like a healthy one.
     """
     rows: list[str] = []
     block = receipt.capture_completeness or {}
-    incomplete = block.get("status") == COMPLETENESS_INCOMPLETE
+    status = block.get("status")
     if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
-        if incomplete:
-            rows.append(_row("Capture", completeness_display(block)))
-            rows.append(_row("", f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run"))
-        else:
-            rows.append(_row(
-                "Capture",
-                f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
-            ))
-    elif incomplete:
-        rows.append(_row("Capture", completeness_display(block)))
+        rows.append(_row(
+            "Capture",
+            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
+        ))
+        rows.append(_row("Gaps", gaps_display(block)))
+    elif status == COMPLETENESS_INCOMPLETE:
+        rows.append(_row("Gaps", gaps_display(block)))
     return rows
+
+
+_CAPTURE_COL = 15  # the CAPTURE section's labels are longer than the receipt's default gutter
+
+
+def _capture_rows_full(receipt: ShardReceipt) -> list[str]:
+    """The full receipt's CAPTURE section: depth, completeness and known gaps as three facts."""
+    block = receipt.capture_completeness or {}
+    depth = str(block.get("depth") or (receipt.shard.capture_depth if receipt.shard else "unknown"))
+    external = receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED
+    depth_text = f"{depth} {_EM} OpenShard did not execute or verify this run" if external else depth
+    return [
+        f"{_INDENT}CAPTURE",
+        _row("Capture depth", depth_text, width=_CAPTURE_COL),
+        _row("Completeness", str(block.get("status") or "unknown").capitalize(), width=_CAPTURE_COL),
+        _row("Known gaps", gaps_display(block), width=_CAPTURE_COL),
+    ]
 
 
 def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
@@ -1656,7 +1676,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     lines.append(_row("Status", receipt.status))
     if receipt.attempt_number is not None:
         lines.append(_row("Attempt", f"{receipt.attempt_number} (Shard {receipt.shard_id})"))
-    lines += _capture_rows(receipt)
+    lines.append("")
+    lines += _capture_rows_full(receipt)
     lines.append("")
 
     if receipt.adapter:

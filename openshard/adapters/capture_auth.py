@@ -17,16 +17,19 @@ Two credential shapes, one server-side check
   ``openshard hooks claude-status``, ``openshard capture stop``, the OpenCode
   plugin (which reads the same file) -- presents it. It authorises every
   endpoint, including shutdown.
-* The **repository capability**: ``r1.`` + HMAC-SHA256(token, normalised
-  repository root). Claude Code's HTTP hooks are the one integration where
-  no process of ours runs and no file can be read at delivery time, so the
-  installer writes this value into the hook header in
-  ``.claude/settings.local.json`` (which the installer keeps out of git via
-  ``.git/info/exclude``, and refuses to write into when git tracks it).
-  It authorises hook/status events **for that repository only**, never
-  shutdown, so a leaked settings file cannot forge evidence elsewhere or
-  stop the service. Rotating the token (``openshard capture rotate-token``)
-  invalidates every capability at once.
+* The **scoped capability**: ``r2.`` + HMAC-SHA256(token, normalised
+  repository root + newline + agent key). It is what third-party
+  configuration carries when no process of ours runs at delivery time:
+  Claude Code's HTTP hook header in ``.claude/settings.local.json`` (agent
+  ``claude_code``) and the OpenCode plugin file
+  ``.opencode/plugins/openshard.ts`` (agent ``opencode``). Both files are
+  kept out of git by the installer (``.git/info/exclude``), which refuses
+  to write a credential into a file git tracks. A capability authorises
+  events **for that repository and that agent only** -- a leaked Claude
+  capability cannot submit Cursor, Codex or OpenCode events, nor events
+  for another repository, and no capability ever authorises shutdown.
+  Rotating the token (``openshard capture rotate-token``) invalidates
+  every capability at once.
 
 The token is never sent through telemetry (the telemetry grammar has no
 free-text property), never logged, never printed by a normal CLI command,
@@ -45,7 +48,8 @@ import sys
 
 TOKEN_FILENAME = "capture-token"
 TOKEN_HEADER = "X-OpenShard-Capture-Token"
-REPO_CAPABILITY_PREFIX = "r1."
+REPO_CAPABILITY_PREFIX = "r2."
+_CAPABILITY_SEPARATOR = "\n"  # never appears in a normalised path or an agent key
 _TOKEN_HEX_LEN = 64
 _MAX_PRESENTED_LEN = 128
 _HEX = frozenset("0123456789abcdef")
@@ -188,28 +192,42 @@ def normalise_root(root: object) -> str:
     return os.path.normcase(os.path.normpath(text))
 
 
-def repo_capability(token: str, root: object) -> str:
-    """The repository-scoped capability for *root* under *token*."""
-    digest = hmac.new(token.encode("ascii"), normalise_root(root).encode("utf-8"), hashlib.sha256).hexdigest()
+def repo_capability(token: str, root: object, agent: str) -> str:
+    """The capability for (*root*, *agent*) under *token*.
+
+    *agent* is the capture agent key the events will be recorded under
+    (``claude_code`` / ``codex`` / ``cursor`` / ``opencode``); the service
+    binds it to the receiver the request arrives on, so a capability minted
+    for one integration is worthless on another's endpoint.
+    """
+    if not isinstance(agent, str) or not agent or _CAPABILITY_SEPARATOR in agent:
+        raise ValueError("agent key must be a non-empty single-line string")
+    message = f"{normalise_root(root)}{_CAPABILITY_SEPARATOR}{agent}".encode()
+    digest = hmac.new(token.encode("ascii"), message, hashlib.sha256).hexdigest()
     return f"{REPO_CAPABILITY_PREFIX}{digest}"
 
 
-def verify_presented(presented: object, token: str | None, root: object | None) -> str | None:
+def verify_presented(
+    presented: object, token: str | None, root: object | None, agent: str | None = None
+) -> str | None:
     """Constant-time check of a presented credential.
 
     Returns ``"token"`` when *presented* is the capture token, ``"repo"``
-    when it is the capability for *root*, else ``None``. A ``None`` *root*
-    means "no repository context" (e.g. shutdown), where only the token is
-    acceptable.
+    when it is the capability for (*root*, *agent*), else ``None``. A
+    ``None`` *root* or *agent* means "no repository/agent context" (e.g.
+    shutdown), where only the token is acceptable.
     """
     if not is_token(token) or not isinstance(presented, str) or len(presented) > _MAX_PRESENTED_LEN:
         return None
     assert token is not None  # for type checkers; is_token guarantees it
     if hmac.compare_digest(presented.encode("utf-8"), token.encode("ascii")):
         return "token"
-    if root is None or not is_repo_capability(presented):
+    if root is None or not agent or not is_repo_capability(presented):
         return None
-    expected = repo_capability(token, root)
+    try:
+        expected = repo_capability(token, root, agent)
+    except ValueError:
+        return None
     if hmac.compare_digest(presented.encode("utf-8"), expected.encode("ascii")):
         return "repo"
     return None

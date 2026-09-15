@@ -23,8 +23,18 @@ another local account, a sandboxed process or a web page's cross-origin
 
 | Credential | Where it lives | Who presents it | Authorises |
 |---|---|---|---|
-| **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, the OpenCode plugin (reads the file at delivery time), `openshard capture stop` | every endpoint, including `/shutdown` |
-| **Repository capability** -- `r1.` + HMAC-SHA256(token, normalised repo root) | the `X-OpenShard-Capture-Token` header of the Claude Code HTTP hook entries in `.claude/settings.local.json` | Claude Code's HTTP hooks (no process of ours runs, no file can be read) | hook and status events **for that repository only**; never shutdown |
+| **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | our own processes only: `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, `openshard capture stop` | every endpoint, including `/shutdown` |
+| **Scoped capability** -- `r2.` + HMAC-SHA256(token, normalised repo root + `\n` + agent key) | third-party configuration that runs no process of ours at delivery time: the `X-OpenShard-Capture-Token` header of the Claude Code HTTP hook entries in `.claude/settings.local.json` (agent `claude_code`); the `CAPABILITY` constant in `.opencode/plugins/openshard.ts` (agent `opencode`) | Claude Code's HTTP hooks; the OpenCode plugin | events **for that repository and that agent only**; never shutdown |
+
+The service checks a capability against the agent the receiver path records
+under (`/hooks/claude` -> `claude_code`, `/status/claude` -> `claude_code`,
+`/hooks/codex` -> `codex`, `/hooks/cursor` -> `cursor`, `/hooks/opencode`
+-> `opencode`), so a leaked Claude capability for repo A cannot submit
+Cursor, Codex or OpenCode events for repo A, a Cursor capability cannot
+submit Claude events, and no capability for repo A works for repo B.
+Codex and Cursor need no capability: their hooks run `openshard hooks
+codex|cursor`, a process of ours that reads the token file. The master
+token never appears in any agent's configuration.
 
 Rules the service enforces (`adapters/claude_capture_service.py`,
 `adapters/capture_auth.py`):
@@ -42,20 +52,31 @@ Rules the service enforces (`adapters/claude_capture_service.py`,
   every repository capability; re-run `openshard setup` in each Claude
   Code repository.
 
-Why the capability lives in a repository-local file at all: Claude Code's
+Why a capability lives in a repository-local file at all: Claude Code's
 documented HTTP hooks can send static headers or interpolate a variable
-from Claude Code's own process environment, and nothing else. The installer
-keeps that file out of git (`.git/info/exclude`) and refuses to write a
-credential into it if git tracks it. A leaked capability can only inject
-events for that one repository and cannot stop the service.
+from Claude Code's own process environment, and nothing else; the OpenCode
+plugin is a file OpenCode executes. The installers keep both files out of
+git (`.git/info/exclude`) and refuse to write a credential into one git
+tracks. A leaked capability can only inject events for that one
+repository and that one agent, and cannot stop the service.
+
+One side effect worth knowing: Claude Code's CLI fires a `SessionEnd`
+HTTP hook even for `claude mcp get` / `claude mcp list`. `openshard
+doctor` and `openshard setup` run `claude mcp get openshard` to detect the
+MCP registration, so on a repository whose Claude hooks still lack a valid
+capability each `doctor` run adds one refused request to the service's
+counter. That refusal is correct (a credential-less hook) and harmless (a
+`SessionEnd` with no work is never recorded); it disappears once the hooks
+are upgraded.
 
 **Migration.** Hooks installed before v0.4.4 carry no credential and are
-refused by an upgraded service. `openshard setup` rewrites them; a
-`SessionStart` of an upgraded OpenShard also upgrades the repository's
-hook entries itself (Claude Code snapshots hooks per session, so the fix
-applies from the next session, and the in-process fallback fold still
-records the current one). `openshard doctor` reports hooks with a missing
-or stale credential and shows the service's `refused` counters.
+refused by an upgraded service. `openshard setup` rewrites the Claude hook
+entries and the OpenCode plugin; a `SessionStart` of an upgraded OpenShard
+also upgrades the repository's Claude hook entries itself (Claude Code
+snapshots hooks per session, so the fix applies from the next session, and
+the in-process fallback fold still records the current one). `openshard
+doctor` reports Claude hooks and OpenCode plugins with a missing or stale
+credential and shows the service's `refused` counters.
 
 **Agents stay fail-open.** A refused or unreachable service never blocks
 the agent: command hooks exit 0 (Cursor still receives its decision reply),
@@ -95,18 +116,29 @@ baseline. Limits: a session whose first observed hook is not a start hook
 *ended* sibling session's files become `git_observed`, never this
 session's.
 
-## Capture completeness (v0.4.4)
+## Capture depth and completeness (v0.4.4)
 
-`capture_depth` says how deep a capture could ever be (`partial` for every
-hook-observed session: OpenShard did not execute or verify). Completeness
-says what is *known to be missing*:
+Two separate questions, kept separate in the record, the JSON and the
+receipt:
 
-| `capture.completeness.status` | Meaning |
+* **Capture depth** (`capture_depth`, unchanged): how deep OpenShard could
+  ever observe or control the run -- `full` (OpenShard ran it), `partial`
+  (observed through an agent's hooks; OpenShard did not execute or verify),
+  `unknown`.
+* **Completeness** (`capture.completeness.status`): within the evidence the
+  integration is expected to deliver, is any evidence *known* to be lost?
+
+| `status` | Meaning |
 |---|---|
-| `full` | OpenShard ran the work itself; nothing known missing |
-| `partial` | observed through an integration, no known loss |
+| `complete` | every loss detector stayed at zero -- not a claim that nothing was missed |
 | `incomplete` | evidence is known lost; `reasons[]` says why |
-| `unknown` | origin unknown |
+| `unknown` | cannot be established: a record written before loss tracking (0.4.3 and earlier hook records) or of unknown origin |
+
+Examples: a healthy Claude Code session is `depth = partial, status =
+complete`; the same session with one undecodable queued event is `depth =
+partial, status = incomplete`; a native run with no known loss is `depth =
+full, status = complete`; a 0.4.3 hook record is `depth = partial, status
+= unknown`. There is no score.
 
 Reasons: `corrupt_queued_event` (a durable queue line could not be
 decoded; the bytes are kept, bounded, under
@@ -115,11 +147,14 @@ decoded; the bytes are kept, bounded, under
 reached), `session_end_not_observed` (the buffer was swept after an hour
 idle without a SessionEnd), `integration_limitation`. Valid lines next to
 a corrupt one are still applied; transient I/O errors keep the retry path
-and are never counted as corruption. The receipt shows
-`Capture  Incomplete — 1 queued event could not be decoded` above the
-usual `partial — OpenShard did not execute or verify this run` line.
-Records written before v0.4.4 derive their status at read time from the
-counters they already carry and are labelled `derived`.
+and are never counted as corruption. The compact receipt keeps the usual
+`Capture  partial — OpenShard did not execute or verify this run` line and
+adds `Gaps  None known` / `Gaps  1 queued event could not be decoded` /
+`Gaps  Unknown (record predates loss tracking)`; the full receipt has a
+CAPTURE section with `Capture depth`, `Completeness` and `Known gaps`.
+JSON carries `capture_completeness = {depth, status, reasons, derived}`.
+Records written before v0.4.4 derive their status at read time and are
+labelled `derived`.
 
 ## Identity (v0.4.4)
 

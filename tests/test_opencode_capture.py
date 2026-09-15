@@ -788,7 +788,8 @@ class TestInstaller:
         for hook in ("session.created", "session.idle", "session.deleted", "file.edited", "message.updated",
                      '"chat.message"', '"tool.execute.after"'):
             assert hook in text
-        assert detect_plugin(repo) == {"state": "openshard", "port": 47811, "version": PLUGIN_VERSION, "error": None}
+        assert detect_plugin(repo) == {"state": "openshard", "port": 47811, "version": PLUGIN_VERSION, "error": None,
+                                       "capability_state": "ok"}
         assert PLUGIN_RELPATH.as_posix() in (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
 
     def test_idempotent_and_port_update(self, repo):

@@ -23,21 +23,22 @@ Receipt never claims more than its evidence supports.
   only this session's changes.
 - **The local capture service is authenticated.** Every `POST` needs the
   per-user capture token (`~/.openshard/capture-token`, created locally,
-  0600) or the repository-scoped capability derived from it; requests
-  without one are refused before parsing and counted, browser-originated
-  requests are refused, and `/shutdown` accepts only the token. Claude
-  Code HTTP hooks carry the repository capability in a header (written by
-  `setup` into the git-excluded `.claude/settings.local.json`; a
-  `SessionStart` of the upgraded OpenShard upgrades older hook entries
-  itself); Codex, Cursor, the status line and the OpenCode plugin read the
-  token file. Agents remain fail-open.
+  0600) or a capability derived from it and scoped to one repository and
+  one agent; requests without one are refused before parsing and counted,
+  browser-originated requests are refused, and `/shutdown` accepts only
+  the token. Claude Code HTTP hooks carry their capability in a header
+  (written by `setup` into the git-excluded `.claude/settings.local.json`;
+  a `SessionStart` of the upgraded OpenShard upgrades older hook entries
+  itself); the OpenCode plugin carries its own capability; Codex, Cursor
+  and the status line run `openshard`, which reads the token file. The
+  master token appears in no agent configuration. Agents remain fail-open.
 - **Corrupt queued evidence is never forgotten.** Undecodable capture-queue
   lines are quarantined (bounded) under
   `.openshard/claude_sessions/quarantine/`, counted (`corrupt_lines`), and
-  the affected record becomes `capture.completeness = incomplete` with the
-  reason; valid neighbouring events are still applied. Transient I/O errors
-  keep the retry path. Receipts show `Capture  Incomplete — N queued events
-  could not be decoded`.
+  the affected record becomes `capture.completeness.status = incomplete`
+  with the reason; valid neighbouring events are still applied. Transient
+  I/O errors keep the retry path. Receipts keep `Capture  partial` (depth)
+  and add `Gaps  None known` / `Gaps  N queued events could not be decoded`.
 - **Status wording**: a finished agent turn renders `Turn completed
   (unverified)` (was `Completed`); a session that ended without a turn
   `Session ended (no turn observed)`.
@@ -51,8 +52,11 @@ Receipt never claims more than its evidence supports.
   and history search. `shard_id` is unchanged.
 - `Integrity` row (`Matches (content hash)` / `Mismatch (content hash)` /
   `Not recorded`) on compact and full receipts.
-- `capture.completeness` (`full` / `partial` / `incomplete` / `unknown`
-  with reasons) on hook records, derived (and labelled so) for older ones.
+- `capture.completeness` (`complete` / `incomplete` / `unknown` with
+  reasons) on hook records -- separate from the unchanged capture depth
+  (`full` / `partial` / `unknown`); records written before loss tracking
+  read `unknown`, never `complete`. JSON carries both as
+  `capture_completeness = {depth, status, reasons, derived}`.
 - `openshard capture rotate-token`; `doctor`/`setup` report hooks with a
   missing or stale credential; `capture status` shows refused and
   quarantined counts. Telemetry `capture.service` gains two bounded

@@ -62,8 +62,10 @@ in ``X-OpenShard-Capture-Token`` (``adapters/capture_auth.py``). A request
 without a valid credential is answered ``401`` before its body is looked at
 and leaves no trace beyond a ``rejected`` counter; a request carrying
 browser-only headers (``Origin``/``Referer``/``Sec-Fetch-*``) is answered
-``403``. ``POST /shutdown`` accepts the token only, never a repository
-capability. ``GET /health`` is the single unauthenticated endpoint and
+``403``. A capability is scoped to one repository *and* one agent
+(``capture_auth.repo_capability``) and is checked against the agent the
+receiver path records under. ``POST /shutdown`` accepts the token only,
+never a capability. ``GET /health`` is the single unauthenticated endpoint and
 returns counters and an informational ``instance_id`` -- nothing that
 authorises anything. Nothing is ever *returned* beyond ``{}``, that health
 document (no paths), and shutdown acknowledgement. Queue lines hold only
@@ -945,8 +947,14 @@ class _Handler(BaseHTTPRequestHandler):
         project_dir = self.headers.get(client.PROJECT_DIR_HEADER)
         project_dir = project_dir.strip() if isinstance(project_dir, str) and project_dir.strip() else None
 
+        # The agent a capability must be scoped to is the one this event will
+        # be *recorded as* -- the receiver path picks the translator and the
+        # record's agent, so a capability minted for another integration
+        # (same repository or not) never authorises this request.
+        agent_for_auth = _HOOK_PATH_AGENTS.get(path, AGENT_CLAUDE_CODE)
+
         def authorize(root: Path) -> bool:
-            return auth.verify_presented(presented, token, root) is not None
+            return auth.verify_presented(presented, token, root, agent_for_auth) is not None
 
         try:
             if path in _HOOK_PATH_AGENTS:

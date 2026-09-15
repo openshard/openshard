@@ -67,17 +67,34 @@ class TestTokenStore:
         new = auth.rotate_token(capture_env)
         assert new != old and auth.load_token(capture_env) == new
 
-    def test_repo_capability_is_scoped_and_deterministic(self, capture_env, tmp_path):
+    def test_repo_capability_is_scoped_to_repository_and_agent(self, capture_env, tmp_path):
         token = auth.ensure_token(capture_env)
-        cap_a = auth.repo_capability(token, tmp_path / "a")
-        cap_b = auth.repo_capability(token, tmp_path / "b")
-        assert cap_a != cap_b and cap_a == auth.repo_capability(token, tmp_path / "a")
-        assert cap_a != token
-        assert auth.verify_presented(cap_a, token, tmp_path / "a") == "repo"
-        assert auth.verify_presented(cap_a, token, tmp_path / "b") is None
-        assert auth.verify_presented(token, token, tmp_path / "b") == "token"
-        assert auth.verify_presented("", token, tmp_path / "a") is None
-        assert auth.verify_presented(None, token, tmp_path / "a") is None
+        cap_a = auth.repo_capability(token, tmp_path / "a", "claude_code")
+        cap_b = auth.repo_capability(token, tmp_path / "b", "claude_code")
+        cap_a_cursor = auth.repo_capability(token, tmp_path / "a", "cursor")
+        assert cap_a != cap_b and cap_a != cap_a_cursor
+        assert cap_a == auth.repo_capability(token, tmp_path / "a", "claude_code")  # deterministic
+        assert cap_a != token and cap_a.startswith("r2.")
+        # Right repo + right agent only.
+        assert auth.verify_presented(cap_a, token, tmp_path / "a", "claude_code") == "repo"
+        assert auth.verify_presented(cap_a, token, tmp_path / "b", "claude_code") is None
+        assert auth.verify_presented(cap_a, token, tmp_path / "a", "cursor") is None
+        assert auth.verify_presented(cap_a_cursor, token, tmp_path / "a", "claude_code") is None
+        # No agent / no repo context: only the token itself.
+        assert auth.verify_presented(cap_a, token, tmp_path / "a", None) is None
+        assert auth.verify_presented(cap_a, token, None, "claude_code") is None
+        assert auth.verify_presented(token, token, tmp_path / "b", "codex") == "token"
+        assert auth.verify_presented("", token, tmp_path / "a", "claude_code") is None
+        assert auth.verify_presented(None, token, tmp_path / "a", "claude_code") is None
+        # The pre-scoping "r1." shape is not a valid capability any more.
+        assert auth.verify_presented("r1." + "0" * 64, token, tmp_path / "a", "claude_code") is None
+
+    def test_agent_key_must_be_a_single_line(self, capture_env, tmp_path):
+        token = auth.ensure_token(capture_env)
+        with pytest.raises(ValueError):
+            auth.repo_capability(token, tmp_path, "claude_code\ncursor")
+        with pytest.raises(ValueError):
+            auth.repo_capability(token, tmp_path, "")
 
 
 class TestHookAuthentication:
@@ -118,7 +135,7 @@ class TestHookAuthentication:
         root = resolve_repo_root(
             __import__("openshard.adapters.claude_hooks", fromlist=["HookPayload"]).HookPayload(
                 event="SessionStart", session_id=None, cwd=str(repo)), {})
-        cap = auth.repo_capability(token, root)
+        cap = auth.repo_capability(token, root, "claude_code")
         status, _ = _raw_post(
             service.port, client.HOOK_PATH,
             _payload("UserPromptSubmit", repo, prompt="scoped ok"),
@@ -138,6 +155,49 @@ class TestHookAuthentication:
         assert status == 401
         assert service.server.recorder.wait_idle(5)
         assert _no_evidence(other)
+
+    def test_capability_is_bound_to_the_integration_not_just_the_repository(self, service, repo):
+        """A leaked Claude capability for this repo must not submit Cursor,
+        Codex or OpenCode events for it, and a Cursor capability must not
+        submit Claude events -- even though the repository matches."""
+        token = auth.ensure_token(service.env)
+        root = resolve_repo_root(
+            __import__("openshard.adapters.claude_hooks", fromlist=["HookPayload"]).HookPayload(
+                event="SessionStart", session_id=None, cwd=str(repo)), {})
+        claude_cap = auth.repo_capability(token, root, "claude_code")
+        cursor_cap = auth.repo_capability(token, root, "cursor")
+        codex_doc = json.dumps({"session_id": SID, "hook_event_name": "UserPromptSubmit", "cwd": str(repo),
+                                "prompt": "forged codex", "model": "gpt-5-codex"}).encode()
+        cursor_doc = json.dumps({"conversation_id": SID, "hook_event_name": "beforeSubmitPrompt", "prompt": "forged",
+                                 "workspace_roots": [str(repo)]}).encode()
+        opencode_doc = json.dumps({"agent": "opencode", "event": "chat.message", "session_id": SID,
+                                   "directory": str(repo), "worktree": str(repo), "prompt": "forged"}).encode()
+        for path, body in ((client.CODEX_HOOK_PATH, codex_doc), (client.CURSOR_HOOK_PATH, cursor_doc),
+                           (client.OPENCODE_HOOK_PATH, opencode_doc)):
+            status, _ = _raw_post(service.port, path, body, {client.PROJECT_DIR_HEADER: str(repo),
+                                                              auth.TOKEN_HEADER: claude_cap})
+            assert status == 401, path
+        # Cursor capability on the Claude receiver (and the Claude status line): refused.
+        status, _ = _raw_post(service.port, client.HOOK_PATH, _payload("UserPromptSubmit", repo, prompt="forged"),
+                              {client.PROJECT_DIR_HEADER: str(repo), auth.TOKEN_HEADER: cursor_cap})
+        assert status == 401
+        status_body = json.dumps({"session_id": SID, "cwd": str(repo), "model": {"id": "m", "display_name": "M"},
+                                  "cost": {"total_cost_usd": 1.0}}).encode()
+        status, _ = _raw_post(service.port, client.STATUS_PATH, status_body,
+                              {client.PROJECT_DIR_HEADER: str(repo), auth.TOKEN_HEADER: cursor_cap})
+        assert status == 401
+        assert service.server.recorder.wait_idle(5)
+        assert _no_evidence(repo)
+        assert client.health(service.port)["stats"]["rejected"] == 5
+        # The matching capability on its own receiver works: Cursor -> /hooks/cursor,
+        # Claude -> /hooks/claude and the status line.
+        status, _ = _raw_post(service.port, client.CURSOR_HOOK_PATH, cursor_doc,
+                              {client.PROJECT_DIR_HEADER: str(repo), auth.TOKEN_HEADER: cursor_cap})
+        assert status == 200
+        status, _ = _raw_post(service.port, client.STATUS_PATH, status_body,
+                              {client.PROJECT_DIR_HEADER: str(repo), auth.TOKEN_HEADER: claude_cap})
+        assert status == 200
+        assert client.health(service.port)["stats"]["rejected"] == 5
 
     def test_status_endpoint_requires_the_token(self, service, repo):
         body = json.dumps({"session_id": SID, "cwd": str(repo), "model": {"id": "m", "display_name": "M"},
@@ -163,13 +223,35 @@ class TestHookAuthentication:
         assert _no_evidence(repo)
 
 
+class TestOpenCodePluginCapability:
+    def test_rendered_plugin_embeds_a_scoped_capability_and_never_the_token(self, capture_env, tmp_path):
+        from openshard.adapters.opencode_plugin_install import (
+            installed_plugin_capability,
+            plugin_capability_state,
+            render_plugin_source,
+        )
+
+        token = auth.ensure_token(capture_env)
+        cap = auth.repo_capability(token, tmp_path, "opencode")
+        text = render_plugin_source(47811, cap)
+        assert f'const CAPABILITY = "{cap}"' in text
+        assert token not in text and "readFileSync" not in text  # the plugin never reads the master token
+        assert installed_plugin_capability(text) == cap
+        assert plugin_capability_state(text, tmp_path, env=capture_env) == "ok"
+        assert plugin_capability_state(text, tmp_path / "other", env=capture_env) == "stale"
+        assert plugin_capability_state(render_plugin_source(47811, None), tmp_path, env=capture_env) == "missing"
+        # A Claude capability for the same repository is not an OpenCode one.
+        claude_cap = auth.repo_capability(token, tmp_path, "claude_code")
+        assert plugin_capability_state(render_plugin_source(47811, claude_cap), tmp_path, env=capture_env) == "stale"
+
+
 class TestControlEndpoints:
     def test_health_exposes_no_credential(self, service):
         token = auth.ensure_token(service.env)
         doc = client.health(service.port)
         blob = json.dumps(doc)
         assert token not in blob
-        assert auth.repo_capability(token, Path.cwd()) not in blob
+        assert auth.repo_capability(token, Path.cwd(), "claude_code") not in blob
         assert "token" not in {k.lower() for k in doc}
 
     def test_shutdown_cannot_be_authorised_from_health_alone(self, service):
@@ -185,7 +267,7 @@ class TestControlEndpoints:
         doc = client.health(service.port)
         body = json.dumps({"instance_id": doc["instance_id"]}).encode("utf-8")
         status, _ = _raw_post(service.port, client.SHUTDOWN_PATH, body,
-                              {auth.TOKEN_HEADER: auth.repo_capability(token, tmp_path)})
+                              {auth.TOKEN_HEADER: auth.repo_capability(token, tmp_path, "claude_code")})
         assert status in (401, 403)
         assert not service.server.shutdown_requested.is_set()
 

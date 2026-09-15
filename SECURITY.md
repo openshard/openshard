@@ -21,12 +21,16 @@ for security are below, with what each one trusts.
   by the hook entrypoints and exiting after four idle hours.
 * **Authentication (v0.4.4).** Every `POST` must carry
   `X-OpenShard-Capture-Token`: either the per-user capture token
-  (`~/.openshard/capture-token`, created locally, mode 0600) or the
-  repository-scoped capability derived from it. A request without a valid
-  credential is refused before its body is parsed and nothing is
-  recorded; a request carrying browser headers (`Origin`, `Referer`,
-  `Sec-Fetch-*`) is refused outright. `POST /shutdown` accepts the token
-  only, never a repository capability. `GET /health` is the only
+  (`~/.openshard/capture-token`, created locally, mode 0600) or a
+  capability derived from it and scoped to one repository **and** one
+  agent (HMAC-SHA256 over the normalised repository root and the agent
+  key). The service checks a capability against the agent the receiving
+  endpoint records under, so a leaked Claude Code capability cannot submit
+  Cursor, Codex or OpenCode events, nor events for another repository. A
+  request without a valid credential is refused before its body is parsed
+  and nothing is recorded; a request carrying browser headers (`Origin`,
+  `Referer`, `Sec-Fetch-*`) is refused outright. `POST /shutdown` accepts
+  the token only, never a capability. `GET /health` is the only
   unauthenticated endpoint and returns counters and an informational
   instance id; it authorises nothing.
 * What the service stores outside `runs.jsonl`: per-session queue lines
@@ -41,14 +45,17 @@ for security are below, with what each one trusts.
 ### Hooks and plugins
 
 * Claude Code: HTTP hooks in `.claude/settings.local.json` carry the
-  repository-scoped capability (that file is added to
-  `.git/info/exclude` by the installer; the installer refuses to write a
-  credential into it when git tracks it). The `SessionStart` command hook
-  and the status line run `openshard` and read the token file.
+  capability scoped to this repository and to Claude Code (that file is
+  added to `.git/info/exclude` by the installer; the installer refuses to
+  write a credential into it when git tracks it). The `SessionStart`
+  command hook and the status line run `openshard`, which reads the token
+  file.
 * Codex and Cursor: command hooks run `openshard hooks codex|cursor`,
-  which reads the token file.
-* OpenCode: the plugin at `.opencode/plugins/openshard.ts` reads the same
-  token file at delivery time.
+  which reads the token file. No credential is written into `.codex/` or
+  `.cursor/`.
+* OpenCode: the plugin at `.opencode/plugins/openshard.ts` carries the
+  capability scoped to this repository and to OpenCode. It never reads
+  the token file. The master token appears in no agent's configuration.
 * All of them are **fail-open for the agent**: if OpenShard is missing,
   refuses, or times out, the coding agent continues; only evidence is
   lost, and the service counts refusals.
@@ -75,9 +82,12 @@ receipt contents cannot be sent even by mistake. See `docs/telemetry.md`.
   that were already dirty before the session or that another live agent
   session reported are excluded and listed separately. Git-observed means
   the repository changed; it does not establish who changed it.
-* `Capture  Incomplete — …` means OpenShard knows evidence was lost; a
-  receipt without that line is not a claim that nothing was missed, only
-  that no loss was detected.
+* `Capture  partial` is how deep OpenShard could see (it observed the
+  agent; it did not execute or verify). `Gaps  None known` means every
+  loss detector stayed at zero; it is not a claim that nothing was missed.
+  `Gaps  1 queued event could not be decoded` means OpenShard knows
+  evidence was lost. `Gaps  Unknown` means the record predates loss
+  tracking and nothing can be claimed either way.
 
 ## Scope
 

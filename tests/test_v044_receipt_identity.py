@@ -51,7 +51,14 @@ class TestReceiptIdFormat:
 
 
 class TestConcurrentSessions:
-    def test_concurrent_sessions_in_one_repo_never_share_a_receipt_id(self, tmp_path):
+    def test_concurrent_sessions_in_one_repo_never_share_a_receipt_id(self, tmp_path, monkeypatch):
+        # 24 sessions contend for one runs.jsonl lock; on a loaded CI box a
+        # 3 s lock budget can expire (the hook then reports "error", which is
+        # a lock-latency fact, not an identity one). Give the lock the time
+        # it needs so this test measures identity only.
+        from openshard.adapters import claude_hooks as ch
+
+        monkeypatch.setattr(ch, "_LOCK_TIMEOUT_SECONDS", 60.0)
         repo = _make_repo(tmp_path / "repo")
         sids = [f"{i:08d}-0000-4000-8000-000000000000" for i in range(24)]
         errors: list[BaseException] = []

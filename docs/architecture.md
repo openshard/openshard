@@ -76,8 +76,9 @@ Local history + rendering      history/query.py, views.py, shard_contract.py
 5. **Shard / Receipt record.** The fold upserts one record per agent
    session into `.openshard/runs.jsonl`. `shard_id` is the history-position
    identity (`shard-YYYYMMDD-NNNN`); `receipt_id` (`rcpt_…`, v0.4.4) is
-   the global one. `capture.completeness` says whether evidence is known
-   to be missing. `changes` and `files_detail[].attribution` separate
+   the global one. `capture_depth` says how much could be observed and
+   `capture.completeness` whether evidence is known to be missing (two
+   separate facts). `changes` and `files_detail[].attribution` separate
    agent-reported, git-observed, pre-existing and other-session changes.
    `content_hash` is an unkeyed tamper-evidence hash of the stored record.
 6. **Local history and rendering.** `last`, `history`, `context`, `stats`

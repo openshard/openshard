@@ -1,22 +1,25 @@
 """Capture completeness: what OpenShard knows it did *not* see (v0.4.4).
 
-``history/shard.py`` already says how deep a capture could ever be
-(``capture_depth``: ``full`` for runs OpenShard executed itself, ``partial``
-for sessions it only observed through an agent's hooks, ``unknown``
-otherwise). This module adds the orthogonal fact a Receipt was missing:
-whether evidence that *should* have reached the record is known to be
-lost, and why. "Everything OpenShard observed" must never read as
-"everything".
+Two separate questions, two separate answers:
 
-Statuses (stored in ``capture.completeness.status`` on hook records, derived
-at read time for everything else)::
+* **Capture depth** (``history/shard.py``, unchanged): how deep OpenShard
+  could ever observe or control this run. ``full`` for runs it executed
+  itself, ``partial`` for sessions observed through an agent's hooks,
+  ``unknown`` otherwise. This module reads it, it does not redefine it.
+* **Completeness** (this module): within the evidence that integration is
+  expected to deliver, is any evidence *known* to be lost?
 
-    full        OpenShard ran the work itself; nothing is known to be missing
-    partial     observed through an integration, no known loss (the normal
-                external-agent case -- OpenShard did not execute or verify)
-    incomplete  evidence is known to be lost, corrupt or never delivered;
+    complete    no known loss -- not a claim that nothing was missed, only
+                that every loss detector stayed at zero
+    incomplete  evidence is known lost, corrupt or never delivered;
                 ``reasons`` says what
-    unknown     origin unknown; nothing can be claimed either way
+    unknown     cannot be established (a record written before loss
+                tracking existed, or of unknown origin)
+
+Hook records written by this version store ``capture.completeness =
+{"status", "reasons"}``; everything else is derived at read time and
+labelled ``derived``. "Everything OpenShard observed" must never read as
+"everything", and a healthy partial capture must never read as a full one.
 
 Reasons (``kind`` values) and what produces them:
 
@@ -30,7 +33,7 @@ Reasons (``kind`` values) and what produces them:
   kind of evidence at all (documented per agent).
 
 Nothing here infers a loss: every reason is backed by a counter the
-capture path incremented when it happened.
+capture path incremented when it happened. There is no score.
 """
 
 from __future__ import annotations
@@ -44,13 +47,12 @@ from openshard.history.shard import (
     derive_shard_identity,
 )
 
-COMPLETENESS_FULL = CAPTURE_FULL
-COMPLETENESS_PARTIAL = CAPTURE_PARTIAL
+COMPLETENESS_COMPLETE = "complete"
 COMPLETENESS_INCOMPLETE = "incomplete"
-COMPLETENESS_UNKNOWN = CAPTURE_UNKNOWN
-VALID_STATUSES = frozenset({
-    COMPLETENESS_FULL, COMPLETENESS_PARTIAL, COMPLETENESS_INCOMPLETE, COMPLETENESS_UNKNOWN,
-})
+COMPLETENESS_UNKNOWN = "unknown"
+VALID_STATUSES = frozenset({COMPLETENESS_COMPLETE, COMPLETENESS_INCOMPLETE, COMPLETENESS_UNKNOWN})
+# Pre-release spellings of a stored "no known loss" status; read as complete.
+_LEGACY_COMPLETE_STATUSES = frozenset({CAPTURE_FULL, CAPTURE_PARTIAL})
 
 REASON_CORRUPT_QUEUED_EVENT = "corrupt_queued_event"
 REASON_DROPPED_HOOK_EVENTS = "dropped_hook_events"
@@ -109,54 +111,77 @@ def merge_reasons(reasons: Iterable[dict]) -> list[dict]:
     return list(merged.values())[:_MAX_REASONS]
 
 
-def build_completeness(reasons: Iterable[dict], *, base: str = COMPLETENESS_PARTIAL) -> dict:
-    """The stored block for a record: ``incomplete`` when any reason exists, else *base*."""
+def build_completeness(reasons: Iterable[dict]) -> dict:
+    """The stored block for a record this version writes: ``incomplete`` when
+    any loss reason exists, else ``complete`` (every loss detector at zero)."""
     merged = merge_reasons(reasons)
-    status = COMPLETENESS_INCOMPLETE if merged else base
+    status = COMPLETENESS_INCOMPLETE if merged else COMPLETENESS_COMPLETE
     return {"status": status, "reasons": merged}
 
 
 def derive_capture_completeness(entry: object) -> dict:
-    """The completeness block for any record, old or new. Pure, never raises.
+    """``{"depth", "status", "reasons", "derived"}`` for any record, old or new. Pure, never raises.
 
-    A block stored by the writer (``capture.completeness``) is authoritative
-    and returned with ``derived: False``. Otherwise the status is derived
-    from ``capture_depth`` plus the one loss counter older hook records
-    already carry (``hook_events_dropped``) and labelled ``derived: True``,
-    so a reader can tell a stored fact from a read-time reconstruction.
+    ``depth`` is the unchanged capture depth from ``history/shard.py``. A
+    completeness block stored by the writer (``capture.completeness``) is
+    authoritative and returned with ``derived: False``. Otherwise:
+
+    * a hook-observed record (depth ``partial``) that predates loss tracking
+      is ``incomplete`` when its one pre-existing counter
+      (``hook_events_dropped``) is non-zero, else ``unknown`` -- its writer
+      could not detect the other kinds of loss, so no claim is made;
+    * a run OpenShard executed itself (depth ``full``) is ``complete``:
+      there is no capture queue to lose evidence in;
+    * unknown origin is ``unknown``.
+
+    Derived answers are labelled ``derived: True`` so a reader can tell a
+    stored fact from a read-time reconstruction.
     """
     if not isinstance(entry, dict):
-        return {"status": COMPLETENESS_UNKNOWN, "reasons": [], "derived": True}
+        return {"depth": CAPTURE_UNKNOWN, "status": COMPLETENESS_UNKNOWN, "reasons": [], "derived": True}
+    _agent, _origin, depth = derive_shard_identity(entry)
     capture = entry.get("capture")
     capture = capture if isinstance(capture, dict) else {}
     stored = capture.get("completeness")
-    if isinstance(stored, dict) and stored.get("status") in VALID_STATUSES:
+    if isinstance(stored, dict) and (
+        stored.get("status") in VALID_STATUSES or stored.get("status") in _LEGACY_COMPLETE_STATUSES
+    ):
         raw_reasons = stored.get("reasons")
-        return {
-            "status": stored["status"],
-            "reasons": merge_reasons(raw_reasons if isinstance(raw_reasons, list) else []),
-            "derived": False,
-        }
-    _agent, _origin, depth = derive_shard_identity(entry)
+        merged = merge_reasons(raw_reasons if isinstance(raw_reasons, list) else [])
+        status = stored["status"]
+        if status in _LEGACY_COMPLETE_STATUSES:
+            status = COMPLETENESS_INCOMPLETE if merged else COMPLETENESS_COMPLETE
+        return {"depth": depth, "status": status, "reasons": merged, "derived": False}
     reasons: list[dict] = []
     dropped = capture.get("hook_events_dropped")
     if isinstance(dropped, int) and not isinstance(dropped, bool) and dropped > 0:
         reasons.append(make_reason(REASON_DROPPED_HOOK_EVENTS, dropped))
-    if depth == CAPTURE_FULL:
-        status = COMPLETENESS_FULL
-    elif depth == CAPTURE_PARTIAL:
-        status = COMPLETENESS_INCOMPLETE if reasons else COMPLETENESS_PARTIAL
+    if reasons:
+        status = COMPLETENESS_INCOMPLETE
+    elif depth == CAPTURE_FULL:
+        status = COMPLETENESS_COMPLETE
     else:
         status = COMPLETENESS_UNKNOWN
-    return {"status": status, "reasons": merge_reasons(reasons), "derived": True}
+    return {"depth": depth, "status": status, "reasons": merge_reasons(reasons), "derived": True}
+
+
+def gaps_display(block: dict) -> str:
+    """The ``Known gaps`` value: ``None known`` / the reasons / ``Unknown (…)``."""
+    status = str(block.get("status") or COMPLETENESS_UNKNOWN)
+    _reasons_raw = block.get("reasons")
+    reasons: list = _reasons_raw if isinstance(_reasons_raw, list) else []
+    if status == COMPLETENESS_INCOMPLETE:
+        details = "; ".join(str(r.get("detail") or r.get("kind")) for r in reasons[:3] if isinstance(r, dict))
+        return details or "evidence known lost"
+    if status == COMPLETENESS_COMPLETE:
+        return "None known"
+    return "Unknown (record predates loss tracking)" if block.get("derived") else "Unknown"
 
 
 def completeness_display(block: dict) -> str:
-    """One receipt line: ``Incomplete -- 1 queued event could not be decoded``."""
+    """``Complete`` / ``Incomplete — <gaps>`` / ``Unknown``."""
     status = str(block.get("status") or COMPLETENESS_UNKNOWN)
     label = status.capitalize()
-    reasons = block.get("reasons") if isinstance(block.get("reasons"), list) else []
-    if status == COMPLETENESS_INCOMPLETE and reasons:
-        details = "; ".join(str(r.get("detail") or r.get("kind")) for r in reasons[:3] if isinstance(r, dict))
-        return f"{label} — {details}" if details else label
+    if status == COMPLETENESS_INCOMPLETE:
+        return f"{label} — {gaps_display(block)}"
     return label

@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from openshard.adapters import capture_auth as _auth
+from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.adapters.claude_capture_client import (
     DEFAULT_PORT,
     HOOK_PATH,
@@ -113,10 +114,12 @@ def _hook_entry(spec: HookSpec, port: int = DEFAULT_PORT, capability: str | None
             PROJECT_DIR_HEADER: "$CLAUDE_PROJECT_DIR",
         }
         if capability:
-            # v0.4.4: the repository-scoped capability (capture_auth). Claude
-            # Code's HTTP hooks run no process of ours and read no file, so
-            # this static header is the only way they can authenticate. It
-            # authorises events for this repository only, never shutdown.
+            # v0.4.4: the capability scoped to this repository *and* to the
+            # claude_code agent (capture_auth). Claude Code's HTTP hooks run
+            # no process of ours and read no file, so this static header is
+            # the only way they can authenticate. It authorises Claude Code
+            # events for this repository only -- not another agent's
+            # receiver, not another repository, never shutdown.
             headers[_auth.TOKEN_HEADER] = capability
         entry: dict = {
             "type": "http",
@@ -187,7 +190,7 @@ def capability_state(settings: object, repo_root: Path, *, env: dict | os._Envir
     present = installed_hook_capability(settings)
     if not present:
         return "missing"
-    return "ok" if _auth.verify_presented(present, token, repo_root) == "repo" else "stale"
+    return "ok" if _auth.verify_presented(present, token, repo_root, AGENT_CLAUDE_CODE) == "repo" else "stale"
 
 
 def settings_file_is_tracked(repo_root: Path, rel: str | None = None) -> bool:
@@ -561,7 +564,7 @@ def install_claude_hooks(
                 "Claude Code capture."
             )
         else:
-            capability = _auth.repo_capability(token, root)
+            capability = _auth.repo_capability(token, root, AGENT_CLAUDE_CODE)
         try:
             merged, changes = merge_openshard_hooks(settings, port=port, capability=capability)
         except ValueError as exc:

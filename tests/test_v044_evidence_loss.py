@@ -14,14 +14,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from openshard.history.capture_completeness import (
-    COMPLETENESS_INCOMPLETE,
-    COMPLETENESS_PARTIAL,
-    derive_capture_completeness,
-)
-
 from openshard.adapters import claude_capture_client as client
 from openshard.adapters import claude_capture_service as svc
+from openshard.history.capture_completeness import (
+    COMPLETENESS_COMPLETE,
+    COMPLETENESS_INCOMPLETE,
+    COMPLETENESS_UNKNOWN,
+    derive_capture_completeness,
+)
 from openshard.history.shard_contract import build_shard_receipt, render_compact_shard_receipt
 from tests.test_claude_capture_service import (  # noqa: F401 - fixtures re-exported for pytest
     SID,
@@ -77,10 +77,11 @@ class TestCorruptQueueLines:
         text = quarantined[0].read_text(encoding="utf-8")
         assert "garbage that is not json" in text
         assert not list(_session_dir(repo).glob("*.queue*.jsonl"))
-        # The receipt says so.
+        # The receipt says so: depth stays partial, the gap is named.
         rendered = render_compact_shard_receipt(build_shard_receipt(entry, 0))
-        assert "Incomplete" in rendered
-        assert "could not be decoded" in rendered
+        gaps = next(ln for ln in rendered.splitlines() if ln.strip().startswith("Gaps"))
+        assert "could not be decoded" in gaps
+        assert "partial" in rendered and "did not execute or verify" in rendered
 
     def test_structurally_invalid_lines_count_as_corrupt(self, service, repo):
         _write_queue(
@@ -156,7 +157,7 @@ class TestTransientFailuresStayTransient:
         assert not _quarantine_dir(repo).exists()
         stats = client.health(service.port)["stats"]
         assert stats["corrupt_lines"] == 0
-        assert _lines(repo)[0]["capture"].get("completeness", {}).get("status", COMPLETENESS_PARTIAL) != COMPLETENESS_INCOMPLETE
+        assert _lines(repo)[0]["capture"]["completeness"]["status"] == COMPLETENESS_COMPLETE
 
     def test_replay_error_outcome_keeps_the_file_for_retry(self, service, repo, monkeypatch):
         _write_queue(repo, _queue_line("ok-1", "UserPromptSubmit", task_excerpt="fine") + "\n")
@@ -182,11 +183,23 @@ class TestTransientFailuresStayTransient:
 
 
 class TestCompletenessModel:
-    def test_hooks_record_without_loss_is_partial_not_incomplete(self):
+    """Depth (how much could be seen) and completeness (is evidence known
+    lost) are separate answers; a healthy partial capture is *complete*."""
+
+    def test_new_hooks_record_without_loss_is_partial_depth_and_complete(self):
+        entry = {"executor": "claude_code_hooks",
+                 "capture": {"hook_events_dropped": 0, "completeness": {"status": "complete", "reasons": []}}}
+        block = derive_capture_completeness(entry)
+        assert block["depth"] == "partial"
+        assert block["status"] == COMPLETENESS_COMPLETE
+        assert block["reasons"] == [] and block["derived"] is False
+
+    def test_legacy_hooks_record_without_loss_tracking_is_unknown_not_complete(self):
         entry = {"executor": "claude_code_hooks", "capture": {"hook_events_dropped": 0}}
         block = derive_capture_completeness(entry)
-        assert block["status"] == COMPLETENESS_PARTIAL
-        assert block["reasons"] == []
+        assert block["depth"] == "partial"
+        assert block["status"] == COMPLETENESS_UNKNOWN
+        assert block["derived"] is True
 
     def test_old_record_with_dropped_events_is_derived_incomplete_and_labelled(self):
         entry = {"executor": "claude_code_hooks", "capture": {"hook_events_dropped": 3}}
@@ -200,15 +213,24 @@ class TestCompletenessModel:
         stored = {"status": COMPLETENESS_INCOMPLETE,
                   "reasons": [{"kind": "corrupt_queued_event", "count": 1, "detail": "1 queued event could not be decoded"}]}
         entry = {"executor": "claude_code_hooks", "capture": {"completeness": stored, "hook_events_dropped": 0}}
-        assert derive_capture_completeness(entry) == {**stored, "derived": False}
+        assert derive_capture_completeness(entry) == {**stored, "depth": "partial", "derived": False}
 
-    def test_native_record_is_full_and_unknown_origin_is_unknown(self):
-        assert derive_capture_completeness({"workflow": "native", "executor": "native"})["status"] == "full"
-        assert derive_capture_completeness({"task": "x"})["status"] == "unknown"
+    def test_pre_release_stored_partial_status_reads_as_complete(self):
+        entry = {"executor": "claude_code_hooks", "capture": {"completeness": {"status": "partial", "reasons": []}}}
+        assert derive_capture_completeness(entry)["status"] == COMPLETENESS_COMPLETE
 
-    def test_receipt_shows_partial_capture_without_incomplete_wording(self):
+    def test_native_record_is_full_and_complete_and_unknown_origin_is_unknown(self):
+        native = derive_capture_completeness({"workflow": "native", "executor": "native"})
+        assert (native["depth"], native["status"]) == ("full", COMPLETENESS_COMPLETE)
+        unknown = derive_capture_completeness({"task": "x"})
+        assert (unknown["depth"], unknown["status"]) == ("unknown", COMPLETENESS_UNKNOWN)
+
+    def test_receipt_shows_partial_capture_and_no_known_gaps(self):
         entry = {"task": "t", "timestamp": "2026-09-01T10:00:00Z", "executor": "claude_code_hooks",
-                 "capture": {"session_id": SID, "task_status": "turn_completed", "hook_events_dropped": 0}}
+                 "capture": {"session_id": SID, "task_status": "turn_completed", "hook_events_dropped": 0,
+                             "completeness": {"status": "complete", "reasons": []}}}
         rendered = render_compact_shard_receipt(build_shard_receipt(entry, 0))
         assert "Incomplete" not in rendered
         assert "did not execute or verify" in rendered
+        gaps = next(ln for ln in rendered.splitlines() if ln.strip().startswith("Gaps"))
+        assert "None known" in gaps

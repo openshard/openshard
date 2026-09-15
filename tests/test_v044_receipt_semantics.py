@@ -110,21 +110,51 @@ class TestIdentityRows:
         assert not any(k in d for k in ("owner", "requested_by", "executed_by", "approved_by", "user"))
 
 
-class TestCaptureRow:
-    def test_incomplete_capture_is_visible_above_the_partial_line(self):
+class TestCaptureRows:
+    """Depth and completeness are shown as two facts, never folded into one."""
+
+    def _lines(self, entry: dict) -> tuple[str, str]:
+        out = render_compact_shard_receipt(build_shard_receipt(entry)).splitlines()
+        capture = next(ln for ln in out if ln.strip().startswith("Capture"))
+        gaps = next(ln for ln in out if ln.strip().startswith("Gaps"))
+        return capture, gaps
+
+    def test_incomplete_capture_names_the_gap_and_keeps_partial_depth(self):
         entry = _hooks_entry()
         entry["capture"]["completeness"] = {
             "status": "incomplete",
             "reasons": [{"kind": "corrupt_queued_event", "count": 1, "detail": "1 queued event could not be decoded"}],
         }
-        out = render_compact_shard_receipt(build_shard_receipt(entry))
-        lines = out.splitlines()
-        idx = next(i for i, ln in enumerate(lines) if ln.strip().startswith("Capture"))
-        assert "Incomplete" in lines[idx] and "could not be decoded" in lines[idx]
-        assert "did not execute or verify" in lines[idx + 1]
+        capture, gaps = self._lines(entry)
+        assert "partial" in capture and "did not execute or verify" in capture
+        assert "1 queued event could not be decoded" in gaps
+        full = render_full_shard_receipt(build_shard_receipt(entry))
+        assert "Capture depth  partial" in full
+        assert "Completeness   Incomplete" in full
+        assert "Known gaps     1 queued event could not be decoded" in full
 
-    def test_partial_capture_reads_as_before(self):
-        out = render_compact_shard_receipt(build_shard_receipt(_hooks_entry()))
-        capture_line = next(ln for ln in out.splitlines() if ln.strip().startswith("Capture"))
-        assert "partial" in capture_line and "did not execute or verify" in capture_line
-        assert "Incomplete" not in out
+    def test_healthy_capture_is_partial_depth_and_complete(self):
+        entry = _hooks_entry()
+        entry["capture"]["completeness"] = {"status": "complete", "reasons": []}
+        capture, gaps = self._lines(entry)
+        assert "partial" in capture and "did not execute or verify" in capture
+        assert "None known" in gaps
+        full = render_full_shard_receipt(build_shard_receipt(entry))
+        assert "Completeness   Complete" in full and "Known gaps     None known" in full
+
+    def test_legacy_record_completeness_is_unknown_not_complete(self):
+        capture, gaps = self._lines(_hooks_entry())  # no stored block, no dropped counter
+        assert "partial" in capture
+        assert "Unknown" in gaps
+        block = build_shard_receipt(_hooks_entry()).capture_completeness
+        assert block["depth"] == "partial" and block["status"] == "unknown" and block["derived"] is True
+
+    def test_native_run_is_full_depth_and_complete(self):
+        entry = {"task": "native", "timestamp": "2026-09-14T10:00:00Z", "workflow": "native", "executor": "native"}
+        receipt = build_shard_receipt(entry)
+        assert receipt.capture_completeness["depth"] == "full"
+        assert receipt.capture_completeness["status"] == "complete"
+        out = render_compact_shard_receipt(receipt)
+        assert "Gaps" not in out  # nothing to flag on a native run with no known loss
+        d = receipt_to_dict(receipt)["capture_completeness"]
+        assert d["depth"] == "full" and d["status"] == "complete"

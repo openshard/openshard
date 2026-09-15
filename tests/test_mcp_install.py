@@ -772,7 +772,7 @@ class TestInstallClaudeHooks(unittest.TestCase):
             # v0.4.4: the HTTP entries carry this repository's capture capability.
             from openshard.adapters.capture_auth import load_token, repo_capability
 
-            capability = repo_capability(load_token(), root)
+            capability = repo_capability(load_token(), root, "claude_code")
             # The installer targets the port the client resolves at call time
             # (conftest isolates the default port per test), so compare against
             # that port rather than the value imported at module load.

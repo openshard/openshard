@@ -20,6 +20,23 @@ deployed. The private Platform repository was not touched.
 | 7 | `receipt: say only what the evidence supports` | status wording, risk floor removed, Integrity row, test isolation |
 | 8 | `docs: v0.4.4 architecture, trust boundary, attribution and cleanup plan` | architecture, SECURITY, agent-capture, README, CONTRIBUTING, CHANGELOG, version |
 | 9 | `capture: log refused requests (throttled); v0.4.4 reports` | rejection logging; this report and the review checklist |
+| 10 | `report: record the final confirmation test run` | report only |
+| 11 | `capture: scope capabilities to repository and agent; separate depth from completeness` | final hardening pass (see "Final hardening pass" below) |
+
+## Final hardening pass (commit 11)
+
+Requested after an independent review of commits 1-10. Scope limited to
+the five items below; no unrelated refactoring.
+
+1. **Capabilities scoped to repository + agent.** `capture_auth.repo_capability(token, root, agent)` now signs `normalised_root + "\n" + agent_key` (prefix `r2.`; the earlier repo-only `r1.` shape is no longer accepted). `verify_presented(presented, token, root, agent)` stays constant-time; the service passes the agent the receiver path records under (`/hooks/claude` and `/status/claude` -> `claude_code`, `/hooks/codex` -> `codex`, `/hooks/cursor` -> `cursor`, `/hooks/opencode` -> `opencode`), so a capability is checked against the agent the event *would be recorded as*, not merely the URL string. Shutdown still accepts only the master token. Claude Code hooks carry the `claude_code` capability; the OpenCode plugin (version 4) now carries an embedded `opencode` capability instead of reading the master token file, so the master token appears in no agent configuration. Codex and Cursor need no capability (their hooks run `openshard hooks codex|cursor`, our own process). `detect_plugin`/`doctor` report a missing or stale plugin capability; the installer refuses to write a credential into a git-tracked plugin file. Migration and fail-open behaviour unchanged; `setup` rewrites both files; the Claude `SessionStart` self-heal is unchanged.
+2. **Capture depth separated from completeness.** `capture_depth` (`full`/`partial`/`unknown`, `history/shard.py`) is untouched and answers "how deep could OpenShard see". `capture.completeness.status` now answers only "is evidence known lost": `complete` / `incomplete` / `unknown`. Hook records written by 0.4.4 store `complete` or `incomplete`; a 0.4.3 hook record (no loss tracking) derives `unknown` unless its `hook_events_dropped` counter is non-zero (`incomplete`); a native run derives `complete`; unknown origin `unknown`. No score. Compact receipt: `Capture  partial — OpenShard did not execute or verify this run` plus a `Gaps` row (`None known` / the reasons / `Unknown (record predates loss tracking)`). Full receipt: a `CAPTURE` section with `Capture depth`, `Completeness`, `Known gaps`. JSON (`receipt_to_dict`, MCP `get_receipt`, `last --json`): `capture_completeness = {depth, status, reasons, derived}`.
+3. **Extra refusal resolved.** Reproduced with refusal logging (see "Real-agent validation"): the second refusal is a `SessionEnd` HTTP hook that **Claude Code's CLI fires for `claude mcp get` / `claude mcp list`**. `openshard doctor` and `openshard setup` run `claude mcp get openshard` to detect the MCP registration, so on a repository whose Claude hooks lack the credential every `doctor` run adds exactly one refused `POST /hooks/claude: no credential presented`. It is correct (a credential-less hook) and harmless (a `SessionEnd` with no work is never recorded; with the credential the same POST is accepted and ignored). Not a migration or stale-hook defect; documented in `docs/agent-capture.md`.
+4. **Report consistency.** Commit table now lists every commit on the branch.
+5. **Validation** re-run (below). One test hardened: the 24-thread identity test raises the runs.jsonl lock budget so a loaded box measures identity, not lock latency (one unattributed flake of the focused v0.4.4 files was seen while the full suite ran concurrently; not reproduced in 6 further runs).
+
+Files changed in this pass: `openshard/adapters/{capture_auth.py, claude_capture_service.py, claude_hooks_install.py, opencode_plugin_install.py, agent_setup.py}`, `openshard/history/{capture_completeness.py, shard_contract.py, views.py}`, docs (`docs/agent-capture.md`, `SECURITY.md`, `CHANGELOG.md`, `docs/architecture.md`, `docs/release-checklist.md`), tests (`tests/test_v044_capture_auth.py`, `tests/test_v044_evidence_loss.py`, `tests/test_v044_receipt_semantics.py`, `tests/test_v044_receipt_identity.py`, `tests/test_mcp_install.py`, `tests/test_opencode_capture.py`), and the two reports.
+
+Tests added/changed in this pass: `test_repo_capability_is_scoped_to_repository_and_agent`, `test_agent_key_must_be_a_single_line`, `test_capability_is_bound_to_the_integration_not_just_the_repository` (Claude capability refused on Codex/Cursor/OpenCode receivers; Cursor capability refused on Claude hook and status receivers; matching capabilities accepted), `TestOpenCodePluginCapability` (plugin embeds a scoped capability, never the token or a token-file read; `missing`/`stale`/`ok` states; a Claude capability is not an OpenCode one); `TestCompletenessModel` rewritten for depth vs completeness (healthy new record `partial`/`complete`, legacy record `unknown`, native `full`/`complete`, pre-release stored `partial` reads as `complete`); `TestCaptureRows` rewritten (two facts shown; legacy `Unknown`; native shows no `Gaps` row); `detect_plugin` and Claude install expectations updated for the agent-scoped signature. Rendered plugin syntax-checked with `node --experimental-strip-types --check` (node 22; the node-executed plugin tests need node 23 and are skipped here).
 
 ## Exact changes
 
@@ -86,11 +103,10 @@ Updated existing tests were changed only where they pinned the behaviour this re
 
 Baseline before edits: 8834 passed, 3 skipped; ruff and mypy clean.
 
-After all functional changes (this branch, Linux, Python 3.11,
-`pip install -e ".[dev]"` as CI): 8900 passed, 3 skipped, 883 subtests
-passed (303 s). Final confirmation run on the pushed branch head (after the
-receipt-label and refused-request-logging changes): 8900 passed, 3 skipped,
-883 subtests passed (302 s). ruff: clean. mypy: clean (191 files).
+Commits 1-10 (Linux, Python 3.11, `pip install -e ".[dev]"` as CI): 8900
+passed, 3 skipped, 883 subtests passed. Final hardening pass (commit 11),
+same environment: focused `tests/test_v044_*.py` 73 passed; then
+the full suite result is recorded in the follow-up report commit; ruff: clean; mypy: clean (191 files).
 
 Windows and Python 3.12 were not run here (no Windows runner in this
 environment); CI runs both. Windows-specific paths touched: token file
@@ -120,20 +136,21 @@ environment); CI runs both. Windows-specific paths touched: token file
 | Claude Code 2.1.270 (logged in, this container) | **Yes** | Temp repo with a dirty tracked file and an untracked file; `openshard setup --json` (installed MCP, HTTP hooks with capability, status line; service started); `claude -p` created `hello.py` with `--allowedTools Write`. Result: 5 events queued and folded, 0 refused; receipt shows `Receipt ID`, `Capture partial`, `Turn completed (unverified)`, `Changed 1 file (1 agent-reported)`, `Excluded 2 pre-existing`, `Integrity Matches (content hash)`; JSON carries `changes`, attribution, completeness; token absent from JSON, log and state file. Then: stripped the capability from the hooks file → forged POST refused 401, `doctor` named the problem, `openshard hooks claude` (SessionStart) restored the 5 headers, `doctor` green again. `Model Unknown` is expected in `-p` mode (no status line). |
 | Codex | No (CLI not installed here) | Translator, installer and service path covered by the existing and new tests with fixtures only. |
 | Cursor | No (CLI not installed here) | Same: fixtures only, including the fail-open decision reply. |
-| OpenCode | No (CLI not installed here) | Plugin source change is covered by the existing node-executed plugin tests only if node is present in CI; the header addition itself was verified by reading the rendered source, not by a live OpenCode session. |
+| OpenCode | No (CLI not installed here) | Plugin now embeds a scoped capability; rendered source syntax-checked with `node --experimental-strip-types --check` (node 22). The node-executed plugin tests require node >= 23 and were skipped here; no live OpenCode session. |
 
-One observation: during the live smoke the service counted 2 refused requests where 1 was expected (the forged POST). A deterministic re-run of the same command sequence (doctor, SessionStart hook, capture status) produced 0 refusals, so the extra one did not come from OpenShard's own clients; the most likely source is a late Claude Code hook delivery after the credential had been stripped. Refusals are now logged with path and reason (throttled) so this can be diagnosed next time.
+Second live Claude Code smoke (final pass, with refusal logging): a fresh temp repo, `openshard setup --json`, `claude -p` created `hello.py` (2 turns), 5 events accepted, 0 refused. Then the capability was stripped from the hooks file and the earlier sequence replayed step by step: `openshard doctor` alone took the refused counter 0 -> 1 (log: `refused POST /hooks/claude: no credential presented`); the forged POST made it 2; the `SessionStart` hook restored the credential and added none. Directly running `claude mcp get openshard` and `claude mcp list` against the stripped file each added one refusal, and against the restored file each added one *accepted* `SessionEnd` (`stats.last_event`) that created no record. So the "extra" refusal is Claude Code's own `SessionEnd` hook fired by the `claude mcp get` subprocess that `doctor`/`setup` run. The earlier deterministic re-run showed 0 because its service was pinned to a different port than the hooks file targeted. Resolved and documented; not a defect.
 
 ## Unresolved risks
 
 1. **Claude Code header interpolation was not needed** (a static header is written), so the one documented-but-unverified mechanism (`$VAR` in headers from Claude Code's process env) is not relied on. The static-header approach was verified live.
-2. **Repository capability in a repo-local file.** Mitigated by scoping (events for that repo only, never shutdown), git exclusion, tracked-file refusal and rotation. A user who copies the file elsewhere still leaks a per-repo capability.
+2. **Capabilities in repo-local files** (Claude hooks, OpenCode plugin). Mitigated by scoping to repository *and* agent (never shutdown), git exclusion, tracked-file refusal and rotation. A copied file still leaks a per-repo, per-agent capability.
 3. **In-flight sessions across upgrade** lose HTTP-hook evidence until the next session (fallback fold covers command hooks only). Documented.
 4. **Other-session attribution** consults live buffers only; an ended sibling's files become `git_observed`.
 5. **Baseline timing for agents without a start hook** (Cursor background agents): baseline at first observed hook.
 6. **`_parse_git_changed_files` cap**: hook fold now examines 200 rows and reports at most 50 + 50 excluded (`files_truncated`); import/wrap still cap at 20.
 7. **Windows**: not executed here; CI covers it. New code avoids POSIX-only calls except the guarded `chmod`.
-8. **Flake watch**: one unexplained single failure of the 24-thread concurrency test during an early, heavily loaded run; 8 subsequent runs were green. Lock timeouts under extreme load would surface as `action == "error"` rather than an identity collision.
+8. **Flake watch**: two single, unattributed failures among the focused v0.4.4 tests were seen only while another full suite ran concurrently on the same box; never reproduced in isolation (14 clean loops). The most plausible candidate, the 24-thread identity test, now raises its runs.jsonl lock budget so lock latency cannot masquerade as a failure.
+9. **Claude Code CLI subcommands fire hooks**: `claude mcp get|list` emit a `SessionEnd` HTTP hook. Harmless for OpenShard (no work, nothing recorded) but it means `doctor` on a credential-less repository counts one refusal per run. Documented.
 
 ## Recommendations intentionally deferred (see `docs/architecture/POST_V044_CORE_CLEANUP.md`)
 

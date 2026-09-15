@@ -33,7 +33,7 @@ On a branch, in one pull request to `main`:
       (no `X-OpenShard-Capture-Token` header), run `openshard setup` and
       confirm `doctor` no longer reports "no valid capture credential", then
       complete one Claude Code turn and confirm `openshard last` shows the
-      session with `Capture  partial` (not `Incomplete`) and a `Receipt ID`.
+      session with `Capture  partial`, `Gaps  None known` and a `Receipt ID`.
 - [ ] `openshard capture status` shows `refused: 0 unauthenticated` after a
       normal session; a non-zero count means some hook still lacks a credential.
 

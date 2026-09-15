@@ -35,14 +35,23 @@ def truncate_text(text: str | None, limit: int = MAX_TEXT) -> str | None:
 
 
 def _completeness_to_dict(block: dict | None) -> dict[str, Any] | None:
-    """``{"status", "reasons": [{kind, count, detail}], "derived"}`` -- static vocabulary only."""
+    """``{"depth", "status", "reasons": [{kind, count, detail}], "derived"}`` -- static vocabulary only.
+
+    ``depth`` (full/partial/unknown) is how much could be observed;
+    ``status`` (complete/incomplete/unknown) whether evidence is known lost.
+    """
     if not isinstance(block, dict):
         return None
     reasons = [
         {"kind": str(r.get("kind")), "count": int(r.get("count") or 1), "detail": truncate_text(str(r.get("detail") or ""))}
         for r in (block.get("reasons") or []) if isinstance(r, dict)
     ][:8]
-    return {"status": str(block.get("status") or "unknown"), "reasons": reasons, "derived": bool(block.get("derived"))}
+    return {
+        "depth": str(block.get("depth") or "unknown"),
+        "status": str(block.get("status") or "unknown"),
+        "reasons": reasons,
+        "derived": bool(block.get("derived")),
+    }
 
 
 def shard_to_dict(shard: Shard) -> dict[str, Any]:
