@@ -2,7 +2,7 @@
 
 All notable changes to OpenShard are documented here.
 
-## 0.4.4 - Unreleased
+## 0.4.4 - 2026-09-15
 
 Receipt integrity hardening. No new integrations, no new commands beyond
 `openshard capture rotate-token`, no telemetry broadening. The goal: a
