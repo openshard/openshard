@@ -1065,8 +1065,10 @@ class TestExecutionSuffixVisibleMemoInstruction(unittest.TestCase):
         self.assertIn("multi-line", _EXECUTION_FINDINGS_SUFFIX)
 
 
-class TestReviewTaskRiskFloorInReceipt(unittest.TestCase):
-    """is_review_task flag raises risk floor to High in build_shard_receipt (mirrors live receipt)."""
+class TestReviewTaskRiskIsNotCoercedAtDisplay(unittest.TestCase):
+    """v0.4.4: the receipt shows the *recorded* risk. The former display-time
+    floor (review task + missing/Low -> High) silently turned one fact into
+    another and is gone."""
 
     def _entry(self, is_review_task: bool, risk_level: str | None) -> dict:
         entry: dict = {
@@ -1081,15 +1083,15 @@ class TestReviewTaskRiskFloorInReceipt(unittest.TestCase):
             entry["form_factor"] = {"risk_level": risk_level}
         return entry
 
-    def test_review_task_low_risk_becomes_high(self):
+    def test_review_task_low_risk_stays_low(self):
         from openshard.history.shard_contract import build_shard_receipt
         receipt = build_shard_receipt(self._entry(is_review_task=True, risk_level="low"))
-        self.assertEqual(receipt.risk, "High")
+        self.assertEqual(receipt.risk, "Low")
 
-    def test_review_task_no_form_factor_becomes_high(self):
+    def test_review_task_no_form_factor_stays_not_recorded(self):
         from openshard.history.shard_contract import build_shard_receipt
         receipt = build_shard_receipt(self._entry(is_review_task=True, risk_level=None))
-        self.assertEqual(receipt.risk, "High")
+        self.assertEqual(receipt.risk, "Not recorded")
 
     def test_review_task_already_high_stays_high(self):
         from openshard.history.shard_contract import build_shard_receipt
@@ -1101,15 +1103,16 @@ class TestReviewTaskRiskFloorInReceipt(unittest.TestCase):
         receipt = build_shard_receipt(self._entry(is_review_task=False, risk_level="low"))
         self.assertEqual(receipt.risk, "Low")
 
-    def test_review_task_risk_high_in_compact_receipt(self):
+    def test_review_task_recorded_low_risk_shown_in_compact_receipt(self):
         from openshard.history.shard_contract import (
             build_shard_receipt,
             render_compact_shard_receipt,
         )
         receipt = build_shard_receipt(self._entry(is_review_task=True, risk_level="low"))
         rendered = render_compact_shard_receipt(receipt)
-        self.assertIn("High", rendered)
-        self.assertNotIn("Low", rendered.split("Risk", 1)[-1].split("\n")[0])
+        risk_line = rendered.split("Risk", 1)[-1].split("\n")[0]
+        self.assertIn("Low", risk_line)
+        self.assertNotIn("High", risk_line)
 
 
 class TestReviewContextInstruction(unittest.TestCase):

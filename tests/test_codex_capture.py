@@ -548,7 +548,8 @@ class TestServicePath:
 
     def test_unsupported_codex_event_is_ignored_not_errored(self, service, repo):
         status, reply = client._request("POST", service.port, client.CODEX_HOOK_PATH,
-                                        json.dumps(_doc("PreToolUse", repo)).encode())
+                                        json.dumps(_doc("PreToolUse", repo)).encode(),
+                                        client._auth_headers(None, None))
         assert status == 200 and reply == b"{}"
         assert client.health(service.port)["stats"]["queued"] == 0
 

@@ -4132,8 +4132,8 @@ class TestReviewRiskRendering(unittest.TestCase):
         receipt = build_shard_receipt(entry)
         self.assertEqual(receipt.risk, "High")
 
-    def test_review_task_flag_overrides_low_risk_in_last(self):
-        # is_review_task=True saved in log entry → /last must floor risk to High
+    def test_review_task_low_risk_is_shown_as_recorded_in_last(self):
+        # v0.4.4: is_review_task no longer coerces a recorded Low risk to High at display time
         entry = {
             "task": "production-iac-hardening",
             "timestamp": "2026-05-22T10:00:00Z",
@@ -4150,9 +4150,11 @@ class TestReviewRiskRendering(unittest.TestCase):
             _render_log_entry(entry, "default")
 
         out = CliRunner().invoke(cmd).output
-        self.assertIn("High", out)
+        risk_line = next(ln for ln in out.splitlines() if ln.strip().startswith("Risk"))
+        self.assertIn("Low", risk_line)
+        self.assertNotIn("High", risk_line)
 
-    def test_review_task_no_form_factor_still_high_in_last(self):
+    def test_review_task_without_recorded_risk_shows_not_recorded_in_last(self):
         entry = {
             "task": "iam-security-review",
             "timestamp": "2026-05-22T10:00:00Z",
@@ -4168,7 +4170,8 @@ class TestReviewRiskRendering(unittest.TestCase):
             _render_log_entry(entry, "default")
 
         out = CliRunner().invoke(cmd).output
-        self.assertIn("High", out)
+        risk_line = next(ln for ln in out.splitlines() if ln.strip().startswith("Risk"))
+        self.assertIn("Not recorded", risk_line)
 
 
 class TestLastVerificationPlanNativeFormat(unittest.TestCase):

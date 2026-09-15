@@ -133,6 +133,11 @@ def _post(port: int, raw: bytes, *, project_dir: str | None = None, event_overri
     return client.post_hook(port, raw, project_dir=project_dir, event_override=event_override)
 
 
+def _auth_headers(project_dir: str | None = None) -> dict[str, str]:
+    """Headers a raw ``client._request`` needs to be accepted (v0.4.4 token)."""
+    return client._auth_headers(None, project_dir)
+
+
 def _lines(repo: Path) -> list[dict]:
     path = repo / ".openshard" / "runs.jsonl"
     if not path.exists():
@@ -235,8 +240,13 @@ class TestLifecycle:
         assert not list(_session_dir(repo).glob("*.queue*.jsonl"))
 
     def test_shutdown_requires_matching_instance_id(self, service):
+        # v0.4.4: the token is required first (401 without it); a wrong
+        # instance id with a valid token is still refused (403).
         status, _ = client._request("POST", service.port, client.SHUTDOWN_PATH,
                                     json.dumps({"instance_id": "nope"}).encode())
+        assert status == 401
+        status, _ = client._request("POST", service.port, client.SHUTDOWN_PATH,
+                                    json.dumps({"instance_id": "nope"}).encode(), _auth_headers())
         assert status == 403
         assert client.health(service.port) is not None
 
@@ -414,9 +424,9 @@ class TestBlockingPath:
         for body in (b"", b"not json", b"[1,2]", b"42", b'{"hook_event_name":"Stop"}',
                      b'{"hook_event_name":"Nope","session_id":"' + SID.encode() + b'"}',
                      b'{"hook_event_name":"Stop","session_id":"../../etc"}'):
-            status, reply = client._request("POST", service.port, client.HOOK_PATH, body)
+            status, reply = client._request("POST", service.port, client.HOOK_PATH, body, _auth_headers())
             assert status == 200 and reply == b"{}", body
-        status, _ = client._request("POST", service.port, "/nope", b"{}")
+        status, _ = client._request("POST", service.port, "/nope", b"{}", _auth_headers())
         assert status == 404
         status, _ = client._request("GET", service.port, "/nope")
         assert status == 404
@@ -706,7 +716,10 @@ class TestRecovery:
         finally:
             running.stop()
 
-    def test_corrupt_queue_lines_are_skipped(self, service, repo):
+    def test_corrupt_queue_lines_are_quarantined_not_skipped(self, service, repo):
+        # v0.4.4: undecodable lines are no longer silently skipped -- they are
+        # quarantined and counted, the valid neighbour is still applied, and
+        # the record says its capture is incomplete. Never a transient error.
         directory = _session_dir(repo)
         directory.mkdir(parents=True)
         (directory / f"{SID}{svc.QUEUE_SUFFIX}").write_text(
@@ -714,9 +727,14 @@ class TestRecovery:
             + json.dumps({"id": "bad-2", "kind": "hook", "at": "x", "data": {"event": "Nope", "session_id": SID}}) + "\n",
             encoding="utf-8")
         service.server.recorder.recover(repo)
-        assert _wait_for(lambda: len(_lines(repo)) == 1)
+        assert _wait_for(lambda: len(_lines(repo)) == 1 and _lines(repo)[0]["capture"].get("completeness"))
+        assert service.server.recorder.wait_idle(20)
         assert _lines(repo)[0]["task"] == "fine"
-        assert client.health(service.port)["stats"]["replay_errors"] == 0
+        assert _lines(repo)[0]["capture"]["completeness"]["status"] == "incomplete"
+        stats = client.health(service.port)["stats"]
+        assert stats["replay_errors"] == 0
+        assert stats["corrupt_lines"] == 3
+        assert len(list((directory / svc.QUARANTINE_DIRNAME).glob("*.jsonl"))) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -882,14 +900,20 @@ class TestSetupIntegration:
         from openshard.adapters.claude_hooks_install import HOOK_COMMAND, install_claude_hooks
         from openshard.adapters.claude_setup import detect_claude_integration
 
-        with patch("openshard.adapters.claude_hooks_install.subprocess.run",
-                   return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")):
+        def _git(argv, **kwargs):
+            # `git ls-files --error-unmatch` (v0.4.4 tracked-file check) says
+            # "not tracked" (1); every other git call succeeds.
+            rc = 1 if "ls-files" in argv else 0
+            return subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
+
+        with patch("openshard.adapters.claude_hooks_install.subprocess.run", side_effect=_git):
             install_claude_hooks(repo_root=repo, port=service.port + 1)
         with patch("openshard.adapters.claude_mcp_install.shutil.which", return_value=None):
             status = detect_claude_integration(repo)
         assert status.capture_service["running"] is True
         assert status.hooks_port == service.port + 1
         assert status.capture_port_mismatch is True
+        assert status.hooks_auth_state == "ok"
         assert status.hooks_need_upgrade is False
         settings_path = repo / ".claude" / "settings.local.json"
         settings_path.write_text(json.dumps({"hooks": {

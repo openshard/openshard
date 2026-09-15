@@ -705,7 +705,8 @@ class TestFiles:
         entry = _runs_lines(root)[0]
         assert entry["files_source"] == "claude_hook_reported"
         assert entry["files_detail"] == [
-            {"path": "made.py", "change_type": "create", "summary": "reported by Claude Code hook"}
+            {"path": "made.py", "change_type": "create", "summary": "reported by Claude Code hook",
+             "attribution": "agent_reported", "pre_existing": False}
         ]
         fe = _events(entry, EVENT_FILE_CHANGED)[0]
         assert fe["evidence"] == EVIDENCE_AGENT_REPORTED
@@ -738,7 +739,11 @@ class TestFiles:
             {
                 "path": "evals/basic/bug_fix/fixtures/word_utils.py",
                 "change_type": "update",
-                "summary": "inferred from git diff",
+                # v0.4.4: the Edit hook (PostToolUse fires only on success) is the
+                # positive signal, so git's diff row is attributed to the agent.
+                "summary": "reported by Claude Code hook",
+                "attribution": "agent_reported",
+                "pre_existing": False,
             }
         ]
         assert entry["files_updated"] == 1
@@ -770,7 +775,8 @@ class TestFiles:
         entry = _runs_lines(root)[0]
         assert entry["files_source"] == "claude_hook_reported"
         assert entry["files_detail"] == [
-            {"path": nested_rel, "change_type": "create", "summary": "reported by Claude Code hook"}
+            {"path": nested_rel, "change_type": "create", "summary": "reported by Claude Code hook",
+             "attribution": "agent_reported", "pre_existing": False}
         ]
 
     def test_no_absolute_paths_anywhere_in_record(self, repo: Path):
@@ -1074,9 +1080,9 @@ class TestTaskCompletion:
         assert entry["capture"]["session_end_observed"] is False
         assert entry["capture"]["task_status"] == "turn_completed"
         receipt = build_shard_receipt(entry)
-        assert receipt.task_completion == "Completed"
+        assert receipt.task_completion == "Turn completed (unverified)"
         out = render_compact_shard_receipt(receipt)
-        assert "Completed" in out
+        assert "Turn completed (unverified)" in out
 
     def test_in_progress_before_any_stop(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")
@@ -1105,14 +1111,14 @@ class TestTaskCompletion:
         entry = _session(repo, with_tools=False, end=False)
         receipt = build_shard_receipt(entry)
         assert receipt.checks_display == "Not run"
-        assert receipt.task_completion == "Completed"  # completion != verification
+        assert receipt.task_completion == "Turn completed (unverified)"  # completion != verification
 
     def test_checks_attempted_but_unverified_when_turn_completed(self, repo: Path):
         # with_tools=True (default) drives a "python -m pytest -q" Bash call.
         entry = _session(repo, end=False)
         receipt = build_shard_receipt(entry)
         assert receipt.checks_display == "Attempted (unverified)"
-        assert receipt.task_completion == "Completed"  # completion != verification
+        assert receipt.task_completion == "Turn completed (unverified)"  # completion != verification
 
 
 # ---------------------------------------------------------------------------

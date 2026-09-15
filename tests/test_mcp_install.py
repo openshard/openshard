@@ -769,10 +769,22 @@ class TestInstallClaudeHooks(unittest.TestCase):
             self.assertEqual(result.status, "installed", result.message)
             self.assertEqual(result.settings_path, root / SETTINGS_RELPATH)
             self.assertEqual(result.warnings, [])
-            self.assertEqual(_read_settings(root)["hooks"], build_hook_config())
+            # v0.4.4: the HTTP entries carry this repository's capture capability.
+            from openshard.adapters.capture_auth import load_token, repo_capability
+
+            capability = repo_capability(load_token(), root, "claude_code")
+            # The installer targets the port the client resolves at call time
+            # (conftest isolates the default port per test), so compare against
+            # that port rather than the value imported at module load.
+            from openshard.adapters import claude_capture_client as _client
+
+            installed_port = installed_hook_port(_read_settings(root))
+            self.assertEqual(installed_port, _client.resolve_port())
+            self.assertEqual(_read_settings(root)["hooks"], build_hook_config(installed_port, capability=capability))
             text = (root / SETTINGS_RELPATH).read_text(encoding="utf-8")
             self.assertTrue(text.endswith("\n"))
             self.assertNotIn(str(root), text)
+            self.assertNotIn(load_token(), text)  # the token itself is never written into the repository
 
     def test_repeated_install_is_idempotent_and_does_not_rewrite(self):
         with CliRunner().isolated_filesystem() as tmp:

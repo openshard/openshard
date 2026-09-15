@@ -345,7 +345,8 @@ class TestCanonicalRecord:
         entry = _lines(root)[0]
         assert entry["files_source"] == "cursor_hook_reported"
         assert entry["files_detail"] == [
-            {"path": "made.py", "change_type": "update", "summary": "reported by Cursor hook"}
+            {"path": "made.py", "change_type": "update", "summary": "reported by Cursor hook",
+             "attribution": "agent_reported", "pre_existing": False}
         ]
         fe = [e for e in entry["events"] if e["event_type"] == "file.changed"]
         assert fe and fe[0]["evidence"] == "agent_reported" and fe[0]["metadata"]["evidence_source"] == "cursor_hook"
@@ -536,7 +537,8 @@ class TestServicePath:
 
     def test_unsupported_cursor_event_is_ignored_not_errored(self, service, repo):
         status, reply = client._request("POST", service.port, client.CURSOR_HOOK_PATH,
-                                        json.dumps(_doc("afterShellExecution", repo, command="ls", output="x")).encode())
+                                        json.dumps(_doc("afterShellExecution", repo, command="ls", output="x")).encode(),
+                                        client._auth_headers(None, None))
         assert status == 200 and reply == b"{}"
         assert client.health(service.port)["stats"]["queued"] == 0
 
