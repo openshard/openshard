@@ -34,6 +34,26 @@ def truncate_text(text: str | None, limit: int = MAX_TEXT) -> str | None:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _completeness_to_dict(block: dict | None) -> dict[str, Any] | None:
+    """``{"depth", "status", "reasons": [{kind, count, detail}], "derived"}`` -- static vocabulary only.
+
+    ``depth`` (full/partial/unknown) is how much could be observed;
+    ``status`` (complete/incomplete/unknown) whether evidence is known lost.
+    """
+    if not isinstance(block, dict):
+        return None
+    reasons = [
+        {"kind": str(r.get("kind")), "count": int(r.get("count") or 1), "detail": truncate_text(str(r.get("detail") or ""))}
+        for r in (block.get("reasons") or []) if isinstance(r, dict)
+    ][:8]
+    return {
+        "depth": str(block.get("depth") or "unknown"),
+        "status": str(block.get("status") or "unknown"),
+        "reasons": reasons,
+        "derived": bool(block.get("derived")),
+    }
+
+
 def shard_to_dict(shard: Shard) -> dict[str, Any]:
     """Canonical Shard -> bounded dict. Identity/origin only -- no evidence fields."""
     return {
@@ -69,10 +89,13 @@ def finding_to_dict(finding: ShardFinding) -> dict[str, Any]:
 
 def file_to_dict(raw: dict) -> dict[str, Any]:
     summary = raw.get("summary")
+    attribution = raw.get("attribution")
     return {
         "path": raw.get("path"),
         "change_type": raw.get("change_type"),
         "summary": truncate_text(summary) if isinstance(summary, str) else None,
+        # v0.4.4: agent_reported | git_observed | pre_existing | other_session; None for old records.
+        "attribution": attribution if isinstance(attribution, str) else None,
     }
 
 
@@ -96,6 +119,9 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
 
     d: dict[str, Any] = {
         "shard_id": receipt.shard_id,
+        "receipt_id": receipt.receipt_id,
+        "capture_completeness": _completeness_to_dict(receipt.capture_completeness),
+        "integrity": receipt.integrity,
         "run_id": receipt.run_id,
         "attempt_number": receipt.attempt_number,
         "created_at": receipt.created_at,
@@ -111,6 +137,8 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         "sandbox": receipt.sandbox,
         "files_changed": receipt.files_changed,
         "files": [file_to_dict(f) for f in files_raw[:MAX_FILES] if isinstance(f, dict)],
+        "changes": receipt.changes,
+        "files_excluded": [file_to_dict(f) for f in receipt.files_excluded[:MAX_FILES] if isinstance(f, dict)],
         "diff_added": receipt.diff_added,
         "diff_removed": receipt.diff_removed,
         "checks": receipt.checks_display,

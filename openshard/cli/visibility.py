@@ -113,8 +113,8 @@ def cost_label(receipt: ShardReceipt) -> str:
 def status_label(receipt: ShardReceipt) -> str:
     """The most truthful one-word-ish status for a row.
 
-    Claude Code captures carry a turn-completion signal (``Completed`` /
-    ``In progress``) that is *not* verification; native runs carry the
+    Claude Code captures carry a turn-completion signal (``Turn completed
+    (unverified)`` / ``In progress``) that is *not* verification; native runs carry the
     verification-derived status (``Passed`` / ``Failed`` / ``No checks run``).
     """
     if receipt.task_completion:
@@ -356,7 +356,7 @@ _VERIFICATION_LABELS = {
     "unknown": "not recorded",
 }
 _COMPLETION_LABELS = {
-    "completed": "completed",
+    "completed": "turn completed (unverified)",
     "in_progress": "in progress",
     "ended_no_turn": "ended without a turn",
 }

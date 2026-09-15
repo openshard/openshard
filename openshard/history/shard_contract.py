@@ -6,12 +6,19 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 
+from openshard.history.capture_completeness import (
+    COMPLETENESS_INCOMPLETE,
+    derive_capture_completeness,
+    gaps_display,
+)
+from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.shard import (
     ORIGIN_EXTERNAL_OBSERVED,
     Shard,
     build_shard,
     derive_shard_identity,
 )
+from openshard.history.shard_hash import verify_shard_hash
 from openshard.run.timeline import normalize_timeline
 
 _PROFILE_TO_STRATEGY: dict[str, str] = {
@@ -507,6 +514,30 @@ class ShardReceipt:
     # Cost provenance -- distinguishes a provider-reported figure from an
     # OpenShard-calculated or OpenShard-estimated one (see cost_display).
     cost_provenance: str | None = None
+    # v0.4.4 global Receipt identity (history/receipt_identity.py). Read
+    # from the record only -- None for records written before 0.4.4, never
+    # minted at display time. ``shard_id`` above keeps its historic,
+    # history-position meaning.
+    receipt_id: str | None = None
+    # v0.4.4 capture completeness (history/capture_completeness.py):
+    # {"depth": full|partial|unknown, "status": complete|incomplete|unknown,
+    #  "reasons": [...], "derived": bool}. ``depth`` is how much could be
+    # observed (also on ``shard.capture_depth``); ``status`` whether evidence
+    # is known lost. Always populated by build_shard_receipt; None only for
+    # hand-built receipts.
+    capture_completeness: dict | None = None
+    # v0.4.4 integrity: "Matches (content hash)" | "Mismatch (content hash)" |
+    # "Not recorded" from history/shard_hash.verify_shard_hash. An unkeyed
+    # content hash is tamper-evidence for the stored record only; it never
+    # proves who wrote it, and the wording never says "signed".
+    integrity: str = "Not recorded"
+    # v0.4.4 change provenance (adapters/claude_hooks._classify_changed_files):
+    # counts per attribution plus the session-start baseline summary. None for
+    # records written before attribution existed. ``files_detail`` holds the
+    # changes counted as this run's; ``files_excluded`` the pre-existing /
+    # other-session changes git also showed, kept for provenance only.
+    changes: dict | None = None
+    files_excluded: list[dict] = field(default_factory=list)
 
 
 def _verification_from_osn_contract(
@@ -624,6 +655,103 @@ def _workspace_folder_name(raw: object) -> str | None:
     return Path(value).name or None
 
 
+_EXCLUDED_ATTRIBUTIONS = frozenset({"pre_existing", "other_session"})
+_ATTRIBUTION_TAGS: dict[str, str] = {
+    "agent_reported": "agent-reported",
+    "git_observed": "git-observed",
+    "pre_existing": "pre-existing",
+    "other_session": "other session",
+}
+
+
+def _changes_summary(block: dict | None) -> dict | None:
+    """The bounded, path-free ``changes`` block for a receipt (None for old records)."""
+    if not isinstance(block, dict):
+        return None
+
+    def _n(key: str) -> int:
+        value = block.get(key)
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    _baseline_raw = block.get("baseline")
+    baseline: dict = _baseline_raw if isinstance(_baseline_raw, dict) else {}
+    return {
+        "agent_reported": _n("agent_reported"),
+        "git_observed": _n("git_observed"),
+        "pre_existing_excluded": _n("pre_existing_excluded"),
+        "other_session_excluded": _n("other_session_excluded"),
+        "files_truncated": bool(block.get("files_truncated")),
+        "baseline": {
+            "source": str(baseline.get("source") or "not_available"),
+            "at": baseline.get("at") if isinstance(baseline.get("at"), str) else None,
+            "dirty_paths": int(baseline.get("dirty_paths") or 0),
+            "truncated": bool(baseline.get("truncated")),
+        },
+    }
+
+
+def integrity_display(entry: dict) -> str:
+    """``Matches (content hash)`` / ``Mismatch (content hash)`` / ``Not recorded``.
+
+    Technically precise on purpose: the hash is an unkeyed SHA-256 over the
+    stored record (``shard_hash``). "Matches" means the record's content is
+    what it was when the hash was written; it says nothing about authorship.
+    """
+    try:
+        result = verify_shard_hash(entry)
+    except Exception:
+        return "Not recorded"
+    status = result.get("status")
+    if status == "valid":
+        return "Matches (content hash)"
+    if status == "mismatch":
+        return "Mismatch (content hash)"
+    return "Not recorded"
+
+
+def changed_files_display(receipt: ShardReceipt) -> str:
+    """``2 files (1 agent-reported, 1 git-observed)`` when provenance is known, else ``2 files``."""
+    n = receipt.files_changed
+    text = f"{n} file{'s' if n != 1 else ''}"
+    changes = receipt.changes
+    if changes and n > 0:
+        parts = []
+        if changes.get("agent_reported"):
+            parts.append(f"{changes['agent_reported']} agent-reported")
+        if changes.get("git_observed"):
+            parts.append(f"{changes['git_observed']} git-observed, actor not established")
+        if parts:
+            text += f" ({'; '.join(parts)})"
+    return text
+
+
+def excluded_changes_rows(receipt: ShardReceipt) -> list[str]:
+    """Rows for changes git showed that are *not* counted as this run's work."""
+    rows: list[str] = []
+    changes = receipt.changes
+    if not changes:
+        return rows
+    pre = changes.get("pre_existing_excluded") or 0
+    other = changes.get("other_session_excluded") or 0
+    # Label fits the receipt's 12-column label gutter; the value names the kind.
+    if pre:
+        rows.append(_row("Excluded", f"{pre} pre-existing (changed before the session)"))
+    if other:
+        rows.append(_row("Excluded", f"{other} other-session (reported by another agent session)"))
+    return rows
+
+
+def _file_line(fd: dict) -> str | None:
+    path = fd.get("path")
+    if not isinstance(path, str) or not path:
+        return None
+    change_type = fd.get("change_type")
+    letter = _FILE_CHANGE_LETTERS.get(change_type, "M") if isinstance(change_type, str) else "M"
+    attribution = fd.get("attribution")
+    tag = _ATTRIBUTION_TAGS.get(attribution) if isinstance(attribution, str) else None
+    return f"{_INDENT}  {letter} {path}" + (f"  {_EM} {tag}" if tag else "")
+
+
 def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     """Convert a raw run-history entry dict into a ShardReceipt. Never raises."""
     timestamp = entry.get("timestamp") or ""
@@ -655,9 +783,9 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     plan = entry.get("plan") or {}
     risk_raw = form_factor.get("risk_level") or plan.get("risk")
     risk = _RISK_LABELS.get(str(risk_raw).lower(), str(risk_raw).capitalize()) if risk_raw else "Not recorded"
-    # Mirror the live-receipt review task risk floor: review runs are always at least High
-    if entry.get("is_review_task") and risk in ("Not recorded", "Low"):
-        risk = "High"
+    # v0.4.4: the receipt shows the risk that was *recorded*. The former
+    # display-time rule that raised a review task's missing/Low risk to High
+    # silently turned one fact into another; a Receipt never does that.
 
     write_path = entry.get("write_path")
     ff_read_only = form_factor.get("read_only")
@@ -793,8 +921,11 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     else:
         result = _result_display(summary) or "Not recorded"
 
-    files_detail_raw = entry.get("files_detail") or []
-    files_touched = [f["path"] for f in files_detail_raw if isinstance(f, dict) and "path" in f]
+    _files_all = [f for f in (entry.get("files_detail") or []) if isinstance(f, dict)]
+    files_detail_raw = [f for f in _files_all if f.get("attribution") not in _EXCLUDED_ATTRIBUTIONS]
+    _files_excluded = [f for f in _files_all if f.get("attribution") in _EXCLUDED_ATTRIBUTIONS]
+    _changes_block = entry.get("changes") if isinstance(entry.get("changes"), dict) else None
+    files_touched = [f["path"] for f in files_detail_raw if "path" in f]
 
     diff_review = entry.get("diff_review") or {}
     if not files_touched:
@@ -1007,6 +1138,8 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         _events = []
 
     _shard_id_val = entry.get("shard_id") or _make_shard_id(timestamp, index)
+    _receipt_id_val = stored_receipt_id(entry)
+    _capture_completeness_val = derive_capture_completeness(entry)
     _task_short_val = _trunc(task, 70)
     _run_id_val = entry.get("run_id") or timestamp or None
     _attempt_number_val = entry.get("attempt_number") if isinstance(entry.get("attempt_number"), int) else None
@@ -1017,15 +1150,18 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     _capture_for_status: dict = entry.get("capture") or {}
     _capture_for_status = _capture_for_status if isinstance(_capture_for_status, dict) else {}
     _task_status_raw = _capture_for_status.get("task_status")
+    # v0.4.4 wording: a Stop hook proves the agent's *turn* ended, not that
+    # the task is complete or its result correct. Never "Completed" alone.
     _task_completion_display = (
         {
-            "turn_completed": "Completed",
+            "turn_completed": "Turn completed (unverified)",
             "in_progress": "In progress",
-            "ended_no_turn": "Ended (no turn observed)",
+            "ended_no_turn": "Session ended (no turn observed)",
         }.get(_task_status_raw)
         if isinstance(_task_status_raw, str)
         else None
     )
+    _integrity_val = integrity_display(entry)
 
     # Token usage -- only ever surfaced on the receipt when a producer stamped
     # an explicit provenance token alongside the counts (see build_hook_entry).
@@ -1120,6 +1256,11 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         tokens_cache_read=_tokens_cache_read if isinstance(_tokens_cache_read, int) else None,
         tokens_provenance=_tokens_provenance,
         cost_provenance=cost_provenance,
+        receipt_id=_receipt_id_val,
+        capture_completeness=_capture_completeness_val,
+        integrity=_integrity_val,
+        changes=_changes_summary(_changes_block),
+        files_excluded=_files_excluded,
         shard=build_shard(
             entry,
             shard_id=_shard_id_val,
@@ -1220,9 +1361,50 @@ def _evidence_summary(receipt: ShardReceipt) -> list[str]:
     return [_EVIDENCE_DISPLAY[k] for k in order if k in seen]
 
 
+def _capture_rows(receipt: ShardReceipt) -> list[str]:
+    """The compact ``Capture`` / ``Gaps`` rows.
+
+    ``Capture`` answers "how deep could OpenShard see?" (the unchanged
+    capture depth; an externally observed run always says OpenShard did not
+    execute or verify it). ``Gaps`` answers "is evidence known lost?":
+    ``None known``, the loss itself (``1 queued event could not be decoded``),
+    or ``Unknown`` for records written before loss tracking. The row is
+    shown whenever the answer is not the default expectation, so a receipt
+    with missing or unknowable evidence never looks like a healthy one.
+    """
+    rows: list[str] = []
+    block = receipt.capture_completeness or {}
+    status = block.get("status")
+    if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
+        rows.append(_row(
+            "Capture",
+            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
+        ))
+        rows.append(_row("Gaps", gaps_display(block)))
+    elif status == COMPLETENESS_INCOMPLETE:
+        rows.append(_row("Gaps", gaps_display(block)))
+    return rows
+
+
+_CAPTURE_COL = 15  # the CAPTURE section's labels are longer than the receipt's default gutter
+
+
+def _capture_rows_full(receipt: ShardReceipt) -> list[str]:
+    """The full receipt's CAPTURE section: depth, completeness and known gaps as three facts."""
+    block = receipt.capture_completeness or {}
+    depth = str(block.get("depth") or (receipt.shard.capture_depth if receipt.shard else "unknown"))
+    external = receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED
+    depth_text = f"{depth} {_EM} OpenShard did not execute or verify this run" if external else depth
+    return [
+        f"{_INDENT}CAPTURE",
+        _row("Capture depth", depth_text, width=_CAPTURE_COL),
+        _row("Completeness", str(block.get("status") or "unknown").capitalize(), width=_CAPTURE_COL),
+        _row("Known gaps", gaps_display(block), width=_CAPTURE_COL),
+    ]
+
+
 def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     """Render a bordered, column-aligned RECEIPT block. Pure, no I/O."""
-    file_str = f"{receipt.files_changed} file{'s' if receipt.files_changed != 1 else ''}"
     model_label, model_value = _models_label_and_value(receipt)
 
     lines = [
@@ -1232,28 +1414,24 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         _row("Task", receipt.task_short),
         _row("Executor", receipt.agent),
     ]
-    if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
-        lines.append(_row(
-            "Capture",
-            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
-        ))
+    if receipt.receipt_id:
+        lines.append(_row("Receipt ID", receipt.receipt_id))
+    lines += _capture_rows(receipt)
     if receipt.task_completion:
         lines.append(_row("Status", receipt.task_completion))
     lines.append(_row(model_label, model_value))
     if receipt.duration_seconds is not None:
         lines.append(_row("Duration", f"{receipt.duration_seconds:.1f}s"))
-    lines.append(_row("Changed", file_str))
+    lines.append(_row("Changed", changed_files_display(receipt)))
+    lines += excluded_changes_rows(receipt)
     if receipt.files_detail:
         lines.append(f"{_INDENT}Files")
         for _fd in receipt.files_detail[:10]:
             if not isinstance(_fd, dict):
                 continue
-            path = _fd.get("path")
-            if not isinstance(path, str) or not path:
-                continue
-            change_type = _fd.get("change_type")
-            letter = _FILE_CHANGE_LETTERS.get(change_type, "M") if isinstance(change_type, str) else "M"
-            lines.append(f"{_INDENT}  {letter} {path}")
+            _line = _file_line(_fd)
+            if _line:
+                lines.append(_line)
         if len(receipt.files_detail) > 10:
             lines.append(f"{_INDENT}  +{len(receipt.files_detail) - 10} more")
     _activity = _tool_activity_counts(receipt)
@@ -1263,6 +1441,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
             lines.append(f"{_INDENT}  {tool} × {count}")
     lines += [
         _row("Checks", receipt.checks_display),
+        _row("Integrity", receipt.integrity),
         _row("Risk", receipt.risk),
         _row("Sandbox", receipt.sandbox),
         _row("Approval", receipt.approval),
@@ -1497,11 +1676,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     lines.append(_row("Status", receipt.status))
     if receipt.attempt_number is not None:
         lines.append(_row("Attempt", f"{receipt.attempt_number} (Shard {receipt.shard_id})"))
-    if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
-        lines.append(_row(
-            "Capture",
-            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
-        ))
+    lines.append("")
+    lines += _capture_rows_full(receipt)
     lines.append("")
 
     if receipt.adapter:
@@ -1650,17 +1826,34 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append("")
 
     lines.append(f"{_INDENT}CHANGES")
-    file_str = f"{receipt.files_changed} file{'s' if receipt.files_changed != 1 else ''}"
+    file_str = changed_files_display(receipt)
     if receipt.diff_added is not None and receipt.diff_removed is not None:
         file_str += f" changed (+{receipt.diff_added} / -{receipt.diff_removed})"
-    elif receipt.files_changed > 0:
+    elif receipt.files_changed > 0 and not receipt.changes:
         file_str += " changed"
     lines.append(f"{_INDENT}{file_str}")
     for _fd in receipt.files_detail[:10]:
         if isinstance(_fd, dict) and "path" in _fd:
-            lines.append(f"{_INDENT}  {_fd['path']}")
+            _line = _file_line(_fd)
+            if _line:
+                lines.append(_line)
     if len(receipt.files_detail) > 10:
         lines.append(f"{_INDENT}  (+{len(receipt.files_detail) - 10} more)")
+    lines += excluded_changes_rows(receipt)
+    if receipt.files_excluded:
+        lines.append(f"{_INDENT}  Not counted (git showed these; not this run's work):")
+        for _fd in receipt.files_excluded[:10]:
+            _line = _file_line(_fd)
+            if _line:
+                lines.append("  " + _line)
+        if len(receipt.files_excluded) > 10:
+            lines.append(f"{_INDENT}    (+{len(receipt.files_excluded) - 10} more)")
+    if receipt.changes and receipt.changes.get("baseline", {}).get("source") == "git_status":
+        _bl = receipt.changes["baseline"]
+        _bl_text = f"{_bl.get('dirty_paths', 0)} path(s) already changed at session start"
+        if _bl.get("truncated"):
+            _bl_text += " (list truncated)"
+        lines.append(_row("Baseline", _bl_text))
     lines.append("")
 
     lines.append(f"{_INDENT}COST")
@@ -1806,8 +1999,11 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append("")
 
     lines += [_SEP, f"{_INDENT}RECEIPT"]
+    if receipt.receipt_id:
+        lines.append(_row("Receipt ID", receipt.receipt_id))
     lines.append(_row("Shard ID", receipt.shard_id))
     lines.append(_row("Created", _fmt_timestamp(receipt.created_at)))
+    lines.append(_row("Integrity", receipt.integrity))
     lines.append(_row("Result", receipt.result))
     lines.append(_SEP)
 
