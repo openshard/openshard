@@ -1351,6 +1351,7 @@ class TestCompactReceiptExactFormat(unittest.TestCase):
             "  Model       claude-sonnet-4-5",
             "  Changed     0 files",
             "  Checks      3/3 passed",
+            "  Integrity   Not recorded",
             "  Risk        High",
             "  Sandbox     On",
             "  Approval    Required → Granted",

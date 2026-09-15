@@ -322,6 +322,10 @@ def build_wrap_entry(
         from openshard.history.shard_contract import _make_shard_id
         entry["shard_id"] = _make_shard_id(entry["timestamp"], run_index)
     entry["attempt_number"] = attempt_number
+    # v0.4.4: global receipt identity, minted at creation (see receipt_identity).
+    from openshard.history.receipt_identity import ensure_receipt_id
+
+    ensure_receipt_id(entry)
 
     entry["events"] = _build_wrap_events(entry, changed_files, files_source, exit_code)
 

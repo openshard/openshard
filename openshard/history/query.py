@@ -102,6 +102,7 @@ from pathlib import Path
 
 from openshard.history.event import events_from_entry, tool_identity
 from openshard.history.metrics import load_runs
+from openshard.history.receipt_identity import is_receipt_id, stored_receipt_id
 from openshard.history.repo_identity import entry_matches_repo
 from openshard.history.run_attempt import UnknownShardError
 from openshard.history.shard import Shard, derive_shard_identity
@@ -138,7 +139,7 @@ DEFAULT_CONTEXT_LIMIT = 5
 
 # Fields search may read. Deliberately excludes summary/notes/agent_notes and
 # every free-text field that could carry model output or private content.
-SEARCH_FIELDS: tuple[str, ...] = ("task_short", "task_full", "shard_id", "agent", "status")
+SEARCH_FIELDS: tuple[str, ...] = ("task_short", "task_full", "shard_id", "receipt_id", "agent", "status")
 
 
 class UnknownRunError(ValueError):
@@ -363,12 +364,25 @@ def get_receipt(
     Receipts are built with ``build_shard_receipt`` and are unchanged from
     what the CLI renders. Raises ``UnknownShardError`` / ``UnknownRunError``
     rather than returning a different run.
+
+    v0.4.4: a ``receipt_id`` (``rcpt_...``) may be passed in place of
+    ``shard_id``; it resolves to the one record that carries it (additive --
+    every existing call shape is unchanged).
     """
     if not shard_id and not run_id:
         raise ValueError("get_receipt() requires a shard_id or a run_id")
 
     entries = load_runs(repo_path)
     groups = _group_entries(entries)
+
+    if shard_id and is_receipt_id(shard_id):
+        for group in groups:
+            for attempt in group.attempts:
+                if stored_receipt_id(attempt[1]) == shard_id:
+                    if run_id is not None and _entry_run_id(attempt[1]) != run_id:
+                        raise UnknownRunError(f"No run '{run_id}' found under Receipt '{shard_id}'.")
+                    return _receipt_for(group, attempt)
+        raise UnknownShardError(f"No Receipt found with id '{shard_id}'.")
 
     if shard_id:
         group = _find_group(groups, shard_id)
@@ -398,6 +412,7 @@ def _searchable_fields(receipt: ShardReceipt) -> dict[str, str]:
         "task_short": (receipt.task_short or "").lower(),
         "task_full": (receipt.task_full or "").lower(),
         "shard_id": (receipt.shard_id or "").lower(),
+        "receipt_id": (receipt.receipt_id or "").lower(),
         "agent": (receipt.agent or "").lower(),
         "status": (receipt.status or "").lower(),
     }

@@ -27,8 +27,12 @@ MODEL_UNKNOWN = "unknown"
 _TOP_FILES = 5
 
 _TASK_COMPLETION_KEYS: dict[str, str] = {
+    # v0.4.4 display strings (shard_contract) plus the pre-0.4.4 ones, so
+    # receipts built by either version bucket the same way.
+    "Turn completed (unverified)": "completed",
     "Completed": "completed",
     "In progress": "in_progress",
+    "Session ended (no turn observed)": "ended_no_turn",
     "Ended (no turn observed)": "ended_no_turn",
 }
 

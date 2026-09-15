@@ -56,7 +56,7 @@ is the source of truth):
 | `receipt.created`, `receipt.completed` | `agent`, `origin` (`openshard_routed`/`external_observed`/`unknown`), `capture_depth` (`full`/`partial`/`unknown`), `files_changed` (count), `files_source` (`git_diff`/`hook_reported`/`not_available`/`other`), `tool_calls`, `tool_failures`, `checks` (`none`/`attempted_unverified`/`passed`/`failed`), `attempt_number`, `is_retry`, `turn_count`, `duration_s`, `cost_usd` (2 decimals), `model_family` |
 | `history.queried` | `command` (`history`/`context`/`search`/`relevant_context`/`last`/`stats`), `results` (count), `duration_ms` |
 | `mcp.tool_called` | `tool` (`recent_shards`/`get_shard`/`get_receipt`/`search_history`/`relevant_context`), `results`, `duration_ms`, `result` |
-| `capture.service` | `state` (`started`/`stopped`/`idle_exit`/`spawn_failed`), `queued`, `folded`, `replay_errors`, `p50_ms`, `p95_ms` |
+| `capture.service` | `state` (`started`/`stopped`/`idle_exit`/`spawn_failed`), `queued`, `folded`, `replay_errors`, `rejected` (unauthenticated requests refused), `corrupt_lines` (queued events quarantined as undecodable), `p50_ms`, `p95_ms` |
 | `error.occurred` | `component` (`cli`/`hooks`/`capture_service`/`mcp`/`native_run`), `category` |
 | `telemetry.consent_changed` | `improve` (`on`), `source` (`setup`/`onboarding`/`cli`/`env`/`config`) |
 

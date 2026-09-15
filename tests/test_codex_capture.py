@@ -544,11 +544,14 @@ class TestServicePath:
                 assert p50_ms < p50_budget, (p50_ms, p95_ms, timing)
                 assert p95_ms < p95_budget, (p50_ms, p95_ms, timing)
         roundtrips.sort()
-        assert roundtrips[len(roundtrips) // 2] < 0.05, roundtrips
+        # Same platform budget as the attempts above: a Windows attempt that
+        # passed at a 50-60 ms median must not then fail a stricter 50 ms bound.
+        assert roundtrips[len(roundtrips) // 2] * 1000 < p50_budget, roundtrips
 
     def test_unsupported_codex_event_is_ignored_not_errored(self, service, repo):
         status, reply = client._request("POST", service.port, client.CODEX_HOOK_PATH,
-                                        json.dumps(_doc("PreToolUse", repo)).encode())
+                                        json.dumps(_doc("PreToolUse", repo)).encode(),
+                                        client._auth_headers(None, None))
         assert status == 200 and reply == b"{}"
         assert client.health(service.port)["stats"]["queued"] == 0
 

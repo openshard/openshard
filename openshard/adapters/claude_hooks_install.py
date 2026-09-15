@@ -47,6 +47,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from openshard.adapters import capture_auth as _auth
+from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.adapters.claude_capture_client import (
     DEFAULT_PORT,
     HOOK_PATH,
@@ -102,17 +104,28 @@ def hook_url(port: int) -> str:
     return f"http://127.0.0.1:{int(port)}{HOOK_PATH}"
 
 
-def _hook_entry(spec: HookSpec, port: int = DEFAULT_PORT) -> dict:
+def _hook_entry(spec: HookSpec, port: int = DEFAULT_PORT, capability: str | None = None) -> dict:
     if spec.transport == TRANSPORT_HTTP:
-        entry: dict = {
-            "type": "http",
-            "url": hook_url(port),
-            "timeout": spec.timeout,
+        headers: dict[str, str] = {
             # Lets the service anchor the event to the project Claude Code
             # was started in, exactly like CLAUDE_PROJECT_DIR does for the
             # command form; when Claude Code does not interpolate it the
             # header is empty and the payload's ``cwd`` is used instead.
-            "headers": {PROJECT_DIR_HEADER: "$CLAUDE_PROJECT_DIR"},
+            PROJECT_DIR_HEADER: "$CLAUDE_PROJECT_DIR",
+        }
+        if capability:
+            # v0.4.4: the capability scoped to this repository *and* to the
+            # claude_code agent (capture_auth). Claude Code's HTTP hooks run
+            # no process of ours and read no file, so this static header is
+            # the only way they can authenticate. It authorises Claude Code
+            # events for this repository only -- not another agent's
+            # receiver, not another repository, never shutdown.
+            headers[_auth.TOKEN_HEADER] = capability
+        entry: dict = {
+            "type": "http",
+            "url": hook_url(port),
+            "timeout": spec.timeout,
+            "headers": headers,
             "allowedEnvVars": ["CLAUDE_PROJECT_DIR"],
         }
         return entry
@@ -130,9 +143,73 @@ def _group_entry(spec: HookSpec, port: int = DEFAULT_PORT, build_entry: Callable
     return group
 
 
-def build_hook_config(port: int = DEFAULT_PORT) -> dict[str, list[dict]]:
+def build_hook_config(port: int = DEFAULT_PORT, capability: str | None = None) -> dict[str, list[dict]]:
     """The exact ``hooks`` block OpenShard installs (fresh-file shape) for service *port*."""
-    return {spec.event: [_group_entry(spec, port)] for spec in HOOK_SPECS}
+    build = _entry_builder(capability)
+    return {spec.event: [_group_entry(spec, port, build)] for spec in HOOK_SPECS}
+
+
+def _entry_builder(capability: str | None) -> Callable[[HookSpec, int], dict]:
+    def build(spec: HookSpec, port: int) -> dict:
+        return _hook_entry(spec, port, capability)
+
+    return build
+
+
+def installed_hook_capability(settings: object) -> str | None:
+    """The capture credential the installed OpenShard HTTP hooks present (first found), or None."""
+    if not isinstance(settings, dict) or not isinstance(settings.get("hooks"), dict):
+        return None
+    for event in HOOK_EVENTS:
+        groups = settings["hooks"].get(event)
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for hook in group.get("hooks") or []:
+                if _hook_entry_port(hook) is None:
+                    continue
+                headers = hook.get("headers") if isinstance(hook, dict) else None
+                value = headers.get(_auth.TOKEN_HEADER) if isinstance(headers, dict) else None
+                return value if isinstance(value, str) and value else None
+    return None
+
+
+def capability_state(settings: object, repo_root: Path, *, env: dict | os._Environ | None = None) -> str:
+    """``ok`` | ``missing`` | ``stale`` | ``no_token`` for the installed Claude HTTP hooks.
+
+    ``missing``: hooks are installed without a credential (pre-0.4.4);
+    ``stale``: the credential does not match the current token for this
+    repository (rotated token, moved repository); ``no_token``: no capture
+    token exists yet, so nothing can be judged.
+    """
+    token = _auth.load_token(env)
+    if token is None:
+        return "no_token"
+    present = installed_hook_capability(settings)
+    if not present:
+        return "missing"
+    return "ok" if _auth.verify_presented(present, token, repo_root, AGENT_CLAUDE_CODE) == "repo" else "stale"
+
+
+def settings_file_is_tracked(repo_root: Path, rel: str | None = None) -> bool:
+    """True when git tracks *rel* (default: the local settings file) in *repo_root*.
+
+    A tracked file would be committed, so the installer never writes a
+    credential into it. Unknown (git failed) counts as *not* tracked: the
+    file is one the installer itself creates and excludes.
+    """
+    rel = rel or SETTINGS_RELPATH.as_posix()
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", rel],
+            cwd=str(repo_root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
 
 
 def _hook_entry_port(hook: object) -> int | None:
@@ -189,6 +266,7 @@ def merge_openshard_hooks(
     specs: tuple[HookSpec, ...] = HOOK_SPECS,
     build_entry: Callable[[HookSpec, int], dict] | None = None,
     is_ours: Callable[[object], bool] | None = None,
+    capability: str | None = None,
 ) -> tuple[dict, dict[str, str]]:
     """Return ``(new_settings, changes)`` with OpenShard's hooks merged in.
 
@@ -204,7 +282,7 @@ def merge_openshard_hooks(
     (``codex_hooks_install``) reuses this merge with its own *specs*,
     *build_entry* and *is_ours* (PR12); the defaults are Claude Code's.
     """
-    build = build_entry or _hook_entry
+    build = build_entry or _entry_builder(capability)
     ours_fn = is_ours or is_openshard_hook
     new_settings = copy.deepcopy(settings)
     hooks = new_settings.get("hooks")
@@ -448,12 +526,18 @@ def ensure_local_settings_ignored(
         return f"Could not update .git/info/exclude; add {rel} to your gitignore."
 
 
-def install_claude_hooks(*, repo_root: Path, port: int | None = None) -> ClaudeHooksInstallResult:
+def install_claude_hooks(
+    *, repo_root: Path, port: int | None = None, env: dict | os._Environ | None = None
+) -> ClaudeHooksInstallResult:
     """Merge OpenShard's Claude Code hooks into ``<repo_root>/.claude/settings.local.json``.
 
     Idempotent and additive (see module docstring). Never raises. *port*
     is the capture service port the HTTP hooks should target (default: the
-    port a running service publishes, else ``DEFAULT_PORT``).
+    port a running service publishes, else ``DEFAULT_PORT``). The HTTP
+    entries carry the repository-scoped capture capability (v0.4.4) unless
+    git tracks the settings file, in which case no credential is written
+    and the result carries a warning: those hooks will be refused by the
+    service until the file is untracked and setup is re-run.
     """
     try:
         root = Path(repo_root)
@@ -464,15 +548,30 @@ def install_claude_hooks(*, repo_root: Path, port: int | None = None) -> ClaudeH
         if port is None:
             from openshard.adapters.claude_capture_client import resolve_port
 
-            port = resolve_port()
+            port = resolve_port(env)
+        warnings: list[str] = []
+        capability: str | None = None
+        token = _auth.ensure_token(env)
+        if token is None:
+            warnings.append(
+                "Could not create the capture token; Claude Code hook events will be refused "
+                "until `openshard capture start` can create it."
+            )
+        elif settings_file_is_tracked(root):
+            warnings.append(
+                f"{SETTINGS_RELPATH.as_posix()} is tracked by git, so no capture credential was written "
+                "into it; untrack the file (it is per-user) and re-run `openshard setup` to enable "
+                "Claude Code capture."
+            )
+        else:
+            capability = _auth.repo_capability(token, root, AGENT_CLAUDE_CODE)
         try:
-            merged, changes = merge_openshard_hooks(settings, port=port)
+            merged, changes = merge_openshard_hooks(settings, port=port, capability=capability)
         except ValueError as exc:
             return _error(
                 f"{settings_path} has an unexpected hooks layout ({exc}); OpenShard will not modify it.",
                 settings_path,
             )
-        warnings: list[str] = []
         if all(v == "unchanged" for v in changes.values()):
             status = "already_installed"
             message = "Auto-capture hooks already configured for this repository."

@@ -309,7 +309,8 @@ class TestCanonicalRecord:
         a, b = _lines(with_edit)[0], _lines(without)[0]
         assert a["files_source"] == "opencode_plugin_reported"
         assert a["files_detail"] == [{"path": "made.py", "change_type": "update",
-                                      "summary": "reported by OpenCode hook"}]
+                                      "summary": "reported by OpenCode hook",
+                                      "attribution": "agent_reported", "pre_existing": False}]
         assert b["files_source"] == "not_available" and b["files_detail"] == []
         for entry in (a, b):
             tool = next(e for e in entry["events"] if e["event_type"] == "tool.invoked")
@@ -530,11 +531,14 @@ class TestServicePath:
                 assert p50_ms < p50_budget, (p50_ms, p95_ms, timing)
                 assert p95_ms < p95_budget, (p50_ms, p95_ms, timing)
         roundtrips.sort()
-        assert roundtrips[len(roundtrips) // 2] < 0.05, roundtrips
+        # Same platform budget as the attempts above: a Windows attempt that
+        # passed at a 50-60 ms median must not then fail a stricter 50 ms bound.
+        assert roundtrips[len(roundtrips) // 2] * 1000 < p50_budget, roundtrips
 
     def test_malformed_documents_never_error(self, service, repo):
         for body in (b"", b"[]", b'{"event":"session.idle"}', b'{"event":"nope","session_id":"x"}'):
-            status, reply = client._request("POST", service.port, client.OPENCODE_HOOK_PATH, body)
+            status, reply = client._request("POST", service.port, client.OPENCODE_HOOK_PATH, body,
+                                            client._auth_headers(None, None))
             assert status == 200 and reply == b"{}", body
         assert client.health(service.port)["stats"]["queued"] == 0
 
@@ -786,7 +790,8 @@ class TestInstaller:
         for hook in ("session.created", "session.idle", "session.deleted", "file.edited", "message.updated",
                      '"chat.message"', '"tool.execute.after"'):
             assert hook in text
-        assert detect_plugin(repo) == {"state": "openshard", "port": 47811, "version": PLUGIN_VERSION, "error": None}
+        assert detect_plugin(repo) == {"state": "openshard", "port": 47811, "version": PLUGIN_VERSION, "error": None,
+                                       "capability_state": "ok"}
         assert PLUGIN_RELPATH.as_posix() in (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
 
     def test_idempotent_and_port_update(self, repo):

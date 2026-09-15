@@ -91,6 +91,7 @@ def _parse_git_changed_files(
     repo_path: Path,
     base_ref: str = "HEAD",
     include_untracked: bool = False,
+    max_files: int = _MAX_FILES,
 ) -> tuple[list[dict], str]:
     """Return changed files from ``git diff <base_ref> --name-status`` in *repo_path*.
 
@@ -143,7 +144,7 @@ def _parse_git_changed_files(
     files: list[dict] = []
     seen: set[str] = set()
     for line in lines:
-        if len(files) >= _MAX_FILES:
+        if len(files) >= max_files:
             break
         parts = line.split("\t", maxsplit=1)
         if len(parts) < 2:
@@ -386,6 +387,10 @@ def build_claude_code_import_entry(
         from openshard.history.shard_contract import _make_shard_id
         entry["shard_id"] = _make_shard_id(entry["timestamp"], run_index)
     entry["attempt_number"] = attempt_number
+    # v0.4.4: global receipt identity, minted at creation (see receipt_identity).
+    from openshard.history.receipt_identity import ensure_receipt_id
+
+    ensure_receipt_id(entry)
 
     entry["events"] = _build_import_events(entry, changed_files, files_source)
 

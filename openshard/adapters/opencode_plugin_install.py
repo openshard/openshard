@@ -41,13 +41,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from openshard.adapters import capture_auth as _auth
+from openshard.adapters.capture_agents import AGENT_OPENCODE
 from openshard.adapters.claude_capture_client import DEFAULT_PORT, OPENCODE_HOOK_PATH
 from openshard.adapters.claude_hooks_install import (
     ClaudeHooksInstallResult,
     ensure_local_settings_ignored,
+    settings_file_is_tracked,
 )
 
-PLUGIN_VERSION = 2
+PLUGIN_VERSION = 4
 PLUGIN_MARKER = "// openshard-capture-plugin"
 PLUGIN_RELPATH = Path(".opencode") / "plugins" / "openshard.ts"
 _MAX_PLUGIN_BYTES = 64 * 1024
@@ -60,6 +63,12 @@ PLUGIN_SOURCE = r'''__MARKER__ v__VERSION__ -- managed by `openshard setup`; edi
 // tool output, or file contents. Remove with `openshard capture uninstall opencode`.
 const PORT = __PORT__
 const PATH = "__HOOK_PATH__"
+// Capability scoped to this repository and to OpenCode (see
+// openshard/adapters/capture_auth.py): it authorises OpenCode events for
+// this repository only -- never another agent's, another repository's, or
+// service control. Written by `openshard setup`; rotate the token and
+// re-run setup to replace it. It never leaves this machine.
+const CAPABILITY = "__CAPABILITY__"
 const MAX_TEXT = 400
 const MAX_PENDING = 200
 // A failed delivery may ask `openshard capture start` to (re)start the
@@ -94,10 +103,13 @@ export const OpenShardCapture = async ({ directory, worktree, $ }: any) => {
     try {
       const r = await fetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-openshard-capture-token": CAPABILITY },
         body,
         signal: AbortSignal.timeout(1500),
       })
+      // 401 means this plugin's capability is stale (token rotated) or the
+      // file predates it: the same bounded buffer-and-retry as a service
+      // that is down; `openshard setup` writes a fresh capability.
       return r.ok
     } catch {
       return false
@@ -218,13 +230,38 @@ export const OpenShardCapture = async ({ directory, worktree, $ }: any) => {
 '''
 
 
-def render_plugin_source(port: int = DEFAULT_PORT) -> str:
+def render_plugin_source(port: int = DEFAULT_PORT, capability: str | None = None) -> str:
+    safe_capability = capability if capability and _auth.is_repo_capability(capability) else ""
     return (
         PLUGIN_SOURCE.replace("__MARKER__", PLUGIN_MARKER)
         .replace("__VERSION__", str(PLUGIN_VERSION))
         .replace("__PORT__", str(int(port)))
         .replace("__HOOK_PATH__", OPENCODE_HOOK_PATH)
+        .replace("__CAPABILITY__", safe_capability)
     )
+
+
+def installed_plugin_capability(text: object) -> str | None:
+    """The capability an installed OpenShard plugin presents, or None (absent / pre-capability)."""
+    if not is_openshard_plugin(text):
+        return None
+    for line in str(text).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("const CAPABILITY ="):
+            value = stripped.split("=", 1)[1].strip().strip('"')
+            return value if _auth.is_repo_capability(value) else None
+    return None
+
+
+def plugin_capability_state(text: object, repo_root: Path, *, env: dict | os._Environ | None = None) -> str:
+    """``ok`` | ``missing`` | ``stale`` | ``no_token`` for an installed plugin's capability."""
+    token = _auth.load_token(env)
+    if token is None:
+        return "no_token"
+    present = installed_plugin_capability(text)
+    if not present:
+        return "missing"
+    return "ok" if _auth.verify_presented(present, token, repo_root, AGENT_OPENCODE) == "repo" else "stale"
 
 
 def is_openshard_plugin(text: object) -> bool:
@@ -273,7 +310,9 @@ def installed_plugin_version(text: object) -> int | None:
 def detect_plugin(repo_root: Path) -> dict:
     """Read-only state of the plugin file: ``{"state", "port", "version", "error"}``.
 
-    ``state`` is ``"openshard"`` / ``"custom"`` / ``"absent"``.
+    ``state`` is ``"openshard"`` / ``"custom"`` / ``"absent"``. An OpenShard
+    plugin also reports ``capability_state`` (v0.4.4: ``ok`` / ``missing`` /
+    ``stale`` / ``no_token``).
     """
     text, err = _read_plugin(plugin_path(repo_root))
     if err or text is None:
@@ -282,7 +321,8 @@ def detect_plugin(repo_root: Path) -> dict:
         return {"state": "absent", "port": None, "version": None, "error": None}
     if is_openshard_plugin(text):
         return {"state": "openshard", "port": installed_plugin_port(text),
-                "version": installed_plugin_version(text), "error": None}
+                "version": installed_plugin_version(text), "error": None,
+                "capability_state": plugin_capability_state(text, Path(repo_root))}
     return {"state": "custom", "port": None, "version": None, "error": None}
 
 
@@ -316,7 +356,23 @@ def install_opencode_plugin(*, repo_root: Path, port: int | None = None) -> Clau
             from openshard.adapters.claude_capture_client import resolve_port
 
             port = resolve_port()
-        desired = render_plugin_source(port)
+        warnings: list[str] = []
+        capability: str | None = None
+        token = _auth.ensure_token()
+        if token is None:
+            warnings.append(
+                "Could not create the capture token; OpenCode events will be refused until "
+                "`openshard capture start` can create it."
+            )
+        elif settings_file_is_tracked(root, PLUGIN_RELPATH.as_posix()):
+            warnings.append(
+                f"{PLUGIN_RELPATH.as_posix()} is tracked by git, so no capture credential was written "
+                "into it; untrack the file (it is per-user) and re-run `openshard setup` to enable "
+                "OpenCode capture."
+            )
+        else:
+            capability = _auth.repo_capability(token, root, AGENT_OPENCODE)
+        desired = render_plugin_source(port, capability)
         existing, err = _read_plugin(path)
         if err or existing is None:
             return _error(err or "Could not read the OpenCode plugin file.", path)
@@ -335,7 +391,6 @@ def install_opencode_plugin(*, repo_root: Path, port: int | None = None) -> Clau
             )
         created = not existing
         _write_plugin(path, desired)
-        warnings: list[str] = []
         if created:
             ignore_warning = ensure_local_settings_ignored(
                 root, PLUGIN_RELPATH.as_posix(), note="added by openshard capture install opencode",

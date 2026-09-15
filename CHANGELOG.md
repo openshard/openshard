@@ -2,6 +2,92 @@
 
 All notable changes to OpenShard are documented here.
 
+## 0.4.4 - 2026-09-15
+
+Receipt integrity hardening. No new integrations, no new commands beyond
+`openshard capture rotate-token`, no telemetry broadening. The goal: a
+Receipt never claims more than its evidence supports.
+
+### Changed
+
+- **Changed files are attributed, not assumed.** The working tree is
+  snapshotted when a session is first observed; at every fold each path in
+  the git diff is `agent_reported` (the agent's own success signal),
+  `git_observed` (repository changed, actor not established),
+  `pre_existing` (already dirty before the session, unchanged since --
+  excluded from counts) or `other_session` (reported by another live agent
+  session -- excluded). Receipts read `Changed  2 files (1 agent-reported;
+  1 git-observed, actor not established)` with separate exclusion rows;
+  `files_detail[].attribution` and a `changes` block are added to records
+  and `--json` output. `files_created/updated/deleted` on new records count
+  only this session's changes.
+- **The local capture service is authenticated.** Every `POST` needs the
+  per-user capture token (`~/.openshard/capture-token`, created locally,
+  0600) or a capability derived from it and scoped to one repository and
+  one agent; requests without one are refused before parsing and counted,
+  browser-originated requests are refused, and `/shutdown` accepts only
+  the token. Claude Code HTTP hooks carry their capability in a header
+  (written by `setup` into the git-excluded `.claude/settings.local.json`;
+  a `SessionStart` of the upgraded OpenShard upgrades older hook entries
+  itself); the OpenCode plugin carries its own capability; Codex, Cursor
+  and the status line run `openshard`, which reads the token file. The
+  master token appears in no agent configuration. Agents remain fail-open.
+- **Corrupt queued evidence is never forgotten.** Undecodable capture-queue
+  lines are quarantined (bounded) under
+  `.openshard/claude_sessions/quarantine/`, counted (`corrupt_lines`), and
+  the affected record becomes `capture.completeness.status = incomplete`
+  with the reason; valid neighbouring events are still applied. Transient
+  I/O errors keep the retry path. Receipts keep `Capture  partial` (depth)
+  and add `Gaps  None known` / `Gaps  N queued events could not be decoded`.
+- **Status wording**: a finished agent turn renders `Turn completed
+  (unverified)` (was `Completed`); a session that ended without a turn
+  `Session ended (no turn observed)`.
+- **Risk** is shown as recorded; the display-time rule that raised a review
+  task's missing/Low risk to High is removed.
+
+### Added
+
+- `receipt_id` (`rcpt_` + 32 hex) on every new record, minted at creation;
+  shown on receipts and in `--json`/MCP output; accepted by `get_receipt`
+  and history search. `shard_id` is unchanged.
+- `Integrity` row (`Matches (content hash)` / `Mismatch (content hash)` /
+  `Not recorded`) on compact and full receipts.
+- `capture.completeness` (`complete` / `incomplete` / `unknown` with
+  reasons) on hook records -- separate from the unchanged capture depth
+  (`full` / `partial` / `unknown`); records written before loss tracking
+  read `unknown`, never `complete`. JSON carries both as
+  `capture_completeness = {depth, status, reasons, derived}`.
+- `openshard capture rotate-token`; `doctor`/`setup` report hooks with a
+  missing or stale credential; `capture status` shows refused and
+  quarantined counts. Telemetry `capture.service` gains two bounded
+  counters, `rejected` and `corrupt_lines`.
+- `docs/architecture.md`, `docs/architecture/V044_RECEIPT_INTEGRITY_AUDIT.md`,
+  `docs/architecture/POST_V044_CORE_CLEANUP.md`; rewritten `SECURITY.md`
+  and `CONTRIBUTING.md`; trust-boundary, attribution and completeness
+  sections in `docs/agent-capture.md`.
+
+### Fixed
+
+- On Windows, several processes opening a brand-new history lock file at
+  once could fail with `PermissionError`: the first process seeded and
+  locked the sidecar's first byte while a second process's buffered seed
+  write landed in that mandatory-locked range. The seed is now written
+  unbuffered and a failed seed (which only ever means another process
+  already holds the lock) falls through to the normal wait.
+
+### Compatibility
+
+- Records written before 0.4.4 render unchanged: no `receipt_id` is
+  back-filled, attribution rows appear only when the record carries them,
+  completeness is derived from existing counters. JSON output is extended
+  additively; `files_changed` may be lower on new records because
+  pre-existing changes are no longer counted.
+- Hooks installed by 0.4.3 or earlier are refused by the 0.4.4 service
+  until upgraded (`openshard setup`, or automatically at the next Claude
+  Code `SessionStart`); the in-process fallback keeps recording meanwhile.
+- The test suite now isolates the capture service's default port per test
+  and never touches a developer's real service.
+
 ## 0.4.3 - 2026-09-12
 
 A DX cleanup pass around the external-agent receipt loop. No commands were

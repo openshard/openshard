@@ -1970,7 +1970,7 @@ def last(more: bool, full: bool, as_json: bool):
             interaction_event_types=_interaction_event_types(entry.get("timestamp", "")),
         )
         payload = _machine_envelope(
-            "last", "ok", shard_id=receipt.shard_id,
+            "last", "ok", shard_id=receipt.shard_id, receipt_id=receipt.receipt_id,
             repo=loc.to_dict(),
             run=_export_run_entry(entry, include_timeline=True, receipt=receipt),
             trust={
@@ -2887,6 +2887,13 @@ def _render_capture_status(status: dict) -> None:
                 f"  events:   {stats.get('queued', 0)} queued, {stats.get('replayed', 0)} folded, "
                 f"{status.get('pending', 0)} pending, {stats.get('replay_errors', 0)} errors"
             )
+            rejected = stats.get("rejected", 0)
+            corrupt = stats.get("corrupt_lines", 0)
+            if rejected or corrupt:
+                click.echo(
+                    f"  refused:  {rejected} unauthenticated request(s) refused, "
+                    f"{corrupt} queued event(s) quarantined as undecodable"
+                )
         timing = status.get("blocking_ms") or {}
         if timing.get("n"):
             click.echo(
@@ -2948,6 +2955,31 @@ def capture_stop(as_json: bool) -> None:
     else:
         click.echo("Capture service did not stop in time; it may still be draining. Re-run to check.")
     if result["was_running"] and not result["stopped"]:
+        raise SystemExit(1)
+
+
+@capture_group.command("rotate-token")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def capture_rotate_token(as_json: bool) -> None:
+    """Replace the local capture token; re-run `openshard setup` in each repository afterwards.
+
+    The token authenticates hook events to the local capture service. It
+    is never printed. Claude Code hooks carry a repository-scoped
+    capability derived from it, so after rotating you must re-run setup
+    (or start a new Claude Code session, which upgrades the hooks itself)
+    in every repository that captures Claude Code sessions.
+    """
+    from openshard.adapters.capture_auth import rotate_token, token_path
+
+    new = rotate_token()
+    result = {"rotated": new is not None, "token_path": token_path()}
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    elif new is None:
+        click.echo(f"Could not write a new capture token to {token_path()}.")
+    else:
+        click.echo("Capture token rotated. Re-run `openshard setup` in each repository that captures Claude Code.")
+    if new is None:
         raise SystemExit(1)
 
 
@@ -4354,6 +4386,11 @@ def _routing_truth_export(entry: dict) -> dict:
 
 
 def _export_run_entry(entry: dict, include_notes: bool = False, include_timeline: bool = False, receipt=None) -> dict:  # receipt: ShardReceipt | None
+    from openshard.history.capture_completeness import (
+        derive_capture_completeness as _derive_capture_completeness,
+    )
+    from openshard.history.receipt_identity import stored_receipt_id as _stored_receipt_id
+
     stage_runs = entry.get("stage_runs") or []
     is_ro = entry.get("routing_rationale") == "read-only analysis"
 
@@ -4408,6 +4445,13 @@ def _export_run_entry(entry: dict, include_notes: bool = False, include_timeline
         "import_source":             entry.get("import_source"),
         "import_method":             entry.get("import_method"),
         "executor":                  entry.get("executor"),
+        # v0.4.4 additive fields: global identity, what the capture knows it
+        # is missing, and per-file change provenance (None/[] for old records).
+        "shard_id":                  entry.get("shard_id"),
+        "receipt_id":                _stored_receipt_id(entry),
+        "capture_completeness":      _derive_capture_completeness(entry),
+        "changes":                   entry.get("changes") if isinstance(entry.get("changes"), dict) else None,
+        "files_detail":              [f for f in (entry.get("files_detail") or []) if isinstance(f, dict)][:200],
         **_baseline_export_fields(
             entry.get("prompt_tokens") or 0,
             entry.get("completion_tokens") or 0,
@@ -6072,7 +6116,13 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     hooks_detail = claude_status.hooks_settings_error or "not configured"
     if hooks_ok and claude_status.hooks_need_upgrade:
         hooks_ok = False
-        hooks_detail = "older hook configuration; run `openshard setup` to switch to the fast capture path"
+        if claude_status.hooks_auth_state in ("missing", "stale"):
+            hooks_detail = (
+                "hooks carry no valid capture credential (they are refused by the service); "
+                "run `openshard setup` or start a new Claude Code session to upgrade them"
+            )
+        else:
+            hooks_detail = "older hook configuration; run `openshard setup` to switch to the fast capture path"
     service_ok = bool(claude_status.capture_service.get("running"))
     if service_ok and claude_status.capture_port_mismatch:
         service_ok = False
