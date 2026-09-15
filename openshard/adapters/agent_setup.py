@@ -190,9 +190,15 @@ def detect_opencode_integration(repo_root: Path | None, *, service_port: int | N
     port = found.get("port")
     version = found.get("version")
     mismatch = False
+    capability_state = str(found.get("capability_state") or "n/a")
     if state == "openshard":
         if version != PLUGIN_VERSION:
             state, detail = "partial", "older plugin version; run `openshard setup` to update it"
+        elif capability_state in ("missing", "stale"):
+            state, detail = "partial", (
+                "plugin carries no valid capture credential (its events are refused by the service); "
+                "run `openshard setup` to rewrite it"
+            )
         else:
             detail = f"configured ({rel})"
         mismatch = service_port is not None and port is not None and port != service_port

@@ -69,6 +69,8 @@ import socket
 import sys
 import time
 
+from openshard.adapters import capture_auth as _auth
+
 DEFAULT_PORT = 47811
 PORT_RANGE = 10  # DEFAULT_PORT .. DEFAULT_PORT + PORT_RANGE - 1 are tried on conflict
 STATE_FILENAME = "claude-capture.json"
@@ -235,6 +237,18 @@ def health(port: int, *, timeout: float = 1.0) -> dict | None:
     return data
 
 
+def _auth_headers(env: dict | os._Environ | None, project_dir: str | None) -> dict[str, str]:
+    """Request headers for an authenticated POST: the project dir (when known)
+    and the capture token (created on first use; see ``capture_auth``)."""
+    headers: dict[str, str] = {}
+    if project_dir:
+        headers[PROJECT_DIR_HEADER] = project_dir
+    token = _auth.load_token(env) or _auth.ensure_token(env)
+    if token:
+        headers[_auth.TOKEN_HEADER] = token
+    return headers
+
+
 def post_hook(
     port: int,
     raw: bytes,
@@ -242,24 +256,26 @@ def post_hook(
     project_dir: str | None = None,
     event_override: str | None = None,
     hook_path: str = HOOK_PATH,
+    env: dict | os._Environ | None = None,
 ) -> bool:
     """POST one raw hook payload. True when the service accepted (durably queued) it.
 
     *hook_path* selects the agent receiver (``HOOK_PATH`` for Claude Code,
-    ``CODEX_HOOK_PATH`` / ``OPENCODE_HOOK_PATH`` for the others).
+    ``CODEX_HOOK_PATH`` / ``OPENCODE_HOOK_PATH`` for the others). The capture
+    token is presented automatically (v0.4.4); *env* says where it lives.
     """
     path = hook_path
     if event_override:
         safe = "".join(ch for ch in event_override if ch.isalnum())
         path = f"{hook_path}?event={safe}"
-    headers = {PROJECT_DIR_HEADER: project_dir} if project_dir else None
-    result = _request("POST", port, path, raw, headers)
+    result = _request("POST", port, path, raw, _auth_headers(env, project_dir))
     return result is not None and result[0] == 200
 
 
-def post_status(port: int, raw: bytes, *, project_dir: str | None = None) -> bool:
-    headers = {PROJECT_DIR_HEADER: project_dir} if project_dir else None
-    result = _request("POST", port, STATUS_PATH, raw, headers)
+def post_status(
+    port: int, raw: bytes, *, project_dir: str | None = None, env: dict | os._Environ | None = None
+) -> bool:
+    result = _request("POST", port, STATUS_PATH, raw, _auth_headers(env, project_dir))
     return result is not None and result[0] == 200
 
 
@@ -534,7 +550,7 @@ def request_shutdown(env: dict | os._Environ | None = None, *, wait_seconds: flo
     if doc is None:
         return True
     body = json.dumps({"instance_id": doc.get("instance_id")}).encode("utf-8")
-    _request("POST", port, SHUTDOWN_PATH, body, timeout=2.0)
+    _request("POST", port, SHUTDOWN_PATH, body, _auth_headers(env, None), timeout=2.0)
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         if health(port, timeout=0.5) is None:
@@ -617,21 +633,69 @@ def _run_hook_raw(
     if not raw.strip():
         return "ignored"
     hook_path = AGENT_HOOK_PATHS.get(agent, HOOK_PATH)
+    if agent == "claude_code" and _is_claude_session_start(raw, event_override):
+        _heal_claude_hook_auth(raw, env)
     try:
         if not disabled(env):
             project_dir = _project_dir(env)
             port = resolve_port(env)
-            if post_hook(port, raw, project_dir=project_dir, event_override=event_override, hook_path=hook_path):
+            if post_hook(port, raw, project_dir=project_dir, event_override=event_override,
+                         hook_path=hook_path, env=env):
                 return "forwarded"
             if spawn:
                 port_after, _state = ensure_service(env)
                 if port_after is not None and post_hook(
-                    port_after, raw, project_dir=project_dir, event_override=event_override, hook_path=hook_path
+                    port_after, raw, project_dir=project_dir, event_override=event_override,
+                    hook_path=hook_path, env=env,
                 ):
                     return "forwarded"
     except Exception:
         pass
     return _inline_hook(raw, env, event_override, agent)
+
+
+def _is_claude_session_start(raw: bytes, event_override: str | None) -> bool:
+    if event_override:
+        return event_override == "SessionStart"
+    return b'"SessionStart"' in raw
+
+
+def _heal_claude_hook_auth(raw: bytes, env: dict | os._Environ) -> None:
+    """Upgrade this repository's Claude Code hook entries to carry the
+    repository capability when they still lack it (v0.4.4 migration).
+
+    Runs only on ``SessionStart`` (a command hook, once per session). Claude
+    Code snapshots its hooks per session, so the fix applies from the next
+    session; the current one falls back to the in-process fold. Never raises,
+    never prints.
+    """
+    try:
+        from openshard.adapters.claude_hooks import (
+            HookPayload,
+            parse_hook_payload,
+            resolve_repo_root,
+        )
+        from openshard.adapters.claude_hooks_install import (
+            capability_state,
+            install_claude_hooks,
+            installed_hook_port,
+            load_settings,
+        )
+
+        data = parse_hook_payload(raw)
+        cwd = data.get("cwd") if isinstance(data, dict) else None
+        probe = HookPayload(event="SessionStart", session_id=None, cwd=cwd if isinstance(cwd, str) else None)
+        root = resolve_repo_root(probe, env)
+        if root is None:
+            return
+        settings, err = load_settings(root)
+        if err or settings is None or installed_hook_port(settings) is None:
+            return  # hooks not installed here (or unreadable): nothing to heal
+        if capability_state(settings, root, env=env) == "ok":
+            return
+        install_claude_hooks(repo_root=root, env=env)
+    except Exception:
+        pass
 
 
 def cursor_hook_response(raw: bytes, event_override: str | None = None) -> str:
@@ -720,7 +784,7 @@ def run_status_via_service(stream: object, *, env: dict | os._Environ | None = N
         if disabled(env):
             return _inline_status(raw, env, text)
         project_dir = _project_dir(env)
-        if post_status(resolve_port(env), raw, project_dir=project_dir):
+        if post_status(resolve_port(env), raw, project_dir=project_dir, env=env):
             return text
         maybe_spawn_service(env)
         return _inline_status(raw, env, text)

@@ -159,6 +159,11 @@ from openshard.adapters.capture_agents import (
     is_known_agent,
     profile_for,
 )
+from openshard.history.capture_completeness import (
+    REASON_SESSION_END_NOT_OBSERVED,
+    build_completeness,
+    make_reason,
+)
 
 # Claude Code identity constants -- kept as module names for existing
 # callers/tests; the values are the Claude profile's (adapters/capture_agents.py).
@@ -202,6 +207,17 @@ SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
 FILE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 # Local agent/OpenShard state is never a task's work (see _git_changed_files).
 _LOCAL_STATE_PREFIXES: tuple[str, ...] = (".openshard/", ".claude/", ".codex/", ".opencode/", ".cursor/")
+# v0.4.4 change attribution (see _snapshot_baseline / _classify_changed_files).
+_BASELINE_MAX_PATHS = 500  # dirty/untracked paths remembered at session start
+_GIT_DIFF_MAX_FILES = 200  # git diff rows examined at fold (pre-existing ones are then excluded)
+_MAX_REPORTED_FILES = 50  # files counted as this session's changes, on the record
+_MAX_EXCLUDED_FILES = 50  # excluded (pre-existing / other-session) files kept for provenance
+_MAX_OTHER_BUFFERS = 20  # sibling session buffers consulted for other-session attribution
+ATTR_AGENT_REPORTED = "agent_reported"
+ATTR_GIT_OBSERVED = "git_observed"
+ATTR_PRE_EXISTING = "pre_existing"
+ATTR_OTHER_SESSION = "other_session"
+_EXCLUDED_ATTRIBUTIONS = frozenset({ATTR_PRE_EXISTING, ATTR_OTHER_SESSION})
 COMMAND_TOOLS: frozenset[str] = frozenset({"Bash"})
 # Agent-neutral tool classification carried on the reduced payload.
 TOOL_KIND_FILE = "file"
@@ -684,9 +700,14 @@ class ReducedHookPayload:
     model_id: str | None = None
     provider_id: str | None = None
     tool_success: bool | None = None  # see HookPayload.tool_success
+    # v0.4.4: on a SessionStart queued by the capture service, the working-tree
+    # baseline taken when the event was *received* (see _snapshot_baseline),
+    # so a replay that lags behind the agent's first edits still anchors
+    # attribution at session start. Absent on every other line.
+    baseline: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        data: dict[str, Any] = {
             "event": self.event,
             "session_id": self.session_id,
             "source": self.source,
@@ -706,6 +727,9 @@ class ReducedHookPayload:
             "provider_id": self.provider_id,
             "tool_success": self.tool_success,
         }
+        if self.baseline is not None:
+            data["baseline"] = self.baseline
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ReducedHookPayload | None:
@@ -757,7 +781,24 @@ class ReducedHookPayload:
             model_id=_str_or_none(data.get("model_id"), 200),
             provider_id=_str_or_none(data.get("provider_id"), 80),
             tool_success=tool_success,
+            baseline=_valid_baseline(data.get("baseline")),
         )
+
+
+def _valid_baseline(raw: object) -> dict | None:
+    """A queued baseline block, or None when absent/malformed (never a guess)."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("paths"), dict):
+        return None
+    paths = {
+        k: (v if isinstance(v, str) or v is None else "?")
+        for k, v in list(raw["paths"].items())[:_BASELINE_MAX_PATHS] if isinstance(k, str)
+    }
+    return {
+        "source": raw.get("source") if isinstance(raw.get("source"), str) else "git_status",
+        "at": raw.get("at") if isinstance(raw.get("at"), str) else None,
+        "paths": paths,
+        "truncated": bool(raw.get("truncated")),
+    }
 
 
 def _classify_claude_tool(tool: str) -> str:
@@ -848,7 +889,8 @@ def _buffer_profile(buf: Mapping[str, Any]) -> AgentProfile:
 
 
 def _new_buffer(
-    session_id: str, repo_root: Path, first_hook: str, *, now: str | None = None, agent: str = AGENT_CLAUDE_CODE
+    session_id: str, repo_root: Path, first_hook: str, *, now: str | None = None, agent: str = AGENT_CLAUDE_CODE,
+    baseline: dict | None = None,
 ) -> dict:
     from openshard.analysis.repo_map import collect_git_info
 
@@ -865,6 +907,13 @@ def _new_buffer(
         "git_branch": git_info.branch,
         "git_head_commit_hash": git_info.head_commit,
         "git_dirty": git_info.dirty,
+        # v0.4.4: the working tree as it already was when this session was
+        # first observed. Anything dirty/untracked here is not this
+        # session's work unless it changes again (blob id) or the agent
+        # reports editing it. See _snapshot_baseline. A baseline the capture
+        # service took when SessionStart was received takes precedence over
+        # one taken now (a replay may lag behind the agent's first edits).
+        "baseline": baseline if baseline is not None else _snapshot_baseline(repo_root, now),
         "task": None,
         "prompt_count": 0,
         "tool_call_count": 0,
@@ -904,6 +953,10 @@ def _new_buffer(
         # Ids of queued events already applied (capture service replay
         # idempotency; see apply_reduced_hook). Bounded, most recent last.
         "applied_ids": [],
+        # v0.4.4: evidence known to be lost for this session -- each item is
+        # a completeness reason ({kind, count, detail}); see
+        # history/capture_completeness.py and apply_capture_loss.
+        "capture_losses": [],
     }
     _append_event(
         buf,
@@ -1021,7 +1074,10 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         f["path"]: f.get("change_type", "update")
         for f in files_detail
         if isinstance(f, dict) and isinstance(f.get("path"), str)
-        and isinstance(f.get("summary"), str) and f["summary"].startswith("reported by ")
+        and (
+            f.get("attribution") == ATTR_AGENT_REPORTED
+            or (isinstance(f.get("summary"), str) and f["summary"].startswith("reported by "))
+        )
     }
     ended = None
     if capture.get("session_end_observed"):
@@ -1052,6 +1108,10 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "record": {
             "run_id": entry.get("run_id"),
             "shard_id": entry.get("shard_id"),
+            # An old record (pre-0.4.4) has no receipt_id; the rebuilt buffer
+            # keeps None and build_hook_entry then leaves the field absent,
+            # so history is never given an identity after the fact.
+            "receipt_id": entry.get("receipt_id") if isinstance(entry.get("receipt_id"), str) else None,
             "attempt_number": entry.get("attempt_number") if isinstance(entry.get("attempt_number"), int) else 1,
             "timestamp": entry.get("timestamp"),
         },
@@ -1086,7 +1146,34 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         ),
         "applied_ids": [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)],
         "check_command_seen": bool(entry.get("verification_attempted")),
+        "capture_losses": _stored_losses(capture),
+        "baseline": _stored_baseline(entry, capture),
     }
+
+
+def _stored_baseline(entry: dict, capture: dict) -> dict:
+    """The session-start baseline a persisted record carries (v0.4.4 ``changes.baseline``).
+
+    A pre-0.4.4 record has none: the rebuilt buffer then has an empty
+    baseline whose source says so, and nothing is assumed pre-existing.
+    """
+    changes = entry.get("changes")
+    stored = changes.get("baseline") if isinstance(changes, dict) else None
+    if isinstance(stored, dict) and isinstance(stored.get("paths"), dict):
+        return {
+            "source": stored.get("source") or "git_status",
+            "at": stored.get("at") or capture.get("started_at"),
+            "paths": {k: v for k, v in stored["paths"].items() if isinstance(k, str)},
+            "truncated": bool(stored.get("truncated")),
+        }
+    return {"source": "not_available", "at": capture.get("started_at"), "paths": {}, "truncated": False}
+
+
+def _stored_losses(capture: dict) -> list[dict]:
+    """The loss reasons a persisted record already carries (none for pre-0.4.4 records)."""
+    block = capture.get("completeness")
+    reasons = block.get("reasons") if isinstance(block, dict) else None
+    return [r for r in reasons if isinstance(r, dict)] if isinstance(reasons, list) else []
 
 
 def _is_session_entry(entry: dict, session_id: str, executor: str = EXECUTOR) -> bool:
@@ -1121,7 +1208,7 @@ def _find_persisted_entry(repo_root: Path, session_id: str, executor: str = EXEC
 
 def _load_or_create_buffer(
     repo_root: Path, session_id: str, first_hook: str, *, now: str | None = None,
-    agent: str = AGENT_CLAUDE_CODE,
+    agent: str = AGENT_CLAUDE_CODE, baseline: dict | None = None,
 ) -> dict:
     path = buffer_path(repo_root, session_id, agent)
     buf = _read_buffer(path) if path.exists() else None
@@ -1132,7 +1219,7 @@ def _load_or_create_buffer(
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
             return rebuilt
-    return _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent)
+    return _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline)
 
 
 def _load_buffer_light(repo_root: Path, session_id: str, agent: str = AGENT_CLAUDE_CODE) -> dict | None:
@@ -1180,6 +1267,7 @@ def _ensure_record(buf: dict, repo_root: Path) -> None:
     """
     if buf.get("record"):
         return
+    from openshard.history.receipt_identity import new_receipt_id
     from openshard.history.shard_contract import _make_shard_id
 
     timestamp = buf.get("started_at") or _now()
@@ -1188,6 +1276,9 @@ def _ensure_record(buf: dict, repo_root: Path) -> None:
     buf["record"] = {
         "run_id": f"{timestamp}-{sid[:8]}" if sid else timestamp,
         "shard_id": _make_shard_id(timestamp, run_index),
+        # v0.4.4: the global identity of this record. Minted once here, at
+        # creation, and carried through every fold; never position-derived.
+        "receipt_id": new_receipt_id(),
         "attempt_number": 1,
         "timestamp": timestamp,
     }
@@ -1218,6 +1309,205 @@ def _cached_repo_identity(buf: dict, repo_root: Path) -> str | None:
     return identity
 
 
+def _run_git(repo_root: Path, args: list[str], *, stdin: str | None = None) -> str | None:
+    """stdout of one git command in *repo_root*, or None on any failure. Never raises."""
+    import subprocess
+
+    from openshard.adapters.claude_code_import import _NO_WINDOW_KW
+
+    try:
+        result = subprocess.run(
+            ["git", *args], cwd=repo_root, input=stdin,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+            timeout=5.0, **_NO_WINDOW_KW,
+        )
+    except Exception:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _blob_ids(repo_root: Path, paths: list[str]) -> dict[str, str | None]:
+    """``path -> git blob id`` of each path's *current working-tree content*.
+
+    ``None`` for a path that does not exist (deleted). A path whose id could
+    not be computed is absent from the result, and callers treat "unknown"
+    as "cannot prove unchanged".
+    """
+    out: dict[str, str | None] = {}
+    existing: list[str] = []
+    for path in paths:
+        if (repo_root / path).is_file():
+            existing.append(path)
+        elif not (repo_root / path).exists():
+            out[path] = None
+    if existing:
+        text = _run_git(repo_root, ["hash-object", "--stdin-paths"], stdin="".join(f"{p}\n" for p in existing))
+        if text is not None:
+            ids = text.split()
+            if len(ids) == len(existing):
+                out.update(zip(existing, ids, strict=True))
+    return out
+
+
+def _snapshot_baseline(repo_root: Path, now: str) -> dict:
+    """Working-tree changes already present when the session was first observed.
+
+    ``git status --porcelain -z --untracked-files=all`` gives every dirty and
+    untracked path; their current blob ids let a later fold tell "still the
+    same pre-existing change" (excluded) from "changed again during the
+    session" (git-observed, actor unknown). Bounded; ``truncated`` says when
+    the bound was hit, and ``source == "not_available"`` when git could not
+    answer -- in both cases attribution stays conservative (nothing beyond
+    the snapshot is ever assumed pre-existing).
+    """
+    from openshard.safety.sanitize import sanitize_path
+
+    text = _run_git(repo_root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+    if text is None:
+        return {"source": "not_available", "at": now, "paths": {}, "truncated": False}
+    paths: list[str] = []
+    truncated = False
+    fields = text.split("\0")
+    i = 0
+    while i < len(fields):
+        item = fields[i]
+        i += 1
+        if len(item) < 4:
+            continue
+        code, raw_path = item[:2], item[3:]
+        candidates = [raw_path]
+        if code[0] in "RC" or code[1] in "RC":
+            # A rename/copy carries the original path in the next field.
+            if i < len(fields) and fields[i]:
+                candidates.append(fields[i])
+            i += 1
+        for candidate in candidates:
+            if candidate.startswith(_LOCAL_STATE_PREFIXES):
+                continue
+            safe = sanitize_path(candidate, _PATH_CAP)
+            if not safe or safe in paths:
+                continue
+            if len(paths) >= _BASELINE_MAX_PATHS:
+                truncated = True
+                break
+            paths.append(safe)
+    blobs = _blob_ids(repo_root, paths) if paths else {}
+    return {
+        "source": "git_status",
+        "at": now,
+        "paths": {p: blobs.get(p, "?") for p in paths},
+        "truncated": truncated,
+    }
+
+
+def _other_sessions_reported_paths(repo_root: Path, buf: dict) -> set[str]:
+    """Paths other live session buffers in this repository report having edited.
+
+    Best-effort and bounded: only what sibling agent sessions themselves
+    reported with a positive success signal (their ``hook_files``). Used to
+    label a change ``other_session`` instead of counting it as this
+    session's work.
+    """
+    own = str(buf.get("session_id") or "")
+    found: set[str] = set()
+    try:
+        directory = sessions_dir(repo_root)
+        if not directory.is_dir():
+            return found
+        for path in sorted(directory.glob("*.json"))[: _MAX_OTHER_BUFFERS * 4]:
+            if len(found) > _MAX_HOOK_FILES * _MAX_OTHER_BUFFERS:
+                break
+            other = _read_buffer(path)
+            if other is None or str(other.get("session_id") or "") == own:
+                continue
+            hook_files = other.get("hook_files")
+            if isinstance(hook_files, dict):
+                found.update(p for p in hook_files if isinstance(p, str))
+    except Exception:
+        pass
+    return found
+
+
+def _attempted_file_targets(buf: dict) -> set[str]:
+    """Paths the agent *tried* to change (file-tool targets without a success signal)."""
+    out: set[str] = set()
+    for ev in buf.get("events") or []:
+        if not isinstance(ev, dict) or ev.get("event_type") != "tool.invoked":
+            continue
+        _meta_raw = ev.get("metadata")
+        meta: dict = _meta_raw if isinstance(_meta_raw, dict) else {}
+        if "command_kind" in meta:
+            continue  # a shell command's first token, not a path
+        target = ev.get("target")
+        if isinstance(target, str) and target:
+            out.add(target)
+    return out
+
+
+def _classify_changed_files(buf: dict, repo_root: Path, files: list[dict]) -> list[dict]:
+    """Stamp ``attribution`` (and provenance flags) on every git-observed change.
+
+    Git proves the repository changed; it does not prove who changed it.
+    So: a path the agent reported with a positive success signal is
+    ``agent_reported``; a path that was already dirty at session start and
+    whose content is unchanged since is ``pre_existing`` (excluded from the
+    session's counts); a path another live session reported is
+    ``other_session`` (excluded); everything else is ``git_observed`` --
+    the actor is not established, and the receipt says so.
+    """
+    profile = _buffer_profile(buf)
+    _baseline_raw = buf.get("baseline")
+    baseline: dict = _baseline_raw if isinstance(_baseline_raw, dict) else {}
+    _paths_raw = baseline.get("paths")
+    base_paths: dict = _paths_raw if isinstance(_paths_raw, dict) else {}
+    _hook_raw = buf.get("hook_files")
+    hook_files: dict = _hook_raw if isinstance(_hook_raw, dict) else {}
+    attempted = _attempted_file_targets(buf)
+    others = _other_sessions_reported_paths(repo_root, buf)
+    need_blob = [f["path"] for f in files if f.get("path") in base_paths and f.get("path") not in hook_files]
+    current = _blob_ids(repo_root, need_blob) if need_blob else {}
+    out: list[dict] = []
+    for f in files:
+        path = f.get("path")
+        if not isinstance(path, str):
+            continue
+        item = dict(f)
+        pre = path in base_paths
+        if path in hook_files:
+            attribution = ATTR_AGENT_REPORTED
+            summary = f"reported by {profile.label} hook"
+            if pre:
+                summary += "; file already had uncommitted changes before the session"
+        elif pre:
+            base_blob = base_paths.get(path)
+            cur = current.get(path, "?")
+            unchanged = base_blob not in (None, "?") and cur == base_blob
+            deleted_both = base_blob is None and path in current and cur is None
+            if unchanged or deleted_both:
+                attribution = ATTR_PRE_EXISTING
+                summary = "changed before the session started; not counted as this session's work"
+            else:
+                attribution = ATTR_GIT_OBSERVED
+                summary = (
+                    "observed in git diff; changed again during the session; actor not established"
+                )
+        elif path in others:
+            attribution = ATTR_OTHER_SESSION
+            summary = "reported by another agent session; not counted as this session's work"
+        else:
+            attribution = ATTR_GIT_OBSERVED
+            summary = "observed in git diff; actor not established"
+            if path in attempted:
+                summary = f"observed in git diff; {profile.label} attempted an edit (success not reported)"
+        item["attribution"] = attribution
+        item["pre_existing"] = pre
+        if attribution == ATTR_GIT_OBSERVED and path in attempted:
+            item["agent_attempted"] = True
+        item["summary"] = summary
+        out.append(item)
+    return out
+
+
 def _git_changed_files(buf: dict, repo_root: Path) -> tuple[list[dict], str]:
     from openshard.adapters.claude_code_import import _parse_git_changed_files
 
@@ -1226,10 +1516,13 @@ def _git_changed_files(buf: dict, repo_root: Path) -> tuple[list[dict], str]:
         repo_root,
         base_ref=base if isinstance(base, str) and base else "HEAD",
         include_untracked=True,
+        max_files=_GIT_DIFF_MAX_FILES,
     )
     if source == "not_available" and isinstance(base, str) and base:
         # The snapshotted commit may be unreachable (e.g. rewritten history); fall back.
-        files, source = _parse_git_changed_files(repo_root, base_ref="HEAD", include_untracked=True)
+        files, source = _parse_git_changed_files(
+            repo_root, base_ref="HEAD", include_untracked=True, max_files=_GIT_DIFF_MAX_FILES,
+        )
     # OpenShard's own store / Claude Code's local settings are never the
     # task's work, even in a repository that tracks them.
     files = [f for f in files if not str(f.get("path", "")).startswith(_LOCAL_STATE_PREFIXES)]
@@ -1251,6 +1544,15 @@ def _build_git_file_events(buf: dict, files: list[dict]) -> list[dict]:
         if not isinstance(path, str):
             continue
         key = f"{path}|{change_type}"
+        metadata: dict[str, Any] = {"evidence_source": "git_diff"}
+        if isinstance(f.get("attribution"), str):
+            # v0.4.4: git proves the change, the attribution says what else
+            # is (and is not) known about who made it.
+            metadata["attribution"] = f["attribution"]
+            if f.get("pre_existing"):
+                metadata["pre_existing"] = True
+            if f.get("agent_attempted"):
+                metadata["agent_attempted"] = True
         ev = make_event(
             event_type="file.changed",
             source=profile.event_source,
@@ -1265,7 +1567,7 @@ def _build_git_file_events(buf: dict, files: list[dict]) -> list[dict]:
             target_is_path=True,
             status="unknown",
             evidence="git_observed",
-            metadata={"evidence_source": "git_diff"},
+            metadata=metadata,
         )
         fresh[key] = ev.event_id
         events.append(ev.to_dict())
@@ -1298,6 +1600,15 @@ def _hook_file_events(buf: dict) -> list[dict]:
         )
         events.append(ev.to_dict())
     return events
+
+
+def _all_losses(buf: dict) -> list[dict]:
+    """Every loss reason for *buf*: recorded losses plus the buffer's own drop counter."""
+    losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
+    dropped = int(buf.get("dropped_events") or 0)
+    if dropped > 0:
+        losses.append(make_reason("dropped_hook_events", dropped))
+    return losses
 
 
 def _turn_duration_seconds(buf: dict) -> float | None:
@@ -1350,15 +1661,44 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     profile = _buffer_profile(buf)
 
     changed_files, files_source = _git_changed_files(buf, repo_root)
+    excluded_files: list[dict] = []
+    _baseline_raw = buf.get("baseline")
+    baseline: dict = _baseline_raw if isinstance(_baseline_raw, dict) else {}
+    _baseline_paths_raw = baseline.get("paths")
+    baseline_paths: dict = _baseline_paths_raw if isinstance(_baseline_paths_raw, dict) else {}
     if files_source == "git_diff_inferred":
+        classified = _classify_changed_files(buf, repo_root, changed_files)
+        included = [f for f in classified if f.get("attribution") not in _EXCLUDED_ATTRIBUTIONS]
+        excluded_files = [f for f in classified if f.get("attribution") in _EXCLUDED_ATTRIBUTIONS]
+        files_truncated = len(included) > _MAX_REPORTED_FILES or len(excluded_files) > _MAX_EXCLUDED_FILES
+        changed_files = included[:_MAX_REPORTED_FILES]
+        excluded_files = excluded_files[:_MAX_EXCLUDED_FILES]
         file_events = _build_git_file_events(buf, changed_files)
     else:
+        files_truncated = False
         changed_files = [
-            {"path": p, "change_type": ct, "summary": f"reported by {profile.label} hook"}
+            {"path": p, "change_type": ct, "summary": f"reported by {profile.label} hook",
+             "attribution": ATTR_AGENT_REPORTED, "pre_existing": p in baseline_paths}
             for p, ct in list(buf.get("hook_files", {}).items())[:_MAX_TOOL_FILE_EVENTS]
         ]
         files_source = profile.files_source_label if changed_files else "not_available"
         file_events = _hook_file_events(buf) if changed_files else []
+    changes_block = {
+        "agent_reported": sum(1 for f in changed_files if f.get("attribution") == ATTR_AGENT_REPORTED),
+        "git_observed": sum(1 for f in changed_files if f.get("attribution") == ATTR_GIT_OBSERVED),
+        "pre_existing_excluded": sum(1 for f in excluded_files if f.get("attribution") == ATTR_PRE_EXISTING),
+        "other_session_excluded": sum(1 for f in excluded_files if f.get("attribution") == ATTR_OTHER_SESSION),
+        "files_truncated": files_truncated,
+        "baseline": {
+            "source": baseline.get("source") or "not_available",
+            "at": baseline.get("at") or buf.get("started_at"),
+            "dirty_paths": len(baseline_paths),
+            "truncated": bool(baseline.get("truncated")),
+            # Kept so a buffer rebuilt from this record (a late hook after
+            # SessionEnd) keeps excluding the same pre-existing changes.
+            "paths": dict(list(baseline_paths.items())[:_BASELINE_MAX_PATHS]),
+        },
+    }
 
     ended = buf.get("ended") if isinstance(buf.get("ended"), dict) else None
     prompt_count = int(buf.get("prompt_count") or 0)
@@ -1381,9 +1721,17 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     end_text = f" Session ended (reason={ended.get('reason') or 'unknown'})." if ended else ""
     # First sentence kept short: the receipt's Result line shows the first
     # complete sentence (see shard_contract._result_display).
+    _attr_text = (
+        f" Files: {changes_block['agent_reported']} agent-reported, {changes_block['git_observed']} git-observed"
+        + (f", {changes_block['pre_existing_excluded']} pre-existing excluded"
+           if changes_block["pre_existing_excluded"] else "")
+        + (f", {changes_block['other_session_excluded']} other-session excluded"
+           if changes_block["other_session_excluded"] else "")
+        + "."
+    )
     summary = (
-        f"{profile.label} session: {len(changed_files)} file(s) changed, {tool_calls} tool call(s). "
-        f"{prompt_count} prompt(s), {_task_status_text}, observed via hooks.{end_text}"
+        f"{profile.label} session: {len(changed_files)} file(s) changed, {tool_calls} tool call(s)."
+        f"{_attr_text} {prompt_count} prompt(s), {_task_status_text}, observed via hooks.{end_text}"
     )
 
     task = buf.get("task") if isinstance(buf.get("task"), str) and buf.get("task") else None
@@ -1449,10 +1797,15 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # here (see module docstring "Evidence honesty").
         "verification_attempted": bool(buf.get("check_command_seen")),
         "verification_passed": None,
+        # Counts cover this session's changes only: agent-reported and
+        # git-observed. Pre-existing / other-session changes are excluded
+        # from the counts and listed after them in files_detail with their
+        # attribution (v0.4.4; see _classify_changed_files).
         "files_created": sum(1 for f in changed_files if f.get("change_type") == "create"),
         "files_updated": sum(1 for f in changed_files if f.get("change_type") == "update"),
         "files_deleted": sum(1 for f in changed_files if f.get("change_type") == "delete"),
-        "files_detail": changed_files,
+        "files_detail": changed_files + excluded_files,
+        "changes": changes_block,
         "git_branch": buf.get("git_branch"),
         "git_head_commit_hash": buf.get("git_head_commit_hash"),
         "git_dirty": buf.get("git_dirty"),
@@ -1479,6 +1832,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "tool_failure_count": int(buf.get("tool_failure_count") or 0),
             "task_source": "first_user_prompt_excerpt" if task else "not_captured",
             "hook_events_dropped": int(buf.get("dropped_events") or 0),
+            # v0.4.4: what this capture knows it is missing. Hook capture is
+            # ``partial`` by nature (OpenShard observed, it did not execute or
+            # verify); any known loss makes it ``incomplete`` with reasons.
+            "completeness": build_completeness(_all_losses(buf)),
             # Dedup ids applied so far (capture-service replay idempotency).
             # Persisted (bounded to a small tail, not the full in-memory cap)
             # so a session's dedup memory survives the buffer being deleted
@@ -1504,6 +1861,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "last_status_ping_at": buf.get("status_last_seen_at"),
         },
     }
+    if isinstance(record.get("receipt_id"), str) and record["receipt_id"]:
+        # v0.4.4 global identity -- present on every record created by this
+        # version; absent (never back-filled) on records rebuilt from older history.
+        entry["receipt_id"] = record["receipt_id"]
     if raw_usage:
         # Per-message usage memory (OpenCode), bounded; lets a buffer rebuilt
         # from this record keep deduplicating re-reported messages.
@@ -1589,6 +1950,12 @@ def sweep_stale_buffers(repo_root: Path, *, max_age_seconds: float = _STALE_BUFF
                     if age is None or age < max_age_seconds:
                         continue
                     if _has_activity(buf):
+                        # Swept without a SessionEnd: say so on the record
+                        # instead of leaving it looking normally finished.
+                        losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
+                        if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
+                            losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
+                        buf["capture_losses"] = losses
                         _fold(buf, repo_root)
                     path.unlink()
                 folded.append(sid)
@@ -1885,7 +2252,8 @@ def apply_reduced_hook(
         path = buffer_path(repo_root, payload.session_id, payload.agent)
         with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
             buf = _load_or_create_buffer(
-                repo_root, payload.session_id, payload.event, now=now, agent=payload.agent
+                repo_root, payload.session_id, payload.event, now=now, agent=payload.agent,
+                baseline=payload.baseline,
             )
             if _already_applied(buf, dedup_id):
                 return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
@@ -1937,6 +2305,61 @@ def apply_reduced_hook(
     except Exception as exc:  # observational hook: never propagate
         return HookOutcome(event=payload.event, action="error", session_id=payload.session_id,
                            detail=f"{type(exc).__name__}")
+
+
+def apply_capture_loss(
+    session_id: str,
+    repo_root: Path,
+    *,
+    kind: str,
+    count: int = 1,
+    agent: str = AGENT_CLAUDE_CODE,
+    at: str | None = None,
+) -> HookOutcome:
+    """Record that evidence for *session_id* is known to be lost. Never raises.
+
+    Called by the capture service when a queued line could not be decoded
+    (see ``claude_capture_service._replay_file``). The loss is staged on the
+    session buffer and, when the session already has a record, folded so
+    ``capture.completeness`` becomes ``incomplete`` at once. A session with
+    no activity yet gets no fabricated record; the loss stays on its buffer
+    and lands on the record the moment the session shows work.
+    """
+    try:
+        if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+            return HookOutcome(event="CaptureLoss", action="ignored", detail="invalid session id")
+        now = at or _now()
+        from openshard.history.jsonl_store import history_file_lock
+
+        path = buffer_path(repo_root, session_id, agent)
+        with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
+            buf = _load_or_create_buffer(repo_root, session_id, "CaptureLoss", now=now, agent=agent)
+            losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
+            losses.append(make_reason(kind, count))
+            buf["capture_losses"] = losses[-_MAX_BUFFERED_EVENTS:]
+            buf["last_activity_at"] = now
+            if buf.get("record") and _has_activity(buf):
+                entry, outcome = _fold(buf, repo_root)
+                action = "record_updated" if outcome == "replaced" else "record_created"
+            else:
+                action = "buffered"
+            if buf.get("ended") and _has_activity(buf):
+                # The session had already ended and its buffer was rebuilt
+                # only to record this loss: fold done above, drop it again.
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError:
+                    pass
+            else:
+                _write_buffer(path, buf)
+        record = buf.get("record") or {}
+        return HookOutcome(
+            event="CaptureLoss", action=action, session_id=session_id, repo_root=repo_root,
+            shard_id=record.get("shard_id"), run_id=record.get("run_id"), detail=f"{kind} x{count}",
+        )
+    except Exception as exc:  # observational: never propagate
+        return HookOutcome(event="CaptureLoss", action="error", session_id=session_id, detail=f"{type(exc).__name__}")
 
 
 def extract_agent_payload(
