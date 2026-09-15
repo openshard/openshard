@@ -112,7 +112,11 @@ class TestHookAuthentication:
         assert doc["stats"]["queued"] == 0
 
     def test_malformed_token_is_rejected_and_records_nothing(self, service, repo):
-        for bad in ("", "nope", "r1.deadbeef", auth.ensure_token(service.env)[:-1] + "0", "x" * 4000):
+        token = auth.ensure_token(service.env)
+        # One hex digit flipped -- guaranteed different from the real token
+        # (a fixed replacement digit would coincide with it one time in 16).
+        flipped = token[:-1] + ("1" if token[-1] == "0" else "0")
+        for bad in ("", "nope", "r1.deadbeef", flipped, "x" * 4000):
             status, _ = _raw_post(
                 service.port, client.HOOK_PATH,
                 _payload("UserPromptSubmit", repo, prompt="forged"),
