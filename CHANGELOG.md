@@ -2,6 +2,32 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **`openshard note` / `openshard feedback` no longer break a Receipt's
+  integrity.** Both commands amended the latest record without re-stamping
+  `content_hash`, so a fresh Receipt went from `Integrity  Matches` to
+  `Integrity  Mismatch` the moment OpenShard itself attached a note. They now
+  go through one canonical amendment path (`history.store.amend_latest_record`)
+  that verifies the stored hash first, applies the change, records an additive
+  `amendments` entry (`kind`, `recorded_at`, `source`, `integrity_before`,
+  `content_hash_restamped`) and preserves the integrity verdict: a valid hash
+  is re-stamped over the amended content; a legacy record with no hash is
+  never given one; a record that already read as mismatched keeps its stored
+  hash and stays `Mismatch`. `receipt_id`, `shard_id` and historical content
+  are untouched.
+- **History reads agree on what a record is.** Every CLI reader now uses one
+  loader (`history.store.load_history`): the last line that parses to a JSON
+  object is the latest record, malformed lines are skipped on read and
+  preserved byte-for-byte on write, and a legacy record is never given a
+  `content_hash` on read (`Not recorded` is never reported as `Matches`).
+- **`note` and `feedback` work from repository subdirectories.** Both resolve
+  `.openshard/runs.jsonl` the same way `last` / `history` do, and the feedback
+  interaction/memory side-records land next to that history instead of in
+  the current directory.
+
 ## 0.4.4 - 2026-09-15
 
 Receipt integrity hardening. No new integrations, no new commands beyond
