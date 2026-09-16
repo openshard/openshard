@@ -70,6 +70,7 @@ import sys
 import time
 
 from openshard.adapters import capture_auth as _auth
+from openshard.util.home import openshard_home
 
 DEFAULT_PORT = 47811
 PORT_RANGE = 10  # DEFAULT_PORT .. DEFAULT_PORT + PORT_RANGE - 1 are tried on conflict
@@ -114,11 +115,8 @@ _STATUS_SPAWN_WAIT_SECONDS = 1.0
 
 
 def capture_home(env: dict | os._Environ | None = None) -> str:
-    env = os.environ if env is None else env
-    override = env.get("OPENSHARD_HOME")
-    if isinstance(override, str) and override.strip():
-        return override.strip()
-    return os.path.join(os.path.expanduser("~"), ".openshard")
+    """The capture service's home: the user-global OpenShard home directory."""
+    return openshard_home(env)
 
 
 def state_path(env: dict | os._Environ | None = None) -> str:

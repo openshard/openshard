@@ -3,7 +3,7 @@
 User-global, never repository-local: an installation id must never be
 committed to a repository, and consent is a property of the person's
 machine, not of one checkout. The file lives in the same directory as the
-capture service's state (``claude_capture_client.capture_home``, so the
+capture service's state (``openshard.util.home.openshard_home``, so the
 ``OPENSHARD_HOME`` override applies to both).
 
 The installation id is a random uuid4 minted locally. It is never derived
@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from openshard.adapters.claude_capture_client import capture_home
+from openshard.util.home import openshard_home
 
 STATE_FILENAME = "telemetry.json"
 STATE_SCHEMA_VERSION = 1
@@ -80,7 +80,7 @@ def _now() -> str:
 
 
 def state_path(env: dict | os._Environ | None = None) -> Path:
-    return Path(capture_home(env)) / STATE_FILENAME
+    return Path(openshard_home(env)) / STATE_FILENAME
 
 
 @dataclass

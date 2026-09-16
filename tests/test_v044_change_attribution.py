@@ -17,16 +17,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from openshard.adapters.claude_hooks import HookOutcome, handle_claude_hook
 from openshard.history.shard_contract import build_shard_receipt, render_compact_shard_receipt
-from tests.test_claude_capture_service import SID, SID2, _make_repo
-
-
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    return _make_repo(tmp_path / "my repo")
+from tests.capture_fixtures import SID, SID2
 
 
 def _payload(event: str, repo: Path, session_id: str = SID, **fields) -> dict:

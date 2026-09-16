@@ -100,28 +100,17 @@ def _parse_git_changed_files(repo_path: Path) -> tuple[list[dict], str]:
 
 
 def _sanitize_task(task: str) -> str:
-    """Sanitize a task description for safe storage.
+    """Sanitize a task description for safe storage (see ``claude_code_import``)."""
+    from openshard.adapters.claude_code_import import _sanitize_task as _shared
 
-    Scrubs secret-like values, strips control characters, and caps length.
-    Returns a neutral placeholder if nothing safe remains.
-    """
-    from openshard.security.secret_scan import scrub_text_for_secrets
-
-    if not isinstance(task, str) or not task.strip():
-        return "Claude Code wrap session"
-    scrubbed, _ = scrub_text_for_secrets(task[:_TASK_CAP], source_label="<task>")
-    cleaned = " ".join(scrubbed.split())
-    return cleaned[:_TASK_CAP] or "Claude Code wrap session"
+    return _shared(task, placeholder="Claude Code wrap session", cap=_TASK_CAP)
 
 
 def _sanitize_model(model: str | None) -> str:
-    """Return a safe model string or ``"unknown"``."""
-    from openshard.safety.sanitize import sanitize_text
+    """Return a safe model string or ``"unknown"`` (see ``claude_code_import``)."""
+    from openshard.adapters.claude_code_import import _sanitize_model as _shared
 
-    if not model:
-        return "unknown"
-    safe = sanitize_text(model, 100)
-    return safe if safe else "unknown"
+    return _shared(model)
 
 
 def capture_pre_run_state(repo_path: Path) -> dict[str, Any]:
