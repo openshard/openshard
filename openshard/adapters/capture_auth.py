@@ -22,7 +22,7 @@ Two credential shapes, one server-side check
   configuration carries when no process of ours runs at delivery time:
   Claude Code's HTTP hook header in ``.claude/settings.local.json`` (agent
   ``claude_code``) and the OpenCode plugin file
-  ``.opencode/plugins/openshard.ts`` (agent ``opencode``). Both files are
+  ``.opencode/plugins/openshard.js`` (agent ``opencode``). Both files are
   kept out of git by the installer (``.git/info/exclude``), which refuses
   to write a credential into a file git tracks. A capability authorises
   events **for that repository and that agent only** -- a leaked Claude

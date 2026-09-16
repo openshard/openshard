@@ -1,12 +1,20 @@
 """OpenCode plugin installation for OpenShard auto-capture (PR12).
 
 Writes the OpenShard capture plugin to the repository's project-local
-plugin directory, ``<repo>/.opencode/plugins/openshard.ts`` -- OpenCode's
+plugin directory, ``<repo>/.opencode/plugins/openshard.js`` -- OpenCode's
 supported plugin mechanism loads every JS/TS file there automatically, so
 no ``opencode.json`` edit is needed and no other plugin or setting is
 touched. The plugin source lives in ``PLUGIN_SOURCE`` below; the installer
 renders it with the capture service port and compares content, so
 re-running is a no-op unless the port or the plugin version changed.
+
+The plugin ships as JavaScript, not TypeScript (v0.4.5). OpenCode's CLI runs
+on Bun, which strips TypeScript types natively, but OpenCode *Desktop* runs
+its server in an Electron utility process whose bundled Node is compiled
+without amaro; that Node refuses a ``.ts`` file (``ERR_UNKNOWN_FILE_EXTENSION``)
+so the plugin never loads and the session captures nothing. Plain ESM
+JavaScript loads under both runtimes. Install/uninstall also remove the old
+``openshard.ts`` an earlier OpenShard may have written.
 
 Ownership
 ---------
@@ -19,7 +27,7 @@ repository's local ``.git/info/exclude``.
 
 The plugin itself
 -----------------
-Plain TypeScript with no imports, no dependencies and no OpenShard
+Plain JavaScript with no imports, no dependencies and no OpenShard
 business logic: it observes ``session.created`` / ``session.idle`` /
 ``session.deleted`` / ``file.edited`` / ``message.updated`` events plus the
 ``chat.message`` and ``tool.execute.after`` hooks, reduces each to a small
@@ -50,17 +58,32 @@ from openshard.adapters.claude_hooks_install import (
     settings_file_is_tracked,
 )
 
-PLUGIN_VERSION = 4
+PLUGIN_VERSION = 5
 PLUGIN_MARKER = "// openshard-capture-plugin"
-PLUGIN_RELPATH = Path(".opencode") / "plugins" / "openshard.ts"
+# The plugin ships as plain JavaScript (v0.4.5). OpenCode's CLI runs on Bun,
+# which strips TypeScript types natively, but OpenCode *Desktop* runs its
+# server in an Electron utility process whose bundled Node is compiled without
+# amaro, so a `.ts` plugin is refused with ERR_UNKNOWN_FILE_EXTENSION and the
+# plugin never loads -- the session runs but captures nothing. A `.js` file
+# with plain ESM syntax loads under Bun *and* under that Node (module-syntax
+# detection reparses it as ESM regardless of the project's package.json), so it
+# is the one form that works in every supported OpenCode surface.
+PLUGIN_RELPATH = Path(".opencode") / "plugins" / "openshard.js"
+# Older OpenShard wrote the plugin as TypeScript at this path. Install/uninstall
+# clean it up so the Bun CLI does not load both files (double capture) and the
+# Desktop Node does not keep logging a load error for a file it cannot import.
+PLUGIN_LEGACY_RELPATH = Path(".opencode") / "plugins" / "openshard.ts"
 _MAX_PLUGIN_BYTES = 64 * 1024
 
 # NOTE: keep this a template with exactly the placeholders substituted in
-# render_plugin_source(); everything else is literal TypeScript.
+# render_plugin_source(); everything else is literal JavaScript (no TypeScript
+# syntax -- see PLUGIN_RELPATH above for why the runtime cannot strip types).
 PLUGIN_SOURCE = r'''__MARKER__ v__VERSION__ -- managed by `openshard setup`; edits are overwritten on reinstall.
 // Sends bounded lifecycle facts about this OpenCode session to the local
 // OpenShard capture service (127.0.0.1 only). Never sends message bodies,
 // tool output, or file contents. Remove with `openshard capture uninstall opencode`.
+// Plain JavaScript on purpose: OpenCode Desktop's bundled Node cannot strip
+// TypeScript types, so a .ts plugin would silently fail to load there.
 const PORT = __PORT__
 const PATH = "__HOOK_PATH__"
 // Capability scoped to this repository and to OpenCode (see
@@ -76,14 +99,14 @@ const MAX_PENDING = 200
 const START_COOLDOWN_MS = 60000
 const START_FLUSH_DELAY_MS = 1500
 
-export const OpenShardCapture = async ({ directory, worktree, $ }: any) => {
+export const OpenShardCapture = async ({ directory, worktree, $ }) => {
   const url = "http://127.0.0.1:" + PORT + PATH
-  const pending: string[] = []
-  const children = new Set<string>()
+  const pending = []
+  const children = new Set()
   let lastStartAt = -Infinity
-  let lastSession: string | null = null
+  let lastSession = null
 
-  const clip = (v: any): string | undefined =>
+  const clip = (v) =>
     typeof v === "string" && v.length > 0 ? v.slice(0, MAX_TEXT) : undefined
 
   const startService = () => {
@@ -99,7 +122,7 @@ export const OpenShardCapture = async ({ directory, worktree, $ }: any) => {
     } catch {}
   }
 
-  const post = async (body: string): Promise<boolean> => {
+  const post = async (body) => {
     try {
       const r = await fetch(url, {
         method: "POST",
@@ -133,11 +156,11 @@ export const OpenShardCapture = async ({ directory, worktree, $ }: any) => {
     }
   }
 
-  const buffer = (body: string) => {
+  const buffer = (body) => {
     if (pending.length < MAX_PENDING) pending.push(body)
   }
 
-  const send = (doc: Record<string, any>) => {
+  const send = (doc) => {
     const body = JSON.stringify({ agent: "opencode", directory, worktree, ...doc })
     if (pending.length) {
       // Keep order: older buffered documents go first; this one joins the
@@ -156,10 +179,10 @@ export const OpenShardCapture = async ({ directory, worktree, $ }: any) => {
     })
   }
 
-  const isChild = (id: any) => typeof id === "string" && children.has(id)
+  const isChild = (id) => typeof id === "string" && children.has(id)
 
   return {
-    event: async ({ event }: any) => {
+    event: async ({ event }) => {
       const p = event?.properties ?? {}
       switch (event?.type) {
         case "session.created": {
@@ -200,11 +223,11 @@ export const OpenShardCapture = async ({ directory, worktree, $ }: any) => {
         }
       }
     },
-    "chat.message": async (input: any, output: any) => {
+    "chat.message": async (input, output) => {
       if (isChild(input?.sessionID)) return
       lastSession = input?.sessionID ?? lastSession
       const model = input?.model ?? output?.message?.model ?? {}
-      const first = (output?.parts ?? []).find((x: any) => x?.type === "text" && typeof x.text === "string")
+      const first = (output?.parts ?? []).find((x) => x?.type === "text" && typeof x.text === "string")
       send({
         event: "chat.message",
         session_id: input?.sessionID,
@@ -213,7 +236,7 @@ export const OpenShardCapture = async ({ directory, worktree, $ }: any) => {
         model_id: model.modelID,
       })
     },
-    "tool.execute.after": async (input: any, _output: any) => {
+    "tool.execute.after": async (input, _output) => {
       if (isChild(input?.sessionID)) return
       lastSession = input?.sessionID ?? lastSession
       const args = input?.args ?? {}
@@ -272,6 +295,30 @@ def plugin_path(repo_root: Path) -> Path:
     return Path(repo_root) / PLUGIN_RELPATH
 
 
+def legacy_plugin_path(repo_root: Path) -> Path:
+    """Path of the pre-0.4.5 TypeScript plugin (``openshard.ts``)."""
+    return Path(repo_root) / PLUGIN_LEGACY_RELPATH
+
+
+def _remove_legacy_ts_plugin(repo_root: Path) -> bool:
+    """Delete an OpenShard-owned ``openshard.ts`` if present. Returns whether one was removed.
+
+    Leaving it in place would make OpenCode load *both* files: the Bun CLI would
+    register the capture plugin twice (double events) and Desktop's Node would
+    keep failing to import the ``.ts`` and logging the error. A user-owned file
+    at that path (no OpenShard marker) is never touched. Never raises.
+    """
+    legacy = legacy_plugin_path(repo_root)
+    text, err = _read_plugin(legacy)
+    if err or not text or not is_openshard_plugin(text):
+        return False
+    try:
+        legacy.unlink()
+        return True
+    except OSError:
+        return False
+
+
 def _read_plugin(path: Path) -> tuple[str | None, str | None]:
     """``(text, error)``; a missing file is ``("", None)``."""
     if not path.exists():
@@ -318,6 +365,15 @@ def detect_plugin(repo_root: Path) -> dict:
     if err or text is None:
         return {"state": "custom", "port": None, "version": None, "error": err}
     if not text:
+        # No .js plugin. A leftover OpenShard .ts (pre-0.4.5) is reported as an
+        # OpenShard plugin so its stale version drives "run `openshard setup`" --
+        # it is what silently fails to load in OpenCode Desktop.
+        legacy_text, legacy_err = _read_plugin(legacy_plugin_path(repo_root))
+        if not legacy_err and legacy_text and is_openshard_plugin(legacy_text):
+            return {"state": "openshard", "port": installed_plugin_port(legacy_text),
+                    "version": installed_plugin_version(legacy_text), "error": None,
+                    "capability_state": plugin_capability_state(legacy_text, Path(repo_root)),
+                    "legacy_ts": True}
         return {"state": "absent", "port": None, "version": None, "error": None}
     if is_openshard_plugin(text):
         return {"state": "openshard", "port": installed_plugin_port(text),
@@ -341,6 +397,16 @@ def _write_plugin(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def _prune_empty_plugin_dirs(path: Path) -> None:
+    """Drop now-empty ``plugins``/``.opencode`` dirs OpenShard created. Never raises."""
+    try:
+        # A directory with anything else in it is left alone (rmdir refuses).
+        path.parent.rmdir()
+        path.parent.parent.rmdir()
+    except OSError:
+        pass
 
 
 def _error(message: str, path: Path | None = None) -> ClaudeHooksInstallResult:
@@ -384,7 +450,10 @@ def install_opencode_plugin(*, repo_root: Path, port: int | None = None) -> Clau
                     "OpenShard will not replace it. Move it aside and re-run to enable OpenCode capture."
                 ),
             )
-        if existing == desired:
+        # Remove a pre-0.4.5 OpenShard .ts even when the .js is already current,
+        # so a repo carrying both never double-captures under the Bun CLI.
+        removed_legacy = _remove_legacy_ts_plugin(root)
+        if existing == desired and not removed_legacy:
             return ClaudeHooksInstallResult(
                 status="already_installed", settings_path=path,
                 message="OpenCode capture plugin already installed for this repository.",
@@ -397,10 +466,15 @@ def install_opencode_plugin(*, repo_root: Path, port: int | None = None) -> Clau
             )
             if ignore_warning:
                 warnings.append(ignore_warning)
+        if removed_legacy:
+            warnings.append(
+                f"Removed the old TypeScript plugin {PLUGIN_LEGACY_RELPATH.as_posix()}; the plugin now ships "
+                "as JavaScript so it loads in OpenCode Desktop (whose bundled Node cannot strip TypeScript types)."
+            )
+        message = "OpenCode capture plugin installed." if created else "OpenCode capture plugin updated."
         return ClaudeHooksInstallResult(
             status="installed" if created else "updated", settings_path=path,
-            message="OpenCode capture plugin installed." if created else "OpenCode capture plugin updated.",
-            warnings=warnings,
+            message=message, warnings=warnings,
         )
     except Exception as exc:
         return _error(f"Failed to install the OpenCode plugin: {type(exc).__name__}")
@@ -409,11 +483,19 @@ def install_opencode_plugin(*, repo_root: Path, port: int | None = None) -> Clau
 def uninstall_opencode_plugin(*, repo_root: Path) -> ClaudeHooksInstallResult:
     """Remove the OpenShard plugin file -- only if it is OpenShard's. Never raises."""
     try:
-        path = plugin_path(Path(repo_root))
+        root = Path(repo_root)
+        path = plugin_path(root)
         existing, err = _read_plugin(path)
         if err or existing is None:
             return _error(err or "Could not read the OpenCode plugin file.", path)
         if not existing:
+            # No .js. Still clean up a pre-0.4.5 OpenShard .ts if one is present.
+            if _remove_legacy_ts_plugin(root):
+                _prune_empty_plugin_dirs(path)
+                return ClaudeHooksInstallResult(
+                    status="removed", settings_path=path,
+                    message="OpenCode capture plugin removed (legacy TypeScript plugin).",
+                )
             return ClaudeHooksInstallResult(
                 status="not_installed", settings_path=path, message="No OpenShard OpenCode plugin was installed.",
             )
@@ -423,13 +505,8 @@ def uninstall_opencode_plugin(*, repo_root: Path) -> ClaudeHooksInstallResult:
                 message=f"{PLUGIN_RELPATH.as_posix()} is not OpenShard's plugin; nothing removed.",
             )
         path.unlink()
-        try:
-            # Drop now-empty plugin directories OpenShard itself created; a
-            # directory with anything else in it is left alone.
-            path.parent.rmdir()
-            path.parent.parent.rmdir()
-        except OSError:
-            pass
+        _remove_legacy_ts_plugin(root)
+        _prune_empty_plugin_dirs(path)
         return ClaudeHooksInstallResult(
             status="removed", settings_path=path, message="OpenCode capture plugin removed.",
         )
