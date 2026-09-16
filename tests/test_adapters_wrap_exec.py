@@ -203,6 +203,11 @@ class TestTaskSanitization(unittest.TestCase):
         result = _sanitize_task(None)  # type: ignore[arg-type]
         self.assertEqual(result, "Claude Code wrap session")
 
+    def test_sanitize_task_strips_control_characters(self):
+        # Same scrubber as the import adapter: non-printables become spaces.
+        result = _sanitize_task("Fix\x1b[31m the\x00 bug")
+        self.assertEqual(result, "Fix [31m the bug")
+
     def test_task_capped_at_500_chars(self):
         long_task = "a" * 600
         result = _sanitize_task(long_task)

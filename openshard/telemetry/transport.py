@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from openshard.adapters.claude_capture_client import capture_home
+from openshard.util.home import openshard_home
 
 BACKOFF_FILENAME = "telemetry.backoff.json"
 _BACKOFF_MIN_SECONDS = 60.0
@@ -115,7 +115,7 @@ class HttpsTransport:
 
 
 def _backoff_path(env: dict | os._Environ | None) -> Path:
-    return Path(capture_home(env)) / BACKOFF_FILENAME
+    return Path(openshard_home(env)) / BACKOFF_FILENAME
 
 
 def read_backoff(env: dict | os._Environ | None = None) -> dict:

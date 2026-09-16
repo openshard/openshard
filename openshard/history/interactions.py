@@ -8,10 +8,10 @@ from pathlib import Path
 
 from openshard.history.jsonl_store import append_jsonl
 from openshard.safety.sanitize import (
-    is_absolute_path as _is_absolute_path,
+    sanitize_metadata as _sanitize_metadata,
 )
 from openshard.safety.sanitize import (
-    sanitize_metadata as _sanitize_metadata,
+    sanitize_path as _sanitize_path,
 )
 from openshard.safety.sanitize import (
     sanitize_text as _sanitize_text,
@@ -63,16 +63,19 @@ _SEVERITY_FALLBACK = "info"
 
 
 def _sanitize_file_paths(paths) -> list[str]:
-    """Keep only relative, secret-free, capped file paths. Absolute paths are dropped."""
+    """Keep only relative, secret-free, capped file paths. Absolute paths are dropped.
+
+    Paths use ``sanitize_path``, not ``sanitize_text``: the generic
+    "long opaque run" secret heuristic would otherwise drop any ordinary
+    repo-relative path with a few nested directories.
+    """
     if not isinstance(paths, list):
         return []
     safe: list[str] = []
     for p in paths:
         if len(safe) >= _MAX_FILE_PATHS:
             break
-        if not isinstance(p, str) or _is_absolute_path(p):
-            continue
-        clean = _sanitize_text(p, _MAX_PATH_CHARS)
+        clean = _sanitize_path(p, _MAX_PATH_CHARS)
         if clean is not None:
             safe.append(clean)
     return safe

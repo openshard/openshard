@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from openshard.safety.sanitize import is_absolute_path as _is_absolute_path
+
 _PM_MAX_SUMMARY_CHARS: int = 240
 _PM_MAX_COMPLETED: int = 5
 _PM_MAX_ITEM_CHARS: int = 120
@@ -57,18 +59,6 @@ class OSNProgressMemory:
         self.next_safe_step = self.next_safe_step[:_PM_MAX_NEXT_SAFE_STEP_CHARS]
         if self.confidence not in _VALID_CONFIDENCE:
             self.confidence = "unknown"
-
-
-def _is_absolute_path(p: str) -> bool:
-    """Return True if p looks like an absolute path. Never store absolute paths."""
-    if not p:
-        return False
-    if p.startswith("/") or p.startswith("\\"):
-        return True
-    # Windows drive letter: C:\ or C:/
-    if len(p) >= 3 and p[1] == ":" and p[2] in ("/", "\\"):
-        return True
-    return False
 
 
 def _is_unsafe_path(p: str) -> bool:

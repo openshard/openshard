@@ -14,7 +14,7 @@ import json
 import os
 from pathlib import Path
 
-from openshard.adapters.claude_capture_client import capture_home
+from openshard.util.home import openshard_home
 
 QUEUE_FILENAME = "telemetry.queue.jsonl"
 MAX_EVENTS = 500
@@ -23,7 +23,7 @@ _LOCK_TIMEOUT = 1.0
 
 
 def queue_path(env: dict | os._Environ | None = None) -> Path:
-    return Path(capture_home(env)) / QUEUE_FILENAME
+    return Path(openshard_home(env)) / QUEUE_FILENAME
 
 
 def _lock(path: Path):

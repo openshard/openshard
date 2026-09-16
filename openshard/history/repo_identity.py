@@ -22,23 +22,13 @@ Design constraints
 from __future__ import annotations
 
 import re
-import subprocess
-import sys
 from pathlib import Path
+
+from openshard.util.git import run_git
 
 REPO_IDENTITY_FIELD = "repo_identity"
 
 _GIT_TIMEOUT_SECONDS = 3
-
-# See the matching comment in adapters/claude_code_import.py: this git call
-# can run from the console-less background capture-service worker, which
-# would otherwise cause Windows to pop a new console per git.exe child.
-# getattr sidesteps mypy's attr-defined error for CREATE_NO_WINDOW, which
-# only exists in typeshed's Windows stubs (a sys.platform guard alone does
-# not make a direct attribute access type-check on this cross-platform module).
-_NO_WINDOW_KW: dict = (
-    {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
-)
 
 # scp-like SSH syntax: ``[user@]host:path`` with no scheme. The host must not
 # contain ``/`` and the path must not start with ``/`` (that would be a
@@ -111,18 +101,10 @@ def canonicalize_remote_url(url: object) -> str | None:
 
 def _origin_remote_url(path: Path) -> str | None:
     """Return the raw ``remote.origin.url`` for *path*, or None. Never raises."""
-    try:
-        r = subprocess.run(
-            ["git", "config", "--get", "remote.origin.url"],
-            cwd=str(path), capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS,
-            **_NO_WINDOW_KW,
-        )
-        if r.returncode != 0:
-            return None
-        out = r.stdout.strip()
-        return out or None
-    except Exception:
+    out = run_git(path, ["config", "--get", "remote.origin.url"], timeout=_GIT_TIMEOUT_SECONDS)
+    if out is None:
         return None
+    return out.strip() or None
 
 
 def capture_repo_identity(path: Path) -> str | None:

@@ -23,15 +23,14 @@ from openshard.history.capture_completeness import (
     derive_capture_completeness,
 )
 from openshard.history.shard_contract import build_shard_receipt, render_compact_shard_receipt
-from tests.test_claude_capture_service import (  # noqa: F401 - fixtures re-exported for pytest
+from tests.capture_fixtures import (
     SID,
     _lines,
+    _payload,
+    _post,
     _queue_line,
     _session_dir,
     _wait_for,
-    capture_env,
-    repo,
-    service,
 )
 
 
@@ -129,8 +128,6 @@ class TestCorruptQueueLines:
         assert service.server.recorder.wait_idle(20)
         assert _lines(repo) == []
         assert client.health(service.port)["stats"]["corrupt_lines"] == 1
-        from tests.test_claude_capture_service import _payload, _post
-
         assert _post(service.port, _payload("UserPromptSubmit", repo, prompt="later work"), project_dir=str(repo))
         assert _wait_for(lambda: len(_lines(repo)) == 1)
         assert service.server.recorder.wait_idle(20)

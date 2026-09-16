@@ -6,6 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
+# Capture-service fixtures (``repo``, ``capture_env``, ``service``) shared by
+# the capture, hook and v0.4.4 test modules.
+pytest_plugins = ["tests.capture_fixtures"]
+
 
 def _free_loopback_port() -> int:
     with socket.socket() as sock:

@@ -241,6 +241,10 @@ class TestSanitizeMeta(unittest.TestCase):
     def test_none_passthrough(self):
         self.assertIsNone(_sanitize_meta(None))
 
+    def test_strips_terminal_escapes_and_other_control_chars(self):
+        out = _sanitize_meta("feat\x1b[31mred\x00\x07tail")
+        self.assertEqual(out, "feat [31mred  tail")
+
 
 class TestSerializationRoundTrip(unittest.TestCase):
 

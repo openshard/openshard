@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import datetime
 import hashlib
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +27,7 @@ from openshard.analysis.repo import (
     _detect_package_files,
     _detect_test_command,
 )
+from openshard.util.git import run_git
 
 SCHEMA_VERSION = "1"
 SOURCE = "repo_map_v1"
@@ -69,13 +68,14 @@ _PKG_TO_MANAGER: dict[str, str] = {
 def _sanitize_meta(value: str | None, *, cap: int = _WARNING_CAP) -> str | None:
     """Make an untrusted git/path/warning string safe to store and display.
 
-    Strips CR/LF (no log/JSON-line injection), reduces absolute-path-looking
-    values to a bare name (no local path leak), and caps the length. Returns
-    None unchanged.
+    Strips CR/LF and every other control character (no log/JSON-line or
+    terminal-escape injection), reduces absolute-path-looking values to a
+    bare name (no local path leak), and caps the length. Returns None
+    unchanged.
     """
     if value is None:
         return None
-    s = value.replace("\r", " ").replace("\n", " ").strip()
+    s = "".join(ch if ch == " " or ch.isprintable() else " " for ch in value).strip()
     norm = s.replace("\\", "/")
     if norm.startswith("/") or (len(norm) > 1 and norm[1] == ":"):
         # Take the basename from the normalised path so Windows-style backslash
@@ -109,56 +109,27 @@ class GitInfo:
     is_git: bool
 
 
-# See the matching comment in adapters/claude_code_import.py: this git call
-# can run from the console-less background capture-service worker, which
-# would otherwise cause Windows to pop a new console per git.exe child.
-# getattr sidesteps mypy's attr-defined error for CREATE_NO_WINDOW, which
-# only exists in typeshed's Windows stubs (a sys.platform guard alone does
-# not make a direct attribute access type-check on this cross-platform module).
-_NO_WINDOW_KW: dict = (
-    {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
-)
-
-
-def _run_git(root: Path, args: list[str], *, timeout: float = 5.0) -> str | None:
-    """Run a git command under *root*; return stdout on success, else None. Never raises."""
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            **_NO_WINDOW_KW,
-        )
-        if result.returncode == 0:
-            return result.stdout
-    except Exception:
-        return None
-    return None
-
-
 def collect_git_info(root: Path) -> GitInfo:
     """Collect branch / head commit / dirty / is_git for *root*. Never raises.
 
     branch is sanitised; detached HEAD yields branch=None. A commit hash is safe
     as-is (hex). dirty is derived from ``git status --porcelain``.
     """
-    inside = _run_git(root, ["rev-parse", "--is-inside-work-tree"])
+    inside = run_git(root, ["rev-parse", "--is-inside-work-tree"])
     if inside is None or inside.strip() != "true":
         return GitInfo(branch=None, head_commit=None, dirty=False, is_git=False)
 
-    branch_out = _run_git(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    branch_out = run_git(root, ["rev-parse", "--abbrev-ref", "HEAD"])
     branch: str | None = None
     if branch_out is not None:
         raw = branch_out.strip()
         if raw and raw != "HEAD":
             branch = _sanitize_meta(raw, cap=_BRANCH_CAP)
 
-    head_out = _run_git(root, ["rev-parse", "HEAD"])
+    head_out = run_git(root, ["rev-parse", "HEAD"])
     head_commit: str | None = head_out.strip() if head_out and head_out.strip() else None
 
-    status_out = _run_git(root, ["status", "--porcelain"])
+    status_out = run_git(root, ["status", "--porcelain"])
     dirty = _porcelain_is_dirty(status_out)
 
     return GitInfo(branch=branch, head_commit=head_commit, dirty=dirty, is_git=True)
