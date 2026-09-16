@@ -170,8 +170,8 @@ def _dict_to_event(d: dict) -> DeveloperInteractionEvent:
     )
 
 
-def log_interaction_event(event: DeveloperInteractionEvent) -> None:
-    interactions_path = Path.cwd() / _INTERACTIONS_PATH
+def log_interaction_event(event: DeveloperInteractionEvent, cwd: Path | None = None) -> None:
+    interactions_path = (cwd if cwd is not None else Path.cwd()) / _INTERACTIONS_PATH
     d = _event_to_dict(sanitize_event(event))
     d["raw_content_stored"] = False
     append_jsonl(interactions_path, d)

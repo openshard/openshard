@@ -13,11 +13,14 @@ Helpers exposed:
 - ``upsert_jsonl(path, record, match)`` — replace the first line whose record
   satisfies ``match`` in place, else append; other lines are preserved
   byte-for-byte (malformed lines included).
+- ``amend_last_jsonl(path, transform)`` — replace the *last* well-formed
+  record with ``transform(record)`` in place; every other line is preserved
+  byte-for-byte. The read-transform-write is one critical section.
 - ``history_file_lock(path)`` — the same sidecar lock, for callers that need to
   read-modify-write a small companion file next to the history store.
 
-All derive the same lock path from the data file, so an append, an upsert and a
-rewrite of the same history file mutually exclude.
+All derive the same lock path from the data file, so an append, an upsert, an
+amend and a rewrite of the same history file mutually exclude.
 """
 
 from __future__ import annotations
@@ -295,6 +298,51 @@ def upsert_jsonl(
             fh.flush()
             os.fsync(fh.fileno())
         return "appended"
+
+
+def amend_last_jsonl(
+    path: Path, transform: Callable[[dict], dict], *, timeout: float | None = None
+) -> dict | None:
+    """Replace the last well-formed record in *path* with ``transform(record)``.
+
+    The "last record" is the last line that parses to a JSON object -- the
+    same rule :func:`openshard.history.store.load_history` uses for its final
+    element, so an amendment always lands on the record readers report as
+    latest. Blank and malformed lines (including any *after* that record) are
+    preserved verbatim and never re-serialized. Returns the record as written,
+    or ``None`` when the file is missing or holds no well-formed record (the
+    file is then left untouched).
+
+    The read, the transform and the crash-safe temp+rename rewrite happen in
+    one critical section under the same sidecar lock as :func:`append_jsonl`,
+    so a concurrent append cannot be lost and two amendments cannot both read
+    the same pre-amendment line. ``transform`` must return a JSON-serializable
+    dict; it runs under the lock, so keep it cheap and never re-enter this
+    module on the same *path* from inside it.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None  # nothing to amend; take no lock and create no directory
+    with _file_lock(_lock_path_for(path), timeout=timeout):
+        if not path.exists():
+            return None
+        with path.open("r", encoding="utf-8") as fh:
+            existing = fh.read().splitlines(keepends=True)
+        for i in range(len(existing) - 1, -1, -1):
+            stripped = existing[i].strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            amended = transform(parsed)
+            existing[i] = json.dumps(amended) + "\n"
+            _atomic_replace(path, "".join(existing))
+            return amended
+        return None
 
 
 def append_jsonl(path: Path, record: dict) -> None:

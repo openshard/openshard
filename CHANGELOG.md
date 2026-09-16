@@ -2,36 +2,88 @@
 
 All notable changes to OpenShard are documented here.
 
-## 0.4.5 - 2026-09-16
+## 0.4.5 - Unreleased
 
-Honest OpenCode capture diagnostics. No behaviour change to how any agent is
-captured; no telemetry broadening; authenticated capture is unchanged.
+OpenCode capture that loads where OpenCode actually runs, diagnostics that
+say only what is proven, and Receipts whose integrity survives OpenShard's
+own amendments. No new integrations, no new commands, no telemetry
+broadening. Authenticated repo+agent scoped capture, fail-open agent
+behaviour, `receipt_id` / `shard_id` semantics and the readability of every
+existing on-disk record are unchanged.
+
+Status: the OpenCode CLI (Bun) has been verified end to end with the new
+plugin. The OpenCode **Desktop** application has not yet been verified
+against it; the fix below targets the Desktop runtime as reproduced under
+an amaro-less Node, and Desktop is confirmed only once a real Desktop
+session records an `opencode_plugin` Receipt.
 
 ### Fixed
 
-- **`doctor` no longer claims OpenCode capture works just because the plugin
-  file exists.** The OpenCode plugin runs inside OpenCode's own runtime, which
-  can silently decline to load it (`opencode run --pure`, a desktop build that
-  skips project plugins, a stalled plugin-dependency wait, or a stale plugin).
-  In that case OpenCode still edits the repository, but no events are captured
-  and `openshard capture status` never moves -- while `doctor` previously
-  showed `✓ Capture plugin`. `doctor` now adds a separate **Capture verified**
-  check that is green only when an OpenCode session has actually been recorded
-  in this repository's `.openshard/runs.jsonl`, and the summary reads
-  `Configured but unverified` until then. `--json` gains
-  `opencode.capture_observed` and `opencode.capture_verified`. The plugin,
-  translator, capability auth and every other agent are unchanged.
+- **The OpenCode project plugin now ships as plain JavaScript
+  (`.opencode/plugins/openshard.js`).** OpenCode's CLI runs on Bun, which
+  strips TypeScript types natively, so the previous `openshard.ts` loaded
+  there. OpenCode Desktop runs its server in an Electron utility process
+  whose bundled Node is compiled without amaro; that Node refuses a `.ts`
+  plugin with `ERR_UNKNOWN_FILE_EXTENSION`, OpenCode logs "failed to load
+  plugin" and continues, and the session edits the repository while
+  OpenShard captures nothing. Plain ESM JavaScript loads under both
+  runtimes. Behaviour, bounded payloads, the repo+agent scoped capability
+  and fail-open buffering are unchanged; only the extension and the
+  (erasable) type annotations differ. Plugin payload version 4 -> 5. The
+  node-harness tests now run with type stripping forced off, reproducing
+  the Desktop runtime.
+- **`openshard setup` / `openshard capture install opencode` migrate an
+  OpenShard-owned legacy `openshard.ts` safely.** Install and uninstall
+  remove a pre-0.4.5 `openshard.ts` that carries the OpenShard marker, so a
+  repository never loads both files (double capture under Bun; a repeated
+  load error under Desktop's Node). A user's own `openshard.ts` without the
+  marker is never touched. `doctor` / `setup` report a leftover OpenShard
+  `.ts` as an outdated plugin and prompt a reinstall instead of reporting
+  the integration absent.
+- **`doctor` separates "configured" from "capture actually observed".** The
+  OpenCode plugin runs inside OpenCode's own runtime, which can silently
+  decline to load it (`opencode run --pure`, a Desktop build that cannot
+  load the plugin, a stalled plugin-dependency wait, a stale plugin). In
+  that state `doctor` previously showed `✓ Capture plugin`. It now adds a
+  separate **Capture verified** check that is green only when an OpenCode
+  session has actually been recorded in this repository's
+  `.openshard/runs.jsonl`, and the summary reads `Configured but
+  unverified` until then. `--json` gains `opencode.capture_observed` and
+  `opencode.capture_verified`. Capture itself, the translator and the
+  capability auth are unchanged.
+- **`openshard note` / `openshard feedback` no longer break a Receipt's
+  integrity.** Both commands amended the latest record without re-stamping
+  `content_hash`, so a fresh Receipt went from `Integrity  Matches` to
+  `Integrity  Mismatch` the moment OpenShard itself attached a note. They now
+  go through one canonical amendment path (`history.store.amend_latest_record`)
+  that verifies the stored hash first, applies the change, records an additive
+  `amendments` entry (`kind`, `recorded_at`, `source`, `integrity_before`,
+  `content_hash_restamped`) and preserves the integrity verdict: a valid hash
+  is re-stamped over the amended content; a legacy record with no hash is
+  never given one; a record that already read as mismatched keeps its stored
+  hash and stays `Mismatch`. `receipt_id`, `shard_id` and historical content
+  are untouched.
+- **History amendment and read behaviour is now consistent.** Every CLI
+  reader uses one loader (`history.store.load_history`): the last line that
+  parses to a JSON object is the latest record, malformed lines are skipped
+  on read and preserved byte-for-byte on write, and a legacy record is never
+  given a `content_hash` on read (`Not recorded` is never reported as
+  `Matches`). The amendment path targets the same record the loader reports
+  as latest. `note` and `feedback` also resolve `.openshard/runs.jsonl` from
+  any repository subdirectory, the same way `last` / `history` do, and the
+  feedback interaction/memory side-records land next to that history instead
+  of in the current directory.
 
 ### Added
 
-- **Per-agent delivery evidence in the capture service.** The service now
-  counts *accepted* (authenticated and queued) deliveries per capture agent,
-  exposed as `stats.by_agent` on `/health` and rendered by `openshard capture
-  status` (`by agent: opencode 12, claude_code 40`). Counted only after
-  authorization succeeds, so it cannot be spoofed and never weakens auth. This
-  is the live signal for "is this agent actually delivering", the complement of
-  the persistent per-repository `doctor` check above. No secret, path, prompt
-  or repository name is added to any output.
+- **`openshard capture status` exposes accepted delivery counts by agent.**
+  The capture service counts *accepted* (authenticated and queued)
+  deliveries per capture agent, exposed as `stats.by_agent` on `/health` and
+  rendered as `by agent: opencode 12, claude_code 40`. Counted only after
+  authorization succeeds, so it cannot be spoofed and never weakens auth.
+  This is the live signal for "is this agent actually delivering", the
+  complement of the persistent per-repository `doctor` check above. No
+  secret, path, prompt or repository name is added to any output.
 
 ## 0.4.4 - 2026-09-15
 
