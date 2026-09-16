@@ -393,7 +393,12 @@ class TestBlockingPath:
         # against -- folding on the hook path -- costs hundreds of ms per
         # call and moves the median, which stays strict.
         p50_budget, p95_budget = (60, 250) if sys.platform == "win32" else (25, 50)
-        attempts = 3 if sys.platform == "win32" else 1
+        # Linux runners are not immune either: on the v0.4.5 release PR the
+        # ubuntu 3.11 job failed this test with p50 0.6 ms and p95 69 ms -- a
+        # single scheduler stall in the 40-sample window, with the 3.12 job
+        # green on the same commit. Each attempt still has to pass the strict
+        # median, so a real hook-path regression cannot hide behind a retry.
+        attempts = 3
         for attempt in range(1, attempts + 1):
             roundtrips: list[float] = []
             for i in range(40):
