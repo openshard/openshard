@@ -29,6 +29,7 @@ from openshard.adapters import claude_capture_service as svc
 from openshard.adapters import opencode_plugin as oc
 from openshard.adapters.claude_hooks import StatusPayload, handle_hook, reduce_hook_payload
 from openshard.adapters.opencode_plugin_install import (
+    PLUGIN_LEGACY_RELPATH,
     PLUGIN_MARKER,
     PLUGIN_RELPATH,
     PLUGIN_VERSION,
@@ -548,22 +549,24 @@ class TestServicePath:
 # ---------------------------------------------------------------------------
 
 
-def _node_status() -> tuple[bool, str]:
-    """``(usable, reason)`` -- the reason names the exact node found, so a skip is never silent."""
+def _node_status() -> tuple[bool, str, int]:
+    """``(usable, reason, major)``. The plugin is plain JavaScript now, so any
+    reasonably modern node can load it -- no TypeScript type stripping needed
+    (that is the whole point: OpenCode Desktop's bundled Node cannot strip)."""
     node = shutil.which("node")
     if not node:
-        return False, "node not found on PATH; the real-plugin tests need node >= 23 (TypeScript type stripping)"
+        return False, "node not found on PATH; the real-plugin tests need node >= 18", 0
     try:
         out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=20).stdout.strip()
         major = int(out.lstrip("v").split(".", 1)[0])
     except Exception as exc:
-        return False, f"could not determine the version of {node} ({type(exc).__name__}); need node >= 23"
-    if major < 23:
-        return False, f"node {out} at {node} is too old; the real-plugin tests need node >= 23 (type stripping)"
-    return True, f"node {out} at {node}"
+        return False, f"could not determine the version of {node} ({type(exc).__name__}); need node >= 18", 0
+    if major < 18:
+        return False, f"node {out} at {node} is too old; the real-plugin tests need node >= 18", major
+    return True, f"node {out} at {node}", major
 
 
-_NODE_OK, _NODE_REASON = _node_status()
+_NODE_OK, _NODE_REASON, _NODE_MAJOR = _node_status()
 # CI can turn the skip into a hard failure so a silently-missing runtime is noticed.
 _NODE_REQUIRED_ENV = "OPENSHARD_REQUIRE_NODE_PLUGIN_TESTS"
 
@@ -576,15 +579,30 @@ def _require_node() -> str:
     return shutil.which("node") or "node"
 
 
+def _node_no_strip_argv(node: str) -> list[str]:
+    """Force TypeScript type stripping OFF, reproducing OpenCode Desktop's Node.
+
+    Desktop runs the server in an Electron utility process whose bundled Node is
+    compiled without amaro, so it cannot strip types and refuses a ``.ts`` plugin
+    outright. ``--no-experimental-strip-types`` (recognised from node 22.6) makes
+    a strip-capable dev node behave the same; older nodes never stripped anyway.
+    """
+    return ["--no-experimental-strip-types"] if _NODE_MAJOR >= 22 else []
+
+
 def _run_node_harness(harness_source: str, tmp_path: Path, *args: str) -> list[dict]:
-    """Run *harness_source* under node against the rendered plugin; returns the JSON lines it printed."""
+    """Run *harness_source* under node against the rendered plugin; returns the JSON lines it printed.
+
+    The plugin is written as ``openshard.js`` and node runs with type stripping
+    OFF, so the harness exercises the exact runtime that OpenCode Desktop uses.
+    """
     node = _require_node()
-    plugin = tmp_path / "openshard.ts"
+    plugin = tmp_path / "openshard.js"
     plugin.write_text(render_plugin_source(port=47899), encoding="utf-8")
     harness = tmp_path / "harness.mjs"
     harness.write_text(harness_source, encoding="utf-8")
     result = subprocess.run(
-        [node, "--no-warnings", str(harness), plugin.resolve().as_uri(), *args],
+        [node, "--no-warnings", *_node_no_strip_argv(node), str(harness), plugin.resolve().as_uri(), *args],
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, f"plugin harness failed under {_NODE_REASON}:\n{result.stderr}\n{result.stdout}"
@@ -705,12 +723,16 @@ report("final")
 class TestPluginUnderNode:
     def test_plugin_posts_bounded_documents_the_translator_accepts(self, tmp_path, repo):
         node = _require_node()
-        plugin = tmp_path / "openshard.ts"
+        # A .js plugin, loaded with type stripping OFF: this is exactly OpenCode
+        # Desktop's amaro-less Node, where the old .ts plugin failed to load and
+        # captured nothing. If this regresses to .ts, node raises
+        # ERR_UNKNOWN_FILE_EXTENSION and no documents are posted.
+        plugin = tmp_path / "openshard.js"
         plugin.write_text(render_plugin_source(port=47899), encoding="utf-8")
         harness = tmp_path / "harness.mjs"
         harness.write_text(HARNESS, encoding="utf-8")
         result = subprocess.run(
-            [node, "--no-warnings", str(harness), plugin.resolve().as_uri(), str(repo), SID],
+            [node, "--no-warnings", *_node_no_strip_argv(node), str(harness), plugin.resolve().as_uri(), str(repo), SID],
             capture_output=True, text=True, timeout=60,
         )
         assert result.returncode == 0, f"plugin harness failed under {_NODE_REASON}:\n{result.stderr}"
@@ -771,6 +793,38 @@ class TestPluginUnderNode:
         # With the queue drained, delivery is direct again.
         assert reports["final"]["delivered"][-1] == "session.deleted" and len(reports["final"]["delivered"]) == 205
         assert reports["final"]["starts"] == 3
+
+
+    def test_js_plugin_loads_where_typescript_does_not(self, tmp_path):
+        # The exact OpenCode Desktop condition: a Node that cannot strip types.
+        # The shipped .js plugin must import cleanly; a .ts one must NOT (that is
+        # the real Desktop failure -- ERR_UNKNOWN_FILE_EXTENSION -> plugin never
+        # loads -> zero events). Same rendered source, only the extension differs.
+        node = _require_node()
+        if not _node_no_strip_argv(node):
+            pytest.skip(f"{_NODE_REASON}: cannot force type-stripping off to emulate Desktop")
+        source = render_plugin_source(port=47899)
+        importer = tmp_path / "import.mjs"
+        importer.write_text(
+            "const m = await import(process.argv[2]);\n"
+            "if (typeof m.OpenShardCapture !== 'function') { console.error('no export'); process.exit(2); }\n"
+            "console.log('loaded');\n",
+            encoding="utf-8",
+        )
+
+        def _import(ext: str):
+            plugin = tmp_path / f"openshard.{ext}"
+            plugin.write_text(source, encoding="utf-8")
+            return subprocess.run(
+                [node, "--no-warnings", *_node_no_strip_argv(node), str(importer), plugin.resolve().as_uri()],
+                capture_output=True, text=True, timeout=60,
+            )
+
+        js = _import("js")
+        assert js.returncode == 0 and "loaded" in js.stdout, f"js plugin failed to load: {js.stderr}"
+        ts = _import("ts")
+        assert ts.returncode != 0, "the .ts plugin unexpectedly loaded under a no-strip node"
+        assert "ERR_UNKNOWN_FILE_EXTENSION" in ts.stderr or "Unknown file extension" in ts.stderr, ts.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -834,6 +888,48 @@ class TestInstaller:
         assert result.status == "removed" and not (repo / PLUGIN_RELPATH).exists()
         assert not (repo / ".opencode").exists()  # only the directories OpenShard created
         assert len(_lines(repo)) == 1  # history untouched
+
+    def test_install_migrates_legacy_ts_to_js(self, repo):
+        # A pre-0.4.5 OpenShard .ts is what silently fails to load in OpenCode
+        # Desktop. Installing the .js must remove it, so OpenCode never loads
+        # both (double capture under Bun / repeated load errors under Node).
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        result = install_opencode_plugin(repo_root=repo, port=47811)
+        assert result.status == "installed"
+        assert (repo / PLUGIN_RELPATH).exists() and not legacy.exists()
+        assert any("Removed the old TypeScript plugin" in w for w in result.warnings)
+        # Detection reports the current JS plugin, not the removed .ts.
+        assert detect_plugin(repo)["version"] == PLUGIN_VERSION
+
+    def test_install_leaves_user_owned_ts_alone(self, repo):
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("export const Mine = async () => ({})\n", encoding="utf-8")  # no OpenShard marker
+        result = install_opencode_plugin(repo_root=repo, port=47811)
+        assert result.status == "installed" and legacy.exists()
+        assert legacy.read_text(encoding="utf-8") == "export const Mine = async () => ({})\n"
+
+    def test_legacy_ts_only_is_detected_as_needing_upgrade(self, repo):
+        # Only the old .ts present (never re-run setup): doctor must see an
+        # OpenShard plugin at an old version so it prompts a reinstall, rather
+        # than reporting "absent".
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nconst PORT = 47811\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        found = detect_plugin(repo)
+        assert found["state"] == "openshard" and found["version"] == 4 and found.get("legacy_ts") is True
+
+    def test_uninstall_removes_legacy_ts_too(self, repo):
+        install_opencode_plugin(repo_root=repo, port=47811)
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        assert uninstall_opencode_plugin(repo_root=repo).status == "removed"
+        assert not (repo / PLUGIN_RELPATH).exists() and not legacy.exists()
 
 
 # ---------------------------------------------------------------------------

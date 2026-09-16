@@ -2823,7 +2823,7 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
 
     codex: merges `openshard hooks codex` into .codex/hooks.json (project-local;
     unrelated hooks preserved). opencode: writes the OpenShard plugin to
-    .opencode/plugins/openshard.ts (never overwrites a file that is not
+    .opencode/plugins/openshard.js (never overwrites a file that is not
     OpenShard's). cursor: merges `openshard hooks cursor` into
     .cursor/hooks.json (project-local; unrelated hooks preserved; Cursor
     reloads it without a restart). All are idempotent and target the shared
