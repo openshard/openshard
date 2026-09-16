@@ -24,9 +24,11 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
 from openshard.adapters import claude_capture_service as svc
 from openshard.adapters import opencode_plugin as oc
+from openshard.adapters.agent_setup import opencode_capture_observed
 from openshard.adapters.claude_hooks import StatusPayload, handle_hook, reduce_hook_payload
 from openshard.adapters.opencode_plugin_install import (
     PLUGIN_MARKER,
@@ -542,6 +544,30 @@ class TestServicePath:
             assert status == 200 and reply == b"{}", body
         assert client.health(service.port)["stats"]["queued"] == 0
 
+    def test_per_agent_received_is_proof_of_delivery(self, service, repo):
+        # This is the signal that distinguishes "the OpenCode plugin file
+        # exists" from "OpenCode is actually delivering events": an integration
+        # that never delivers (plugin not loaded) leaves its agent absent here.
+        def by_agent() -> dict:
+            return dict(client.health(service.port)["stats"].get("by_agent") or {})
+
+        assert by_agent() == {}
+        assert _post(service.port, _doc("session.created", repo, parent_id=None))
+        assert _post(service.port, _doc("chat.message", repo, prompt="hi"))
+        assert _wait_for(lambda: by_agent().get("opencode", {}).get("received", 0) >= 2)
+        assert by_agent()["opencode"]["last_event"] in ("SessionStart", "UserPromptSubmit")
+
+        # An unauthenticated request is refused and never counted as a delivery,
+        # so authenticated capture is not weakened and the evidence stays honest.
+        before = by_agent()["opencode"]["received"]
+        status, _reply = client._request(
+            "POST", service.port, client.OPENCODE_HOOK_PATH,
+            json.dumps(_doc("chat.message", repo, prompt="x")).encode("utf-8"),
+            {"content-type": "application/json", auth.TOKEN_HEADER: "not-a-valid-token"},
+        )
+        assert status == 401
+        assert client.health(service.port)["stats"]["by_agent"]["opencode"]["received"] == before
+
 
 # ---------------------------------------------------------------------------
 # The real plugin under node: representative OpenCode events -> POST documents
@@ -845,6 +871,26 @@ def _which(name: str):
     return {"opencode": "/usr/local/bin/opencode", "openshard": "/usr/local/bin/openshard"}.get(name)
 
 
+class TestCaptureObserved:
+    def test_none_when_no_history(self, repo):
+        # No runs file yet: unknown, never falsely "observed".
+        assert opencode_capture_observed(repo) is None
+        assert opencode_capture_observed(None) is None
+
+    def test_false_when_history_has_no_opencode_run(self, repo):
+        runs = repo / ".openshard" / "runs.jsonl"
+        runs.parent.mkdir(parents=True, exist_ok=True)
+        runs.write_text(json.dumps({"executor": "claude_code", "import_source": "claude_code"}) + "\n",
+                        encoding="utf-8")
+        assert opencode_capture_observed(repo) is False
+
+    def test_true_when_an_opencode_run_is_recorded(self, repo):
+        install_opencode_plugin(repo_root=repo, port=47811)
+        _drive_inline(repo)
+        assert any(e.get("executor") == "opencode_plugin" for e in _lines(repo))
+        assert opencode_capture_observed(repo) is True
+
+
 class TestCli:
     def test_capture_install_and_uninstall_opencode(self, repo):
         runner = CliRunner()
@@ -881,4 +927,26 @@ class TestCli:
         data = json.loads(after.output)
         assert data["opencode"]["configured"] is True and data["opencode"]["port"] == 47811
         assert data["codex"]["cli_available"] is False
-        assert "use OpenCode normally" in human.output
+        # Installed but never captured: doctor is honest -- it does NOT claim the
+        # integration works just because the plugin file exists (the reported
+        # OpenCode failure). It reports "configured but unverified", not "ready".
+        assert data["opencode"]["capture_verified"] is False
+        assert "use OpenCode normally" not in human.output
+        assert "Configured but unverified" in human.output
+        assert "Capture verified" in human.output
+
+    def test_doctor_verifies_opencode_after_a_capture(self, repo):
+        # Once a real OpenCode session has been captured into this repo's
+        # history, doctor upgrades from "configured but unverified" to verified
+        # and only then claims the integration works.
+        install_opencode_plugin(repo_root=repo, port=47811)
+        _drive_inline(repo)  # folds one OpenCode Shard into .openshard/runs.jsonl
+        assert any(e.get("executor") == "opencode_plugin" for e in _lines(repo))
+        runner = CliRunner()
+        with patch("shutil.which", side_effect=_which):
+            data = json.loads(runner.invoke(cli, ["doctor", "--json", "--repo-path", str(repo)]).output)
+            human = runner.invoke(cli, ["doctor", "--repo-path", str(repo)]).output
+        assert data["opencode"]["capture_observed"] is True
+        assert data["opencode"]["capture_verified"] is True
+        assert "use OpenCode normally" in human
+        assert "Configured but unverified" not in human

@@ -2894,6 +2894,19 @@ def _render_capture_status(status: dict) -> None:
                     f"  refused:  {rejected} unauthenticated request(s) refused, "
                     f"{corrupt} queued event(s) quarantined as undecodable"
                 )
+            by_agent = stats.get("by_agent")
+            if isinstance(by_agent, dict) and by_agent:
+                # Per-agent accepted deliveries: this is the honest signal for
+                # "is this agent's capture actually working" -- an agent whose
+                # config exists but which never delivers (e.g. an OpenCode that
+                # is not loading the plugin) simply does not appear here.
+                parts = []
+                for agent in sorted(by_agent):
+                    entry = by_agent.get(agent)
+                    if isinstance(entry, dict):
+                        parts.append(f"{agent} {int(entry.get('received') or 0)}")
+                if parts:
+                    click.echo(f"  by agent: {', '.join(parts)} (accepted since start)")
         timing = status.get("blocking_ms") or {}
         if timing.get("n"):
             click.echo(
@@ -6164,6 +6177,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
 
     ready_agents: list[str] = []
     limited_agents: list[str] = []
+    unverified_agents: list[str] = []
     if fully_ready:
         ready_agents.append("Claude Code")
     elif core_ready:
@@ -6193,13 +6207,31 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
             (integration_label, integration_ok, integration_detail),
             ("Capture service", service_running, service_detail_shared),
         ]
+        # The OpenCode plugin runs inside OpenCode's own runtime, so a valid
+        # plugin file is not proof capture works: only an actually-recorded
+        # OpenCode session is. Surface that distinction as its own line rather
+        # than letting "Capture plugin ✓" imply delivery.
+        opencode_unverified = False
+        if key == "opencode" and integration_ok:
+            if status.capture_observed is True:
+                agent_checks.append(("Capture verified", True, ""))
+            else:
+                opencode_unverified = True
+                agent_checks.append((
+                    "Capture verified", False,
+                    "no OpenCode session captured yet; run one to verify (if a completed session "
+                    "records nothing, OpenCode is not loading the plugin)",
+                ))
         click.echo(f"\n{label}\n")
         for check_label, ok, detail in agent_checks:
             mark = "✓" if ok else "✗"
             suffix = "" if ok else f" ({detail})"
             click.echo(f"  {mark} {check_label}{suffix}")
         if root is not None and history_writable and status.cli_available and integration_ok:
-            ready_agents.append(label)
+            if opencode_unverified:
+                unverified_agents.append(label)
+            else:
+                ready_agents.append(label)
 
     click.echo("")
     if ready_agents and not limited_agents:
@@ -6207,8 +6239,14 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     elif ready_agents or limited_agents:
         names = ", ".join(ready_agents + limited_agents)
         click.echo(f"Ready, with limited receipts -- use {names} normally. Run `openshard setup` for details.")
-    else:
+    elif not unverified_agents:
         click.echo("Not ready -- run `openshard setup` to configure capture for the coding agents you use.")
+    if unverified_agents:
+        click.echo(
+            f"Configured but unverified: {', '.join(unverified_agents)} -- the plugin is installed but "
+            "no capture has been recorded yet. Run a session to confirm; if nothing is captured, "
+            "OpenCode is not loading the plugin (e.g. `--pure` or a desktop build that skips project plugins)."
+        )
     click.echo("")
 
 
