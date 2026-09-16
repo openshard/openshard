@@ -29,7 +29,7 @@ for security are below, with what each one trusts.
   Cursor, Codex or OpenCode events, nor events for another repository. A
   request without a valid credential is refused before its body is parsed
   and nothing is recorded; a request carrying browser headers (`Origin`,
-  `Referer`, `Sec-Fetch-*`) is refused outright. `POST /shutdown` accepts
+  `Referer`, `Sec-Fetch-Site`) is refused outright. `POST /shutdown` accepts
   the token only, never a capability. `GET /health` is the only
   unauthenticated endpoint and returns counters and an informational
   instance id; it authorises nothing.
@@ -53,7 +53,7 @@ for security are below, with what each one trusts.
 * Codex and Cursor: command hooks run `openshard hooks codex|cursor`,
   which reads the token file. No credential is written into `.codex/` or
   `.cursor/`.
-* OpenCode: the plugin at `.opencode/plugins/openshard.ts` carries the
+* OpenCode: the plugin at `.opencode/plugins/openshard.js` carries the
   capability scoped to this repository and to OpenCode. It never reads
   the token file. The master token appears in no agent's configuration.
 * All of them are **fail-open for the agent**: if OpenShard is missing,

@@ -22,7 +22,7 @@ Two credential shapes, one server-side check
   configuration carries when no process of ours runs at delivery time:
   Claude Code's HTTP hook header in ``.claude/settings.local.json`` (agent
   ``claude_code``) and the OpenCode plugin file
-  ``.opencode/plugins/openshard.ts`` (agent ``opencode``). Both files are
+  ``.opencode/plugins/openshard.js`` (agent ``opencode``). Both files are
   kept out of git by the installer (``.git/info/exclude``), which refuses
   to write a credential into a file git tracks. A capability authorises
   events **for that repository and that agent only** -- a leaked Claude
@@ -233,7 +233,16 @@ def verify_presented(
     return None
 
 
-_BROWSER_HEADERS = ("Origin", "Referer", "Sec-Fetch-Mode", "Sec-Fetch-Site")
+# Headers a real cross-origin browser request always carries and that a
+# legitimate local client does not. A cross-origin `fetch` from a page always
+# sends ``Origin`` (and modern browsers ``Sec-Fetch-Site``), so these reliably
+# flag a browser context. ``Sec-Fetch-Mode`` is deliberately NOT here: Node's
+# undici ``fetch`` sets ``Sec-Fetch-Mode: cors`` on every request even though it
+# is not a browser, and OpenCode Desktop runs the capture plugin under Electron's
+# Node -- so treating that header as a browser signal silently refused every
+# authenticated Desktop event (the Bun CLI's fetch does not send it, which is why
+# only Desktop was affected). The capability remains the primary gate regardless.
+_BROWSER_HEADERS = ("Origin", "Referer", "Sec-Fetch-Site")
 
 
 def has_browser_headers(headers: object) -> bool:
@@ -241,7 +250,8 @@ def has_browser_headers(headers: object) -> bool:
 
     Defence in depth, not the primary check: a page can never present the
     token, but refusing these outright also stops it from probing which
-    paths exist.
+    paths exist. Kept narrow to headers genuine (non-browser) local clients
+    never send, so a legitimate integration is never mistaken for a page.
     """
     getter = getattr(headers, "get", None)
     if not callable(getter):

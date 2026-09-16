@@ -90,6 +90,63 @@ def agent_label(agent: str) -> str:
     return _LABELS.get(agent, agent)
 
 
+# The capture record fields that mark a run as OpenCode-originated (see
+# opencode_plugin / history.event). Either is sufficient evidence that the
+# OpenCode plugin actually delivered events into this repository.
+_OPENCODE_RECORD_MARKERS: tuple[tuple[str, str], ...] = (
+    ("executor", "opencode_plugin"),
+    ("import_source", "opencode"),
+)
+_RUNS_RELPATH = Path(".openshard") / "runs.jsonl"
+_MAX_RUNS_SCAN_BYTES = 8 * 1024 * 1024
+
+
+def opencode_capture_observed(repo_root: Path | None) -> bool | None:
+    """Whether OpenShard has an actual OpenCode capture recorded for *repo_root*.
+
+    This is the difference between "the plugin file is installed" (structural)
+    and "OpenCode has really delivered events here" (proven). It reads the
+    repository's own ``.openshard/runs.jsonl`` -- persistent, per-repository,
+    and impossible to fake without a real captured session -- and returns
+    ``True`` if any recorded run is OpenCode-originated, ``False`` if the file
+    exists but holds no such run, and ``None`` when it cannot tell (no history
+    file yet, or it could not be read). Never raises.
+
+    A ``False`` here next to an installed plugin is exactly the reported
+    failure: OpenCode ran and edited the repo, but nothing was captured
+    because the plugin never loaded (``--pure``, a desktop build that skips
+    project plugins, a stalled dependency wait, or a stale plugin).
+    """
+    if repo_root is None:
+        return None
+    path = Path(repo_root) / _RUNS_RELPATH
+    try:
+        if not path.is_file():
+            return None
+        if path.stat().st_size > _MAX_RUNS_SCAN_BYTES:
+            # Unusually large history: don't block doctor scanning it; treat as
+            # "cannot cheaply prove" rather than risk a slow/again-unbounded read.
+            return None
+        import json as _json
+
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = _json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and any(
+                    entry.get(k) == v for k, v in _OPENCODE_RECORD_MARKERS
+                ):
+                    return True
+        return False
+    except OSError:
+        return None
+
+
 def detect_agent_cli(agent: str) -> tuple[bool, str | None]:
     """``(available, path)`` for the agent's CLI on PATH. Never raises."""
     names = _CLI_NAMES.get(agent)
@@ -121,10 +178,21 @@ class AgentIntegrationStatus:
     config_error: str | None = None
     port: int | None = None  # port an installed OpenCode plugin targets
     capture_port_mismatch: bool = False
+    # v0.4.5: whether an actual capture from this agent has been recorded for
+    # this repository (proof of delivery, not just of a config file). True /
+    # False / None (unknown -- not applicable or could not tell). Only the
+    # OpenCode plugin, which runs inside OpenCode's own runtime and can silently
+    # fail to load, sets this today; hook-based agents run `openshard` directly.
+    capture_observed: bool | None = None
 
     @property
     def configured(self) -> bool:
         return self.state == "openshard" and not self.capture_port_mismatch
+
+    @property
+    def capture_verified(self) -> bool:
+        """Configured *and* proven to deliver (a real capture exists)."""
+        return self.configured and self.capture_observed is True
 
     def to_dict(self) -> dict:
         return {
@@ -132,6 +200,8 @@ class AgentIntegrationStatus:
             "cli_available": self.cli_available,
             "cli_path": self.cli_path,
             "configured": self.configured,
+            "capture_observed": self.capture_observed,
+            "capture_verified": self.capture_verified,
             "state": self.state,
             "detail": self.detail,
             "config_path": self.config_relpath,
@@ -172,8 +242,19 @@ def detect_codex_integration(repo_root: Path | None) -> AgentIntegrationStatus:
     )
 
 
-def detect_opencode_integration(repo_root: Path | None, *, service_port: int | None = None) -> AgentIntegrationStatus:
-    """Read-only snapshot of the OpenCode plugin integration for *repo_root*."""
+def detect_opencode_integration(
+    repo_root: Path | None,
+    *,
+    service_port: int | None = None,
+    capture_observed: bool | None = None,
+) -> AgentIntegrationStatus:
+    """Read-only snapshot of the OpenCode plugin integration for *repo_root*.
+
+    *capture_observed* is the evidence (from ``opencode_capture_observed``)
+    that OpenCode has actually delivered events here; when the plugin is
+    installed but nothing has been captured, the detail says so rather than
+    implying the integration works. It is looked up here when not supplied.
+    """
     available, path = detect_agent_cli(AGENT_OPENCODE)
     rel = OPENCODE_PLUGIN_RELPATH.as_posix()
     if repo_root is None:
@@ -186,18 +267,49 @@ def detect_opencode_integration(repo_root: Path | None, *, service_port: int | N
             AGENT_OPENCODE, available, path, repo_root, "error", str(found["error"]), rel,
             config_error=str(found["error"]),
         )
+    if capture_observed is None:
+        capture_observed = opencode_capture_observed(repo_root)
     state = str(found.get("state"))
     port = found.get("port")
     version = found.get("version")
     mismatch = False
     capability_state = str(found.get("capability_state") or "n/a")
     if state == "openshard":
-        if version != PLUGIN_VERSION:
+        if found.get("legacy_ts"):
+            # Only the pre-0.4.5 TypeScript plugin is present. It loads under the
+            # Bun CLI but not under OpenCode Desktop's Node, so say exactly that
+            # rather than a generic "older version".
+            state, detail = "partial", (
+                "plugin is the pre-0.4.5 TypeScript file (.opencode/plugins/openshard.ts), which "
+                "OpenCode Desktop cannot load; run `openshard setup` to replace it with openshard.js"
+            )
+        elif found.get("legacy_ts_also_present"):
+            # The installer only leaves an OpenShard .ts next to the .js when
+            # git tracks it. OpenCode's CLI loads both -> every event twice.
+            state, detail = "partial", (
+                "both .opencode/plugins/openshard.js and the pre-0.4.5 openshard.ts are present, so "
+                "OpenCode loads the plugin twice (double capture); openshard.ts is tracked by git, so "
+                "`git rm .opencode/plugins/openshard.ts` and commit"
+            )
+        elif version != PLUGIN_VERSION:
             state, detail = "partial", "older plugin version; run `openshard setup` to update it"
         elif capability_state in ("missing", "stale"):
             state, detail = "partial", (
                 "plugin carries no valid capture credential (its events are refused by the service); "
                 "run `openshard setup` to rewrite it"
+            )
+        elif capture_observed is True:
+            detail = f"configured ({rel}); OpenCode capture verified in this repository"
+        elif capture_observed is False:
+            # The reported failure: the plugin file is present and valid but no
+            # OpenCode session has ever been captured here. Say what is proven
+            # and what is not, and name the likely reason -- OpenShard cannot
+            # make OpenCode load the plugin, so "the file exists" is not "it works".
+            detail = (
+                f"plugin installed ({rel}) but no OpenCode capture recorded here yet. Run an OpenCode "
+                "session in this repository to verify. If a completed session still records nothing, "
+                "OpenCode is not loading the plugin (e.g. `--pure`, an OpenCode build that cannot load "
+                "it, or a stale plugin) -- re-run `openshard setup`."
             )
         else:
             detail = f"configured ({rel})"
@@ -209,6 +321,7 @@ def detect_opencode_integration(repo_root: Path | None, *, service_port: int | N
     return AgentIntegrationStatus(
         AGENT_OPENCODE, available, path, repo_root, state, detail, rel,
         port=port if isinstance(port, int) else None, capture_port_mismatch=mismatch,
+        capture_observed=capture_observed if state in ("openshard", "partial") else None,
     )
 
 

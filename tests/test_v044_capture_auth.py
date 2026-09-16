@@ -212,11 +212,13 @@ class TestHookAuthentication:
 
     def test_browser_originated_requests_are_rejected_even_with_a_token(self, service, repo):
         token = auth.ensure_token(service.env)
+        # A real cross-origin page always sends Origin (and Sec-Fetch-Site);
+        # these stay refused even when a token is presented.
         for headers in (
             {"Origin": "http://evil.example", auth.TOKEN_HEADER: token},
             {"Origin": "null", auth.TOKEN_HEADER: token},
             {"Referer": "http://evil.example/page", auth.TOKEN_HEADER: token},
-            {"Sec-Fetch-Mode": "cors", auth.TOKEN_HEADER: token},
+            {"Sec-Fetch-Site": "cross-site", auth.TOKEN_HEADER: token},
         ):
             status, _ = _raw_post(
                 service.port, client.HOOK_PATH, _payload("UserPromptSubmit", repo, prompt="from a page"),
@@ -225,6 +227,20 @@ class TestHookAuthentication:
             assert status == 403, headers
         assert service.server.recorder.wait_idle(5)
         assert _no_evidence(repo)
+
+    def test_sec_fetch_mode_alone_is_not_treated_as_a_browser(self, service, repo):
+        # Node's undici `fetch` (OpenCode Desktop's runtime) sends
+        # `Sec-Fetch-Mode: cors` on every POST but no Origin/Sec-Fetch-Site.
+        # That header alone must NOT be refused as a browser origin, or every
+        # authenticated Desktop event is silently dropped -- the real bug.
+        token = auth.ensure_token(service.env)
+        status, _ = _raw_post(
+            service.port, client.HOOK_PATH, _payload("UserPromptSubmit", repo, prompt="from desktop node"),
+            {client.PROJECT_DIR_HEADER: str(repo), "Sec-Fetch-Mode": "cors", auth.TOKEN_HEADER: token},
+        )
+        assert status == 200
+        assert service.server.recorder.wait_idle(5)
+        assert not _no_evidence(repo)  # the event was actually recorded
 
 
 class TestOpenCodePluginCapability:
@@ -247,6 +263,26 @@ class TestOpenCodePluginCapability:
         # A Claude capability for the same repository is not an OpenCode one.
         claude_cap = auth.repo_capability(token, tmp_path, "claude_code")
         assert plugin_capability_state(render_plugin_source(47811, claude_cap), tmp_path, env=capture_env) == "stale"
+
+    def test_desktop_style_opencode_post_is_accepted(self, service, repo):
+        # The exact OpenCode Desktop request: a valid OpenCode capability on the
+        # OpenCode receiver, carrying the `Sec-Fetch-Mode: cors` header that
+        # Electron's Node (undici) attaches. It must be accepted and recorded --
+        # this is the request that was silently refused, capturing nothing.
+        token = auth.ensure_token(service.env)
+        root = resolve_repo_root(
+            __import__("openshard.adapters.claude_hooks", fromlist=["HookPayload"]).HookPayload(
+                event="SessionStart", session_id=None, cwd=str(repo)), {})
+        cap = auth.repo_capability(token, root, "opencode")
+        doc = json.dumps({"agent": "opencode", "event": "chat.message", "session_id": SID,
+                          "directory": str(repo), "worktree": str(repo), "prompt": "real desktop work"}).encode()
+        status, _ = _raw_post(
+            service.port, client.OPENCODE_HOOK_PATH, doc,
+            {client.PROJECT_DIR_HEADER: str(repo), "Sec-Fetch-Mode": "cors", auth.TOKEN_HEADER: cap},
+        )
+        assert status == 200
+        assert service.server.recorder.wait_idle(5)
+        assert not _no_evidence(repo)
 
 
 class TestControlEndpoints:

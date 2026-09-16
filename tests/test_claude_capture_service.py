@@ -341,8 +341,18 @@ class TestLifecycle:
             doc = client.health(port)
             assert doc is not None and doc["pid"] != os.getpid()
             assert svc._pid_alive(doc["pid"])
-            log = Path(client.log_path(env)).read_text(encoding="utf-8")
-            assert f"listening on 127.0.0.1:{port}" in log
+            # The serve thread answers /health before the service writes its
+            # state file and logs "listening" (see serve()), so the log can
+            # still be empty right after the first health round-trip; poll.
+            log_file = Path(client.log_path(env))
+
+            def _log_text() -> str:
+                try:
+                    return log_file.read_text(encoding="utf-8")
+                except OSError:
+                    return ""
+
+            assert _wait_for(lambda: f"listening on 127.0.0.1:{port}" in _log_text(), timeout=15), _log_text()
         finally:
             assert client.request_shutdown(env, wait_seconds=15)
         assert _wait_for(lambda: not svc._pid_alive(doc["pid"]), timeout=15)
@@ -393,7 +403,12 @@ class TestBlockingPath:
         # against -- folding on the hook path -- costs hundreds of ms per
         # call and moves the median, which stays strict.
         p50_budget, p95_budget = (60, 250) if sys.platform == "win32" else (25, 50)
-        attempts = 3 if sys.platform == "win32" else 1
+        # Linux runners are not immune either: on the v0.4.5 release PR the
+        # ubuntu 3.11 job failed this test with p50 0.6 ms and p95 69 ms -- a
+        # single scheduler stall in the 40-sample window, with the 3.12 job
+        # green on the same commit. Each attempt still has to pass the strict
+        # median, so a real hook-path regression cannot hide behind a retry.
+        attempts = 3
         for attempt in range(1, attempts + 1):
             roundtrips: list[float] = []
             for i in range(40):

@@ -122,11 +122,18 @@ def _strip_blocked(obj: object, depth: int = 0) -> object:
     return obj
 
 
-def coerce_shard_entry(entry: object) -> dict:
+def coerce_shard_entry(entry: object, *, stamp_hash: bool = True) -> dict:
     """Coerce a raw run-history entry to a safe, defaults-filled dict.
 
     Accepts records at any ``schema_version`` (including missing).  Never
     raises.  Returns a new dict — does not mutate *entry*.
+
+    ``stamp_hash`` (default ``True``) is the *write-path* behaviour: a record
+    with no ``content_hash`` gets one computed over its coerced content.
+    Readers (``history.store.load_history``) pass ``stamp_hash=False`` so a
+    legacy record is never given an integrity it did not have when it was
+    written -- its receipt keeps reporting ``Not recorded`` instead of a
+    fabricated ``Matches``. A stored hash is never overwritten either way.
 
     * If *entry* is not a dict, returns a minimal safe dict immediately.
     * Blocked fields are stripped recursively **first** so they cannot appear
@@ -163,7 +170,7 @@ def coerce_shard_entry(entry: object) -> dict:
         # later mismatch surfaces tampering instead of being silently re-stamped.
         # Computed last so the hash covers the fully coerced (blocked-fields-
         # stripped) content.
-        if SHARD_HASH_FIELD not in result:
+        if stamp_hash and SHARD_HASH_FIELD not in result:
             result[SHARD_HASH_FIELD] = compute_shard_hash(result)
 
     except Exception:

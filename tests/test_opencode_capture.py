@@ -24,11 +24,14 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
 from openshard.adapters import claude_capture_service as svc
 from openshard.adapters import opencode_plugin as oc
+from openshard.adapters.agent_setup import detect_opencode_integration, opencode_capture_observed
 from openshard.adapters.claude_hooks import StatusPayload, handle_hook, reduce_hook_payload
 from openshard.adapters.opencode_plugin_install import (
+    PLUGIN_LEGACY_RELPATH,
     PLUGIN_MARKER,
     PLUGIN_RELPATH,
     PLUGIN_VERSION,
@@ -507,7 +510,12 @@ class TestServicePath:
         # against -- folding on the hook path -- costs hundreds of ms per
         # call and moves the median, which stays strict.
         p50_budget, p95_budget = (60, 250) if sys.platform == "win32" else (25, 50)
-        attempts = 3 if sys.platform == "win32" else 1
+        # Linux runners are not immune either: on the v0.4.5 release PR the
+        # ubuntu 3.11 job failed this test with p50 0.6 ms and p95 69 ms -- a
+        # single scheduler stall in the 40-sample window, with the 3.12 job
+        # green on the same commit. Each attempt still has to pass the strict
+        # median, so a real hook-path regression cannot hide behind a retry.
+        attempts = 3
         for attempt in range(1, attempts + 1):
             roundtrips: list[float] = []
             for i in range(40):
@@ -542,28 +550,54 @@ class TestServicePath:
             assert status == 200 and reply == b"{}", body
         assert client.health(service.port)["stats"]["queued"] == 0
 
+    def test_per_agent_received_is_proof_of_delivery(self, service, repo):
+        # This is the signal that distinguishes "the OpenCode plugin file
+        # exists" from "OpenCode is actually delivering events": an integration
+        # that never delivers (plugin not loaded) leaves its agent absent here.
+        def by_agent() -> dict:
+            return dict(client.health(service.port)["stats"].get("by_agent") or {})
+
+        assert by_agent() == {}
+        assert _post(service.port, _doc("session.created", repo, parent_id=None))
+        assert _post(service.port, _doc("chat.message", repo, prompt="hi"))
+        assert _wait_for(lambda: by_agent().get("opencode", {}).get("received", 0) >= 2)
+        assert by_agent()["opencode"]["last_event"] in ("SessionStart", "UserPromptSubmit")
+
+        # An unauthenticated request is refused and never counted as a delivery,
+        # so authenticated capture is not weakened and the evidence stays honest.
+        before = by_agent()["opencode"]["received"]
+        status, _reply = client._request(
+            "POST", service.port, client.OPENCODE_HOOK_PATH,
+            json.dumps(_doc("chat.message", repo, prompt="x")).encode("utf-8"),
+            {"content-type": "application/json", auth.TOKEN_HEADER: "not-a-valid-token"},
+        )
+        assert status == 401
+        assert client.health(service.port)["stats"]["by_agent"]["opencode"]["received"] == before
+
 
 # ---------------------------------------------------------------------------
 # The real plugin under node: representative OpenCode events -> POST documents
 # ---------------------------------------------------------------------------
 
 
-def _node_status() -> tuple[bool, str]:
-    """``(usable, reason)`` -- the reason names the exact node found, so a skip is never silent."""
+def _node_status() -> tuple[bool, str, int]:
+    """``(usable, reason, major)``. The plugin is plain JavaScript now, so any
+    reasonably modern node can load it -- no TypeScript type stripping needed
+    (that is the whole point: OpenCode Desktop's bundled Node cannot strip)."""
     node = shutil.which("node")
     if not node:
-        return False, "node not found on PATH; the real-plugin tests need node >= 23 (TypeScript type stripping)"
+        return False, "node not found on PATH; the real-plugin tests need node >= 18", 0
     try:
         out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=20).stdout.strip()
         major = int(out.lstrip("v").split(".", 1)[0])
     except Exception as exc:
-        return False, f"could not determine the version of {node} ({type(exc).__name__}); need node >= 23"
-    if major < 23:
-        return False, f"node {out} at {node} is too old; the real-plugin tests need node >= 23 (type stripping)"
-    return True, f"node {out} at {node}"
+        return False, f"could not determine the version of {node} ({type(exc).__name__}); need node >= 18", 0
+    if major < 18:
+        return False, f"node {out} at {node} is too old; the real-plugin tests need node >= 18", major
+    return True, f"node {out} at {node}", major
 
 
-_NODE_OK, _NODE_REASON = _node_status()
+_NODE_OK, _NODE_REASON, _NODE_MAJOR = _node_status()
 # CI can turn the skip into a hard failure so a silently-missing runtime is noticed.
 _NODE_REQUIRED_ENV = "OPENSHARD_REQUIRE_NODE_PLUGIN_TESTS"
 
@@ -576,15 +610,30 @@ def _require_node() -> str:
     return shutil.which("node") or "node"
 
 
+def _node_no_strip_argv(node: str) -> list[str]:
+    """Force TypeScript type stripping OFF, reproducing OpenCode Desktop's Node.
+
+    Desktop runs the server in an Electron utility process whose bundled Node is
+    compiled without amaro, so it cannot strip types and refuses a ``.ts`` plugin
+    outright. ``--no-experimental-strip-types`` (recognised from node 22.6) makes
+    a strip-capable dev node behave the same; older nodes never stripped anyway.
+    """
+    return ["--no-experimental-strip-types"] if _NODE_MAJOR >= 22 else []
+
+
 def _run_node_harness(harness_source: str, tmp_path: Path, *args: str) -> list[dict]:
-    """Run *harness_source* under node against the rendered plugin; returns the JSON lines it printed."""
+    """Run *harness_source* under node against the rendered plugin; returns the JSON lines it printed.
+
+    The plugin is written as ``openshard.js`` and node runs with type stripping
+    OFF, so the harness exercises the exact runtime that OpenCode Desktop uses.
+    """
     node = _require_node()
-    plugin = tmp_path / "openshard.ts"
+    plugin = tmp_path / "openshard.js"
     plugin.write_text(render_plugin_source(port=47899), encoding="utf-8")
     harness = tmp_path / "harness.mjs"
     harness.write_text(harness_source, encoding="utf-8")
     result = subprocess.run(
-        [node, "--no-warnings", str(harness), plugin.resolve().as_uri(), *args],
+        [node, "--no-warnings", *_node_no_strip_argv(node), str(harness), plugin.resolve().as_uri(), *args],
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, f"plugin harness failed under {_NODE_REASON}:\n{result.stderr}\n{result.stdout}"
@@ -705,12 +754,16 @@ report("final")
 class TestPluginUnderNode:
     def test_plugin_posts_bounded_documents_the_translator_accepts(self, tmp_path, repo):
         node = _require_node()
-        plugin = tmp_path / "openshard.ts"
+        # A .js plugin, loaded with type stripping OFF: this is exactly OpenCode
+        # Desktop's amaro-less Node, where the old .ts plugin failed to load and
+        # captured nothing. If this regresses to .ts, node raises
+        # ERR_UNKNOWN_FILE_EXTENSION and no documents are posted.
+        plugin = tmp_path / "openshard.js"
         plugin.write_text(render_plugin_source(port=47899), encoding="utf-8")
         harness = tmp_path / "harness.mjs"
         harness.write_text(HARNESS, encoding="utf-8")
         result = subprocess.run(
-            [node, "--no-warnings", str(harness), plugin.resolve().as_uri(), str(repo), SID],
+            [node, "--no-warnings", *_node_no_strip_argv(node), str(harness), plugin.resolve().as_uri(), str(repo), SID],
             capture_output=True, text=True, timeout=60,
         )
         assert result.returncode == 0, f"plugin harness failed under {_NODE_REASON}:\n{result.stderr}"
@@ -771,6 +824,38 @@ class TestPluginUnderNode:
         # With the queue drained, delivery is direct again.
         assert reports["final"]["delivered"][-1] == "session.deleted" and len(reports["final"]["delivered"]) == 205
         assert reports["final"]["starts"] == 3
+
+
+    def test_js_plugin_loads_where_typescript_does_not(self, tmp_path):
+        # The exact OpenCode Desktop condition: a Node that cannot strip types.
+        # The shipped .js plugin must import cleanly; a .ts one must NOT (that is
+        # the real Desktop failure -- ERR_UNKNOWN_FILE_EXTENSION -> plugin never
+        # loads -> zero events). Same rendered source, only the extension differs.
+        node = _require_node()
+        if not _node_no_strip_argv(node):
+            pytest.skip(f"{_NODE_REASON}: cannot force type-stripping off to emulate Desktop")
+        source = render_plugin_source(port=47899)
+        importer = tmp_path / "import.mjs"
+        importer.write_text(
+            "const m = await import(process.argv[2]);\n"
+            "if (typeof m.OpenShardCapture !== 'function') { console.error('no export'); process.exit(2); }\n"
+            "console.log('loaded');\n",
+            encoding="utf-8",
+        )
+
+        def _import(ext: str):
+            plugin = tmp_path / f"openshard.{ext}"
+            plugin.write_text(source, encoding="utf-8")
+            return subprocess.run(
+                [node, "--no-warnings", *_node_no_strip_argv(node), str(importer), plugin.resolve().as_uri()],
+                capture_output=True, text=True, timeout=60,
+            )
+
+        js = _import("js")
+        assert js.returncode == 0 and "loaded" in js.stdout, f"js plugin failed to load: {js.stderr}"
+        ts = _import("ts")
+        assert ts.returncode != 0, "the .ts plugin unexpectedly loaded under a no-strip node"
+        assert "ERR_UNKNOWN_FILE_EXTENSION" in ts.stderr or "Unknown file extension" in ts.stderr, ts.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +920,92 @@ class TestInstaller:
         assert not (repo / ".opencode").exists()  # only the directories OpenShard created
         assert len(_lines(repo)) == 1  # history untouched
 
+    def test_install_migrates_legacy_ts_to_js(self, repo):
+        # A pre-0.4.5 OpenShard .ts is what silently fails to load in OpenCode
+        # Desktop. Installing the .js must remove it, so OpenCode never loads
+        # both (double capture under Bun / repeated load errors under Node).
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        result = install_opencode_plugin(repo_root=repo, port=47811)
+        assert result.status == "installed"
+        assert (repo / PLUGIN_RELPATH).exists() and not legacy.exists()
+        assert any("Removed the old TypeScript plugin" in w for w in result.warnings)
+        # Detection reports the current JS plugin, not the removed .ts.
+        assert detect_plugin(repo)["version"] == PLUGIN_VERSION
+
+    def test_install_leaves_user_owned_ts_alone(self, repo):
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("export const Mine = async () => ({})\n", encoding="utf-8")  # no OpenShard marker
+        result = install_opencode_plugin(repo_root=repo, port=47811)
+        assert result.status == "installed" and legacy.exists()
+        assert legacy.read_text(encoding="utf-8") == "export const Mine = async () => ({})\n"
+
+    def test_legacy_ts_only_is_detected_as_needing_upgrade(self, repo):
+        # Only the old .ts present (never re-run setup): doctor must see an
+        # OpenShard plugin at an old version so it prompts a reinstall, rather
+        # than reporting "absent".
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nconst PORT = 47811\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        found = detect_plugin(repo)
+        assert found["state"] == "openshard" and found["version"] == 4 and found.get("legacy_ts") is True
+
+    def test_install_keeps_git_tracked_legacy_ts_and_warns(self, repo):
+        # A committed openshard.ts is the user's to delete: the installer must not
+        # unlink a git-tracked file behind their back. It writes the .js, says
+        # plainly that OpenCode will now load both, and detection keeps flagging
+        # the duplicate (double capture under the Bun CLI) until it is removed.
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nconst PORT = 47811\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        _git(repo, "add", "-f", PLUGIN_LEGACY_RELPATH.as_posix())
+        _git(repo, "commit", "-q", "-m", "committed plugin")
+        result = install_opencode_plugin(repo_root=repo, port=47811)
+        assert result.status == "installed"
+        assert (repo / PLUGIN_RELPATH).exists() and legacy.exists()
+        assert any("tracked by git" in w and "double capture" in w for w in result.warnings)
+        found = detect_plugin(repo)
+        assert found["state"] == "openshard" and found["version"] == PLUGIN_VERSION
+        assert found.get("legacy_ts_also_present") is True
+        status = detect_opencode_integration(repo, service_port=47811)
+        assert status.configured is False and status.state == "partial"
+        assert "double capture" in status.detail and "git rm" in status.detail
+        # Re-running is still idempotent on the .js, and still warns.
+        again = install_opencode_plugin(repo_root=repo, port=47811)
+        assert again.status == "already_installed"
+        assert any("tracked by git" in w for w in again.warnings)
+        assert legacy.exists()
+        # Once the user untracks and removes it, the duplicate report clears.
+        _git(repo, "rm", "-q", PLUGIN_LEGACY_RELPATH.as_posix())
+        assert not legacy.exists()
+        assert detect_plugin(repo).get("legacy_ts_also_present") is None
+        assert detect_opencode_integration(repo, service_port=47811).configured is True
+
+    def test_uninstall_keeps_git_tracked_legacy_ts_and_warns(self, repo):
+        install_opencode_plugin(repo_root=repo, port=47811)
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        _git(repo, "add", "-f", PLUGIN_LEGACY_RELPATH.as_posix())
+        _git(repo, "commit", "-q", "-m", "committed plugin")
+        result = uninstall_opencode_plugin(repo_root=repo)
+        assert result.status == "removed"
+        assert not (repo / PLUGIN_RELPATH).exists() and legacy.exists()
+        assert any("tracked by git" in w for w in result.warnings)
+
+    def test_uninstall_removes_legacy_ts_too(self, repo):
+        install_opencode_plugin(repo_root=repo, port=47811)
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        assert uninstall_opencode_plugin(repo_root=repo).status == "removed"
+        assert not (repo / PLUGIN_RELPATH).exists() and not legacy.exists()
+
 
 # ---------------------------------------------------------------------------
 # CLI: capture install/uninstall opencode, setup, doctor
@@ -843,6 +1014,26 @@ class TestInstaller:
 
 def _which(name: str):
     return {"opencode": "/usr/local/bin/opencode", "openshard": "/usr/local/bin/openshard"}.get(name)
+
+
+class TestCaptureObserved:
+    def test_none_when_no_history(self, repo):
+        # No runs file yet: unknown, never falsely "observed".
+        assert opencode_capture_observed(repo) is None
+        assert opencode_capture_observed(None) is None
+
+    def test_false_when_history_has_no_opencode_run(self, repo):
+        runs = repo / ".openshard" / "runs.jsonl"
+        runs.parent.mkdir(parents=True, exist_ok=True)
+        runs.write_text(json.dumps({"executor": "claude_code", "import_source": "claude_code"}) + "\n",
+                        encoding="utf-8")
+        assert opencode_capture_observed(repo) is False
+
+    def test_true_when_an_opencode_run_is_recorded(self, repo):
+        install_opencode_plugin(repo_root=repo, port=47811)
+        _drive_inline(repo)
+        assert any(e.get("executor") == "opencode_plugin" for e in _lines(repo))
+        assert opencode_capture_observed(repo) is True
 
 
 class TestCli:
@@ -881,4 +1072,26 @@ class TestCli:
         data = json.loads(after.output)
         assert data["opencode"]["configured"] is True and data["opencode"]["port"] == 47811
         assert data["codex"]["cli_available"] is False
-        assert "use OpenCode normally" in human.output
+        # Installed but never captured: doctor is honest -- it does NOT claim the
+        # integration works just because the plugin file exists (the reported
+        # OpenCode failure). It reports "configured but unverified", not "ready".
+        assert data["opencode"]["capture_verified"] is False
+        assert "use OpenCode normally" not in human.output
+        assert "Configured but unverified" in human.output
+        assert "Capture verified" in human.output
+
+    def test_doctor_verifies_opencode_after_a_capture(self, repo):
+        # Once a real OpenCode session has been captured into this repo's
+        # history, doctor upgrades from "configured but unverified" to verified
+        # and only then claims the integration works.
+        install_opencode_plugin(repo_root=repo, port=47811)
+        _drive_inline(repo)  # folds one OpenCode Shard into .openshard/runs.jsonl
+        assert any(e.get("executor") == "opencode_plugin" for e in _lines(repo))
+        runner = CliRunner()
+        with patch("shutil.which", side_effect=_which):
+            data = json.loads(runner.invoke(cli, ["doctor", "--json", "--repo-path", str(repo)]).output)
+            human = runner.invoke(cli, ["doctor", "--repo-path", str(repo)]).output
+        assert data["opencode"]["capture_observed"] is True
+        assert data["opencode"]["capture_verified"] is True
+        assert "use OpenCode normally" in human
+        assert "Configured but unverified" not in human

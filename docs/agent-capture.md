@@ -24,7 +24,7 @@ another local account, a sandboxed process or a web page's cross-origin
 | Credential | Where it lives | Who presents it | Authorises |
 |---|---|---|---|
 | **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | our own processes only: `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, `openshard capture stop` | every endpoint, including `/shutdown` |
-| **Scoped capability** -- `r2.` + HMAC-SHA256(token, normalised repo root + `\n` + agent key) | third-party configuration that runs no process of ours at delivery time: the `X-OpenShard-Capture-Token` header of the Claude Code HTTP hook entries in `.claude/settings.local.json` (agent `claude_code`); the `CAPABILITY` constant in `.opencode/plugins/openshard.ts` (agent `opencode`) | Claude Code's HTTP hooks; the OpenCode plugin | events **for that repository and that agent only**; never shutdown |
+| **Scoped capability** -- `r2.` + HMAC-SHA256(token, normalised repo root + `\n` + agent key) | third-party configuration that runs no process of ours at delivery time: the `X-OpenShard-Capture-Token` header of the Claude Code HTTP hook entries in `.claude/settings.local.json` (agent `claude_code`); the `CAPABILITY` constant in `.opencode/plugins/openshard.js` (agent `opencode`) | Claude Code's HTTP hooks; the OpenCode plugin | events **for that repository and that agent only**; never shutdown |
 
 The service checks a capability against the agent the receiver path records
 under (`/hooks/claude` -> `claude_code`, `/status/claude` -> `claude_code`,
@@ -42,7 +42,7 @@ Rules the service enforces (`adapters/claude_capture_service.py`,
 * No plausible credential -> `401` before the body is parsed; nothing is
   recorded; `stats.rejected` increments. A credential for a different
   repository -> `401` as well.
-* `Origin` / `Referer` / `Sec-Fetch-*` present -> `403` (browser defence
+* `Origin` / `Referer` / `Sec-Fetch-Site` present -> `403` (browser defence
   in depth; the primary check is still the credential).
 * `/shutdown` needs the token *and* the instance id; the instance id in
   `/health` is informational and cannot authorise anything on its own.
@@ -321,11 +321,17 @@ never invented evidence.
 
 ## OpenCode integration
 
-* **Config**: `<repo>/.opencode/plugins/openshard.ts`, OpenCode's supported
+* **Config**: `<repo>/.opencode/plugins/openshard.js`, OpenCode's supported
   project-local plugin location (loaded automatically; `opencode.json` is
   never touched). The file starts with a marker comment; install only ever
   overwrites a marked file, uninstall only removes one, and a user's own
-  file at that path is reported as `skipped_existing`.
+  file at that path is reported as `skipped_existing`. The plugin is plain
+  ESM JavaScript on purpose: OpenCode's CLI runs on Bun, which strips
+  TypeScript types, but OpenCode Desktop runs its server under Electron's
+  bundled Node, which cannot, so a `.ts` plugin is refused there and never
+  loads. Install and uninstall also remove a pre-0.4.5 OpenShard-owned
+  `openshard.ts` (identified by the marker) so OpenCode never loads both; a
+  user's own `openshard.ts` is left alone.
 * **Plugin** (`opencode_plugin_install.PLUGIN_SOURCE`, no imports, no
   OpenShard logic): observes `session.created` / `session.idle` /
   `session.deleted` / `file.edited` / `message.updated` and the

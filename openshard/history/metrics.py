@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from pathlib import Path
-
-from openshard.history.shard_schema import coerce_shard_entry
 
 _LOG_PATH = Path(".openshard") / "runs.jsonl"
 
@@ -12,19 +9,15 @@ ALL_PROFILES = ("native_light", "native_deep", "native_swarm")
 
 
 def load_runs(repo_path: Path | None = None) -> list[dict]:
-    log_path = (repo_path or Path.cwd()) / _LOG_PATH
-    if not log_path.exists():
-        return []
-    runs: list[dict] = []
-    for line in log_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            runs.append(coerce_shard_entry(json.loads(line)))
-        except json.JSONDecodeError:
-            continue
-    return runs
+    """Coerced run records under *repo_path* (default cwd), oldest first.
+
+    Delegates to the canonical loader in :mod:`openshard.history.store`, so
+    this and every CLI reader skip the same malformed lines and never stamp a
+    ``content_hash`` on a legacy record at read time.
+    """
+    from openshard.history.store import load_history
+
+    return load_history((repo_path or Path.cwd()) / _LOG_PATH)
 
 
 def compute_model_stats(runs: list[dict]) -> dict[str, dict]:

@@ -61,7 +61,7 @@ per-user capture token or the repository-scoped capability derived from it
 in ``X-OpenShard-Capture-Token`` (``adapters/capture_auth.py``). A request
 without a valid credential is answered ``401`` before its body is looked at
 and leaves no trace beyond a ``rejected`` counter; a request carrying
-browser-only headers (``Origin``/``Referer``/``Sec-Fetch-*``) is answered
+browser-only headers (``Origin``/``Referer``/``Sec-Fetch-Site``) is answered
 ``403``. A capability is scoped to one repository *and* one agent
 (``capture_auth.repo_capability``) and is checked against the agent the
 receiver path records under. ``POST /shutdown`` accepts the token only,
@@ -326,6 +326,15 @@ class CaptureRecorder:
             # v0.4.4: requests refused for lack of a valid credential (nothing
             # recorded), and queued lines that could not be decoded (quarantined).
             "rejected": 0, "corrupt_lines": 0,
+            # v0.4.5: per-agent evidence of *accepted* (authenticated + queued)
+            # deliveries, keyed by capture agent. This is what lets `doctor` /
+            # `capture status` say "OpenCode has actually delivered events"
+            # instead of only "the plugin file exists" -- a plugin that never
+            # loads (e.g. OpenCode `--pure`, a desktop build that skips project
+            # plugins, or a stale plugin) shows zero here even though the file
+            # and its capability are perfectly valid. Only ever written after
+            # authorization succeeds, so it cannot be spoofed.
+            "by_agent": {},
         }
         self._stats_lock = threading.Lock()
 
@@ -387,6 +396,43 @@ class CaptureRecorder:
             self.stats[key] = int(self.stats.get(key) or 0) + 1
             if event:
                 self.stats["last_event"] = event
+
+    def _note_agent_received(self, agent: str | None, event: str | None = None) -> None:
+        """Record that one authenticated event was accepted for *agent*.
+
+        Called only after authorization passes and the line is queued, so a
+        non-zero count is proof the agent's integration is actually delivering
+        (not merely that its config file exists). Never raises.
+        """
+        if not agent:
+            return
+        with self._stats_lock:
+            by_agent = self.stats.get("by_agent")
+            if not isinstance(by_agent, dict):
+                by_agent = {}
+                self.stats["by_agent"] = by_agent
+            entry = by_agent.get(agent)
+            if not isinstance(entry, dict):
+                entry = {"received": 0}
+                by_agent[agent] = entry
+            entry["received"] = int(entry.get("received") or 0) + 1
+            entry["last_at"] = _now()
+            if event:
+                entry["last_event"] = event
+
+    def snapshot_stats(self) -> dict:
+        """A lock-safe copy of ``stats`` for serialization/exposure.
+
+        The nested ``by_agent`` mapping is copied entry-by-entry under the
+        stats lock so a concurrent accepted delivery cannot mutate it while it
+        is being serialized (the flat counters are cheap ints).
+        """
+        with self._stats_lock:
+            snap = dict(self.stats)
+            by_agent = snap.get("by_agent")
+            if isinstance(by_agent, dict):
+                snap["by_agent"] = {k: dict(v) if isinstance(v, dict) else v for k, v in by_agent.items()}
+            return snap
 
     def _next_id(self) -> str:
         with self._seq_lock:
@@ -456,6 +502,7 @@ class CaptureRecorder:
             line = {"id": self._next_id(), "kind": "status", "at": _now(), "data": payload.to_dict()}
             self._queue_line(root, key, line)
             self._bump("queued", "status")
+            self._note_agent_received(payload.agent, "status")
             self.timings.add(time.perf_counter() - t0)
             self.enqueue(root, key)
             return "queued", "status"
@@ -473,6 +520,7 @@ class CaptureRecorder:
         line = {"id": self._next_id(), "kind": "hook", "at": _now(), "data": reduced.to_dict()}
         self._queue_line(root, key, line)
         self._bump("queued", payload.event)
+        self._note_agent_received(reduced.agent, payload.event)
         self.timings.add(time.perf_counter() - t0)
         self.enqueue(root, key)
         if payload.event == EVENT_SESSION_START:
@@ -504,6 +552,7 @@ class CaptureRecorder:
         line = {"id": self._next_id(), "kind": "status", "at": _now(), "data": payload.to_dict()}
         self._queue_line(root, key, line)
         self._bump("queued", "status")
+        self._note_agent_received(payload.agent, "status")
         self.timings.add(time.perf_counter() - t0)
         self.enqueue(root, key)
         return "queued", "status"
@@ -846,7 +895,7 @@ class CaptureServer(ThreadingHTTPServer):
         threading.Thread(target=self.shutdown, name="openshard-capture-shutdown", daemon=True).start()
 
     def health_document(self) -> dict:
-        stats = dict(self.recorder.stats)
+        stats = self.recorder.snapshot_stats()
         return {
             "ok": True,
             "service": SERVICE_NAME,

@@ -67,7 +67,6 @@ from openshard.config.settings import (
 )
 from openshard.evals.registry import load_eval_tasks
 from openshard.evals.runner import append_eval_result, run_eval_task
-from openshard.history.jsonl_store import write_jsonl
 from openshard.history.sandbox_apply_receipts import (
     SandboxApplyReceipt,
     log_sandbox_apply_receipt,
@@ -2823,7 +2822,7 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
 
     codex: merges `openshard hooks codex` into .codex/hooks.json (project-local;
     unrelated hooks preserved). opencode: writes the OpenShard plugin to
-    .opencode/plugins/openshard.ts (never overwrites a file that is not
+    .opencode/plugins/openshard.js (never overwrites a file that is not
     OpenShard's). cursor: merges `openshard hooks cursor` into
     .cursor/hooks.json (project-local; unrelated hooks preserved; Cursor
     reloads it without a restart). All are idempotent and target the shared
@@ -2894,6 +2893,19 @@ def _render_capture_status(status: dict) -> None:
                     f"  refused:  {rejected} unauthenticated request(s) refused, "
                     f"{corrupt} queued event(s) quarantined as undecodable"
                 )
+            by_agent = stats.get("by_agent")
+            if isinstance(by_agent, dict) and by_agent:
+                # Per-agent accepted deliveries: this is the honest signal for
+                # "is this agent's capture actually working" -- an agent whose
+                # config exists but which never delivers (e.g. an OpenCode that
+                # is not loading the plugin) simply does not appear here.
+                parts = []
+                for agent in sorted(by_agent):
+                    entry = by_agent.get(agent)
+                    if isinstance(entry, dict):
+                        parts.append(f"{agent} {int(entry.get('received') or 0)}")
+                if parts:
+                    click.echo(f"  by agent: {', '.join(parts)} (accepted since start)")
         timing = status.get("blocking_ms") or {}
         if timing.get("n"):
             click.echo(
@@ -3827,18 +3839,16 @@ def resume_last() -> None:
 
 
 def _load_run_entries(log_path: Path) -> list[dict]:
-    if not log_path.exists():
-        return []
-    entries: list[dict] = []
-    for line in log_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return entries
+    """Every well-formed record in *log_path*, oldest first (see history.store).
+
+    Thin alias over the canonical loader so each CLI reader agrees on what a
+    record is and which one is latest. Read as stored (``coerce=False``): the
+    receipt renderers whitelist what they print, and the proof/quality layer
+    must see a persisted blocked field to be able to flag the record unsafe.
+    """
+    from openshard.history.store import load_history
+
+    return load_history(log_path, coerce=False)
 
 
 def _content_hash_fields(entry: dict) -> dict:
@@ -4002,12 +4012,10 @@ def _record_feedback(
     pr_created: bool,
     pr_merged: bool,
 ) -> None:
-    log_path = Path.cwd() / _LOG_PATH
-    if not log_path.exists():
-        raise click.ClickException("No run history found. Run a task first with 'openshard run'.")
-    entries = _load_run_entries(log_path)
-    if not entries:
-        raise click.ClickException("No run history found. Run a task first with 'openshard run'.")
+    from openshard.history.store import amend_latest_record
+
+    loc = _locate_history()
+    log_path = loc.runs_path
     df: dict = {
         "schema_version": 1,
         "outcome": outcome,
@@ -4021,8 +4029,13 @@ def _record_feedback(
         "recorded_at": datetime.datetime.now(datetime.UTC).isoformat(),
         "source": "cli",
     }
-    entries[-1]["developer_feedback"] = df
-    write_jsonl(log_path, entries)
+
+    def _attach(record: dict) -> None:
+        record["developer_feedback"] = df
+
+    amended = amend_latest_record(log_path, "developer_feedback", _attach)
+    if amended is None:
+        raise click.ClickException("No run history found. Run a task first with 'openshard run'.")
     try:
         from openshard.history.interactions import DeveloperInteractionEvent, log_interaction_event
         _event_type_map = {
@@ -4036,7 +4049,7 @@ def _record_feedback(
             "rejected": False,
             "needs-retry": False,
         }
-        _run_id = entries[-1].get("timestamp") or ""
+        _run_id = amended.get("timestamp") or ""
         _evt = DeveloperInteractionEvent(
             run_id=_run_id,
             event_type=_event_type_map.get(outcome, "feedback_noted"),
@@ -4045,13 +4058,13 @@ def _record_feedback(
             accepted=_accepted_map.get(outcome),
             metadata={"edited": edited, "ci_passed": ci_passed, "ci_failed": ci_failed},
         )
-        log_interaction_event(_evt)
+        log_interaction_event(_evt, cwd=loc.root)
     except Exception:
         pass
     try:
         from openshard.history.memory import build_memory_entry, log_memory_entry
-        _mem = build_memory_entry(entries[-1], outcome, reason)
-        log_memory_entry(_mem)
+        _mem = build_memory_entry(amended, outcome, reason)
+        log_memory_entry(_mem, cwd=loc.root)
     except Exception:
         pass
 
@@ -4205,29 +4218,28 @@ def memory_stats() -> None:
 @click.argument("text")
 def note_cmd(text: str) -> None:
     """Attach a note to the most recent run."""
+    from openshard.history.store import amend_latest_record
     from openshard.security.secret_scan import scrub_text_for_secrets
 
-    log_path = Path.cwd() / _LOG_PATH
-    if not log_path.exists():
-        click.echo("No run history found.")
-        raise SystemExit(1)
-    entries = _load_run_entries(log_path)
-    if not entries:
-        click.echo("No run history found.")
-        raise SystemExit(1)
+    log_path = _locate_history().runs_path
     scrubbed, _ = scrub_text_for_secrets(text[:500], source_label="<note>")
     note_item = {
         "text": scrubbed,
         "recorded_at": datetime.datetime.now(datetime.UTC).isoformat(),
         "schema_version": 1,
     }
-    existing = entries[-1].get("notes")
-    if isinstance(existing, list) and all(isinstance(n, dict) for n in existing):
-        existing.append(note_item)
-        entries[-1]["notes"] = existing
-    else:
-        entries[-1]["notes"] = [note_item]
-    write_jsonl(log_path, entries)
+
+    def _attach(record: dict) -> None:
+        existing = record.get("notes")
+        if isinstance(existing, list) and all(isinstance(n, dict) for n in existing):
+            existing.append(note_item)
+            record["notes"] = existing
+        else:
+            record["notes"] = [note_item]
+
+    if amend_latest_record(log_path, "note", _attach) is None:
+        click.echo("No run history found.")
+        raise SystemExit(1)
     click.echo("Note recorded.")
 
 
@@ -6164,6 +6176,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
 
     ready_agents: list[str] = []
     limited_agents: list[str] = []
+    unverified_agents: list[str] = []
     if fully_ready:
         ready_agents.append("Claude Code")
     elif core_ready:
@@ -6193,13 +6206,31 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
             (integration_label, integration_ok, integration_detail),
             ("Capture service", service_running, service_detail_shared),
         ]
+        # The OpenCode plugin runs inside OpenCode's own runtime, so a valid
+        # plugin file is not proof capture works: only an actually-recorded
+        # OpenCode session is. Surface that distinction as its own line rather
+        # than letting "Capture plugin ✓" imply delivery.
+        opencode_unverified = False
+        if key == "opencode" and integration_ok:
+            if status.capture_observed is True:
+                agent_checks.append(("Capture verified", True, ""))
+            else:
+                opencode_unverified = True
+                agent_checks.append((
+                    "Capture verified", False,
+                    "no OpenCode session captured yet; run one to verify (if a completed session "
+                    "records nothing, OpenCode is not loading the plugin)",
+                ))
         click.echo(f"\n{label}\n")
         for check_label, ok, detail in agent_checks:
             mark = "✓" if ok else "✗"
             suffix = "" if ok else f" ({detail})"
             click.echo(f"  {mark} {check_label}{suffix}")
         if root is not None and history_writable and status.cli_available and integration_ok:
-            ready_agents.append(label)
+            if opencode_unverified:
+                unverified_agents.append(label)
+            else:
+                ready_agents.append(label)
 
     click.echo("")
     if ready_agents and not limited_agents:
@@ -6207,8 +6238,14 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     elif ready_agents or limited_agents:
         names = ", ".join(ready_agents + limited_agents)
         click.echo(f"Ready, with limited receipts -- use {names} normally. Run `openshard setup` for details.")
-    else:
+    elif not unverified_agents:
         click.echo("Not ready -- run `openshard setup` to configure capture for the coding agents you use.")
+    if unverified_agents:
+        click.echo(
+            f"Configured but unverified: {', '.join(unverified_agents)} -- the plugin is installed but "
+            "no capture has been recorded yet. Run a session to confirm; if nothing is captured, "
+            "OpenCode is not loading the plugin (e.g. `--pure` or an OpenCode build that cannot load it)."
+        )
     click.echo("")
 
 

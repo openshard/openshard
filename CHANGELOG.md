@@ -2,6 +2,103 @@
 
 All notable changes to OpenShard are documented here.
 
+## 0.4.5 - 2026-09-16
+
+OpenCode capture that loads where OpenCode actually runs, diagnostics that
+say only what is proven, and Receipts whose integrity survives OpenShard's
+own amendments. No new integrations, no new commands, no telemetry
+broadening. Authenticated repo+agent scoped capture, fail-open agent
+behaviour, `receipt_id` / `shard_id` semantics and the readability of every
+existing on-disk record are unchanged.
+
+Verified end to end on Windows with the real OpenCode Desktop application:
+a Desktop session was captured (21 accepted OpenCode deliveries), recorded a
+new Receipt with `Executor  OpenCode (external)` and `Integrity  Matches
+(content hash)`, and `doctor` reported `✓ Capture verified`. The OpenCode CLI
+(Bun) and a Node with TypeScript type stripping forced off are covered by
+the test suite.
+
+### Fixed
+
+- **The OpenCode project plugin now ships as plain JavaScript
+  (`.opencode/plugins/openshard.js`).** OpenCode's CLI runs on Bun, which
+  strips TypeScript types natively, so the previous `openshard.ts` loaded
+  there. OpenCode Desktop runs its server in an Electron utility process
+  whose bundled Node is compiled without amaro; that Node refuses a `.ts`
+  plugin with `ERR_UNKNOWN_FILE_EXTENSION`, OpenCode logs "failed to load
+  plugin" and continues, and the session edits the repository while
+  OpenShard captures nothing. Plain ESM JavaScript loads under both
+  runtimes. Behaviour, bounded payloads, the repo+agent scoped capability
+  and fail-open buffering are unchanged; only the extension and the
+  (erasable) type annotations differ. Plugin payload version 4 -> 5. The
+  node-harness tests now run with type stripping forced off, reproducing
+  the Desktop runtime.
+- **Authenticated OpenCode Desktop deliveries are no longer refused as
+  browser traffic.** With the plugin loading in Desktop, every event it sent
+  was still answered `403` before its capability was checked: the capture
+  service refuses requests carrying browser-only headers, and its list
+  included `Sec-Fetch-Mode`, which Node's undici `fetch` (the runtime under
+  Electron) attaches as `Sec-Fetch-Mode: cors` to every request even though
+  it is not a browser. Bun's fetch does not, which is why only Desktop was
+  affected. `Sec-Fetch-Mode` is dropped from the browser-header set;
+  `Origin`, `Referer` and `Sec-Fetch-Site` remain refused outright, with or
+  without a token, because a cross-origin browser request always carries
+  `Origin`. The repo+agent scoped capability stays the primary gate and
+  authentication is not weakened; Claude Code, Codex and Cursor capture are
+  unaffected.
+- **`openshard setup` / `openshard capture install opencode` migrate an
+  OpenShard-owned legacy `openshard.ts` safely.** Install and uninstall
+  remove a pre-0.4.5 `openshard.ts` that carries the OpenShard marker, so a
+  repository never loads both files (double capture under Bun; a repeated
+  load error under Desktop's Node). A user's own `openshard.ts` without the
+  marker is never touched. `doctor` / `setup` report a leftover OpenShard
+  `.ts` as an outdated plugin and prompt a reinstall instead of reporting
+  the integration absent.
+- **`doctor` separates "configured" from "capture actually observed".** The
+  OpenCode plugin runs inside OpenCode's own runtime, which can silently
+  decline to load it (`opencode run --pure`, a Desktop build that cannot
+  load the plugin, a stalled plugin-dependency wait, a stale plugin). In
+  that state `doctor` previously showed `✓ Capture plugin`. It now adds a
+  separate **Capture verified** check that is green only when an OpenCode
+  session has actually been recorded in this repository's
+  `.openshard/runs.jsonl`, and the summary reads `Configured but
+  unverified` until then. `--json` gains `opencode.capture_observed` and
+  `opencode.capture_verified`. Capture itself, the translator and the
+  capability auth are unchanged.
+- **`openshard note` / `openshard feedback` no longer break a Receipt's
+  integrity.** Both commands amended the latest record without re-stamping
+  `content_hash`, so a fresh Receipt went from `Integrity  Matches` to
+  `Integrity  Mismatch` the moment OpenShard itself attached a note. They now
+  go through one canonical amendment path (`history.store.amend_latest_record`)
+  that verifies the stored hash first, applies the change, records an additive
+  `amendments` entry (`kind`, `recorded_at`, `source`, `integrity_before`,
+  `content_hash_restamped`) and preserves the integrity verdict: a valid hash
+  is re-stamped over the amended content; a legacy record with no hash is
+  never given one; a record that already read as mismatched keeps its stored
+  hash and stays `Mismatch`. `receipt_id`, `shard_id` and historical content
+  are untouched.
+- **History amendment and read behaviour is now consistent.** Every CLI
+  reader uses one loader (`history.store.load_history`): the last line that
+  parses to a JSON object is the latest record, malformed lines are skipped
+  on read and preserved byte-for-byte on write, and a legacy record is never
+  given a `content_hash` on read (`Not recorded` is never reported as
+  `Matches`). The amendment path targets the same record the loader reports
+  as latest. `note` and `feedback` also resolve `.openshard/runs.jsonl` from
+  any repository subdirectory, the same way `last` / `history` do, and the
+  feedback interaction/memory side-records land next to that history instead
+  of in the current directory.
+
+### Added
+
+- **`openshard capture status` exposes accepted delivery counts by agent.**
+  The capture service counts *accepted* (authenticated and queued)
+  deliveries per capture agent, exposed as `stats.by_agent` on `/health` and
+  rendered as `by agent: opencode 12, claude_code 40`. Counted only after
+  authorization succeeds, so it cannot be spoofed and never weakens auth.
+  This is the live signal for "is this agent actually delivering", the
+  complement of the persistent per-repository `doctor` check above. No
+  secret, path, prompt or repository name is added to any output.
+
 ## 0.4.4 - 2026-09-15
 
 Receipt integrity hardening. No new integrations, no new commands beyond
