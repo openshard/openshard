@@ -6244,7 +6244,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
         click.echo(
             f"Configured but unverified: {', '.join(unverified_agents)} -- the plugin is installed but "
             "no capture has been recorded yet. Run a session to confirm; if nothing is captured, "
-            "OpenCode is not loading the plugin (e.g. `--pure` or a desktop build that skips project plugins)."
+            "OpenCode is not loading the plugin (e.g. `--pure` or an OpenCode build that cannot load it)."
         )
     click.echo("")
 

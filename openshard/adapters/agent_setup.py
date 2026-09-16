@@ -275,7 +275,23 @@ def detect_opencode_integration(
     mismatch = False
     capability_state = str(found.get("capability_state") or "n/a")
     if state == "openshard":
-        if version != PLUGIN_VERSION:
+        if found.get("legacy_ts"):
+            # Only the pre-0.4.5 TypeScript plugin is present. It loads under the
+            # Bun CLI but not under OpenCode Desktop's Node, so say exactly that
+            # rather than a generic "older version".
+            state, detail = "partial", (
+                "plugin is the pre-0.4.5 TypeScript file (.opencode/plugins/openshard.ts), which "
+                "OpenCode Desktop cannot load; run `openshard setup` to replace it with openshard.js"
+            )
+        elif found.get("legacy_ts_also_present"):
+            # The installer only leaves an OpenShard .ts next to the .js when
+            # git tracks it. OpenCode's CLI loads both -> every event twice.
+            state, detail = "partial", (
+                "both .opencode/plugins/openshard.js and the pre-0.4.5 openshard.ts are present, so "
+                "OpenCode loads the plugin twice (double capture); openshard.ts is tracked by git, so "
+                "`git rm .opencode/plugins/openshard.ts` and commit"
+            )
+        elif version != PLUGIN_VERSION:
             state, detail = "partial", "older plugin version; run `openshard setup` to update it"
         elif capability_state in ("missing", "stale"):
             state, detail = "partial", (
@@ -292,8 +308,8 @@ def detect_opencode_integration(
             detail = (
                 f"plugin installed ({rel}) but no OpenCode capture recorded here yet. Run an OpenCode "
                 "session in this repository to verify. If a completed session still records nothing, "
-                "OpenCode is not loading the plugin (e.g. `--pure`, a desktop build that skips project "
-                "plugins, or a stale plugin) -- re-run `openshard setup`."
+                "OpenCode is not loading the plugin (e.g. `--pure`, an OpenCode build that cannot load "
+                "it, or a stale plugin) -- re-run `openshard setup`."
             )
         else:
             detail = f"configured ({rel})"

@@ -300,23 +300,52 @@ def legacy_plugin_path(repo_root: Path) -> Path:
     return Path(repo_root) / PLUGIN_LEGACY_RELPATH
 
 
-def _remove_legacy_ts_plugin(repo_root: Path) -> bool:
-    """Delete an OpenShard-owned ``openshard.ts`` if present. Returns whether one was removed.
+def _legacy_ts_is_openshard(repo_root: Path) -> bool:
+    """True when an OpenShard-owned (marked) ``openshard.ts`` is present. Never raises."""
+    text, err = _read_plugin(legacy_plugin_path(repo_root))
+    return bool(text) and not err and is_openshard_plugin(text)
+
+
+def _remove_legacy_ts_plugin(repo_root: Path) -> str:
+    """Delete an OpenShard-owned ``openshard.ts`` if present.
+
+    Returns ``"removed"``, ``"absent"`` (no OpenShard-owned ``.ts``), ``"tracked"``
+    (present but git tracks it, so it was left alone) or ``"failed"``.
 
     Leaving it in place would make OpenCode load *both* files: the Bun CLI would
     register the capture plugin twice (double events) and Desktop's Node would
     keep failing to import the ``.ts`` and logging the error. A user-owned file
-    at that path (no OpenShard marker) is never touched. Never raises.
+    at that path (no OpenShard marker) is never touched, and neither is a file
+    git tracks: deleting a committed file behind the user's back is not
+    OpenShard's call -- the installer warns and ``doctor`` keeps reporting the
+    duplicate until it is untracked and removed. Never raises.
     """
-    legacy = legacy_plugin_path(repo_root)
-    text, err = _read_plugin(legacy)
-    if err or not text or not is_openshard_plugin(text):
-        return False
+    if not _legacy_ts_is_openshard(repo_root):
+        return "absent"
+    if settings_file_is_tracked(repo_root, PLUGIN_LEGACY_RELPATH.as_posix()):
+        return "tracked"
     try:
-        legacy.unlink()
-        return True
+        legacy_plugin_path(repo_root).unlink()
+        return "removed"
     except OSError:
-        return False
+        return "failed"
+
+
+def _legacy_ts_kept_warning(state: str) -> str | None:
+    """Installer warning for a legacy ``.ts`` that is still on disk, or ``None``."""
+    rel = PLUGIN_LEGACY_RELPATH.as_posix()
+    if state == "tracked":
+        return (
+            f"{rel} is the old TypeScript plugin and is tracked by git, so OpenShard left it in place. "
+            f"OpenCode will load both it and {PLUGIN_RELPATH.as_posix()} (double capture) until you "
+            f"`git rm {rel}` and commit."
+        )
+    if state == "failed":
+        return (
+            f"Could not remove the old TypeScript plugin {rel}; delete it by hand so OpenCode does not "
+            f"load both it and {PLUGIN_RELPATH.as_posix()}."
+        )
+    return None
 
 
 def _read_plugin(path: Path) -> tuple[str | None, str | None]:
@@ -376,9 +405,15 @@ def detect_plugin(repo_root: Path) -> dict:
                     "legacy_ts": True}
         return {"state": "absent", "port": None, "version": None, "error": None}
     if is_openshard_plugin(text):
-        return {"state": "openshard", "port": installed_plugin_port(text),
-                "version": installed_plugin_version(text), "error": None,
-                "capability_state": plugin_capability_state(text, Path(repo_root))}
+        found = {"state": "openshard", "port": installed_plugin_port(text),
+                 "version": installed_plugin_version(text), "error": None,
+                 "capability_state": plugin_capability_state(text, Path(repo_root))}
+        if _legacy_ts_is_openshard(Path(repo_root)):
+            # Both the current .js and an OpenShard-owned pre-0.4.5 .ts are on
+            # disk (the installer only leaves the .ts when git tracks it).
+            # OpenCode's CLI loads both -> double capture; surface it.
+            found["legacy_ts_also_present"] = True
+        return found
     return {"state": "custom", "port": None, "version": None, "error": None}
 
 
@@ -452,8 +487,16 @@ def install_opencode_plugin(*, repo_root: Path, port: int | None = None) -> Clau
             )
         # Remove a pre-0.4.5 OpenShard .ts even when the .js is already current,
         # so a repo carrying both never double-captures under the Bun CLI.
-        removed_legacy = _remove_legacy_ts_plugin(root)
+        legacy_state = _remove_legacy_ts_plugin(root)
+        removed_legacy = legacy_state == "removed"
+        kept_warning = _legacy_ts_kept_warning(legacy_state)
         if existing == desired and not removed_legacy:
+            if kept_warning:
+                return ClaudeHooksInstallResult(
+                    status="already_installed", settings_path=path,
+                    message="OpenCode capture plugin already installed for this repository.",
+                    warnings=[kept_warning],
+                )
             return ClaudeHooksInstallResult(
                 status="already_installed", settings_path=path,
                 message="OpenCode capture plugin already installed for this repository.",
@@ -471,6 +514,8 @@ def install_opencode_plugin(*, repo_root: Path, port: int | None = None) -> Clau
                 f"Removed the old TypeScript plugin {PLUGIN_LEGACY_RELPATH.as_posix()}; the plugin now ships "
                 "as JavaScript so it loads in OpenCode Desktop (whose bundled Node cannot strip TypeScript types)."
             )
+        elif kept_warning:
+            warnings.append(kept_warning)
         message = "OpenCode capture plugin installed." if created else "OpenCode capture plugin updated."
         return ClaudeHooksInstallResult(
             status="installed" if created else "updated", settings_path=path,
@@ -490,11 +535,18 @@ def uninstall_opencode_plugin(*, repo_root: Path) -> ClaudeHooksInstallResult:
             return _error(err or "Could not read the OpenCode plugin file.", path)
         if not existing:
             # No .js. Still clean up a pre-0.4.5 OpenShard .ts if one is present.
-            if _remove_legacy_ts_plugin(root):
+            legacy_state = _remove_legacy_ts_plugin(root)
+            if legacy_state == "removed":
                 _prune_empty_plugin_dirs(path)
                 return ClaudeHooksInstallResult(
                     status="removed", settings_path=path,
                     message="OpenCode capture plugin removed (legacy TypeScript plugin).",
+                )
+            kept_warning = _legacy_ts_kept_warning(legacy_state)
+            if kept_warning:
+                return ClaudeHooksInstallResult(
+                    status="not_installed", settings_path=path,
+                    message="No OpenShard OpenCode plugin was installed.", warnings=[kept_warning],
                 )
             return ClaudeHooksInstallResult(
                 status="not_installed", settings_path=path, message="No OpenShard OpenCode plugin was installed.",
@@ -505,10 +557,11 @@ def uninstall_opencode_plugin(*, repo_root: Path) -> ClaudeHooksInstallResult:
                 message=f"{PLUGIN_RELPATH.as_posix()} is not OpenShard's plugin; nothing removed.",
             )
         path.unlink()
-        _remove_legacy_ts_plugin(root)
+        kept_warning = _legacy_ts_kept_warning(_remove_legacy_ts_plugin(root))
         _prune_empty_plugin_dirs(path)
         return ClaudeHooksInstallResult(
             status="removed", settings_path=path, message="OpenCode capture plugin removed.",
+            warnings=[kept_warning] if kept_warning else [],
         )
     except Exception as exc:
         return _error(f"Failed to remove the OpenCode plugin: {type(exc).__name__}")

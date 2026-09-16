@@ -11,11 +11,12 @@ broadening. Authenticated repo+agent scoped capture, fail-open agent
 behaviour, `receipt_id` / `shard_id` semantics and the readability of every
 existing on-disk record are unchanged.
 
-Status: the OpenCode CLI (Bun) has been verified end to end with the new
-plugin. The OpenCode **Desktop** application has not yet been verified
-against it; the fix below targets the Desktop runtime as reproduced under
-an amaro-less Node, and Desktop is confirmed only once a real Desktop
-session records an `opencode_plugin` Receipt.
+Status: the new plugin loads and delivers under a Node with TypeScript type
+stripping forced off (the runtime OpenCode Desktop uses), which the test
+suite covers, and under Bun (the OpenCode CLI runtime). The OpenCode
+**Desktop** application itself has not yet been verified against it; Desktop
+counts as fixed only once a real Desktop session records an
+`opencode_plugin` Receipt.
 
 ### Fixed
 

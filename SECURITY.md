@@ -53,7 +53,7 @@ for security are below, with what each one trusts.
 * Codex and Cursor: command hooks run `openshard hooks codex|cursor`,
   which reads the token file. No credential is written into `.codex/` or
   `.cursor/`.
-* OpenCode: the plugin at `.opencode/plugins/openshard.ts` carries the
+* OpenCode: the plugin at `.opencode/plugins/openshard.js` carries the
   capability scoped to this repository and to OpenCode. It never reads
   the token file. The master token appears in no agent's configuration.
 * All of them are **fail-open for the agent**: if OpenShard is missing,

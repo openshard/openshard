@@ -28,7 +28,7 @@ from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
 from openshard.adapters import claude_capture_service as svc
 from openshard.adapters import opencode_plugin as oc
-from openshard.adapters.agent_setup import opencode_capture_observed
+from openshard.adapters.agent_setup import detect_opencode_integration, opencode_capture_observed
 from openshard.adapters.claude_hooks import StatusPayload, handle_hook, reduce_hook_payload
 from openshard.adapters.opencode_plugin_install import (
     PLUGIN_LEGACY_RELPATH,
@@ -948,6 +948,50 @@ class TestInstaller:
                           encoding="utf-8")
         found = detect_plugin(repo)
         assert found["state"] == "openshard" and found["version"] == 4 and found.get("legacy_ts") is True
+
+    def test_install_keeps_git_tracked_legacy_ts_and_warns(self, repo):
+        # A committed openshard.ts is the user's to delete: the installer must not
+        # unlink a git-tracked file behind their back. It writes the .js, says
+        # plainly that OpenCode will now load both, and detection keeps flagging
+        # the duplicate (double capture under the Bun CLI) until it is removed.
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nconst PORT = 47811\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        _git(repo, "add", "-f", PLUGIN_LEGACY_RELPATH.as_posix())
+        _git(repo, "commit", "-q", "-m", "committed plugin")
+        result = install_opencode_plugin(repo_root=repo, port=47811)
+        assert result.status == "installed"
+        assert (repo / PLUGIN_RELPATH).exists() and legacy.exists()
+        assert any("tracked by git" in w and "double capture" in w for w in result.warnings)
+        found = detect_plugin(repo)
+        assert found["state"] == "openshard" and found["version"] == PLUGIN_VERSION
+        assert found.get("legacy_ts_also_present") is True
+        status = detect_opencode_integration(repo, service_port=47811)
+        assert status.configured is False and status.state == "partial"
+        assert "double capture" in status.detail and "git rm" in status.detail
+        # Re-running is still idempotent on the .js, and still warns.
+        again = install_opencode_plugin(repo_root=repo, port=47811)
+        assert again.status == "already_installed"
+        assert any("tracked by git" in w for w in again.warnings)
+        assert legacy.exists()
+        # Once the user untracks and removes it, the duplicate report clears.
+        _git(repo, "rm", "-q", PLUGIN_LEGACY_RELPATH.as_posix())
+        assert not legacy.exists()
+        assert detect_plugin(repo).get("legacy_ts_also_present") is None
+        assert detect_opencode_integration(repo, service_port=47811).configured is True
+
+    def test_uninstall_keeps_git_tracked_legacy_ts_and_warns(self, repo):
+        install_opencode_plugin(repo_root=repo, port=47811)
+        legacy = repo / PLUGIN_LEGACY_RELPATH
+        legacy.write_text(f"{PLUGIN_MARKER} v4 -- old\nexport const OpenShardCapture = async () => ({{}})\n",
+                          encoding="utf-8")
+        _git(repo, "add", "-f", PLUGIN_LEGACY_RELPATH.as_posix())
+        _git(repo, "commit", "-q", "-m", "committed plugin")
+        result = uninstall_opencode_plugin(repo_root=repo)
+        assert result.status == "removed"
+        assert not (repo / PLUGIN_RELPATH).exists() and legacy.exists()
+        assert any("tracked by git" in w for w in result.warnings)
 
     def test_uninstall_removes_legacy_ts_too(self, repo):
         install_opencode_plugin(repo_root=repo, port=47811)
