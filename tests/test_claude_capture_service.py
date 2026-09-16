@@ -341,8 +341,18 @@ class TestLifecycle:
             doc = client.health(port)
             assert doc is not None and doc["pid"] != os.getpid()
             assert svc._pid_alive(doc["pid"])
-            log = Path(client.log_path(env)).read_text(encoding="utf-8")
-            assert f"listening on 127.0.0.1:{port}" in log
+            # The serve thread answers /health before the service writes its
+            # state file and logs "listening" (see serve()), so the log can
+            # still be empty right after the first health round-trip; poll.
+            log_file = Path(client.log_path(env))
+
+            def _log_text() -> str:
+                try:
+                    return log_file.read_text(encoding="utf-8")
+                except OSError:
+                    return ""
+
+            assert _wait_for(lambda: f"listening on 127.0.0.1:{port}" in _log_text(), timeout=15), _log_text()
         finally:
             assert client.request_shutdown(env, wait_seconds=15)
         assert _wait_for(lambda: not svc._pid_alive(doc["pid"]), timeout=15)
