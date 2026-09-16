@@ -42,7 +42,7 @@ Rules the service enforces (`adapters/claude_capture_service.py`,
 * No plausible credential -> `401` before the body is parsed; nothing is
   recorded; `stats.rejected` increments. A credential for a different
   repository -> `401` as well.
-* `Origin` / `Referer` / `Sec-Fetch-*` present -> `403` (browser defence
+* `Origin` / `Referer` / `Sec-Fetch-Site` present -> `403` (browser defence
   in depth; the primary check is still the credential).
 * `/shutdown` needs the token *and* the instance id; the instance id in
   `/health` is informational and cannot authorise anything on its own.

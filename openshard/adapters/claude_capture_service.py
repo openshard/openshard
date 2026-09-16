@@ -61,7 +61,7 @@ per-user capture token or the repository-scoped capability derived from it
 in ``X-OpenShard-Capture-Token`` (``adapters/capture_auth.py``). A request
 without a valid credential is answered ``401`` before its body is looked at
 and leaves no trace beyond a ``rejected`` counter; a request carrying
-browser-only headers (``Origin``/``Referer``/``Sec-Fetch-*``) is answered
+browser-only headers (``Origin``/``Referer``/``Sec-Fetch-Site``) is answered
 ``403``. A capability is scoped to one repository *and* one agent
 (``capture_auth.repo_capability``) and is checked against the agent the
 receiver path records under. ``POST /shutdown`` accepts the token only,

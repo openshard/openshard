@@ -2,7 +2,7 @@
 
 All notable changes to OpenShard are documented here.
 
-## 0.4.5 - Unreleased
+## 0.4.5 - 2026-09-16
 
 OpenCode capture that loads where OpenCode actually runs, diagnostics that
 say only what is proven, and Receipts whose integrity survives OpenShard's
@@ -11,12 +11,12 @@ broadening. Authenticated repo+agent scoped capture, fail-open agent
 behaviour, `receipt_id` / `shard_id` semantics and the readability of every
 existing on-disk record are unchanged.
 
-Status: the new plugin loads and delivers under a Node with TypeScript type
-stripping forced off (the runtime OpenCode Desktop uses), which the test
-suite covers, and under Bun (the OpenCode CLI runtime). The OpenCode
-**Desktop** application itself has not yet been verified against it; Desktop
-counts as fixed only once a real Desktop session records an
-`opencode_plugin` Receipt.
+Verified end to end on Windows with the real OpenCode Desktop application:
+a Desktop session was captured (21 accepted OpenCode deliveries), recorded a
+new Receipt with `Executor  OpenCode (external)` and `Integrity  Matches
+(content hash)`, and `doctor` reported `✓ Capture verified`. The OpenCode CLI
+(Bun) and a Node with TypeScript type stripping forced off are covered by
+the test suite.
 
 ### Fixed
 
@@ -33,6 +33,19 @@ counts as fixed only once a real Desktop session records an
   (erasable) type annotations differ. Plugin payload version 4 -> 5. The
   node-harness tests now run with type stripping forced off, reproducing
   the Desktop runtime.
+- **Authenticated OpenCode Desktop deliveries are no longer refused as
+  browser traffic.** With the plugin loading in Desktop, every event it sent
+  was still answered `403` before its capability was checked: the capture
+  service refuses requests carrying browser-only headers, and its list
+  included `Sec-Fetch-Mode`, which Node's undici `fetch` (the runtime under
+  Electron) attaches as `Sec-Fetch-Mode: cors` to every request even though
+  it is not a browser. Bun's fetch does not, which is why only Desktop was
+  affected. `Sec-Fetch-Mode` is dropped from the browser-header set;
+  `Origin`, `Referer` and `Sec-Fetch-Site` remain refused outright, with or
+  without a token, because a cross-origin browser request always carries
+  `Origin`. The repo+agent scoped capability stays the primary gate and
+  authentication is not weakened; Claude Code, Codex and Cursor capture are
+  unaffected.
 - **`openshard setup` / `openshard capture install opencode` migrate an
   OpenShard-owned legacy `openshard.ts` safely.** Install and uninstall
   remove a pre-0.4.5 `openshard.ts` that carries the OpenShard marker, so a
