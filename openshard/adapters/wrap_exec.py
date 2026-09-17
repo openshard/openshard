@@ -228,6 +228,7 @@ def build_wrap_entry(
     shard_id: str | None = None,
     attempt_number: int = 1,
     run_index: int | None = None,
+    task_id: str | None = None,
 ) -> dict:
     """Build a coerced Shard entry for a wrapped Claude Code subprocess run.
 
@@ -242,6 +243,10 @@ def build_wrap_entry(
     never-raises contract); the entry is then stamped as another attempt
     on that Shard. When omitted, a fresh shard_id is minted from this
     entry's own timestamp and ``run_index`` — a new Shard, attempt 1.
+
+    ``task_id``, when given, must already be a well-formed, explicitly
+    created task id (``openshard task new``) — it is attached to this
+    entry exactly as given, never minted or inferred here.
 
     Also embeds this run's own canonical Events under ``entry["events"]``
     (see ``_build_wrap_events``) — this entry is a Migration 5 producer
@@ -315,6 +320,12 @@ def build_wrap_entry(
     from openshard.history.receipt_identity import ensure_receipt_id
 
     ensure_receipt_id(entry)
+
+    # task_id: attach only when explicitly supplied; never minted here (see
+    # history/task_identity.py).
+    from openshard.history.task_identity import ensure_task_id
+
+    ensure_task_id(entry, task_id)
 
     entry["events"] = _build_wrap_events(entry, changed_files, files_source, exit_code)
 

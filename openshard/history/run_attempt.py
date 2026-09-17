@@ -37,6 +37,10 @@ class RunAttempt:
     agent: str
     origin: str
     capture_depth: str
+    # task_id (history/task_identity.py): the explicitly declared task this
+    # attempt belongs to, if one was attached. Read-through only -- never
+    # minted or inferred here.
+    task_id: str | None = None
 
 
 def build_run_attempt(entry: dict, shard: Shard) -> RunAttempt:
@@ -56,6 +60,7 @@ def build_run_attempt(entry: dict, shard: Shard) -> RunAttempt:
         agent=shard.agent,
         origin=shard.origin,
         capture_depth=shard.capture_depth,
+        task_id=shard.task_id,
     )
 
 

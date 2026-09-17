@@ -339,6 +339,45 @@ class TestBlockedFields(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# task_id: explicit only, never minted here
+# ---------------------------------------------------------------------------
+
+class TestTaskIdAttachment(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_no_task_id_argument_means_no_task_id_field(self):
+        entry = build_wrap_entry(
+            "Fix the bug", model=None, pre_state=_fake_pre_state(),
+            exit_code=0, repo_path=self.repo,
+        )
+        self.assertNotIn("task_id", entry)
+
+    def test_explicit_task_id_is_preserved_exactly(self):
+        from openshard.history.task_identity import new_task_id
+
+        tid = new_task_id()
+        entry = build_wrap_entry(
+            "Fix the bug", model=None, pre_state=_fake_pre_state(),
+            exit_code=0, repo_path=self.repo, task_id=tid,
+        )
+        self.assertEqual(entry["task_id"], tid)
+
+    def test_malformed_task_id_argument_raises(self):
+        with self.assertRaises(ValueError):
+            build_wrap_entry(
+                "Fix the bug", model=None, pre_state=_fake_pre_state(),
+                exit_code=0, repo_path=self.repo, task_id="not-well-formed",
+            )
+
+
+# ---------------------------------------------------------------------------
 # git diff parsing
 # ---------------------------------------------------------------------------
 

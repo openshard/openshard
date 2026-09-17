@@ -1109,7 +1109,7 @@ class TestRelevantContextMcpTool:
         match = structured["matches"][0]
         assert set(match) == {
             "shard_id", "created_at", "task_short", "task_full", "agent", "origin", "capture_depth",
-            "score", "why_relevant", "status", "verification_status", "verification_reason",
+            "task_id", "score", "why_relevant", "status", "verification_status", "verification_reason",
             "result", "repo", "files", "findings", "attempts", "recovery",
         }
 

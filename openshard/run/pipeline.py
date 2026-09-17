@@ -306,9 +306,11 @@ class RunPipeline:
         model_policy: str | None = None,
         candidates: int = 1,
         shard_id: str | None = None,
+        task_id: str | None = None,
     ) -> None:
         self._config = config
         self._shard_id = shard_id
+        self._task_id = task_id
         self._write = write
         self._verify = verify
         self._dry_run = dry_run
@@ -1757,7 +1759,8 @@ class RunPipeline:
                          routable_pool=_routable_pool_cache,
                          model_policy_summary=_model_policy_summary,
                          shard_id=_resolved_shard_id,
-                         attempt_number=_resolved_attempt_number)
+                         attempt_number=_resolved_attempt_number,
+                         task_id=self._task_id)
             except Exception as exc:
                 click.echo(f"  [log] warning: {exc}")
             result_obj.exit_code = 0
@@ -2116,7 +2119,8 @@ class RunPipeline:
                              routable_pool=_routable_pool_cache,
                              model_policy_summary=_model_policy_summary,
                              shard_id=_resolved_shard_id,
-                             attempt_number=_resolved_attempt_number)
+                             attempt_number=_resolved_attempt_number,
+                             task_id=self._task_id)
                 except Exception as exc:
                     click.echo(f"  [log] warning: {exc}")
                 result_obj.exit_code = code
@@ -2715,7 +2719,8 @@ class RunPipeline:
                      routable_pool=_routable_pool_cache,
                      model_policy_summary=_model_policy_summary,
                      shard_id=_resolved_shard_id,
-                     attempt_number=_resolved_attempt_number)
+                     attempt_number=_resolved_attempt_number,
+                     task_id=self._task_id)
         except Exception as exc:
             click.echo(f"  [log] warning: {exc}")
 

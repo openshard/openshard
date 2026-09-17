@@ -460,6 +460,7 @@ def _log_run(
     model_policy_summary: dict | None = None,
     shard_id: str | None = None,
     attempt_number: int = 1,
+    task_id: str | None = None,
 ) -> None:
     _timestamp_val = run_id if run_id else datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
     entry: dict = {
@@ -701,6 +702,11 @@ def _log_run(
     # v0.4.4: global receipt identity, minted at creation (see receipt_identity).
     from openshard.history.receipt_identity import ensure_receipt_id as _erid
     _erid(entry)
+
+    # task_id: attach only when explicitly supplied; never minted here (see
+    # history/task_identity.py).
+    from openshard.history.task_identity import ensure_task_id as _etid
+    _etid(entry, task_id)
 
     if effective_executor == "native":
         entry["events"] = _build_native_events(

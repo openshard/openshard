@@ -161,11 +161,14 @@ labelled `derived`.
 Every new record carries `receipt_id` (`rcpt_` + 32 hex; a UUID4),
 minted at creation and safe across repositories, machines and
 organisations. `shard_id` (`shard-YYYYMMDD-NNNN`, history position) is
-unchanged and remains the grouping key for attempts. Task identity across
-retries is a separate, unsolved problem: no `task_id` exists and none is
-inferred from prompt similarity. Owner / Requested by / Approved by are not
-recorded locally and are never inferred from git config or the OS user;
-only the executing agent is known.
+unchanged and remains the grouping key for attempts. `task_id`
+(`history/task_identity.py`) is a third, additive identity: one explicitly
+declared engineering task across attempts, agents and potentially
+repositories. It is minted only by `openshard task new` and attached with
+`--task-id`; it is never inferred from prompt similarity, timing, or
+`shard_id`, and old records without one remain fully valid. Owner /
+Requested by / Approved by are not recorded locally and are never inferred
+from git config or the OS user; only the executing agent is known.
 
 Nothing in the fold, the Shard model, the receipt renderer, `history`/
 `context`/`relevant_context` or the MCP server was redesigned for

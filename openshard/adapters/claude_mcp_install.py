@@ -41,6 +41,7 @@ MCP_TOOLS: tuple[str, ...] = (
     "recent_shards",
     "get_shard",
     "get_receipt",
+    "get_receipts_by_task",
     "search_history",
     "relevant_context",
 )

@@ -128,6 +128,50 @@ class TestDeriveShardIdentity(unittest.TestCase):
         self.assertEqual(capture, CAPTURE_UNKNOWN)
 
 
+class TestTaskIdPropagation(unittest.TestCase):
+    def test_shard_and_receipt_carry_explicitly_attached_task_id(self):
+        from openshard.history.task_identity import new_task_id
+
+        tid = new_task_id()
+        entry = _claude_code_import_entry()
+        entry["task_id"] = tid
+
+        shard = build_shard(
+            entry,
+            shard_id="shard-20260413-0001",
+            created_at="2026-04-13T06:24:08Z",
+            task_short="x",
+            task_full="x",
+        )
+        self.assertEqual(shard.task_id, tid)
+
+        receipt = build_shard_receipt(entry)
+        self.assertEqual(receipt.task_id, tid)
+        self.assertEqual(receipt.shard.task_id, tid)
+
+    def test_shard_and_receipt_task_id_none_when_absent(self):
+        entry = _claude_code_import_entry()
+        self.assertNotIn("task_id", entry)
+
+        shard = build_shard(
+            entry,
+            shard_id="shard-20260413-0001",
+            created_at="2026-04-13T06:24:08Z",
+            task_short="x",
+            task_full="x",
+        )
+        self.assertIsNone(shard.task_id)
+
+        receipt = build_shard_receipt(entry)
+        self.assertIsNone(receipt.task_id)
+
+    def test_malformed_stored_task_id_is_never_surfaced(self):
+        entry = _claude_code_import_entry()
+        entry["task_id"] = "not-well-formed"
+        receipt = build_shard_receipt(entry)
+        self.assertIsNone(receipt.task_id)
+
+
 class TestBuildShard(unittest.TestCase):
     def test_returns_shard_with_identity_fields(self):
         shard = build_shard(

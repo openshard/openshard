@@ -400,5 +400,45 @@ class TestWrappedShardWithLastCommand(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
 
 
+# ---------------------------------------------------------------------------
+# --task-id
+# ---------------------------------------------------------------------------
+
+class TestTaskIdOption(unittest.TestCase):
+
+    def test_no_task_id_flag_dry_run_has_no_task_id(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(
+                cli, ["wrap", "claude", "--task", "Fix bug", "--dry-run", "--", *_ECHO_ARGV],
+            )
+            data = json.loads(result.output)
+            self.assertNotIn("task_id", data)
+
+    def test_explicit_task_id_attached_in_dry_run(self):
+        from openshard.history.task_identity import new_task_id
+
+        tid = new_task_id()
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(
+                cli,
+                ["wrap", "claude", "--task", "Fix bug", "--task-id", tid, "--dry-run", "--", *_ECHO_ARGV],
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            data = json.loads(result.output)
+            self.assertEqual(data["task_id"], tid)
+
+    def test_malformed_task_id_rejected(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(
+                cli,
+                ["wrap", "claude", "--task", "Fix bug", "--task-id", "not-well-formed",
+                 "--dry-run", "--", *_ECHO_ARGV],
+            )
+            self.assertNotEqual(result.exit_code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

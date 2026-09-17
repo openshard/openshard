@@ -374,10 +374,26 @@ def plan(task: str):
         "(see 'openshard shard attempts' or a prior receipt's Shard ID)."
     ),
 )
-def run(task: str, write: bool, verify: bool, dry_run: bool, more: bool, full: bool, no_shrink: bool, workflow: str | None, profile: str | None, executor: str | None, native_backend: str | None, experimental_deepagents_run: bool, experimental_tier_dispatch: bool, native_loop: str | None, plan_flag: bool, approval: str | None, provider: str | None, history_scoring: bool, eval_scoring: bool, feedback_scoring: bool, model_policy: str | None, candidates: int, shard_id: str | None):
+@click.option(
+    "--task-id",
+    "task_id",
+    default=None,
+    help=(
+        "Attach this run's receipt to an explicitly declared engineering "
+        "task. Must be a task id from 'openshard task new' -- never guessed "
+        "or inferred from the task prompt."
+    ),
+)
+def run(task: str, write: bool, verify: bool, dry_run: bool, more: bool, full: bool, no_shrink: bool, workflow: str | None, profile: str | None, executor: str | None, native_backend: str | None, experimental_deepagents_run: bool, experimental_tier_dispatch: bool, native_loop: str | None, plan_flag: bool, approval: str | None, provider: str | None, history_scoring: bool, eval_scoring: bool, feedback_scoring: bool, model_policy: str | None, candidates: int, shard_id: str | None, task_id: str | None):
     """Execute TASK and return a structured result."""
     if native_loop is not None and workflow != "native":
         raise click.UsageError("--native-loop experimental requires --workflow native")
+    from openshard.history.task_identity import is_task_id
+    if task_id is not None and not is_task_id(task_id):
+        raise click.UsageError(
+            f"--task-id {task_id!r} is not a well-formed task id "
+            "(expected 'task_' + UUIDv7 from 'openshard task new')."
+        )
     try:
         config = load_config()
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
@@ -408,6 +424,7 @@ def run(task: str, write: bool, verify: bool, dry_run: bool, more: bool, full: b
         model_policy=model_policy,
         candidates=candidates,
         shard_id=shard_id,
+        task_id=task_id,
     )
     from openshard.history.run_attempt import UnknownShardError
     try:
@@ -1970,6 +1987,7 @@ def last(more: bool, full: bool, as_json: bool):
         )
         payload = _machine_envelope(
             "last", "ok", shard_id=receipt.shard_id, receipt_id=receipt.receipt_id,
+            task_id=receipt.task_id,
             repo=loc.to_dict(),
             run=_export_run_entry(entry, include_timeline=True, receipt=receipt),
             trust={
@@ -2403,6 +2421,72 @@ def shard_attempts(shard_id: str, as_json: bool) -> None:
             f"- {a.origin}/{a.capture_depth}"
             f"{' (retry)' if a.retry_triggered else ''}"
         )
+
+
+@cli.group("task")
+def task_group() -> None:
+    """Explicit engineering-task identity (task_id), separate from Shard/Receipt."""
+
+
+@task_group.command("attempts")
+@click.argument("task_id")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Machine-readable output (valid JSON only).")
+def task_attempts(task_id: str, as_json: bool) -> None:
+    """List every persisted Receipt explicitly attached to TASK_ID, newest first.
+
+    Purely a read over stored task_id values -- never inferred from prompt
+    text, timing or shard_id.
+    """
+    from openshard.history.query import list_receipts_by_task
+    from openshard.history.task_identity import is_task_id
+
+    if not is_task_id(task_id):
+        raise click.UsageError(
+            f"'{task_id}' is not a well-formed task id "
+            "(expected 'task_' + UUIDv7 from 'openshard task new')."
+        )
+
+    receipts = list_receipts_by_task(task_id)
+    if as_json:
+        click.echo(json.dumps(_machine_envelope(
+            "task attempts", "ok", task_id=task_id,
+            receipts=[
+                {"shard_id": r.shard_id, "receipt_id": r.receipt_id, "agent": r.agent,
+                 "created_at": r.created_at, "status": r.status}
+                for r in receipts
+            ],
+        ), indent=2))
+        return
+
+    if not receipts:
+        click.echo(f"No receipts found for Task '{task_id}'.")
+        return
+
+    click.echo(f"Task: {task_id}")
+    for r in receipts:
+        click.echo(f"  {r.shard_id} - {r.agent} - {r.created_at} - {r.status}")
+
+
+@task_group.command("new")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Machine-readable output (valid JSON only).")
+def task_new(as_json: bool) -> None:
+    """Mint a new, explicit task_id.
+
+    This is the only path that mints a task_id. It is never inferred from a
+    prompt, a Shard, or a Receipt. Pass the printed id to '--task-id' on
+    'openshard run', 'openshard import claude' or 'openshard wrap claude' to
+    attach that run's receipt to this task.
+    """
+    from openshard.history.task_identity import new_task_id
+
+    task_id = new_task_id()
+    if as_json:
+        click.echo(json.dumps(_machine_envelope("task new", "ok", task_id=task_id), indent=2))
+    else:
+        click.echo(f"Task ID: {task_id}")
+        click.echo("Pass this to --task-id on 'run', 'import claude' or 'wrap claude' to attach a receipt to it.")
 
 
 @cli.group("mcp")
@@ -4402,6 +4486,7 @@ def _export_run_entry(entry: dict, include_notes: bool = False, include_timeline
         derive_capture_completeness as _derive_capture_completeness,
     )
     from openshard.history.receipt_identity import stored_receipt_id as _stored_receipt_id
+    from openshard.history.task_identity import stored_task_id as _stored_task_id
 
     stage_runs = entry.get("stage_runs") or []
     is_ro = entry.get("routing_rationale") == "read-only analysis"
@@ -4461,6 +4546,7 @@ def _export_run_entry(entry: dict, include_notes: bool = False, include_timeline
         # is missing, and per-file change provenance (None/[] for old records).
         "shard_id":                  entry.get("shard_id"),
         "receipt_id":                _stored_receipt_id(entry),
+        "task_id":                   _stored_task_id(entry),
         "capture_completeness":      _derive_capture_completeness(entry),
         "changes":                   entry.get("changes") if isinstance(entry.get("changes"), dict) else None,
         "files_detail":              [f for f in (entry.get("files_detail") or []) if isinstance(f, dict)][:200],
@@ -5706,6 +5792,15 @@ def import_group() -> None:
         "reference a Shard ID from a previous run."
     ),
 )
+@click.option(
+    "--task-id",
+    "task_id",
+    default=None,
+    help=(
+        "Attach this import's receipt to an explicitly declared engineering "
+        "task. Must be a task id from 'openshard task new'."
+    ),
+)
 def import_claude(
     task: str,
     model: str | None,
@@ -5714,6 +5809,7 @@ def import_claude(
     dry_run: bool,
     as_json: bool,
     shard_id: str | None,
+    task_id: str | None,
 ) -> None:
     """Import a Claude Code session as an OpenShard receipt.
 
@@ -5727,6 +5823,7 @@ def import_claude(
     )
     from openshard.history.metrics import load_runs
     from openshard.history.run_attempt import UnknownShardError, resolve_shard_for_attempt
+    from openshard.history.task_identity import is_task_id
 
     cwd = Path(repo_path) if repo_path else Path.cwd()
     notes_path = Path(notes_file) if notes_file else None
@@ -5735,6 +5832,11 @@ def import_claude(
         raise click.BadParameter(
             f"Notes file not found: {notes_file}",
             param_hint="--notes",
+        )
+    if task_id is not None and not is_task_id(task_id):
+        raise click.UsageError(
+            f"--task-id {task_id!r} is not a well-formed task id "
+            "(expected 'task_' + UUIDv7 from 'openshard task new')."
         )
 
     attempt_number = 1
@@ -5760,6 +5862,7 @@ def import_claude(
         shard_id=shard_id,
         attempt_number=attempt_number,
         run_index=run_index,
+        task_id=task_id,
     )
 
     if dry_run or as_json:
@@ -5798,6 +5901,15 @@ def wrap_group() -> None:
         "reference a Shard ID from a previous run."
     ),
 )
+@click.option(
+    "--task-id",
+    "task_id",
+    default=None,
+    help=(
+        "Attach this wrap's receipt to an explicitly declared engineering "
+        "task. Must be a task id from 'openshard task new'."
+    ),
+)
 @click.argument("command", nargs=-1, required=True)
 def wrap_claude(
     task: str,
@@ -5806,6 +5918,7 @@ def wrap_claude(
     dry_run: bool,
     as_json: bool,
     shard_id: str | None,
+    task_id: str | None,
     command: tuple[str, ...],
 ) -> None:
     """Wrap a Claude Code command and record an OpenShard receipt automatically.
@@ -5827,9 +5940,16 @@ def wrap_claude(
     )
     from openshard.history.metrics import load_runs
     from openshard.history.run_attempt import UnknownShardError, resolve_shard_for_attempt
+    from openshard.history.task_identity import is_task_id
 
     cwd = Path(repo_path) if repo_path else Path.cwd()
     cmd = list(command)
+
+    if task_id is not None and not is_task_id(task_id):
+        raise click.UsageError(
+            f"--task-id {task_id!r} is not a well-formed task id "
+            "(expected 'task_' + UUIDv7 from 'openshard task new')."
+        )
 
     attempt_number = 1
     if shard_id:
@@ -5863,6 +5983,7 @@ def wrap_claude(
             shard_id=shard_id,
             attempt_number=attempt_number,
             run_index=run_index,
+            task_id=task_id,
         )
         click.echo(json.dumps(entry, indent=2))
         return
@@ -5883,6 +6004,7 @@ def wrap_claude(
         shard_id=shard_id,
         attempt_number=attempt_number,
         run_index=run_index,
+        task_id=task_id,
     )
 
     write_wrap_entry(entry, cwd)

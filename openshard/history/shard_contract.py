@@ -19,6 +19,7 @@ from openshard.history.shard import (
     derive_shard_identity,
 )
 from openshard.history.shard_hash import verify_shard_hash
+from openshard.history.task_identity import stored_task_id
 from openshard.run.timeline import normalize_timeline
 
 _PROFILE_TO_STRATEGY: dict[str, str] = {
@@ -519,6 +520,12 @@ class ShardReceipt:
     # minted at display time. ``shard_id`` above keeps its historic,
     # history-position meaning.
     receipt_id: str | None = None
+    # task_id (history/task_identity.py): one explicitly declared engineering
+    # task across attempts, agents and potentially repositories. Read from
+    # the record only -- never minted, inferred or backfilled at build/
+    # display time. Additive alongside shard_id/receipt_id; None for records
+    # that never had one attached.
+    task_id: str | None = None
     # v0.4.4 capture completeness (history/capture_completeness.py):
     # {"depth": full|partial|unknown, "status": complete|incomplete|unknown,
     #  "reasons": [...], "derived": bool}. ``depth`` is how much could be
@@ -1139,6 +1146,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
 
     _shard_id_val = entry.get("shard_id") or _make_shard_id(timestamp, index)
     _receipt_id_val = stored_receipt_id(entry)
+    _task_id_val = stored_task_id(entry)
     _capture_completeness_val = derive_capture_completeness(entry)
     _task_short_val = _trunc(task, 70)
     _run_id_val = entry.get("run_id") or timestamp or None
@@ -1257,6 +1265,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         tokens_provenance=_tokens_provenance,
         cost_provenance=cost_provenance,
         receipt_id=_receipt_id_val,
+        task_id=_task_id_val,
         capture_completeness=_capture_completeness_val,
         integrity=_integrity_val,
         changes=_changes_summary(_changes_block),
@@ -1416,6 +1425,8 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     ]
     if receipt.receipt_id:
         lines.append(_row("Receipt ID", receipt.receipt_id))
+    if receipt.task_id:
+        lines.append(_row("Task ID", receipt.task_id))
     lines += _capture_rows(receipt)
     if receipt.task_completion:
         lines.append(_row("Status", receipt.task_completion))
@@ -2001,6 +2012,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     lines += [_SEP, f"{_INDENT}RECEIPT"]
     if receipt.receipt_id:
         lines.append(_row("Receipt ID", receipt.receipt_id))
+    if receipt.task_id:
+        lines.append(_row("Task ID", receipt.task_id))
     lines.append(_row("Shard ID", receipt.shard_id))
     lines.append(_row("Created", _fmt_timestamp(receipt.created_at)))
     lines.append(_row("Integrity", receipt.integrity))

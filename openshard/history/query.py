@@ -128,6 +128,7 @@ __all__ = [
     "UnknownShardError",
     "get_receipt",
     "get_shard",
+    "list_receipts_by_task",
     "list_shards",
     "recent_shards",
     "relevant_context",
@@ -139,7 +140,9 @@ DEFAULT_CONTEXT_LIMIT = 5
 
 # Fields search may read. Deliberately excludes summary/notes/agent_notes and
 # every free-text field that could carry model output or private content.
-SEARCH_FIELDS: tuple[str, ...] = ("task_short", "task_full", "shard_id", "receipt_id", "agent", "status")
+SEARCH_FIELDS: tuple[str, ...] = (
+    "task_short", "task_full", "shard_id", "receipt_id", "task_id", "agent", "status",
+)
 
 
 class UnknownRunError(ValueError):
@@ -402,6 +405,24 @@ def get_receipt(
     raise UnknownRunError(f"No run found with id '{run_id}'.")
 
 
+def list_receipts_by_task(task_id: str, *, repo_path: Path | None = None) -> list[ShardReceipt]:
+    """Return every persisted Receipt explicitly attached to *task_id*, newest first.
+
+    Purely a read over the ``task_id`` already stored on each record (see
+    ``history/task_identity.py``) -- never infers membership from prompt
+    similarity, timing, ``shard_id`` or anything else. Records without a
+    ``task_id`` are never included, whatever their task text looks like.
+    """
+    groups = _load_groups(repo_path, None)
+    out: list[ShardReceipt] = []
+    for group in groups:
+        for attempt in sorted(group.attempts, key=lambda a: a[0]):
+            receipt = _receipt_for(group, attempt)
+            if receipt.task_id == task_id:
+                out.append(receipt)
+    return out
+
+
 def _entry_run_id(entry: dict) -> str:
     return str(entry.get("run_id") or entry.get("timestamp") or "")
 
@@ -413,6 +434,7 @@ def _searchable_fields(receipt: ShardReceipt) -> dict[str, str]:
         "task_full": (receipt.task_full or "").lower(),
         "shard_id": (receipt.shard_id or "").lower(),
         "receipt_id": (receipt.receipt_id or "").lower(),
+        "task_id": (receipt.task_id or "").lower(),
         "agent": (receipt.agent or "").lower(),
         "status": (receipt.status or "").lower(),
     }

@@ -17,6 +17,7 @@ from openshard.history.query import (
     UnknownShardError,
     get_receipt,
     get_shard,
+    list_receipts_by_task,
     list_shards,
     search_history,
 )
@@ -263,6 +264,40 @@ class TestGetReceipt:
         _write(tmp_path, [{"task": "old", "timestamp": T1}])
         receipt = get_receipt(run_id=T1, repo_path=tmp_path)
         assert receipt.shard_id == _make_shard_id(T1, 0)
+
+
+# ---------------------------------------------------------------------------
+# list_receipts_by_task
+# ---------------------------------------------------------------------------
+
+
+class TestListReceiptsByTask:
+    def test_returns_only_receipts_carrying_that_task_id(self, tmp_path: Path):
+        from openshard.history.task_identity import new_task_id
+
+        tid = new_task_id()
+        other_tid = new_task_id()
+        _write(tmp_path, [
+            _entry("add JWT auth", T1, shard_id="shard-a", task_id=tid),
+            _entry("unrelated", T2, shard_id="shard-b", task_id=other_tid),
+            _entry("no task_id here", T3, shard_id="shard-c"),
+            _entry("second attempt at the task", T4, shard_id="shard-d", task_id=tid),
+        ])
+        receipts = list_receipts_by_task(tid, repo_path=tmp_path)
+        assert [r.shard_id for r in receipts] == ["shard-d", "shard-a"]
+        assert all(r.task_id == tid for r in receipts)
+
+    def test_no_matches_returns_empty_list(self, history: Path):
+        from openshard.history.task_identity import new_task_id
+
+        assert list_receipts_by_task(new_task_id(), repo_path=history) == []
+
+    def test_never_matches_on_malformed_stored_task_id(self, tmp_path: Path):
+        from openshard.history.task_identity import new_task_id
+
+        tid = new_task_id()
+        _write(tmp_path, [_entry("x", T1, shard_id="shard-a", task_id="not-well-formed")])
+        assert list_receipts_by_task(tid, repo_path=tmp_path) == []
 
 
 # ---------------------------------------------------------------------------

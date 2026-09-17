@@ -11,11 +11,19 @@ v0 limitation: a Shard here still corresponds to one persisted run record —
 identity that persists across retries/attempts; a retried run is still a
 sibling JSONL entry with its own fresh ``shard_id``. Persistent Shard
 identity spanning multiple Run/Attempts is future work.
+
+``task_id`` (``history/task_identity.py``) is a separate, additive,
+explicitly-attached identity for "the same engineering task across
+attempts, agents and potentially repositories" -- it does not change
+``shard_id`` semantics or force a stronger Task -> Shard -> RunAttempt
+hierarchy than exists today.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from openshard.history.task_identity import stored_task_id
 
 ORIGIN_OPENSHARD_ROUTED = "openshard_routed"
 ORIGIN_EXTERNAL_OBSERVED = "external_observed"
@@ -61,6 +69,10 @@ class Shard:
     agent: str
     origin: str
     capture_depth: str
+    # task_id (history/task_identity.py): the explicitly declared engineering
+    # task this Shard is an attempt at, if one was attached. Read from the
+    # record only -- never minted, inferred or backfilled here.
+    task_id: str | None = None
 
 
 def derive_shard_identity(entry: dict) -> tuple[str, str, str]:
@@ -119,4 +131,5 @@ def build_shard(
         agent=agent,
         origin=origin,
         capture_depth=capture_depth,
+        task_id=stored_task_id(entry),
     )

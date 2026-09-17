@@ -34,6 +34,8 @@ import time
 import uuid
 from pathlib import Path
 
+from openshard.adapters.claude_mcp_install import MCP_TOOLS
+
 MODEL = os.environ.get("PR13_FAKE_MODEL", "fake-model-1")
 
 
@@ -65,7 +67,7 @@ def parse_argv(argv: list[str]) -> dict:
     return out
 
 
-MCP_TOOL_NAMES = ("recent_shards", "get_shard", "get_receipt", "search_history", "relevant_context")
+MCP_TOOL_NAMES = MCP_TOOLS
 
 
 def mcp_servers(config_path: str | None) -> list[dict]:
