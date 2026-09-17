@@ -94,7 +94,7 @@ The important part is not simply collecting more fields. It is being clear about
 
 ## Why receipts?
 
-AI coding agents have long moved past autocomplete and now carry out significant work in real prouction workflows. They inspect repositories, edit files, run commands, execute tests, call tools, and increasingly work on tasks that previously belonged entirely to developers.
+AI coding agents have long moved past autocomplete and now carry out significant work in real production workflows. They inspect repositories, edit files, run commands, execute tests, call tools, and increasingly work on tasks that previously belonged entirely to developers.
 
 Git gives us a durable history of code changes, but it does not always tell us what happened during the AI work around those changes. Which agent handled the task? Which model was used? What did the agent report changing? Which checks actually ran? What failed? What did the run cost? Was any evidence missed? Can we still trust the record we are looking at later?
 
