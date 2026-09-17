@@ -8,7 +8,7 @@ import type { Receipt, Task, TaskSummary } from "./types";
  * without touching a page.
  */
 export interface OpenShardApi {
-  /** Newest first. */
+  /** Explicit tasks only (Receipts carrying a `task_id`), newest first. */
   listTasks(): Promise<TaskSummary[]>;
   /** Resolves `null` when the task does not exist. */
   getTask(taskId: string): Promise<Task | null>;

@@ -54,7 +54,7 @@ function ReceiptView({ r }: { r: Receipt }) {
       <Crumbs
         items={[
           { to: "/", label: "Recent work" },
-          { to: `/tasks/${r.task_id}`, label: r.task_short },
+          ...(r.task_id ? [{ to: `/tasks/${r.task_id}`, label: r.task_short }] : []),
           { label: `Receipt${r.attempt_number ? ` · attempt #${r.attempt_number}` : ""}` },
         ]}
       />
@@ -84,7 +84,7 @@ function ReceiptView({ r }: { r: Receipt }) {
               ["Verification", <><ChecksText verification={r.verification_status} checks={r.checks} />{r.verification_reason && r.verification_status !== "passed" ? <span className="hint">{r.verification_reason}</span> : null}</>],
               ["Result", r.result ?? <Muted>not recorded</Muted>],
               ["Duration", duration(r.duration_seconds)],
-              ["Attempt", r.attempt_number !== null ? <>#{r.attempt_number} <Link to={`/tasks/${r.task_id}`} style={{ color: "var(--accent)" }}>· view task</Link></> : <Muted>not tracked</Muted>],
+              ["Attempt", r.attempt_number !== null ? <>#{r.attempt_number}{r.task_id ? <Link to={`/tasks/${r.task_id}`} style={{ color: "var(--accent)" }}> · view task</Link> : null}</> : <Muted>not tracked</Muted>],
               ...(r.error_class ? ([["Error class", <code>{r.error_class}</code>]] as [string, React.ReactNode][]) : []),
             ]}
           />
@@ -214,6 +214,7 @@ function ReceiptView({ r }: { r: Receipt }) {
             items={[
               ["Content hash", <IntegrityPill integrity={r.integrity} />],
               ["Receipt ID", <code>{r.receipt_id}</code>],
+              ["Task ID", r.task_id ? <code>{r.task_id}</code> : <Muted>none — recorded without an explicit task</Muted>],
               ["Shard ID", <><code>{r.shard_id}</code><span className="hint">position in the repo's local history</span></>],
               ["Run ID", <code>{r.run_id}</code>],
             ]}

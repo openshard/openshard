@@ -38,9 +38,17 @@ VITE_OPENSHARD_API_URL=https://api.example.com npm run dev
 ## How it is put together
 
 - `src/api/types.ts` mirrors `receipt_to_dict(extended=True)` from
-  `openshard/history/views.py`, plus `task_id` and `synced_at`, which the
-  hosted side adds. Nothing that the local privacy boundary omits (prompts,
+  `openshard/history/views.py`, plus `synced_at` (stamped on sync) and
+  `task_id`. Nothing that the local privacy boundary omits (prompts,
   transcripts, diffs, absolute paths) is in the contract.
+- Task identity is explicit only. `task_id` (`task_` + UUIDv7) is
+  established by Core when a task is explicitly created and travels on the
+  Receipts recorded under it; the dashboard stores and uses it as-is. It
+  never infers, guesses or reconstructs a task from prompts, timestamps,
+  repository, agent, similarity or Receipt contents. A Receipt with no
+  `task_id` stays valid and ungrouped. The canonical contract is landing in
+  Core; `task_id` here is that field, not a second definition, and the
+  three-method API boundary is where any shape change gets absorbed.
 - `src/api/client.ts` is the whole backend seam: `listTasks`, `getTask`,
   `getReceipt`. `fixtureClient.ts` and `httpClient.ts` both implement it;
   `createApi()` picks one from the environment. Pages never import either.

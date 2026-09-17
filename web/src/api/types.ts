@@ -3,10 +3,19 @@
  *
  * `Receipt` mirrors `receipt_to_dict(extended=True)` in
  * openshard/history/views.py -- the privacy-bounded shape the CLI and MCP
- * server already emit -- plus the two fields hosted sync adds
- * (`synced_at`, `task_id`). `Task` is the hosted-side grouping of one or
- * more attempts; the local layer does not yet give a task a stable identity
- * across retries (see openshard/history/shard.py), so the server owns it.
+ * server already emit -- plus `synced_at` (stamped by the sync service) and
+ * `task_id`.
+ *
+ * Task identity is explicit only. `task_id` (`task_` + UUIDv7) is
+ * established by Core when a task is explicitly created, travels on the
+ * attempts/Receipts recorded under it, and is stored and used as-is here.
+ * The Platform never infers, guesses, reconstructs or assigns task
+ * relationships from prompts, timestamps, repository, agent, similarity or
+ * Receipt contents. A Receipt with no `task_id` (every record written
+ * before the field existed) stays valid and ungrouped. `receipt_id` stays
+ * the identity of one Receipt; `shard_id` keeps its local history-position
+ * meaning. The canonical `task_id` contract is being landed in Core; the
+ * field here is the expected shape of that contract, not a second one.
  *
  * Rule carried over from the CLI: a value that was not captured is `null`,
  * never a zero or an empty string, and the UI says "not recorded".
@@ -83,7 +92,8 @@ export interface EvidenceSummary {
 export interface Receipt {
   receipt_id: string;
   shard_id: string;
-  task_id: string;
+  /** Explicit task identity carried on the Receipt, or null for a Receipt recorded without one. */
+  task_id: string | null;
   run_id: string;
   attempt_number: number | null;
 
@@ -148,6 +158,7 @@ export interface Attempt {
   duration_seconds: number | null;
 }
 
+/** One explicitly created task, keyed by the `task_id` its Receipts carry. */
 export interface TaskSummary {
   task_id: string;
   title: string;

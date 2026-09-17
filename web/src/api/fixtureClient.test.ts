@@ -16,7 +16,7 @@ describe("fixture client", () => {
   });
 
   it("resolves a task with its attempts and latest receipt", async () => {
-    const task = await api.getTask("task_01j8refreshtokenreuse");
+    const task = await api.getTask("task_019965a1-4d2e-7c3a-8f11-2b6e9d4a0c51");
     expect(task?.attempt_count).toBe(2);
     expect(task?.attempts.map((a) => a.status)).toEqual(["failed", "completed"]);
     expect(task?.latest_receipt.files_changed).toBe(1);
@@ -33,10 +33,31 @@ describe("fixture client", () => {
     for (const r of RECEIPTS) {
       expect(r.receipt_id).toMatch(/^rcpt_[0-9a-f]{32}$/);
       expect(r.shard_id).toMatch(/^shard-\d{8}-\d{4}$/);
-      expect(TASKS.some((t) => t.task_id === r.task_id)).toBe(true);
     }
     const ids = new Set(RECEIPTS.map((r) => r.receipt_id));
     expect(ids.size).toBe(RECEIPTS.length);
+  });
+
+  it("groups only by an explicitly carried task_id and never invents one", () => {
+    for (const r of RECEIPTS) {
+      const owners = TASKS.filter((t) => t.attempts.some((a) => a.receipt_id === r.receipt_id));
+      if (r.task_id === null) {
+        expect(owners).toEqual([]);
+      } else {
+        expect(owners.map((t) => t.task_id)).toEqual([r.task_id]);
+      }
+    }
+    for (const t of TASKS) {
+      expect(t.latest_receipt.task_id).toBe(t.task_id);
+    }
+  });
+
+  it("keeps a legacy receipt without task_id valid and reachable", async () => {
+    const legacy = await api.getReceipt("rcpt_1a3c5e7a9b1d3f5a7c9e1b3d5f7a9c16");
+    expect(legacy?.task_id).toBeNull();
+    expect(legacy?.attempt_number).toBeNull();
+    expect(legacy?.integrity).toBe("Not recorded");
+    expect((await api.listTasks()).some((t) => t.latest_receipt_id === legacy?.receipt_id)).toBe(false);
   });
 
   it("never fabricates cost or tokens", () => {

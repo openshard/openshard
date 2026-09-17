@@ -7,6 +7,12 @@
  * run, partial capture, a legacy record with no integrity hash, a hash
  * mismatch, checks not run, and cost/tokens present vs. not recorded.
  *
+ * Task identity here is explicit: each Receipt carries the `task_id` Core
+ * established when the task was created (`task_` + UUIDv7), and a fixture
+ * Task is simply the Receipts that carry the same id. Nothing is grouped
+ * by prompt, time, repo, agent or similarity. One Receipt (`r6`) predates
+ * `task_id` and stays ungrouped on purpose.
+ *
  * Timestamps are relative to load time so the history reads "2m ago" the
  * way the product brief describes it.
  */
@@ -24,7 +30,7 @@ function shardId(iso: string, n: number): string {
 }
 
 type ReceiptSeed = Partial<Receipt> &
-  Pick<Receipt, "receipt_id" | "task_id" | "task_short" | "agent" | "repo" | "created_at" | "status">;
+  Pick<Receipt, "receipt_id" | "task_short" | "agent" | "repo" | "created_at" | "status">;
 
 /** Fill a receipt with the conservative defaults the CLI uses: nothing invented. */
 function receipt(seed: ReceiptSeed, shardIndex: number): Receipt {
@@ -32,7 +38,7 @@ function receipt(seed: ReceiptSeed, shardIndex: number): Receipt {
   const base: Receipt = {
     receipt_id: seed.receipt_id,
     shard_id: shardId(created, shardIndex),
-    task_id: seed.task_id,
+    task_id: null,
     run_id: `run_${seed.receipt_id.slice(5, 17)}`,
     attempt_number: 1,
     task_short: seed.task_short,
@@ -91,7 +97,7 @@ const checks = (names: string[], failed: string[] = []) =>
 // Task 1: Fix refresh-token reuse bug -- OpenCode, retried once, completed.
 // ---------------------------------------------------------------------------
 
-const T1 = "task_01j8refreshtokenreuse";
+const T1 = "task_019965a1-4d2e-7c3a-8f11-2b6e9d4a0c51";
 
 const r1a = receipt(
   {
@@ -202,7 +208,7 @@ const r1b = receipt(
 // Task 2: Add billing webhook -- Claude Code, one attempt, completed.
 // ---------------------------------------------------------------------------
 
-const T2 = "task_01j8billingwebhook";
+const T2 = "task_0199659e-88b0-7a12-9c4d-6e1f0a2b3c74";
 
 const r2 = receipt(
   {
@@ -274,7 +280,7 @@ const r2 = receipt(
 // Task 3: Refactor auth middleware -- Codex, one attempt, failed.
 // ---------------------------------------------------------------------------
 
-const T3 = "task_01j8refactorauthmw";
+const T3 = "task_0199657c-1f60-7b9e-8d02-4a5b6c7d8e93";
 
 const r3 = receipt(
   {
@@ -337,7 +343,7 @@ const r3 = receipt(
 // Task 4: Migrate user avatars to S3 -- Cursor, partial capture, cost unknown.
 // ---------------------------------------------------------------------------
 
-const T4 = "task_01j8avatarss3";
+const T4 = "task_01996520-9a44-7d31-b7e5-0c1d2e3f4a05";
 
 const r4 = receipt(
   {
@@ -390,7 +396,7 @@ const r4 = receipt(
 // Task 5: Investigate flaky checkout test -- Codex, in progress.
 // ---------------------------------------------------------------------------
 
-const T5 = "task_01j8flakycheckout";
+const T5 = "task_019965a0-2c18-7e5f-a3b8-9d0e1f2a3b46";
 
 const r5 = receipt(
   {
@@ -421,15 +427,14 @@ const r5 = receipt(
 );
 
 // ---------------------------------------------------------------------------
-// Task 6: Bump dependencies and fix lint -- Claude Code, legacy record, no hash.
+// Legacy Receipt: Bump dependencies and fix lint -- Claude Code, recorded
+// before task_id and content hashing existed. Valid, but belongs to no Task.
 // ---------------------------------------------------------------------------
-
-const T6 = "task_01j8depsbump";
 
 const r6 = receipt(
   {
     receipt_id: "rcpt_1a3c5e7a9b1d3f5a7c9e1b3d5f7a9c16",
-    task_id: T6,
+    attempt_number: null,
     task_short: "Bump dependencies and fix lint",
     task_full: "Bump dependencies and fix lint",
     agent: "Claude Code",
@@ -458,7 +463,7 @@ const r6 = receipt(
 // Task 7: Add rate limiting to login -- OpenCode, hash mismatch.
 // ---------------------------------------------------------------------------
 
-const T7 = "task_01j8loginratelimit";
+const T7 = "task_01995c2e-7788-7f0a-9e6c-3b4c5d6e7f27";
 
 const r7 = receipt(
   {
@@ -510,7 +515,7 @@ const r7 = receipt(
 // Task 8: Write ADR for event sourcing -- Claude Code, docs only, no checks.
 // ---------------------------------------------------------------------------
 
-const T8 = "task_01j8adreventsourcing";
+const T8 = "task_0199581d-3c9a-7a6b-8f4e-5a6b7c8d9e08";
 
 const r8 = receipt(
   {
@@ -553,7 +558,8 @@ const r8 = receipt(
 );
 
 // ---------------------------------------------------------------------------
-// Assemble tasks from receipts.
+// Tasks: one per explicit task_id. A fixture Task is only ever the Receipts
+// that already carry that id -- never a grouping the dashboard worked out.
 // ---------------------------------------------------------------------------
 
 export const RECEIPTS: Receipt[] = [r1a, r1b, r2, r3, r4, r5, r6, r7, r8];
@@ -571,6 +577,11 @@ function attempt(r: Receipt): Attempt {
 }
 
 function task(taskId: string, title: string, receipts: Receipt[]): Task {
+  for (const r of receipts) {
+    if (r.task_id !== taskId) {
+      throw new Error(`fixture receipt ${r.receipt_id} does not carry task_id ${taskId}`);
+    }
+  }
   const ordered = [...receipts].sort((a, b) => (a.attempt_number ?? 1) - (b.attempt_number ?? 1));
   const latest = ordered[ordered.length - 1];
   const first = ordered[0];
@@ -601,7 +612,6 @@ export const TASKS: Task[] = [
   task(T2, "Add billing webhook", [r2]),
   task(T3, "Refactor auth middleware", [r3]),
   task(T4, "Migrate user avatars to S3", [r4]),
-  task(T6, "Bump dependencies and fix lint", [r6]),
   task(T7, "Add rate limiting to login endpoint", [r7]),
   task(T8, "Write ADR for event sourcing", [r8]),
 ];
