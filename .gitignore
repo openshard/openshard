@@ -65,3 +65,7 @@ yc-*.md
 
 # PR13 benchmark output (workspaces, transcripts, results)
 evals/pr13/results/
+
+# Hosted dashboard (web/)
+web/node_modules/
+web/dist/
