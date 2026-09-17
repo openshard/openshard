@@ -93,7 +93,7 @@ Local history + rendering      history/query.py, views.py, shard_contract.py
 | Receipt identity | `receipt_id` | one persisted record, globally unique | v0.4.4 |
 | History identity | `shard_id` | position in this repository's history; grouping key for attempts | unchanged |
 | Agent session | `capture.session_id` | the agent's own id; per agent | unchanged |
-| Task / work identity | — | "the same engineering task across attempts" | **not yet**: no authoritative source; never inferred from prompt text |
+| Task identity | `task_id` | "the same engineering task across attempts, agents and potentially repositories" | v0.4.6: explicit only — minted by `openshard task new`, attached with `--task-id`; never inferred from prompt text, timing, `shard_id` or anything else. See `history/task_identity.py`. |
 | Owner / Requested by / Executed by / Approved by | — | accountable person, delegator, performer, approver | **not yet**: only "Executed by" is known (the agent); nothing is inferred from git config or the OS user |
 
 ## Optional and advanced systems

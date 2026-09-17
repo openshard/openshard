@@ -64,6 +64,7 @@ def shard_to_dict(shard: Shard) -> dict[str, Any]:
         "agent": shard.agent,
         "origin": shard.origin,
         "capture_depth": shard.capture_depth,
+        "task_id": shard.task_id,
     }
 
 
@@ -120,6 +121,7 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
     d: dict[str, Any] = {
         "shard_id": receipt.shard_id,
         "receipt_id": receipt.receipt_id,
+        "task_id": receipt.task_id,
         "capture_completeness": _completeness_to_dict(receipt.capture_completeness),
         "integrity": receipt.integrity,
         "run_id": receipt.run_id,

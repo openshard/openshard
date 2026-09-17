@@ -98,7 +98,8 @@ class TestToolRegistration:
         tools = asyncio.run(server.list_tools())
         names = {t.name for t in tools}
         assert names == {
-            "recent_shards", "get_shard", "get_receipt", "search_history", "relevant_context",
+            "recent_shards", "get_shard", "get_receipt", "get_receipts_by_task",
+            "search_history", "relevant_context",
         }
 
     def test_each_tool_has_a_description(self, server):
@@ -176,7 +177,7 @@ class TestRecentShards:
         shard = structured["result"][0]
         assert set(shard) == {
             "shard_id", "created_at", "task_short", "task_full",
-            "agent", "origin", "capture_depth",
+            "agent", "origin", "capture_depth", "task_id",
         }
 
     def test_multi_attempt_shard_listed_once_with_latest_state(self, multi_attempt: Path):
@@ -296,7 +297,7 @@ class TestGetReceipt:
         _, structured = _call(server, "get_receipt", {"shard_id": "shard-a"})
         # v0.4.4: receipt_id is an additive key (None for records written before it existed).
         expected_keys = {
-            "shard_id", "receipt_id", "capture_completeness", "integrity", "run_id", "attempt_number",
+            "shard_id", "receipt_id", "task_id", "capture_completeness", "integrity", "run_id", "attempt_number",
             "created_at", "task_short",
             "task_full", "agent", "origin", "capture_depth", "model",
             "model_stages", "strategy", "risk", "sandbox", "files_changed",

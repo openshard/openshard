@@ -1,7 +1,7 @@
 """Placebo OpenShard MCP server for the PR13 control arm.
 
 The control arm must see exactly the tool surface the treatment arm sees --
-the same server name, the same five read-only tools, the same descriptions
+the same server name, the same read-only tools, the same descriptions
 and input schemas -- while receiving *empty* OpenShard history. This
 server provides that surface and nothing else:
 
@@ -107,6 +107,16 @@ def build_server() -> MCPServer:
         if shard_id:
             raise _unknown_shard(shard_id)
         raise ToolError(f"No run found with id '{run_id}'.")
+
+    @mcp.tool()
+    def get_receipts_by_task(task_id: str) -> list[dict[str, Any]]:
+        """List every persisted Receipt explicitly attached to task_id, newest
+        first. Purely a read over stored task_id values -- never infers
+        membership from prompt text, timing, or shard_id. Returns an empty
+        list when no Receipt carries this task_id."""
+        if not task_id or not task_id.strip():
+            raise ToolError("task_id must be a non-empty string.")
+        return []
 
     @mcp.tool()
     def search_history(

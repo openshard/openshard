@@ -124,6 +124,15 @@ def test_coerce_preserves_unknown_safe_fields():
     assert result.get("another_novel_key") == 42
 
 
+def test_coerce_preserves_task_id():
+    from openshard.history.task_identity import new_task_id
+
+    tid = new_task_id()
+    entry = _minimal_entry(task_id=tid)
+    result = coerce_shard_entry(entry)
+    assert result.get("task_id") == tid
+
+
 # ---------------------------------------------------------------------------
 # Fail-closed guarantee
 # ---------------------------------------------------------------------------

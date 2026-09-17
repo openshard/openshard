@@ -320,5 +320,51 @@ class TestNotesFile(unittest.TestCase):
             self.assertNotIn("sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890", raw_summary)
 
 
+# ---------------------------------------------------------------------------
+# --task-id
+# ---------------------------------------------------------------------------
+
+class TestTaskIdOption(unittest.TestCase):
+
+    def _new_task_id(self) -> str:
+        from openshard.history.task_identity import new_task_id
+        return new_task_id()
+
+    def test_no_task_id_flag_means_no_task_id_in_entry(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            runner.invoke(cli, ["import", "claude", "--task", "Minor fix"])
+            entry = _load_jsonl(Path(".openshard/runs.jsonl"))[0]
+            self.assertNotIn("task_id", entry)
+
+    def test_explicit_task_id_attached(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            tid = self._new_task_id()
+            result = runner.invoke(cli, ["import", "claude", "--task", "Minor fix", "--task-id", tid])
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            entry = _load_jsonl(Path(".openshard/runs.jsonl"))[0]
+            self.assertEqual(entry["task_id"], tid)
+
+    def test_malformed_task_id_rejected(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            result = runner.invoke(cli, ["import", "claude", "--task", "Minor fix", "--task-id", "not-well-formed"])
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertFalse(Path(".openshard/runs.jsonl").exists())
+
+    def test_task_new_then_import_round_trip(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            new_result = runner.invoke(cli, ["task", "new", "--json"])
+            self.assertEqual(new_result.exit_code, 0, msg=new_result.output)
+            tid = json.loads(new_result.output)["task_id"]
+            runner.invoke(cli, ["import", "claude", "--task", "Minor fix", "--task-id", tid])
+            attempts_result = runner.invoke(cli, ["task", "attempts", tid, "--json"])
+            self.assertEqual(attempts_result.exit_code, 0, msg=attempts_result.output)
+            data = json.loads(attempts_result.output)
+            self.assertEqual(len(data["receipts"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

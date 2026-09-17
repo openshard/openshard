@@ -149,6 +149,19 @@ def build_server(*, repo_path: Path | None = None) -> MCPServer:
         return shard_to_dict(shard)
 
     @mcp.tool()
+    def get_receipts_by_task(task_id: str) -> list[dict[str, Any]]:
+        """List every persisted Receipt explicitly attached to task_id, newest
+        first. Purely a read over stored task_id values -- never infers
+        membership from prompt text, timing, or shard_id. Returns an empty
+        list when no Receipt carries this task_id."""
+        if not task_id or not task_id.strip():
+            raise ToolError("task_id must be a non-empty string.")
+        with _ToolCall("get_receipts_by_task") as call:
+            receipts = history_query.list_receipts_by_task(task_id, repo_path=repo_path)
+            call.results = len(receipts)
+        return [receipt_to_dict(r) for r in receipts]
+
+    @mcp.tool()
     def get_receipt(
         shard_id: str | None = None, run_id: str | None = None
     ) -> dict[str, Any]:
