@@ -138,3 +138,32 @@ class TestRenderingAndCompatibility:
         assert "Receipt ID" not in compact
         assert receipt.shard_id.startswith("shard-")
         assert receipt_to_dict(receipt)["receipt_id"] is None
+
+
+class TestRepoIdentityProjection:
+    """``repo_identity`` (canonical host/owner/repo) rides the extended export
+    beside the folder-name ``repo``; the MCP default key set is unchanged."""
+
+    def test_extended_export_carries_stored_repo_identity(self):
+        entry = {
+            "schema_version": "1.2", "receipt_id": new_receipt_id(), "timestamp": "2026-09-16T09:12:03Z",
+            "task": "t", "agent": "codex", "repo_name": "openshard",
+            "repo_identity": "github.com/openshard/openshard",
+        }
+        receipt = build_shard_receipt(entry, index=0)
+        assert receipt.repo == "openshard"
+        assert receipt.repo_identity == "github.com/openshard/openshard"
+        extended = receipt_to_dict(receipt, extended=True)
+        assert extended["repo"] == "openshard"
+        assert extended["repo_identity"] == "github.com/openshard/openshard"
+        assert "repo_identity" not in receipt_to_dict(receipt)
+
+    def test_missing_or_malformed_identity_is_none_never_derived(self, tmp_path):
+        for value in (None, "", 42, {"host": "github.com"}):
+            entry = {"receipt_id": new_receipt_id(), "timestamp": "2026-09-16T09:12:03Z", "task": "t",
+                     "agent": "codex", "repo_name": "openshard"}
+            if value is not None:
+                entry["repo_identity"] = value
+            receipt = build_shard_receipt(entry, index=0)
+            assert receipt.repo_identity is None
+            assert receipt_to_dict(receipt, extended=True)["repo_identity"] is None

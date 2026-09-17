@@ -416,6 +416,10 @@ class ShardReceipt:
     status: str
     duration_seconds: float | None
     repo: str | None = None
+    # Canonical ``host/owner/repo`` from the record's additive ``repo_identity``
+    # field (history/repo_identity.py); None for records without one. ``repo``
+    # stays the folder name.
+    repo_identity: str | None = None
     branch: str | None = None
     git_state: str | None = None
     context_quality: str | None = None
@@ -649,6 +653,14 @@ def _result_display(summary: str) -> str:
     clipped = clipped.rstrip(" ,;:")
     clipped = _RE_TRAILING_CONNECTIVE.sub("", clipped).rstrip(" ,;:")
     return clipped or line[:_MAX_RESULT]
+
+
+def _stored_repo_identity(entry: dict) -> str | None:
+    """The canonical ``repo_identity`` written on *entry*, or None. Never derives one."""
+    from openshard.history.repo_identity import REPO_IDENTITY_FIELD
+
+    value = entry.get(REPO_IDENTITY_FIELD)
+    return value if isinstance(value, str) and value else None
 
 
 def _workspace_folder_name(raw: object) -> str | None:
@@ -1203,6 +1215,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         status=status,
         duration_seconds=entry.get("duration_seconds"),
         repo=repo,
+        repo_identity=_stored_repo_identity(entry),
         branch=entry.get("git_branch") or None,
         git_state=git_state,
         context_quality=context_quality,

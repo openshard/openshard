@@ -170,6 +170,9 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
             "tokens_cache_read": receipt.tokens_cache_read,
             "tokens_cache_creation": receipt.tokens_cache_creation,
             "tokens_provenance": receipt.tokens_provenance,
+            # Canonical host/owner/repo (from the record's repo_identity field);
+            # ``repo`` above stays the folder name. None when never captured.
+            "repo_identity": receipt.repo_identity,
         })
     return d
 

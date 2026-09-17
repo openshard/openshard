@@ -615,6 +615,13 @@ class CaptureRecorder:
             self.enqueue(root, sid)
         return len(found)
 
+    def known_repos(self) -> list[Path]:
+        """Repository roots this service has seen (most recent first). Never raises."""
+        try:
+            return [Path(r) for r in self._state.get("recent_repos", []) or [] if isinstance(r, str)]
+        except Exception:
+            return []
+
     def recover_known_repos(self) -> int:
         total = 0
         for raw in self._state.get("recent_repos", []) or []:
@@ -1241,6 +1248,19 @@ def serve(
         threading.Thread(
             target=flush_periodically, args=(server.shutdown_requested,), kwargs={"env": env},
             name="openshard-telemetry-flush-timer", daemon=True,
+        ).start()
+    except Exception:
+        pass
+    # Platform sync: the same long-running process flushes each known
+    # repository's unsynced receipts on a timer. A no-op (one small file
+    # read per tick) until `openshard sync connect` has stored a link.
+    try:
+        from openshard.sync.client import sync_periodically
+
+        threading.Thread(
+            target=sync_periodically, args=(server.shutdown_requested,),
+            kwargs={"env": env, "repos": recorder.known_repos},
+            name="openshard-platform-sync-timer", daemon=True,
         ).start()
     except Exception:
         pass
