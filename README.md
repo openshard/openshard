@@ -1,522 +1,322 @@
-# OpenShard
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/openshard-wordmark-white.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/openshard-wordmark-black.png">
+    <img src="docs/assets/openshard-wordmark-black.png" alt="Openshard" width="700">
+  </picture>
+</p>
 
 <p align="center">
   <strong>Receipts for AI coding agents.</strong>
 </p>
 
 <p align="center">
-  AI coding agents can write code, but developers still need a clear record of what happened: what ran, what changed, what checks passed or failed, what it cost, and whether the saved record still matches its fingerprint.
+  Use Claude Code, Codex, Cursor, or OpenCode normally. Openshard keeps a clear record of what happened: what ran, what changed, what was verified, what it cost, and what it could not establish.
 </p>
 
 <p align="center">
-  OpenShard gives AI coding work a local receipt. It starts with receipts and grows into the control layer for AI coding workflows.
-</p>
-
-<p align="center">
-  <strong>Agents write code. OpenShard keeps the receipt.</strong>
+  <strong>Agents write code. Openshard keeps the receipt.</strong>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge" alt="License"></a>
-  <a href="#"><img src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge" alt="Status"></a>
-  <a href="#"><img src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"></a>
-  <a href="#"><img src="https://img.shields.io/badge/CLI-terminal-black?style=for-the-badge" alt="CLI"></a>
+  <a href="https://pypi.org/project/openshard/"><img src="https://img.shields.io/pypi/v/openshard?style=for-the-badge&label=PyPI" alt="PyPI"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge" alt="Status"></a>
+</p>
+
+<p align="center">
+  <a href="docs/">Docs</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="SECURITY.md">Security</a>
 </p>
 
 ---
 
-## Why OpenShard exists
+## See Openshard in action
 
-AI coding agents are becoming good enough to work on real repos, infrastructure, and production-shaped systems.
+Getting your first receipt takes a couple of commands:
 
-That creates a new problem. Not “can the model write code?” but:
+```bash
+pip install openshard
+cd my-project
+openshard setup
+```
 
-* Which model or workflow handled the task?
-* What files did it inspect or touch?
-* What did it change?
-* Did checks pass, fail, skip, or not run?
-* What did the run cost?
-* Was anything risky blocked or reviewed?
-* Is there a durable receipt of what happened?
+Now use Claude Code, Codex, Cursor, or OpenCode as you normally would. When the agent finishes:
 
-OpenShard is built for the work around the agent: routing, checks, risk gates, cost awareness, feedback, local history, and Shard receipts.
+```bash
+openshard last
+```
 
-The valuable unit is not a single model call. It is a completed engineering task with a record you can inspect later.
+Openshard records the available evidence from the run and turns it into a receipt you can inspect locally.
+
+```text
+your coding agent
+       ↓
+does the work
+       ↓
+Openshard captures the available evidence
+       ↓
+receipt
+```
+
+You keep your existing coding workflow and Openshard gives that work a record.
+
+<!--
+Add the short product demo here once recorded.
+
+Recommended length: 15 to 25 seconds.
+
+Show:
+1. openshard setup
+2. a normal task in one of the supported coding agents
+3. openshard last
+4. the resulting receipt
+
+One demo is enough. The supported agents section below shows that the same receipt layer works across all four integrations.
+-->
 
 ---
 
-## What OpenShard does
+## What does a receipt tell you?
 
-OpenShard is a CLI tool for controlling and recording AI coding work.
+A receipt is the saved record of an AI coding run.
 
-It can:
+Depending on what the agent and its integration expose, Openshard can record the task, coding agent, model, inspected files, file changes, checks, estimated token usage and cost, actions taken during the run, capture completeness, result state, and integrity information.
 
-* Run real repo tasks through a controlled execution path
-* Route work across models and workflows where available
-* Classify task risk
-* Gate risky writes and commands
-* Record model used, risk, checks, changed files, cost, and result
-* Produce durable Shard receipts for runs
-* Show proof, trust, and quality signals for the latest run
-* Check whether a saved Shard still matches its fingerprint
-* Support read-only review flows that preserve `Changed 0 files`
-* Provide workflow packs for repeatable engineering reviews
-* Compare models and workflows through local evals
-* Track feedback and session signals around runs
+Each new receipt also has a globally unique `receipt_id`, while the existing `shard_id` remains available for compatibility with local repo history.
 
-OpenShard is not trying to replace Claude Code, Codex, Cursor, OpenCode, or other coding agents.
-
-Those tools do the coding work.
-
-OpenShard sits around them as the receipt and control layer.
+The important part is not simply collecting more fields. It is being clear about what Openshard actually knows.
 
 ---
 
-## Current developer loop
+## Why receipts?
 
-The current local developer loop is:
+AI coding agents have long moved past autocomplete and now carry out significant work in real prouction workflows. They inspect repositories, edit files, run commands, execute tests, call tools, and increasingly work on tasks that previously belonged entirely to developers.
 
-```text
-Ask -> Plan -> Run -> Inspect -> Feedback
-```
-**Ask**
-Ask OpenShard product, model, command, and policy questions.
+Git gives us a durable history of code changes, but it does not always tell us what happened during the AI work around those changes. Which agent handled the task? Which model was used? What did the agent report changing? Which checks actually ran? What failed? What did the run cost? Was any evidence missed? Can we still trust the record we are looking at later?
 
-**Plan**
-Generate a local execution plan. Plan Mode v1 is deterministic and conservative. It does not write files, and it does not make provider calls.
-
-**Run**
-Send a real repo task through OpenShard’s controlled execution path.
-
-**Inspect**
-Review the result, actions taken, checks, changed files, cost estimate, model choice, trust signals, and Shard receipt.
-
-**Feedback**
-Record whether the result was accepted, partial, rejected, or needs more work.
+Openshard exists to preserve that context.
+The coding agent still does the coding and Openshard keeps the receipt.
 
 ---
 
-## Getting started
+## Openshard doesn't guess
 
-The fastest way to get value from OpenShard is to let it quietly record the coding-agent work you already do — with Claude Code, Codex, OpenCode, or Cursor, in any mix, in the same repository. No API key, account, or cloud service is needed. Your receipts, history and code stay in the repository. The one thing that can leave your machine is basic privacy-safe product telemetry after setup: counts, versions, timings and error categories, never code, prompts, file names or receipt contents. `openshard telemetry off` disables it; see [docs/telemetry.md](docs/telemetry.md).
+Receipts stop being useful if uncertain information is presented as fact.
 
-```bash
-pip install openshard   # 1. Install (once per machine)
-cd my-project            # 2. Go to a git repository
-openshard setup          # 3. Set up (once per repository)
-# 4. Use Claude Code, Codex, OpenCode, or Cursor normally
-openshard last           # 5. See the receipt for what just happened
-```
+Openshard is deliberately conservative about what it claims. If the model is unknown, it says `unknown`. If cost was not captured, it says `not recorded`. If part of a session was missed, the receipt records a partial capture.
 
-<details>
-<summary>Alternative installers (<code>pipx</code>, <code>uv</code>)</summary>
+The same principle applies to code changes. A working tree might already contain human edits, another agent might be active at the same time, or Git might show that a file changed without providing enough evidence to establish who caused it.
 
-```bash
-# pipx keeps OpenShard in its own isolated environment
-pipx install openshard
+Openshard therefore separates files an agent reported changing from changes that were only observed by Git, pre-existing changes, and changes associated with another recorded session. If Openshard cannot establish the actor, it says so.
 
-# uv
-uv tool install openshard
-```
+A finished agent turn is also not automatically treated as proof that the code is correct. An agent can finish successfully while its work remains unverified, so Openshard can report the turn as `Turn completed (unverified)`.
 
-Upgrade later with `pipx upgrade openshard` (or `pip install -U openshard`). See [docs/install.md](docs/install.md) for details.
-
-</details>
+The aim is simple: record the evidence that exists without filling the gaps with guesses.
 
 ---
 
-`openshard setup` detects which supported agents are installed (Claude Code, Codex, OpenCode, Cursor), configures each one for this repository, and ends with:
+## Receipt identity and integrity
 
-```text
-OpenShard is ready. Use Claude Code normally.
+Every new receipt receives a globally unique `receipt_id` when it is created.
 
-Next steps:
-  1. Open Claude Code in this repository.
-  2. Complete a normal coding task.
-  3. Run `openshard last` to see the captured Shard receipt.
-```
+Unlike the existing repo-local `shard_id`, the receipt ID is designed to remain unique across repositories, machines, developers, and organisations.
 
-That is the whole loop: use Claude Code as you normally would, then look at what OpenShard captured. You never have to trust that it is "working in the background" -- these commands show exactly what it knows, locally and offline:
+Receipts can also carry a content fingerprint. Openshard can use that fingerprint to check whether the stored record still matches the content from which it was produced.
 
-```bash
-openshard last                    # What just happened? The newest receipt: task, agent, model, cost, files, checks
-openshard history                 # Recent work: a compact newest-first list of Shards for this repository
-openshard context "add caching"   # What OpenShard would surface to an agent for this task, and why each item matched
-openshard stats                   # Honest counts: Shards, agents, models, verification, estimated cost, tokens
-```
-
-All four work from the repository root or any subdirectory of it, read only this repository's `.openshard/runs.jsonl`, and take `--json` for scripting. They never invent values: an unknown model is shown as unknown, a missing cost as not recorded, a partially observed session as a partial capture, and every cost as an estimate.
-
-Useful follow-ups:
-
-```bash
-openshard doctor                    # Is OpenShard actually working here? One ✓/✗ checklist per agent
-openshard setup                     # Safe to re-run; already-configured parts are left alone
-openshard mcp uninstall claude      # Remove OpenShard's Claude Code configuration (history is kept)
-openshard capture uninstall codex   # Remove OpenShard's Codex hooks (history is kept)
-openshard capture uninstall opencode  # Remove OpenShard's OpenCode plugin (history is kept)
-```
-
-If `setup` reports a limitation — most commonly a custom Claude Code status line already in place — it tells you exactly what stays unavailable (model/cost/token data on receipts) and the one step to enable it. It never replaces your existing settings.
-
-Under the hood, `setup` registers a local, read-only MCP server so Claude can look up your history, installs Claude Code hooks that record sessions as Shards, and configures the status line for receipt enrichment. For Codex it merges its hooks into the project-local `.codex/hooks.json`; for OpenCode it writes a small plugin to `.opencode/plugins/openshard.js`. For Cursor it merges hooks into `.cursor/hooks.json`. All four feed the same local, authenticated capture service and the same `.openshard/runs.jsonl`, so `openshard history`, `openshard context` and `relevant_context` see work from every agent together, each Shard labelled with the agent that did it (see [docs/agent-capture.md](docs/agent-capture.md)). You do not need to understand any of that to use it; the lower-level `openshard mcp install claude` and `openshard capture install codex|opencode` commands remain available if you want them.
+This is an integrity check on the receipt itself. It is not a claim that the underlying code is correct.
 
 ---
-Launch the TUI:
+
+## Supported coding agents
+
+Openshard currently captures receipts from:
+
+| Coding agent | Receipt capture |
+| --- | --- |
+| Claude Code | Supported |
+| Codex | Supported |
+| Cursor | Supported |
+| OpenCode | Supported |
+
+All four can contribute to the same local Openshard history in a repo. You can move between supported agents without creating separate receipt stores or changing the way you normally use those tools.
+
+Run:
 
 ```bash
-openshard tui
+openshard doctor
 ```
 
-Inside the TUI:
+to see which integrations are configured and what Openshard can currently capture.
 
-```text
-/ask what models do you support?
-/plan review this repo for production readiness
-/packs
-/pack production-iac-hardening
+---
+
+## Getting around your receipt history
+
+The basic workflow is intentionally small.
+
+See the most recent receipt:
+
+```bash
+openshard last
 ```
 
-Run a real repo task:
-
-```text
-Review and harden this deliberately flawed Terraform codebase. Assess it through security/compliance posture, 2am operability, and developer experience for a 5-10 person engineering team. Identify critical, high, and medium risks. Explain trade-offs. Do not apply changes directly without review.
-```
-
-Inspect the latest run:
-
-```text
-/last more
-```
-
-Or from the shell:
+See more detail:
 
 ```bash
 openshard last --more
+openshard last --full
 ```
 
-The `--more` view includes a PROOF SUMMARY block when OSN proof metadata is present, showing observation, progress, verification, loop, retry, and PR comment status.
-
-Optional local follow-up commands after a run:
+Browse recent AI coding work in the repo:
 
 ```bash
-openshard reflect last                        # advisory reflection on the run (local, no model calls)
-openshard pr comment                          # generate a GitHub-ready PR comment from the run
-openshard pr comment --output pr-comment.md  # write the PR comment to a file
+openshard history
 ```
 
-Leave feedback:
+See repo-level statistics:
 
 ```bash
-openshard feedback accept                     # Mark the latest run as accepted
-openshard feedback reject --reason "..."      # Mark it as rejected, with a reason
-openshard feedback retry --reason "..."       # Mark it as needing a retry
-openshard feedback note "..."                 # Add a free-text note
+openshard stats
 ```
 
-See the demo scripts for a recorded walkthrough:
-- [docs/demo-script-60s.md](docs/demo-script-60s.md)
-- [docs/demo-script-3min.md](docs/demo-script-3min.md)
-
----
-
-## Production IaC demo
-
-The `examples/production-infra-demo/` directory contains a fictional GCP workload called **DocuVault** — a sanitised demo scenario for OpenShard.
-
-The infrastructure is intentionally production-shaped: networking, IAM, Cloud SQL, Cloud Run, storage, secrets, monitoring, and logging.
-
-It is deliberately flawed to serve as the input for an infrastructure-as-code hardening review.
-
-All names, project IDs, resource IDs, CIDRs, and accounts are fake and public-safe. No employer or customer details. Designed to show a serious IaC review, not a toy example.
-
-See:
-- [`examples/production-infra-demo/README.md`](examples/production-infra-demo/README.md)
-- [`examples/production-infra-demo/demo-task.md`](examples/production-infra-demo/demo-task.md)
-
-A typical production IaC review can show:
-- Critical, high, and medium findings
-- File-level evidence such as `iam.tf`, `secrets.tf`, `database.tf`, `network.tf`, and `storage.tf`
-- Verification output from tools like `terraform fmt`, `terraform validate`, and `tflint` when available
-- A clear `Changed 0 files` receipt for read-only reviews
-- Model selection and cost tracking
-- A `/last more` view with the full Shard, findings, checks, evidence, and cost comparison
-
-This is the core OpenShard use case: let AI help with serious engineering work, but keep the control, evidence, and receipt layer visible.
-
----
-
-## Shard receipts
-
-A Shard is the saved record of an AI coding run.
-
-New here? Read [What is a Shard?](docs/what-is-a-shard.md).
-
-Think of it like a receipt for AI coding work.
-
-It can show:
-
-* Task and agent
-* Model used
-* Strategy
-* Risk level
-* Context used, when recorded
-* Inspected files
-* Changed and touched files
-* Checks and their outcomes
-* Findings, when structured findings exist
-* Cost
-* Actions timeline
-* Result
-* Receipt ID (global) and Shard ID (this repository's history)
-* Capture completeness -- whether evidence is known to be missing, and why
-* Integrity -- whether the stored record still matches its content hash
-
-Changed files are attributed, not assumed: files the agent reported
-editing, files git shows changed without an agent signal (actor not
-established), and files that were already dirty before the session or
-belong to another agent session are shown separately. A finished agent
-turn is shown as `Turn completed (unverified)`, never as "Completed".
-
-A Shard does not prove the code is perfect. Nothing can.
-
-What it proves is more practical: what OpenShard recorded during the run, what changed and on whose report, what checks passed or failed, whether anything risky was blocked, whether OpenShard knows it missed evidence, and whether the saved record changed later. Where OpenShard cannot establish something, the receipt says so rather than guessing.
-
-OpenShard can also record feedback and infer session signals around a run.
+Check the installation and agent integrations:
 
 ```bash
-openshard last --more    # expanded receipt for the latest run
-openshard last --full    # full stored details
-openshard proof last     # inspect the latest run's proof
-openshard trust last     # inspect the latest run's trust score
+openshard doctor
 ```
 
-Every Shard receipt can power two local follow-up commands:
+The main receipt commands also support JSON, which makes them useful in scripts and other tooling:
 
 ```bash
-openshard reflect last                        # local advisory reflection on the run
-openshard pr comment                          # generate a GitHub-ready PR comment
-openshard pr comment --output pr-comment.md  # write the PR comment to a file instead
+openshard last --json
+openshard history --json
+openshard stats --json
 ```
 
-Both commands are local and deterministic. They do not make additional model calls.
+---
 
-Raw developer content is not stored by default.
+## How capture works
+
+`openshard setup` detects whatever supported coding agents are available for the repo and configures their supported integration points.
+
+The implementation differs slightly between agents. Openshard can use hooks, plugins, local configuration, and MCP-based integration depending on what each tool exposes. Those events are normalised into the same receipt history and passed through a local authenticated capture service.
+
+That means Claude Code, Codex, Cursor, and OpenCode can all leave receipts in the same repo history even though the agents themselves work differently.
+
+For the deeper implementation details, see [Agent capture](docs/agent-capture.md).
 
 ---
 
-## One run, end to end
+## Local-first
 
-A normal OpenShard run can capture:
+The open-source receipt layer is local-first. Your receipt history stays with the repo and can be inspected offline.
 
-1. **Task** - the user request or workflow pack prompt.
-2. **Routing** - which model or workflow was selected.
-3. **Risk** - whether the task is low, medium, high, or requires stronger review.
-4. **Execution** - what happened during the run.
-5. **Checks** - verification results, including passed, failed, skipped, or not run.
-6. **Recorded context** - files inspected, findings, and relevant source references when available.
-7. **Changes** - files changed, touched, or left untouched.
-8. **Cost** - estimated spend for the run.
-9. **Receipt** - a durable Shard record that can be inspected later.
-10. **Fingerprint** - a content hash that helps detect whether the saved record changed later.
+You do not need a hosted Openshard account to create or inspect local receipts.
 
-The point is simple: every AI coding run should leave behind a receipt that a developer or team can inspect.
+Raw developer content is not sent to Openshard by default. Basic privacy-safe product telemetry may be collected after setup, such as versions, counts, timings, and error categories. It does not include code, prompts, file names, or receipt contents.
 
----
+Telemetry can be disabled at any time:
 
-## How OpenShard is different
-
-OpenShard is not a chatbot, IDE, or even a generic agent framework.
-It's the layer around agentic coding work.
-
-| Layer | What it does |
-|---|---|
-| Coding agent | Generates code, edits files, answers task prompts |
-| Model router | Chooses which model or workflow should handle the job |
-| Verification layer | Runs checks and records whether they passed, failed, skipped, or were not run |
-| Policy layer | Gates risky writes, commands, and high-risk work |
-| Receipt layer | Records model, cost, evidence, checks, changed files, and result |
-| Eval layer | Compares models and workflows by outcome, cost, speed, and safety |
-
-OpenShard can work alongside tools like Claude Code, Codex, Cursor, OpenCode, LangChain, LangGraph, OpenRouter, and provider APIs.
-
-The goal is not to replace every coding agent.
-The goal is to make AI coding work controllable, inspectable, and measurable.
-
----
-
-## Workflow packs
-
-Workflow packs are pre-built prompts for repeatable engineering reviews.
 ```bash
-openshard packs list
-openshard packs show production-iac-hardening
-openshard packs prompt production-iac-hardening
+openshard telemetry off
 ```
 
-Built-in packs include:
-- `repo-explanation`
-- `production-iac-hardening`
-- `terraform-networking-review`
-- `iam-security-review`
-- `cicd-safety-review`
-- `powershell-automation-review`
-
-Workflow packs make common review patterns repeatable without forcing users to rewrite long prompts every time.
+See [Telemetry](docs/telemetry.md) for the full behaviour.
 
 ---
 
-## Command reference
+## Installation
 
-The beginner flow is just `openshard setup` and `openshard last` (above). For
-everything else -- running tasks directly, workflow packs, model registry
-inspection, evals, feedback, TUI slash commands -- see
-[docs/cli-reference.md](docs/cli-reference.md), or run `openshard --help`
-(commands are grouped: Getting Started, Receipts, Diagnostics, Integrations,
-Advanced) and `openshard <command> --help` for any command.
+The standard installation is:
 
----
-
-## What works today
-
-OpenShard is still alpha, but the core local loop is working.
-
-Current features include:
-
-* Local CLI and TUI (`openshard tui`)
-* Ask Mode for local product/model/command Q&A
-* Plan Mode v1 for deterministic local plans
-* Controlled run path for real repo tasks
-* OpenShard Native execution harness
-* Task classification and risk handling
-* Model registry and model policy inspection
-* Routing across models/workflows where available
-* Shard receipts with model, risk, attributed file changes, checks, capture completeness, integrity, cost and result
-* Authenticated local capture service (per-user token; repository-scoped capability for Claude Code HTTP hooks)
-* Global `receipt_id` on every new record alongside the historic `shard_id`
-* `/last`, `/last more`, and `/last --full`
-* Local visibility commands: `openshard history`, `openshard context "<task>"`, `openshard stats` (offline, per-repository, explainable, `--json`)
-* `openshard proof last` for latest-run proof inspection
-* `openshard trust last` for latest-run trust scoring
-* Shard quality summary in `last --json`
-* Compact `Proof: <status>` line in `openshard last`
-* Content hash verification for Shards
-* Best-effort pre-send secret scanning before provider calls
-* Safer JSONL history writes with write locking
-* CI check mode for pass / warn / fail / skip decisions
-* GitHub Actions PR receipt output surfaces
-* Read-only review handling that preserves `Changed 0 files`
-* Intent-specific review handling for Terraform/IaC, CI/CD, auth/security, tests, and docs/onboarding
-* Workflow packs for repeatable engineering reviews
-* Feedback signals
-* Session signal inference
-* Local run history
-* Local eval harness
-* Eval comparison by pass rate and cost-per-pass
-* Cost comparison in `/last more`
-* OSN proof pipeline with PROOF SUMMARY in `openshard last --more` when metadata is present
-* `openshard reflect last` for local advisory run reflection
-* `openshard pr comment` for local GitHub PR comment generation
-* TUI post-run command hints for reflect and pr comment
-* Production-shaped Terraform demo
-* 8,700+ passing tests and green CI
-
----
-
-## What is not built yet
-
-OpenShard is early and intentionally local-first.
-
-Not built yet:
-
-* No hosted team platform yet
-* No cloud sync yet
-* No hosted dashboard for teams yet
-* No IDE integration yet
-* No Homebrew, winget, or one-line shell installer yet
-* Ask Mode and Plan Mode are local deterministic v1 flows
-* Feedback advisory does not automatically change routing yet
-* Model lifecycle tags do not yet drive default routing behavior
-* Claude Code, Codex, OpenCode, and Cursor capture is implemented; other agents are not
-* External harness adapters are experimental and not guaranteed
-* Not a full Claude Code, Codex, Cursor, or OpenCode replacement
-
----
-
-## Current validation state
-
-OpenShard is still early, but it is not just a prototype.
-
-Current validation includes:
-
-* 8,700+ passing tests
-* Green CI
-* Ruff-clean Python codebase
-* Clean `pipx install openshard` path from PyPI
-* Local CLI/TUI workflow
-* Production-shaped Terraform demo
-* Workflow packs for repeatable reviews
-* Shard receipts for run history
-* Proof, trust, quality, and hash checks for run records
-* CI check surfaces for automation
-* Eval tooling for model and workflow comparison
-* Pre-launch usage from developers testing it on real work
-
-The project is alpha, but the core loop is working:
-
-```text
-Run the task -> inspect what happened -> verify the output -> keep the receipt
+```bash
+pip install openshard
 ```
 
+Then move into a Git repo and run:
+
+```bash
+cd your-project
+openshard setup
+```
+
+`pipx` and `uv` are also supported:
+
+```bash
+pipx install openshard
+```
+
+```bash
+uv tool install openshard
+```
+
+To upgrade later:
+
+```bash
+pip install -U openshard
+```
+
+or:
+
+```bash
+pipx upgrade openshard
+```
+
+See [Installation](docs/install.md) for additional installation guidance.
+
 ---
 
-## Roadmap
+## Project status
 
-Near-term roadmap:
+Openshard is currently a working tool available for use, and the core local receipt loop is working across Claude Code, Codex, Cursor, and OpenCode.
 
-* More real-world developer testing
-* External-agent receipt capture beyond Claude Code, Codex, OpenCode, and Cursor
-* Better repo-aware planning
-* Stronger model/workflow ranking from real outcomes
-* More workflow packs
-* More repo analyzers for common stacks
-* Cleaner setup and release packaging
-* Hosted/team run history
-* Team policies and shared approval gates
-* Dashboards for cost, model usage, and verification outcomes
+The project has automated CI, Ruff and mypy checks, a large pytest suite, Linux and Windows validation, authenticated local capture, receipt integrity checks, explicit capture-completeness handling, and real integration testing across supported agent paths.
 
-Longer-term, OpenShard should become the control layer teams use to manage AI engineering work.
+The hosted product is still being built. Shared team receipt history, hosted analytics, and team controls will build on the same receipt primitive rather than replacing the local workflow.
+
+For now, the focus is straightforward: making the receipt layer reliable, useful, and easy enough to fit naturally into the way developers already work.
 
 ---
 
 ## Why open source?
-Routing decisions should be inspectable.
 
-If a tool decides which model touches security-sensitive code, developers should be able to see why.
+We believe that evidence infrastructure should be inspectable.
 
-OpenShard is open because trust, integrations, and routing policies improve when real users can inspect and extend the system.
+If Openshard says a coding agent changed a file, a check passed, a session was incomplete, or an actor could not be established, developers should be able to understand how that conclusion was reached.
 
-Open source also keeps the local-first layer useful on its own. Hosted and team features can come later, but the core control layer should be understandable and inspectable.
+Keeping the local receipt layer open source makes the capture model, integrations, and integrity behaviour available for inspection and improvement.
+
+Openshard is licensed under Apache-2.0.
+
+---
+
+## Documentation
+
+- [Installation](docs/install.md)
+- [Agent capture](docs/agent-capture.md)
+- [What is a Shard?](docs/what-is-a-shard.md)
+- [CLI reference](docs/cli-reference.md)
+- [Telemetry](docs/telemetry.md)
+- [Changelog](CHANGELOG.md)
+- [Security](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
 
 ---
 
 ## Contributing
 
-Contributions are welcome around:
-- Routing policies and scoring logic
-- Repo analyzers for new stacks
-- Model profiles and capability data
-- Evaluation datasets
-- Provider integrations
-- Workflow packs
-- CLI/TUI UX improvements
-- Documentation and examples
+Contributions are welcome across receipt capture, coding-agent integrations, provenance, verification, CLI experience, platform compatibility, security, tests, documentation, and examples.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
 
 ---
 
 ## Security
+
 If you find a security issue, please report it privately before opening a public issue.
 
 See [SECURITY.md](SECURITY.md).
@@ -524,4 +324,5 @@ See [SECURITY.md](SECURITY.md).
 ---
 
 ## License
+
 Apache-2.0
