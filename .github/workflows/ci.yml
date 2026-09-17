@@ -5,12 +5,18 @@ on:
     branches: [main]
   pull_request:
 
-# A new push to the same PR (or branch) supersedes the previous one --
-# cancel whatever of it is still running instead of burning runner time
-# on a commit nobody will look at.
+# A new push to the same PR supersedes the previous one -- cancel whatever
+# of it is still running instead of burning runner time on a commit nobody
+# will look at. A push to main is different: it's what drives the full
+# compatibility matrix below, and a second merge landing while the first
+# one's validation is still running must never silently cancel it. Each
+# push-to-main run gets its own group (keyed by the commit SHA, which is
+# unique per push), so it never collides with -- and is never cancelled
+# by -- another push; cancel-in-progress is also explicitly off for push
+# events as a second guard against that.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # The 224 tests across these 7 files spin up a real background HTTP
