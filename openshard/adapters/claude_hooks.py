@@ -164,6 +164,7 @@ from openshard.history.capture_completeness import (
     build_completeness,
     make_reason,
 )
+from openshard.util.git import run_git
 
 # Claude Code identity constants -- kept as module names for existing
 # callers/tests; the values are the Claude profile's (adapters/capture_agents.py).
@@ -1309,23 +1310,6 @@ def _cached_repo_identity(buf: dict, repo_root: Path) -> str | None:
     return identity
 
 
-def _run_git(repo_root: Path, args: list[str], *, stdin: str | None = None) -> str | None:
-    """stdout of one git command in *repo_root*, or None on any failure. Never raises."""
-    import subprocess
-
-    from openshard.adapters.claude_code_import import _NO_WINDOW_KW
-
-    try:
-        result = subprocess.run(
-            ["git", *args], cwd=repo_root, input=stdin,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-            timeout=5.0, **_NO_WINDOW_KW,
-        )
-    except Exception:
-        return None
-    return result.stdout if result.returncode == 0 else None
-
-
 def _blob_ids(repo_root: Path, paths: list[str]) -> dict[str, str | None]:
     """``path -> git blob id`` of each path's *current working-tree content*.
 
@@ -1341,7 +1325,7 @@ def _blob_ids(repo_root: Path, paths: list[str]) -> dict[str, str | None]:
         elif not (repo_root / path).exists():
             out[path] = None
     if existing:
-        text = _run_git(repo_root, ["hash-object", "--stdin-paths"], stdin="".join(f"{p}\n" for p in existing))
+        text = run_git(repo_root, ["hash-object", "--stdin-paths"], stdin="".join(f"{p}\n" for p in existing))
         if text is not None:
             ids = text.split()
             if len(ids) == len(existing):
@@ -1362,7 +1346,7 @@ def _snapshot_baseline(repo_root: Path, now: str) -> dict:
     """
     from openshard.safety.sanitize import sanitize_path
 
-    text = _run_git(repo_root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+    text = run_git(repo_root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
     if text is None:
         return {"source": "not_available", "at": now, "paths": {}, "truncated": False}
     paths: list[str] = []

@@ -177,11 +177,3 @@ def gaps_display(block: dict) -> str:
         return "None known"
     return "Unknown (record predates loss tracking)" if block.get("derived") else "Unknown"
 
-
-def completeness_display(block: dict) -> str:
-    """``Complete`` / ``Incomplete — <gaps>`` / ``Unknown``."""
-    status = str(block.get("status") or COMPLETENESS_UNKNOWN)
-    label = status.capitalize()
-    if status == COMPLETENESS_INCOMPLETE:
-        return f"{label} — {gaps_display(block)}"
-    return label

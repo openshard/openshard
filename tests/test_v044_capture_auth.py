@@ -20,17 +20,13 @@ import pytest
 from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
 from openshard.adapters.claude_hooks import resolve_repo_root
-from tests.test_claude_capture_service import (  # noqa: F401 - fixtures re-exported for pytest
+from tests.capture_fixtures import (
     SID,
     _first_line,
-    _lines,
     _payload,
     _post,
     _session_dir,
     _wait_for,
-    capture_env,
-    repo,
-    service,
 )
 
 
@@ -148,7 +144,7 @@ class TestHookAuthentication:
         assert status == 200
         assert _wait_for(lambda: (_e := _first_line(repo)) is not None and _e["task"] == "scoped ok")
         # The same capability presented for a different repository is refused.
-        from tests.test_claude_capture_service import _make_repo
+        from tests.capture_fixtures import _make_repo
 
         other = _make_repo(tmp_path / "other")
         status, _ = _raw_post(

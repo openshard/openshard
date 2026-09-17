@@ -8,8 +8,11 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+from openshard.util.home import openshard_home
+
 OPENROUTER_MODELS_URL = "https://api.openrouter.ai/api/v1/models"
-_DEFAULT_CACHE_PATH = Path.home() / ".openshard" / "openrouter-models.json"
+# Resolved once at import (``OPENSHARD_HOME`` honoured); tests repoint it.
+_DEFAULT_CACHE_PATH = Path(openshard_home()) / "openrouter-models.json"
 SCHEMA_VERSION = "1"
 _FETCH_TIMEOUT = 15
 

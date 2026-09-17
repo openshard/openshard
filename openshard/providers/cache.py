@@ -5,9 +5,11 @@ import time
 from pathlib import Path
 
 from openshard.providers.base import ModelInfo
+from openshard.util.home import openshard_home
 
 CACHE_TTL_HOURS: int = 24
-CACHE_PATH: Path = Path.home() / ".openshard" / "model_cache.json"
+# Resolved once at import (``OPENSHARD_HOME`` honoured); tests repoint it.
+CACHE_PATH: Path = Path(openshard_home()) / "model_cache.json"
 
 
 def load_cache() -> dict | None:

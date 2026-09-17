@@ -46,6 +46,8 @@ import hmac
 import os
 import sys
 
+from openshard.util.home import openshard_home
+
 TOKEN_FILENAME = "capture-token"
 TOKEN_HEADER = "X-OpenShard-Capture-Token"
 REPO_CAPABILITY_PREFIX = "r2."
@@ -55,16 +57,8 @@ _MAX_PRESENTED_LEN = 128
 _HEX = frozenset("0123456789abcdef")
 
 
-def _capture_home(env: dict | os._Environ | None) -> str:
-    env = os.environ if env is None else env
-    override = env.get("OPENSHARD_HOME")
-    if isinstance(override, str) and override.strip():
-        return override.strip()
-    return os.path.join(os.path.expanduser("~"), ".openshard")
-
-
 def token_path(env: dict | os._Environ | None = None) -> str:
-    return os.path.join(_capture_home(env), TOKEN_FILENAME)
+    return os.path.join(openshard_home(env), TOKEN_FILENAME)
 
 
 def is_token(value: object) -> bool:

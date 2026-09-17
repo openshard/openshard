@@ -23,7 +23,7 @@ from openshard.history.shard_contract import (
     render_full_shard_receipt,
 )
 from openshard.history.views import receipt_to_dict
-from tests.test_claude_capture_service import _make_repo
+from tests.capture_fixtures import _make_repo
 
 
 def _entries(repo: Path) -> list[dict]:

@@ -544,12 +544,12 @@ class TestCaptureRepoIdentity:
 
 class TestCaptureRepoIdentityFailures:
     def test_git_lookup_failure_yields_none(self, tmp_path: Path):
-        with patch("openshard.history.repo_identity.subprocess.run", side_effect=OSError("no git")):
+        with patch("openshard.util.git.subprocess.run", side_effect=OSError("no git")):
             assert capture_repo_identity(tmp_path) is None
 
     def test_git_timeout_yields_none(self, tmp_path: Path):
         with patch(
-            "openshard.history.repo_identity.subprocess.run",
+            "openshard.util.git.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="git", timeout=3),
         ):
             assert capture_repo_identity(tmp_path) is None

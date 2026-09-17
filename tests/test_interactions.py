@@ -420,6 +420,13 @@ class TestSanitisation(unittest.TestCase):
         evt = _make_event(related_file_paths=["src/ok.py", _ABS_POSIX, _ABS_WIN])
         self.assertEqual(sanitize_event(evt).related_file_paths, ["src/ok.py"])
 
+    def test_related_file_paths_keep_long_nested_relative_paths(self):
+        # A repo-relative path with several nested directories must not be
+        # dropped by the generic "long opaque key-like run" secret heuristic.
+        deep = "evals/basic/bug_fix/fixtures/word_utils.py"
+        evt = _make_event(related_file_paths=[deep, "src/ok.py"])
+        self.assertEqual(sanitize_event(evt).related_file_paths, [deep, "src/ok.py"])
+
     def test_metadata_scalar_only(self):
         evt = _make_event(
             metadata={
