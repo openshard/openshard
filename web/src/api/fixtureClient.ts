@@ -1,15 +1,13 @@
 import type { OpenShardApi } from "./client";
-import { RECEIPTS, TASKS, toSummary } from "./fixtures";
+import { RECEIPTS, TASKS, recentWork } from "./fixtures";
 
 /** In-memory client over the fixture set. A short delay keeps loading states honest. */
 export function createFixtureClient(delayMs = 120): OpenShardApi {
   const wait = () => new Promise<void>((resolve) => setTimeout(resolve, delayMs));
   return {
-    async listTasks() {
+    async listWork() {
       await wait();
-      return [...TASKS]
-        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-        .map(toSummary);
+      return recentWork();
     },
     async getTask(taskId) {
       await wait();

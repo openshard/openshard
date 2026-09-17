@@ -16,7 +16,7 @@ Three pages, nothing else:
 
 | Route                   | Page            | What it answers                                             |
 | ----------------------- | --------------- | ----------------------------------------------------------- |
-| `/`                     | Recent work     | What ran, with which agent, did it complete, how long ago    |
+| `/`                     | Recent work     | Tasks and standalone Receipts: what ran, which agent, outcome, when |
 | `/tasks/:taskId`        | Task            | Repo, agent, model, every attempt, the latest receipt summary |
 | `/receipts/:receiptId`  | Receipt         | The full record: changes, checks, cost, evidence, integrity  |
 
@@ -49,8 +49,9 @@ VITE_OPENSHARD_API_URL=https://api.example.com npm run dev
   `task_id` stays valid and ungrouped. The canonical contract is landing in
   Core; `task_id` here is that field, not a second definition, and the
   three-method API boundary is where any shape change gets absorbed.
-- `src/api/client.ts` is the whole backend seam: `listTasks`, `getTask`,
-  `getReceipt`. `fixtureClient.ts` and `httpClient.ts` both implement it;
+- `src/api/client.ts` is the whole backend seam: `listWork`, `getTask`,
+  `getReceipt`. `listWork` returns explicit Tasks and standalone Receipts
+  (those with no `task_id`) as one newest-first list. `fixtureClient.ts` and `httpClient.ts` both implement it;
   `createApi()` picks one from the environment. Pages never import either.
 - `src/lib/format.ts` copies the CLI's wording so the dashboard and
   `openshard last` say the same thing: costs are always `est.`, missing

@@ -1,5 +1,5 @@
 import { ApiError, type OpenShardApi } from "./client";
-import type { Receipt, Task, TaskSummary } from "./types";
+import type { Receipt, Task, WorkItem } from "./types";
 
 /**
  * Hosted API client. Same three calls as the fixture client, against
@@ -17,8 +17,8 @@ export function createHttpClient(baseUrl: string, fetchImpl: typeof fetch = fetc
   }
 
   return {
-    async listTasks() {
-      return (await get<TaskSummary[]>("/v1/tasks")) ?? [];
+    async listWork() {
+      return (await get<WorkItem[]>("/v1/work")) ?? [];
     },
     getTask(taskId) {
       return get<Task>(`/v1/tasks/${encodeURIComponent(taskId)}`);

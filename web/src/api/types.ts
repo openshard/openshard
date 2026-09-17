@@ -176,6 +176,29 @@ export interface TaskSummary {
   updated_at: string;
 }
 
+/** One Receipt that carries no `task_id`. It is listed on its own and never placed in a Task. */
+export interface ReceiptSummary {
+  receipt_id: string;
+  title: string;
+  repo: string;
+  agent: Agent;
+  model: string | null;
+  status: AttemptStatus;
+  files_changed: number;
+  checks: string;
+  integrity: Integrity;
+  capture_depth: CaptureDepth;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * One row of "Recent work": an explicit Task (the Receipts carrying its
+ * `task_id`) or a standalone Receipt (no `task_id`). Nothing else exists;
+ * an ungrouped Receipt is never synthesised into a Task.
+ */
+export type WorkItem = { kind: "task"; task: TaskSummary } | { kind: "receipt"; receipt: ReceiptSummary };
+
 export interface Task extends TaskSummary {
   task_full: string;
   attempts: Attempt[];

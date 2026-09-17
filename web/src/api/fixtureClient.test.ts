@@ -1,18 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { createFixtureClient } from "./fixtureClient";
 import { createHttpClient } from "./httpClient";
-import { RECEIPTS, TASKS } from "./fixtures";
+import { RECEIPTS, TASKS, updatedAt } from "./fixtures";
 
 const api = createFixtureClient(0);
 
 describe("fixture client", () => {
-  it("lists tasks newest first", async () => {
-    const tasks = await api.listTasks();
-    expect(tasks.length).toBe(TASKS.length);
-    for (let i = 1; i < tasks.length; i++) {
-      expect(tasks[i - 1].updated_at >= tasks[i].updated_at).toBe(true);
+  it("lists recent work newest first: tasks and standalone receipts", async () => {
+    const work = await api.listWork();
+    const standalone = RECEIPTS.filter((r) => r.task_id === null);
+    expect(work.length).toBe(TASKS.length + standalone.length);
+    for (let i = 1; i < work.length; i++) {
+      expect(updatedAt(work[i - 1]) >= updatedAt(work[i])).toBe(true);
     }
-    expect(tasks[0].title).toBe("Fix refresh-token reuse bug");
+    expect(work[0]).toMatchObject({ kind: "task", task: { title: "Fix refresh-token reuse bug" } });
+  });
+
+  it("lists a receipt standalone only when it has no task_id", async () => {
+    const work = await api.listWork();
+    const standalone = work.filter((w) => w.kind === "receipt");
+    expect(standalone.map((w) => w.kind === "receipt" && w.receipt.receipt_id)).toEqual(
+      RECEIPTS.filter((r) => r.task_id === null).map((r) => r.receipt_id),
+    );
+    // No receipt appears both inside a task and on its own.
+    const inTasks = new Set(TASKS.flatMap((t) => t.attempts.map((a) => a.receipt_id)));
+    for (const w of standalone) {
+      if (w.kind === "receipt") expect(inTasks.has(w.receipt.receipt_id)).toBe(false);
+    }
   });
 
   it("resolves a task with its attempts and latest receipt", async () => {
@@ -57,7 +71,9 @@ describe("fixture client", () => {
     expect(legacy?.task_id).toBeNull();
     expect(legacy?.attempt_number).toBeNull();
     expect(legacy?.integrity).toBe("Not recorded");
-    expect((await api.listTasks()).some((t) => t.latest_receipt_id === legacy?.receipt_id)).toBe(false);
+    const work = await api.listWork();
+    expect(work.some((w) => w.kind === "task" && w.task.latest_receipt_id === legacy?.receipt_id)).toBe(false);
+    expect(work.some((w) => w.kind === "receipt" && w.receipt.receipt_id === legacy?.receipt_id)).toBe(true);
   });
 
   it("never fabricates cost or tokens", () => {
@@ -74,15 +90,15 @@ describe("http client", () => {
     const fetchImpl = (async (input: RequestInfo | URL) => {
       const url = String(input);
       calls.push(url);
-      if (url.endsWith("/v1/tasks")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.endsWith("/v1/work")) return new Response(JSON.stringify([]), { status: 200 });
       return new Response("", { status: 404 });
     }) as typeof fetch;
     const http = createHttpClient("https://api.example.test/", fetchImpl);
-    expect(await http.listTasks()).toEqual([]);
+    expect(await http.listWork()).toEqual([]);
     expect(await http.getTask("t")).toBeNull();
     expect(await http.getReceipt("r")).toBeNull();
     expect(calls).toEqual([
-      "https://api.example.test/v1/tasks",
+      "https://api.example.test/v1/work",
       "https://api.example.test/v1/tasks/t",
       "https://api.example.test/v1/receipts/r",
     ]);

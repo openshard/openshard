@@ -16,7 +16,7 @@
  * Timestamps are relative to load time so the history reads "2m ago" the
  * way the product brief describes it.
  */
-import type { Attempt, Receipt, Task, TaskSummary } from "./types";
+import type { Attempt, Receipt, ReceiptSummary, Task, TaskSummary, WorkItem } from "./types";
 
 const NOW = Date.now();
 const MIN = 60_000;
@@ -619,4 +619,38 @@ export const TASKS: Task[] = [
 export function toSummary(t: Task): TaskSummary {
   const { attempts: _a, latest_receipt: _r, task_full: _f, ...summary } = t;
   return summary;
+}
+
+export function toReceiptSummary(r: Receipt): ReceiptSummary {
+  return {
+    receipt_id: r.receipt_id,
+    title: r.task_short,
+    repo: r.repo,
+    agent: r.agent,
+    model: r.model,
+    status: r.status,
+    files_changed: r.files_changed,
+    checks: r.checks,
+    integrity: r.integrity,
+    capture_depth: r.capture_completeness.depth,
+    created_at: r.created_at,
+    updated_at: r.synced_at,
+  };
+}
+
+/**
+ * Recent work: every explicit Task plus every Receipt that carries no
+ * `task_id`, as itself. A Receipt is listed standalone only because its
+ * `task_id` is null -- never because a Task could not be found for it.
+ */
+export function recentWork(): WorkItem[] {
+  const items: WorkItem[] = [
+    ...TASKS.map((t): WorkItem => ({ kind: "task", task: toSummary(t) })),
+    ...RECEIPTS.filter((r) => r.task_id === null).map((r): WorkItem => ({ kind: "receipt", receipt: toReceiptSummary(r) })),
+  ];
+  return items.sort((a, b) => updatedAt(b).localeCompare(updatedAt(a)));
+}
+
+export function updatedAt(item: WorkItem): string {
+  return item.kind === "task" ? item.task.updated_at : item.receipt.updated_at;
 }

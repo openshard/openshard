@@ -1,4 +1,4 @@
-import type { Receipt, Task, TaskSummary } from "./types";
+import type { Receipt, Task, WorkItem } from "./types";
 
 /**
  * The only seam between the dashboard and its data.
@@ -8,8 +8,8 @@ import type { Receipt, Task, TaskSummary } from "./types";
  * without touching a page.
  */
 export interface OpenShardApi {
-  /** Explicit tasks only (Receipts carrying a `task_id`), newest first. */
-  listTasks(): Promise<TaskSummary[]>;
+  /** Recent work, newest first: explicit Tasks and standalone Receipts (no `task_id`). */
+  listWork(): Promise<WorkItem[]>;
   /** Resolves `null` when the task does not exist. */
   getTask(taskId: string): Promise<Task | null>;
   /** Resolves `null` when the receipt does not exist. */

@@ -214,7 +214,7 @@ function ReceiptView({ r }: { r: Receipt }) {
             items={[
               ["Content hash", <IntegrityPill integrity={r.integrity} />],
               ["Receipt ID", <code>{r.receipt_id}</code>],
-              ["Task ID", r.task_id ? <code>{r.task_id}</code> : <Muted>none — recorded without an explicit task</Muted>],
+              ["Task ID", r.task_id ? <code>{r.task_id}</code> : <Muted>No task</Muted>],
               ["Shard ID", <><code>{r.shard_id}</code><span className="hint">position in the repo's local history</span></>],
               ["Run ID", <code>{r.run_id}</code>],
             ]}
