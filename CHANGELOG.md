@@ -2,6 +2,34 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Added
+
+- **`openshard sync`: hosted Receipt history.** `openshard sync connect`
+  stores an OpenShard Platform link (endpoint, organisation, `osk_` API
+  key) in `~/.openshard/platform.json` (mode 0600, never in a
+  repository); `openshard sync now` sends this repository's Receipts as
+  the receipt sync envelope v1 (the exact `openshard history --json`
+  projection: no prompts, transcripts, diffs, output, notes or paths),
+  keyed by `receipt_id`; `openshard sync status` shows what is synced,
+  pending, still in progress, changed locally, in conflict or rejected.
+  Sending is idempotent and retry-safe: pending work is derived from
+  `runs.jsonl` against `.openshard/sync-outbox.jsonl`, a replay is a
+  no-op, conflicts and rejections are recorded once and never retried,
+  an unreachable Platform backs off exponentially, and an open agent
+  session is left alone until it ends or has been idle for an hour. The
+  capture service syncs every repository it knows on a timer once a link
+  exists. `OPENSHARD_PLATFORM_SYNC=off` or `platform: {sync: false}` in a
+  repository's config turns it off. See `docs/platform-sync.md`.
+- **`task_id` syncs unchanged.** The receipt sync envelope carries the
+  record's explicit `task_id` (v0.4.6) exactly as stored, `null` for
+  Receipts that never declared one. Sync never mints or infers one.
+- **`repo_identity` in the extended receipt projection.** `openshard
+  history --json` now includes the record's canonical `host/owner/repo`
+  beside the folder-name `repo` (which hook-captured records never
+  carry). The MCP `get_receipt` key set is unchanged.
+
 ## 0.4.5 - 2026-09-16
 
 OpenCode capture that loads where OpenCode actually runs, diagnostics that

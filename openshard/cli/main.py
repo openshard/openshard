@@ -185,7 +185,7 @@ _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Getting Started", ("setup", "doctor")),
     ("Receipts", ("last", "history", "report", "context")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
-    ("Integrations", ("mcp", "capture", "import", "wrap", "adapters", "telemetry")),
+    ("Integrations", ("mcp", "capture", "sync", "import", "wrap", "adapters", "telemetry")),
     # Everything else (run, plan, models, roster, eval, packs, ...) falls
     # into "Advanced" below rather than needing to be named here.
 ]
@@ -6463,6 +6463,143 @@ def telemetry_sample(limit: int, as_json: bool) -> None:
         return
     for event in events:
         click.echo(json.dumps(event, sort_keys=True))
+
+
+@cli.group("sync")
+def sync_group() -> None:
+    """Hosted Receipt history: sync this repository's Receipts to an OpenShard Platform organisation.
+
+    The canonical Receipt stays in .openshard/runs.jsonl. `sync` sends a
+    copy of the same privacy-bounded machine receipt that `openshard history
+    --json` prints, keyed by receipt_id, over HTTPS with an
+    organisation-scoped API key from `openshard sync connect`. Sending is
+    idempotent and retry-safe; a session still in progress is left alone
+    until it ends. See docs/platform-sync.md.
+    """
+
+
+def _render_sync_status(doc: dict) -> None:
+    link = doc.get("link") or {}
+    if not doc.get("connected"):
+        click.echo("Platform sync: not connected  (openshard sync connect --endpoint ... --org ... --api-key ...)")
+        return
+    state = "on"
+    if doc.get("disabled"):
+        state = f"off ({doc['disabled']})"
+    elif doc.get("paused"):
+        state = f"paused ({doc['paused']}; retried later)"
+    click.echo(f"Platform sync: {state}")
+    click.echo(f"  endpoint:        {link.get('endpoint')}")
+    click.echo(f"  organisation:    {link.get('organisation_id')}")
+    click.echo(f"  api key:         {link.get('api_key_prefix')}  (from {link.get('source')})")
+    if "scanned" in doc:
+        click.echo(f"  receipts:        {doc.get('scanned', 0)} in this repository")
+        click.echo(f"  synced:          {doc.get('synced', 0)}")
+        click.echo(f"  pending:         {doc.get('pending', 0)}"
+                   + (f"  (+{doc['in_progress']} session(s) still in progress)" if doc.get("in_progress") else ""))
+        if doc.get("stale"):
+            click.echo(f"  changed locally: {doc['stale']}  (hosted copy is the earlier one)")
+        if doc.get("conflict") or doc.get("rejected"):
+            click.echo(f"  not accepted:    {doc.get('conflict', 0)} conflict, {doc.get('rejected', 0)} rejected"
+                       "  (see --json for details)")
+        if doc.get("without_receipt_id"):
+            click.echo(f"  cannot sync:     {doc['without_receipt_id']} record(s) predate receipt_id (v0.4.4)")
+    click.echo("  never sent:      prompts, transcripts, diffs, command output, absolute paths, notes")
+    click.echo("  change:          openshard sync now | status | connect | disconnect   (docs/platform-sync.md)")
+
+
+@sync_group.command("connect")
+@click.option("--endpoint", required=True, help="Platform base URL, e.g. https://api.openshard.dev")
+@click.option("--org", "organisation_id", required=True, help="Organisation id (UUID) the receipts belong to.")
+@click.option("--api-key", "api_key", default=None,
+              help="Organisation API key (osk_...). Omit to be prompted without echo.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("sync.connect")
+def sync_connect(endpoint: str, organisation_id: str, api_key: str | None, as_json: bool) -> None:
+    """Store the Platform link for this user (~/.openshard/platform.json, mode 0600). Never in a repository."""
+    from openshard.sync import transport as sync_transport
+    from openshard.sync.config import save_link
+
+    if api_key is None:
+        api_key = click.prompt("API key (osk_...)", hide_input=True)
+    try:
+        link = save_link(endpoint=endpoint, organisation_id=organisation_id, api_key=api_key)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
+    except OSError as exc:
+        raise click.ClickException(f"could not write the link file: {type(exc).__name__}") from None
+    sync_transport.clear_backoff()  # a new key or endpoint deserves a fresh attempt
+    if as_json:
+        click.echo(json.dumps({"connected": True, "link": link.to_public_dict()}, indent=2))
+        return
+    click.echo(f"Connected: receipts from this machine will sync to {link.endpoint} "
+               f"(organisation {link.organisation_id}, key {link.key_prefix}).")
+    click.echo("Run `openshard sync now` in a repository to send its Receipts; the capture service "
+               "syncs known repositories in the background.")
+
+
+@sync_group.command("disconnect")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("sync.disconnect")
+def sync_disconnect(as_json: bool) -> None:
+    """Forget the stored Platform link. Nothing is sent from then on; hosted copies are not deleted."""
+    from openshard.sync import transport as sync_transport
+    from openshard.sync.config import clear_link
+
+    removed = clear_link()
+    sync_transport.clear_backoff()
+    if as_json:
+        click.echo(json.dumps({"connected": False, "removed": removed}, indent=2))
+        return
+    click.echo("Disconnected." if removed else "No stored Platform link.")
+
+
+@sync_group.command("status")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("sync.status")
+def sync_status(as_json: bool) -> None:
+    """Show where Receipts sync to and what this repository still has to send."""
+    from openshard.sync.client import status
+
+    loc = _locate_history()
+    doc = status(loc.root)
+    if as_json:
+        click.echo(json.dumps(doc, indent=2))
+    else:
+        _render_sync_status(doc)
+
+
+@sync_group.command("now")
+@click.option("--limit", default=50, type=click.IntRange(min=1, max=500), show_default=True,
+              help="At most this many receipts in one run.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("sync.now")
+def sync_now(limit: int, as_json: bool) -> None:
+    """Send this repository's unsynced Receipts now (safe to repeat)."""
+    from openshard.sync.client import flush
+
+    loc = _locate_history()
+    report = flush(loc.root, limit=limit)
+    if as_json:
+        click.echo(json.dumps(_machine_envelope("sync.now", "ok" if report.connected else "not_connected",
+                                                **report.to_dict()), indent=2))
+        return
+    if not report.connected:
+        click.echo("Not connected. Run `openshard sync connect --endpoint ... --org ... --api-key ...` first.")
+        return
+    if report.stopped and report.sent == 0:
+        click.echo(f"Nothing sent: {report.stopped}.")
+    line = (f"Sent {report.sent}: {report.created} new, {report.duplicate} already hosted, "
+            f"{report.conflict} conflict, {report.rejected} rejected.")
+    if report.pending:
+        line += f" {report.pending} still pending."
+    if report.in_progress:
+        line += f" {report.in_progress} session(s) in progress, left alone."
+    if report.stale:
+        line += f" {report.stale} changed locally since sync."
+    if report.stopped and report.sent:
+        line += f" Stopped: {report.stopped}."
+    click.echo(line)
 
 
 @cli.group("config")

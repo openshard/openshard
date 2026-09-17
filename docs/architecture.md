@@ -111,6 +111,7 @@ trust or use receipts, and the receipt path does not depend on them.
 | Workflow packs, review domains | `packs/`, `review/` | Repeatable review prompts for native runs. |
 | TUI | `tui/` | Interactive front-end over the same history. |
 | Telemetry | `telemetry/` | Privacy-safe counters (`docs/telemetry.md`); never receipt contents. |
+| Platform sync | `sync/`, `openshard sync` | Sends copies of the `history --json` projection to a hosted organisation, keyed by `receipt_id` (`docs/platform-sync.md`). The local record stays canonical. |
 
 ## Where to read next
 
@@ -118,6 +119,8 @@ trust or use receipts, and the receipt path does not depend on them.
   authentication, change attribution, capture completeness.
 * `docs/what-is-a-shard.md` — the Shard / Receipt model for users.
 * `docs/telemetry.md` — the complete telemetry contract.
+* `docs/platform-sync.md` — what hosted Receipt history sends, when, and
+  how it fails.
 * `SECURITY.md` — what is in and out of scope, and how to report.
 * `docs/architecture/V044_RECEIPT_INTEGRITY_AUDIT.md` and
   `docs/architecture/POST_V044_CORE_CLEANUP.md` — the v0.4.4 audit and
