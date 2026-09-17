@@ -22,6 +22,9 @@ All notable changes to OpenShard are documented here.
   capture service syncs every repository it knows on a timer once a link
   exists. `OPENSHARD_PLATFORM_SYNC=off` or `platform: {sync: false}` in a
   repository's config turns it off. See `docs/platform-sync.md`.
+- **`task_id` syncs unchanged.** The receipt sync envelope carries the
+  record's explicit `task_id` (v0.4.6) exactly as stored, `null` for
+  Receipts that never declared one. Sync never mints or infers one.
 - **`repo_identity` in the extended receipt projection.** `openshard
   history --json` now includes the record's canonical `host/owner/repo`
   beside the folder-name `repo` (which hook-captured records never

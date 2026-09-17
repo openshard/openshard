@@ -101,9 +101,12 @@ conflict. Hosted receipt revisions are the next Platform step.
 
 ## Not done, on purpose
 
-- **Task identity.** Receipts have no `task_id` yet (see
-  `docs/architecture.md`). The envelope carries none and the Platform
-  infers none. When Core mints one, it is an additive contract key.
+- **Task grouping.** `task_id` (`task_` + UUIDv7, minted only by
+  `openshard task new` and attached at record creation with `--task-id`)
+  travels in the receipt exactly as stored, and is `null` for every
+  Receipt that never declared one. The Platform stores and filters on it
+  and never mints, infers or reconstructs one. Task views are a later
+  step.
 - **Prompt-derived task text.** `task_short` / `task_full` are scrubbed,
   bounded excerpts of the first prompt for hook-captured sessions, and
   are sent as Core exports them. Stripping them on ingest is a planned

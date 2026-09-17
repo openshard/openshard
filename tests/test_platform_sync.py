@@ -25,7 +25,7 @@ from openshard.history.receipt_identity import is_receipt_id
 from openshard.history.store import amend_latest_record, load_history
 from openshard.sync import client, config, envelope, outbox, transport
 from openshard.sync.transport import SendResult
-from tests.test_claude_capture_service import _git, _make_repo
+from tests.capture_fixtures import _git, _make_repo
 
 ENDPOINT = "https://platform.example.test"
 ORG = "0f1e2d3c-4b5a-4697-8877-665544332211"
@@ -38,7 +38,7 @@ RUNS = Path(".openshard") / "runs.jsonl"
 # extended projection must produce exactly these keys, or the Platform
 # rejects the envelope with 400 for the unknown / missing key.
 CONTRACT_RECEIPT_KEYS = frozenset({
-    "receipt_id", "shard_id", "created_at", "agent", "origin", "capture_depth", "capture_completeness",
+    "receipt_id", "shard_id", "task_id", "created_at", "agent", "origin", "capture_depth", "capture_completeness",
     "integrity", "run_id", "attempt_number", "task_short", "task_full", "model", "model_stages", "strategy",
     "risk", "sandbox", "files_changed", "files", "changes", "files_excluded", "diff_added", "diff_removed",
     "checks", "status", "verification_status", "verification_reason", "verification_returncode",
@@ -215,6 +215,20 @@ class TestEnvelope:
         # json-serialisable, and the hash is stable across key order
         assert envelope.payload_hash(receipt) == envelope.payload_hash(dict(reversed(list(receipt.items()))))
         assert envelope.payload_hash(receipt).startswith("sha256:")
+
+    def test_explicit_task_id_is_transported_unchanged_and_legacy_is_null(self, repo):
+        from openshard.history.task_identity import ensure_task_id, new_task_id
+
+        _session(repo, _sid(1))  # hook-captured: no task_id was declared
+        tid = new_task_id()
+        entry = {"receipt_id": "rcpt_" + "9" * 32, "timestamp": "2026-09-16T09:12:03Z", "task": "t",
+                 "agent": "codex", "schema_version": "1.2"}
+        ensure_task_id(entry, tid)
+        legacy = envelope.build_envelope(_entries(repo)[0], 0, core_version="x")["receipt"]
+        explicit = envelope.build_envelope(entry, 1, core_version="x")["receipt"]
+        assert legacy["task_id"] is None
+        assert explicit["task_id"] == tid  # exactly as stored: never normalised or minted here
+        assert set(legacy) == set(explicit) == CONTRACT_RECEIPT_KEYS
 
     def test_schema_version_is_the_records_own(self):
         entry = {"receipt_id": "rcpt_" + "c" * 32, "timestamp": "2026-09-16T09:12:03Z", "task": "t", "agent": "codex"}
@@ -398,6 +412,25 @@ class TestFlush:
         doc = client.status(repo, env=env)
         assert doc["connected"] and doc["synced"] == 2 and doc["pending"] == 0 and doc["problems"] == []
         assert KEY not in json.dumps(doc)
+
+    def test_task_id_crosses_the_wire_exactly_as_stored(self, repo, env, link, recording, monkeypatch):
+        from openshard.cli.main import cli
+        from openshard.history.task_identity import is_task_id
+
+        monkeypatch.setenv("OPENSHARD_HOME", env["OPENSHARD_HOME"])
+        monkeypatch.chdir(repo)
+        runner = CliRunner()
+        minted = runner.invoke(cli, ["task", "new", "--json"], catch_exceptions=False)
+        tid = json.loads(minted.output)["task_id"]
+        assert is_task_id(tid)
+        assert runner.invoke(cli, ["import", "claude", "--task", "Wire it up", "--task-id", tid],
+                             catch_exceptions=False).exit_code == 0
+        assert runner.invoke(cli, ["import", "claude", "--task", "No task declared"],
+                             catch_exceptions=False).exit_code == 0
+        report = client.flush(repo, env=env)
+        assert report.created == 2
+        sent = {e["receipt"]["task_short"]: e["receipt"]["task_id"] for e in recording.envelopes}
+        assert sent == {"Wire it up": tid, "No task declared": None}
 
     def test_duplicate_answer_counts_as_synced(self, repo, env, link):
         _session(repo, _sid(1))
