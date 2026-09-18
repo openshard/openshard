@@ -2,7 +2,14 @@
 
 All notable changes to OpenShard are documented here.
 
-## Unreleased
+## 0.4.6 - 2026-09-18
+
+OpenShard Platform sync arrives: `openshard sync connect` / `now` / `status`
+send this repository's Receipts to a hosted history, retry-safe and
+idempotent, off until a Platform link is configured. Receipt `task_id`
+propagates through sync unchanged, and the extended receipt projection now
+carries canonical `host/owner/repo` identity. No existing Receipt semantics,
+on-disk format, or MCP output change.
 
 ### Added
 
