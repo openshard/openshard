@@ -1,6 +1,6 @@
 # CLI reference
 
-This is a task-oriented tour of the OpenShard CLI, moved out of the README to
+This is a task-oriented tour of the Openshard CLI, moved out of the README to
 keep that focused on the beginner flow (`openshard setup` -> use your coding
 agent -> `openshard last`).
 
@@ -17,33 +17,33 @@ openshard setup --agent --json                     # Read-only status snapshot; 
 openshard doctor                                   # Health check: repo, history, Claude Code, MCP, hooks, enrichment
 openshard mcp install claude                       # Lower-level: MCP server + hooks + status line only
 openshard capture rotate-token                     # Replace the local capture token (then re-run setup per repo)
-openshard mcp uninstall claude                     # Remove OpenShard's Claude Code config; history is never deleted
+openshard mcp uninstall claude                     # Remove Openshard's Claude Code config; history is never deleted
 ```
 
 Most developers who want the interactive experience should start with the TUI:
 
 ```bash
-openshard tui                                      # Launch the OpenShard terminal UI
+openshard tui                                      # Launch the Openshard terminal UI
 ```
 
 Run tasks:
 
 ```bash
-openshard run "Review this repo for risks"         # Run a task through OpenShard from the shell
+openshard run "Review this repo for risks"         # Run a task through Openshard from the shell
 openshard run --workflow native "Fix this bug"     # Run using the native workflow path
 ```
 
-Inspect what OpenShard captured (local, offline, works from any subdirectory of the repo):
+Inspect what Openshard captured (local, offline, works from any subdirectory of the repo):
 
 ```bash
 openshard last                                     # Show the latest run summary
-openshard last --more                              # Show the expanded Shard receipt
+openshard last --more                              # Show the expanded receipt
 openshard last --full                              # Show full stored/debug details
-openshard history                                  # Recent Shards for this repo, newest first
+openshard history                                  # Recent receipts for this repo, newest first
 openshard history --limit 20 --json                # Same, more rows, machine-readable
 openshard context "fix the flaky auth test"        # What relevant_context would give an agent, and why
 openshard context --text "fix the flaky auth test" # Just the block an agent would receive
-openshard stats                                    # Counts over recorded Shards (agents, models, checks, est. cost)
+openshard stats                                    # Counts over recorded receipts (agents, models, checks, est. cost)
 openshard stats completeness                       # Receipt completeness heuristic
 openshard stats failures                           # Failure categories over recent runs
 ```
@@ -103,7 +103,7 @@ openshard eval stats                               # Show eval stats
 Useful TUI commands:
 
 ```text
-/ask what models do you support?                   # Ask OpenShard product/model questions
+/ask what models do you support?                   # Ask Openshard product/model questions
 /plan review this repo for production readiness    # Generate a local plan without writing files
 /packs                                             # List workflow packs inside the TUI
 /pack production-iac-hardening                     # Load a workflow pack inside the TUI

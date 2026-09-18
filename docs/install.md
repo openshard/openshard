@@ -1,8 +1,8 @@
-# Installing OpenShard
+# Installing Openshard
 
 ## Recommended: pipx
 
-pipx installs OpenShard in an isolated environment, so its dependencies don't conflict with other Python tools.
+pipx installs Openshard in an isolated environment, so its dependencies don't conflict with other Python tools.
 
 If you don't have pipx yet:
 
@@ -14,29 +14,31 @@ brew install pipx
 pip install pipx
 ```
 
-Then install OpenShard:
+Then install Openshard:
 
 ```sh
 pipx install openshard
 ```
 
-Set up Claude Code capture for a repository (once per repository, safe to re-run):
+Set up receipt capture for a repository (once per repository, safe to re-run):
 
 ```sh
 cd my-project
 openshard setup
 ```
 
-Then use Claude Code normally and look at what was captured:
+`openshard setup` detects whichever of Claude Code, Codex, Cursor or
+OpenCode are available for the repo and configures capture for each. Then
+use your coding agent normally and look at what was captured:
 
 ```sh
 openshard last                   # the newest receipt
-openshard history                # recent Shards for this repository
-openshard context "some task"    # what OpenShard would surface for that task, and why
+openshard history                # recent receipts for this repository
+openshard context "some task"    # what Openshard would surface for that task, and why
 openshard stats                  # counts over everything recorded here
 ```
 
-These work from any subdirectory of the repository and never need a network connection or account. `openshard doctor` answers "is OpenShard actually working here?", and `openshard mcp uninstall claude` removes OpenShard's Claude Code configuration again (local history is never deleted).
+These work from any subdirectory of the repository and never need a network connection or account. `openshard doctor` answers "is Openshard actually working here?", and `openshard mcp uninstall claude` removes Openshard's Claude Code configuration again (local history is never deleted).
 
 Or run the TUI:
 

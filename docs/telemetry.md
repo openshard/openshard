@@ -1,6 +1,6 @@
 # Telemetry ("Help improve OpenShard")
 
-OpenShard shares a small amount of privacy-safe usage and reliability data
+Openshard shares a small amount of privacy-safe usage and reliability data
 so we can tell whether it works, which agents people use it with, and where
 it fails. This page is the complete contract: what is collected, what is
 never collected, how to see it, and how to turn it off.
@@ -86,8 +86,8 @@ So the following are never sent:
 - file names, directory names or paths
 - repository names, git remotes, branch names or commit hashes
 - model slugs (only the public family above)
-- API keys, tokens or anything matching OpenShard's secret patterns
-- receipt or Shard contents, task text, error messages
+- API keys, tokens or anything matching Openshard's secret patterns
+- receipt contents, task text, error messages
 - hostname, username, email, IP address, locale or timezone
 
 `openshard telemetry sample` prints the queued events exactly as they will
@@ -97,7 +97,7 @@ be sent, so you can check this yourself at any time.
 
 `installation_id` is a random uuid4 minted the first time telemetry state is
 created. It is a pseudonymous token, not an identity. It is stored
-user-globally in `telemetry.json` under your OpenShard home (`~/.openshard`,
+user-globally in `telemetry.json` under your Openshard home (`~/.openshard`,
 or `OPENSHARD_HOME`), never inside a repository, and it is never derived from a username, hostname, email, MAC address or repository
 path. `openshard telemetry reset` mints a new one and keeps your telemetry
 preference.
@@ -170,7 +170,7 @@ immediately: the preference is recorded as `off` and the queue is discarded.
 - `emit` never blocks, never prints and never raises. When telemetry is off
   it returns after an environment/preference check. When on, the event is
   validated and appended to a local queue file (`telemetry.queue.jsonl` in
-  your OpenShard home).
+  your Openshard home).
 - The queue is bounded: at most 500 events or 256 KiB, dropping the oldest
   first. Telemetry is not evidence; loss is acceptable, growth is not.
 - Sending is a single HTTPS `POST` of a JSON batch (at most 50 events) to

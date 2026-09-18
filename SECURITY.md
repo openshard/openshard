@@ -8,9 +8,9 @@ to reproduce, and what you think the impact is. You will get a response as
 quickly as possible and we will agree a fix and disclosure timeline with
 you before anything is published.
 
-## What OpenShard is, in security terms
+## What Openshard is, in security terms
 
-OpenShard records evidence about coding-agent sessions into a local file
+Openshard records evidence about coding-agent sessions into a local file
 (`.openshard/runs.jsonl`) and renders it. It does not run your agent, does
 not proxy model traffic, and needs no account. The components that matter
 for security are below, with what each one trusts.
@@ -56,7 +56,7 @@ for security are below, with what each one trusts.
 * OpenCode: the plugin at `.opencode/plugins/openshard.js` carries the
   capability scoped to this repository and to OpenCode. It never reads
   the token file. The master token appears in no agent's configuration.
-* All of them are **fail-open for the agent**: if OpenShard is missing,
+* All of them are **fail-open for the agent**: if Openshard is missing,
   refuses, or times out, the coding agent continues; only evidence is
   lost, and the service counts refusals.
 
@@ -82,10 +82,10 @@ receipt contents cannot be sent even by mistake. See `docs/telemetry.md`.
   that were already dirty before the session or that another live agent
   session reported are excluded and listed separately. Git-observed means
   the repository changed; it does not establish who changed it.
-* `Capture  partial` is how deep OpenShard could see (it observed the
+* `Capture  partial` is how deep Openshard could see (it observed the
   agent; it did not execute or verify). `Gaps  None known` means every
   loss detector stayed at zero; it is not a claim that nothing was missed.
-  `Gaps  1 queued event could not be decoded` means OpenShard knows
+  `Gaps  1 queued event could not be decoded` means Openshard knows
   evidence was lost. `Gaps  Unknown` means the record predates loss
   tracking and nothing can be claimed either way.
 

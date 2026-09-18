@@ -1,4 +1,4 @@
-# Contributing to OpenShard
+# Contributing to Openshard
 
 Thanks for your interest in contributing.
 
@@ -7,7 +7,7 @@ Thanks for your interest in contributing.
 A Receipt is an evidence record. Code that touches capture, history or
 rendering must never make a stronger claim than its evidence supports.
 Prefer *observed*, *agent-reported*, *independently verified*, *unknown*
-and *incomplete* over filling a gap. If OpenShard loses evidence, cannot
+and *incomplete* over filling a gap. If Openshard loses evidence, cannot
 prove causality or cannot authenticate an event, the Receipt must become
 more explicit and more conservative, never quietly more confident. See
 `docs/architecture.md` for the receipt path and its evidence levels.
