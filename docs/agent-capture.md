@@ -1,6 +1,6 @@
 # Agent capture: Claude Code, Codex, Cursor and OpenCode
 
-OpenShard records the coding-agent work you already do. Four agents feed
+Openshard records the coding-agent work you already do. Four agents feed
 **one** capture path:
 
 ```text
@@ -71,7 +71,7 @@ are upgraded.
 
 **Migration.** Hooks installed before v0.4.4 carry no credential and are
 refused by an upgraded service. `openshard setup` rewrites the Claude hook
-entries and the OpenCode plugin; a `SessionStart` of an upgraded OpenShard
+entries and the OpenCode plugin; a `SessionStart` of an upgraded Openshard
 also upgrades the repository's Claude hook entries itself (Claude Code
 snapshots hooks per session, so the fix applies from the next session, and
 the in-process fallback fold still records the current one). `openshard
@@ -121,9 +121,9 @@ session's.
 Two separate questions, kept separate in the record, the JSON and the
 receipt:
 
-* **Capture depth** (`capture_depth`, unchanged): how deep OpenShard could
-  ever observe or control the run -- `full` (OpenShard ran it), `partial`
-  (observed through an agent's hooks; OpenShard did not execute or verify),
+* **Capture depth** (`capture_depth`, unchanged): how deep Openshard could
+  ever observe or control the run -- `full` (Openshard ran it), `partial`
+  (observed through an agent's hooks; Openshard did not execute or verify),
   `unknown`.
 * **Completeness** (`capture.completeness.status`): within the evidence the
   integration is expected to deliver, is any evidence *known* to be lost?
@@ -187,9 +187,9 @@ translator and one installer per agent, and per-agent readiness in
 | OpenCode | `opencode_plugin` | OpenCode (external) | `opencode` / — | `providerID/modelID` OpenCode reports on the user/assistant message, only when present |
 
 Every one of these is `origin = external_observed`, `capture_depth =
-partial` (`history/shard.py`): OpenShard observed the session, it did not
+partial` (`history/shard.py`): Openshard observed the session, it did not
 execute or verify it. `executor == "opencode"` (no `_plugin`) still means
-OpenShard *routed* work to OpenCode itself and is unaffected.
+Openshard *routed* work to OpenCode itself and is unaffected.
 
 The profile table is `openshard/adapters/capture_agents.py`. The fold in
 `adapters/claude_hooks.py` stores the agent key on the staging buffer and
@@ -197,7 +197,7 @@ looks every label up from the profile; it never branches on an agent name.
 
 ## Canonical event mapping
 
-| Agent event | OpenShard event | Canonical Event(s) staged | Evidence |
+| Agent event | Openshard event | Canonical Event(s) staged | Evidence |
 |---|---|---|---|
 | Codex `SessionStart` / OpenCode `session.created` | `SessionStart` | `session.started` (first hook) | directly_observed |
 | Codex `UserPromptSubmit` / OpenCode `chat.message` | `UserPromptSubmit` | `session.activity` "user prompt submitted"; first prompt becomes the task excerpt and mints the Shard | directly_observed |
@@ -221,7 +221,7 @@ MCP tools (`mcp__server__tool`) are recorded by name only.
 Confirmed against OpenAI's Codex hooks reference
 (`developers.openai.com/codex/hooks`):
 
-| Field | Status | How OpenShard treats it |
+| Field | Status | How Openshard treats it |
 |---|---|---|
 | events `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SessionEnd`, `Interrupt` | documented | subscribed; `Interrupt` is activity, never completion |
 | `PostToolUseFailure` | **does not exist** in Codex (`PostToolUse` also fires for non-zero Bash exits) | a document naming it is not a Codex hook; a Codex `PostToolUse` is never a success signal |
@@ -332,11 +332,11 @@ never invented evidence.
   ESM JavaScript on purpose: OpenCode's CLI runs on Bun, which strips
   TypeScript types, but OpenCode Desktop runs its server under Electron's
   bundled Node, which cannot, so a `.ts` plugin is refused there and never
-  loads. Install and uninstall also remove a pre-0.4.5 OpenShard-owned
+  loads. Install and uninstall also remove a pre-0.4.5 Openshard-owned
   `openshard.ts` (identified by the marker) so OpenCode never loads both; a
   user's own `openshard.ts` is left alone.
 * **Plugin** (`opencode_plugin_install.PLUGIN_SOURCE`, no imports, no
-  OpenShard logic): observes `session.created` / `session.idle` /
+  Openshard logic): observes `session.created` / `session.idle` /
   `session.deleted` / `file.edited` / `message.updated` and the
   `chat.message` / `tool.execute.after` hooks; sends one bounded JSON
   document per observation with `fetch` (1.5s timeout) to
@@ -345,9 +345,9 @@ never invented evidence.
   in-memory buffer (200) and the plugin asks `openshard capture start`
   (fire-and-forget) -- at most once per 60 s, so a service that dies
   mid-session is restarted on the next failed delivery after the cooldown
-  and a missing OpenShard never causes a spawn storm. The buffer is
+  and a missing Openshard never causes a spawn storm. The buffer is
   replayed in order by a short timer after each start attempt and by the
-  next delivery attempt; with OpenShard uninstalled the plugin fails
+  next delivery attempt; with Openshard uninstalled the plugin fails
   silently.
 * **Commands**: `openshard setup` (when `opencode` is on PATH),
   `openshard capture install opencode`, `openshard capture uninstall
@@ -368,7 +368,7 @@ never invented evidence.
   shared capture service) and a final line naming the agents that are
   ready; `--json` adds `codex` and `opencode` keys.
 * `openshard mcp uninstall claude` is unchanged; `openshard capture
-  uninstall codex|opencode` remove only OpenShard's own hook entries /
+  uninstall codex|opencode` remove only Openshard's own hook entries /
   plugin file. History under `.openshard/` is never deleted.
 
 ## Performance

@@ -1,6 +1,6 @@
 # Platform sync (hosted Receipt history)
 
-`openshard sync` sends copies of this repository's Receipts to an OpenShard
+`openshard sync` sends copies of this repository's Receipts to an Openshard
 Platform organisation so they can be read from a web dashboard. This page
 is the complete contract: what leaves the machine, when, how failures are
 handled, and what is deliberately not done yet.

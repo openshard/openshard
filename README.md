@@ -229,6 +229,29 @@ See [Telemetry](docs/telemetry.md) for the full behaviour.
 
 ---
 
+## Optional hosted sync
+
+Receipts stay local by default. If you want them visible beyond your own
+machine, `openshard sync` sends copies of this repository's Receipts to an
+Openshard Platform organisation:
+
+```bash
+openshard sync connect --endpoint <url> --org <org-id>
+openshard sync now
+openshard sync status
+```
+
+Sync is off until you run `connect`, sends only the same bounded fields
+`openshard history --json` already prints (no prompts, transcripts, diffs,
+or file contents), and is retry-safe and idempotent: replaying `sync now`
+never duplicates a Receipt. See [Platform sync](docs/platform-sync.md) for
+the full contract.
+
+The hosted dashboard that reads this synced history is still being built;
+see Project status below.
+
+---
+
 ## Installation
 
 The standard installation is:
@@ -276,7 +299,7 @@ Openshard is currently a working tool available for use, and the core local rece
 
 The project has automated CI, Ruff and mypy checks, a large pytest suite, Linux and Windows validation, authenticated local capture, receipt integrity checks, explicit capture-completeness handling, and real integration testing across supported agent paths.
 
-The hosted product is still being built. Shared team receipt history, hosted analytics, and team controls will build on the same receipt primitive rather than replacing the local workflow.
+Sending Receipts to the Openshard Platform is live and retry-safe (`openshard sync`), and that local-to-hosted path has passed real end-to-end testing. What's still being built on top of it is the hosted web experience: the dashboard, receipt history views, and team controls. They'll build on the same receipt primitive rather than replacing the local workflow.
 
 For now, the focus is straightforward: making the receipt layer reliable, useful, and easy enough to fit naturally into the way developers already work.
 
@@ -298,7 +321,8 @@ Openshard is licensed under Apache-2.0.
 
 - [Installation](docs/install.md)
 - [Agent capture](docs/agent-capture.md)
-- [What is a Shard?](docs/what-is-a-shard.md)
+- [What is a Receipt?](docs/what-is-a-shard.md)
+- [Platform sync](docs/platform-sync.md)
 - [CLI reference](docs/cli-reference.md)
 - [Telemetry](docs/telemetry.md)
 - [Changelog](CHANGELOG.md)
