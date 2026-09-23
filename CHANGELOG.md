@@ -2,7 +2,14 @@
 
 All notable changes to OpenShard are documented here.
 
-## Unreleased
+## 0.4.7 - 2026-09-23
+
+Four more capture surfaces: Google Antigravity, Hermes Agent and Grok Build
+through the same authenticated local capture path as the other agents, and
+Grok Bot (Cursor) through Cursor's OpenTelemetry export or a self-report
+skill, each with its evidence level stated. Receipts gain a structured
+`verification` block and a concise `task_title`, and sync now closes idle
+sessions before sending them. Stored records are never rewritten.
 
 ### Added
 
@@ -100,7 +107,9 @@ All notable changes to OpenShard are documented here.
   is kept (`capture.models_seen`, one `model invoked` Event per switch).
   Antigravity exposes no prompt, token counts, cost, provider or session
   end to hooks, so those stay Not recorded and idle sessions are closed by
-  the sweep as `session_end_not_observed`. See `docs/agent-capture.md`.
+  the sweep as `session_end_not_observed`. Workspace hooks load only in a
+  folder that belongs to an Antigravity project (confirmed with Antigravity
+  1.2.9). See `docs/agent-capture.md`.
 - Two agent-neutral additions to the shared fold: a `ModelInvocation`
   lifecycle event and a `read` tool kind (a repo-relative path read, never
   a change or an attempted edit). The capture service anchors a session's

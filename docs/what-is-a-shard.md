@@ -2,10 +2,11 @@
 
 **A Receipt is the saved record of an AI coding run.**
 
-When Claude Code, Codex, Cursor or OpenCode writes or changes code, Openshard
-records what happened: the task, the agent and model where known, the files
-touched, the checks that ran, the result, the estimated cost, and how
-completely Openshard could see the run.
+When Claude Code, Codex, Cursor, OpenCode, Google Antigravity, Hermes Agent,
+Grok Build or Grok Bot writes or changes code, Openshard records what
+happened: the task, the agent and model where known, the files touched, the
+checks that ran, the result, the estimated cost, and how completely
+Openshard could see the run.
 
 The `receipt_id` is what makes a Receipt globally unique and portable across
 repositories, machines and organisations; the older `shard_id` remains on

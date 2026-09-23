@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  Use Claude Code, Codex, Cursor, or OpenCode normally. Openshard keeps a clear record of what happened: what ran, what changed, what was verified, what it cost, and what it could not establish.
+  Use Claude Code, Codex, Cursor, OpenCode, Google Antigravity, Hermes Agent, Grok Build or Grok Bot normally. Openshard keeps a clear record of what happened: what ran, what changed, what was verified, what it cost, and what it could not establish.
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@ cd my-project
 openshard setup
 ```
 
-Now use Claude Code, Codex, Cursor, or OpenCode as you normally would. When the agent finishes:
+Now use your coding agent (Claude Code, Codex, Cursor, OpenCode, Google Antigravity or Grok Build; Hermes Agent and Grok Bot need one extra step, see [Supported coding agents](#supported-coding-agents)) as you normally would. When the agent finishes:
 
 ```bash
 openshard last
@@ -75,7 +75,7 @@ Show:
 3. openshard last
 4. the resulting receipt
 
-One demo is enough. The supported agents section below shows that the same receipt layer works across all four integrations.
+One demo is enough. The supported agents section below shows that the same receipt layer works across every supported integration.
 -->
 
 ---
@@ -209,7 +209,7 @@ openshard stats --json
 
 The implementation differs slightly between agents. Openshard can use hooks, plugins, local configuration, and MCP-based integration depending on what each tool exposes. Those events are normalised into the same receipt history and passed through a local authenticated capture service.
 
-That means Claude Code, Codex, Cursor, and OpenCode can all leave receipts in the same repo history even though the agents themselves work differently.
+That means every supported agent can leave receipts in the same repo history even though the agents themselves work differently.
 
 For the deeper implementation details, see [Agent capture](docs/agent-capture.md).
 
@@ -299,7 +299,7 @@ See [Installation](docs/install.md) for additional installation guidance.
 
 ## Project status
 
-Openshard is currently a working tool available for use, and the core local receipt loop is working across Claude Code, Codex, Cursor, and OpenCode.
+Openshard is currently a working tool available for use, and the core local receipt loop is working across Claude Code, Codex, Cursor, OpenCode, Google Antigravity, Hermes Agent and Grok Build, with Grok Bot captured through Cursor's OpenTelemetry export or a self-report skill.
 
 The project has automated CI, Ruff and mypy checks, a large pytest suite, Linux and Windows validation, authenticated local capture, receipt integrity checks, explicit capture-completeness handling, and real integration testing across supported agent paths.
 
