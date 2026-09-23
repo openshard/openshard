@@ -2906,6 +2906,158 @@ def hooks_claude_status() -> None:
     click.echo(run_status_via_service(sys.stdin, env=os.environ))
 
 
+@cli.group("grok-bot")
+def grok_bot_group() -> None:
+    """Grok Bot (Cursor's cloud teammate): Enterprise Action Recording ingest and the self-report path.
+
+    Grok Bot runs on a cloud computer, so there are no local hooks to install.
+    Enterprise: ingest Cursor's OpenTelemetry Export of Action Recording
+    (`ingest` / `serve`) -- actions observed by Cursor's platform. Every
+    plan: the Bot can self-report a task (`report`, driven by the skill from
+    `skill`) -- recorded as agent_reported, never as observed.
+    """
+
+
+def _grok_bot_repo(repo_path: Path | None) -> Path:
+    from openshard.adapters.claude_mcp_install import find_repo_root
+
+    root = find_repo_root(repo_path)
+    if root is None:
+        raise click.ClickException(
+            "No git repository found. Pass --repo PATH: the repository whose .openshard history receives Grok Bot Shards."
+        )
+    return root
+
+
+def _read_input(source: str) -> bytes:
+    if source == "-":
+        return sys.stdin.buffer.read()
+    try:
+        return Path(source).read_bytes()
+    except OSError as exc:
+        raise click.ClickException(f"Cannot read {source}: {exc.strerror or exc}") from exc
+
+
+@grok_bot_group.command("ingest")
+@click.argument("source", default="-")
+@click.option("--repo", "repo_path", type=click.Path(file_okay=False, path_type=Path), default=None,
+              help="Repository whose .openshard history receives the Shards (default: the current one).")
+@click.option("--team-id", type=int, default=None, help="Only accept records from this Cursor team id.")
+@click.option("--format", "fmt", type=click.Choice(["auto", "protobuf", "json"]), default="auto",
+              help="Input format (default: sniffed).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def grok_bot_ingest(source: str, repo_path: Path | None, team_id: int | None, fmt: str, as_json: bool) -> None:
+    """Ingest an OTLP logs export of Grok Bot Action Recording (Enterprise).
+
+    SOURCE is a file (or - for stdin) holding an OTLP/HTTP logs request body
+    (protobuf) or OTLP/JSON -- e.g. the output of an OpenTelemetry
+    Collector `file` exporter receiving Cursor's OpenTelemetry Export. Only
+    cursor.surface=grok_bot records are read; one Cursor conversation
+    becomes one Shard. Re-ingesting the same export is a no-op.
+    """
+    from openshard.adapters.grok_bot import ingest_otlp_bytes
+    from openshard.adapters.otlp_logs import OtlpDecodeError
+
+    root = _grok_bot_repo(repo_path)
+    ctype = {"auto": None, "protobuf": "application/x-protobuf", "json": "application/json"}[fmt]
+    try:
+        result = ingest_otlp_bytes(_read_input(source), root, content_type=ctype, team_id=team_id)
+    except (OtlpDecodeError, UnicodeDecodeError) as exc:
+        raise click.ClickException(f"Not a decodable OTLP logs export: {exc}") from exc
+    data = result.to_dict()
+    if as_json:
+        click.echo(json.dumps(data, indent=2))
+        return
+    click.echo(
+        f"Grok Bot Action Recording: {data['accepted']} event(s) ingested, {data['duplicates']} duplicate(s), "
+        f"{sum(data['skipped'].values())} skipped; {data['conversations']} conversation Shard(s) updated."
+    )
+    for reason, n in sorted(data["skipped"].items()):
+        click.echo(f"  skipped {n}: {reason.replace('_', ' ')}")
+    for s in data["shards"]:
+        click.echo(f"  {s['shard_id']}  conversation {s['conversation_id']}  ({s['outcome']})")
+    if data["accepted"]:
+        click.echo("Evidence: observed by Cursor's platform (not the Bot's own claims); OpenShard ran and verified nothing.")
+
+
+@grok_bot_group.command("serve")
+@click.option("--repo", "repo_path", type=click.Path(file_okay=False, path_type=Path), default=None,
+              help="Repository whose .openshard history receives the Shards (default: the current one).")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address.")
+@click.option("--port", default=4318, show_default=True, type=int, help="Bind port.")
+@click.option("--team-id", type=int, default=None, help="Only accept records from this Cursor team id.")
+def grok_bot_serve(repo_path: Path | None, host: str, port: int, team_id: int | None) -> None:
+    """Run an OTLP/HTTP logs receiver for Grok Bot Action Recording (Enterprise).
+
+    Point an OpenTelemetry Collector `otlphttp` exporter (fed by Cursor's
+    OpenTelemetry Export) at http://HOST:PORT. Every request must carry
+    `Authorization: Bearer $OPENSHARD_GROK_BOT_OTLP_TOKEN`. This does not
+    terminate public TLS: Cursor requires a public HTTPS endpoint, which is
+    your collector, not this process.
+    """
+    from openshard.adapters.grok_bot_receiver import MIN_TOKEN_LENGTH, TOKEN_ENV, serve
+
+    token = os.environ.get(TOKEN_ENV, "")
+    if len(token) < MIN_TOKEN_LENGTH:
+        raise click.ClickException(f"Set {TOKEN_ENV} to a bearer token of at least {MIN_TOKEN_LENGTH} characters.")
+    root = _grok_bot_repo(repo_path)
+
+    def _ready(server) -> None:
+        click.echo(f"Listening on http://{host}:{server.server_address[1]}/v1/logs -> {root / '.openshard' / 'runs.jsonl'}")
+
+    def _on_ingest(result: dict) -> None:
+        click.echo(f"ingested {result['accepted']} event(s), {result['duplicates']} duplicate(s), "
+                   f"{result['conversations']} conversation(s)")
+
+    try:
+        serve(root, token, host=host, port=port, team_id=team_id, ready=_ready, on_ingest=_on_ingest)
+    except OSError as exc:
+        raise click.ClickException(f"Cannot listen on {host}:{port}: {exc.strerror or exc}") from exc
+    except KeyboardInterrupt:
+        click.echo("Stopped.")
+
+
+@grok_bot_group.command("report")
+@click.argument("source", default="-")
+@click.option("--repo", "repo_path", type=click.Path(file_okay=False, path_type=Path), default=None,
+              help="Repository whose .openshard history receives the Shard (default: the current one).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def grok_bot_report(source: str, repo_path: Path | None, as_json: bool) -> None:
+    """Record a Grok Bot self-report (openshard.grok_bot.report/v1 JSON) as a Shard.
+
+    Run by the Bot through Execution on Local Computer, as the skill from
+    `openshard grok-bot skill` instructs. Everything in the report is the
+    Bot's own claim and is recorded as agent_reported.
+    """
+    from openshard.adapters.grok_bot import ReportError, ingest_report
+
+    root = _grok_bot_repo(repo_path)
+    try:
+        result = ingest_report(_read_input(source), root)
+    except ReportError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    click.echo(f"Recorded Grok Bot self-report as Shard {result['shard_id']} ({result['outcome']}).")
+    click.echo("Evidence: agent_reported -- the Bot's own claims; nothing was observed.")
+
+
+@grok_bot_group.command("skill")
+@click.option("--output", "output", type=click.Path(dir_okay=False, path_type=Path), default=None,
+              help="Write SKILL.md here instead of printing it.")
+def grok_bot_skill(output: Path | None) -> None:
+    """Print the OpenShard self-report skill to give to Grok Bot."""
+    from openshard.adapters.grok_bot import SKILL_MARKDOWN
+
+    if output is None:
+        click.echo(SKILL_MARKDOWN, nl=False)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(SKILL_MARKDOWN, encoding="utf-8")
+    click.echo(f"Wrote {output}")
+
+
 @cli.group("capture")
 def capture_group() -> None:
     """The local capture service shared by Claude Code, Codex, OpenCode, Cursor and Google Antigravity, and its per-agent integrations."""

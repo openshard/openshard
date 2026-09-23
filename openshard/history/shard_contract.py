@@ -22,6 +22,7 @@ from openshard.history.shard_hash import verify_shard_hash
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
 from openshard.history.verification import (
+    MODE_AGENT_CLAIM,
     REASON_OUTCOME_NOT_OBSERVED,
     STATUS_FAILED,
     STATUS_NOT_RUN,
@@ -623,7 +624,20 @@ _WEAK_VERIFICATION_STATUSES: frozenset[str] = frozenset(
 
 
 def _verification_display(ev: VerificationEvidence) -> tuple[str, str]:
-    """(checks_display, status) for structured evidence, in the receipt's existing vocabulary."""
+    """(checks_display, status) for structured evidence, in the receipt's existing vocabulary.
+
+    A result the agent merely *stated* (``observation_mode == agent_claim``)
+    keeps its counts but is labelled as a claim, so it never reads like an
+    observed pass.
+    """
+    display, status = _verification_display_base(ev)
+    if ev.observation_mode == MODE_AGENT_CLAIM and ev.status in (STATUS_PASSED, STATUS_FAILED, STATUS_PARTIAL):
+        display += " (agent claim, not observed)"
+        status += " (agent claim)"
+    return display, status
+
+
+def _verification_display_base(ev: VerificationEvidence) -> tuple[str, str]:
     attempted = ev.checks_attempted
     if ev.status == STATUS_PASSED:
         return (f"{ev.checks_passed}/{attempted} passed" if attempted else "Passed"), "Passed"
@@ -736,7 +750,7 @@ def _changes_summary(block: dict | None) -> dict | None:
 
     _baseline_raw = block.get("baseline")
     baseline: dict = _baseline_raw if isinstance(_baseline_raw, dict) else {}
-    return {
+    summary: dict = {
         "agent_reported": _n("agent_reported"),
         "git_observed": _n("git_observed"),
         "pre_existing_excluded": _n("pre_existing_excluded"),
@@ -749,6 +763,12 @@ def _changes_summary(block: dict | None) -> dict | None:
             "truncated": bool(baseline.get("truncated")),
         },
     }
+    if block.get("files_observable") is False:
+        # Only integrations that cannot see file changes at all (Grok Bot's
+        # Action Recording export) store this; absent everywhere else, so
+        # existing receipts -- and their sync payload hashes -- are unchanged.
+        summary["files_observable"] = False
+    return summary
 
 
 def integrity_display(entry: dict) -> str:
@@ -773,8 +793,10 @@ def integrity_display(entry: dict) -> str:
 def changed_files_display(receipt: ShardReceipt) -> str:
     """``2 files (1 agent-reported, 1 git-observed)`` when provenance is known, else ``2 files``."""
     n = receipt.files_changed
-    text = f"{n} file{'s' if n != 1 else ''}"
     changes = receipt.changes
+    if n == 0 and changes and changes.get("files_observable") is False:
+        return "Not observable (this integration exports no file changes)"
+    text = f"{n} file{'s' if n != 1 else ''}"
     if changes and n > 0:
         parts = []
         if changes.get("agent_reported"):
@@ -1440,11 +1462,33 @@ _EVIDENCE_DISPLAY: dict[str, str] = {
 }
 
 
+# ``metadata.observer`` on directly_observed Events recorded by a system
+# other than OpenShard or the agent's own hooks (see adapters/grok_bot.py).
+_OBSERVER_DISPLAY: dict[str, str] = {
+    "cursor_action_recording": "by Cursor Action Recording",
+}
+
+
 def _evidence_summary(receipt: ShardReceipt) -> list[str]:
-    """Distinct evidence kinds behind this receipt's events, in a stable priority order."""
+    """Distinct evidence kinds behind this receipt's events, in a stable priority order.
+
+    When every directly-observed event names the same known third-party
+    observer, the label says who observed it.
+    """
     seen = {getattr(ev, "evidence", None) for ev in receipt.events}
     order = ["independently_verified", "directly_observed", "git_observed", "agent_reported"]
-    return [_EVIDENCE_DISPLAY[k] for k in order if k in seen]
+    out = [_EVIDENCE_DISPLAY[k] for k in order if k in seen]
+    observers = {
+        (getattr(ev, "metadata", None) or {}).get("observer")
+        for ev in receipt.events
+        if getattr(ev, "evidence", None) == "directly_observed"
+    }
+    if len(observers) == 1:
+        observer = next(iter(observers))
+        if isinstance(observer, str) and observer in _OBSERVER_DISPLAY:
+            label = _EVIDENCE_DISPLAY["directly_observed"]
+            out = [f"{label} ({_OBSERVER_DISPLAY[observer]})" if x == label else x for x in out]
+    return out
 
 
 def _capture_rows(receipt: ShardReceipt) -> list[str]:

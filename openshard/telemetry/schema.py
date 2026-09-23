@@ -115,7 +115,7 @@ def _token_list(*allowed: str, max_items: int = 8) -> Validator:
 # Closed vocabularies
 # ---------------------------------------------------------------------------
 
-AGENTS = ("claude_code", "codex", "opencode", "cursor", "antigravity", "native", "wrap", "import", "other")
+AGENTS = ("claude_code", "codex", "opencode", "cursor", "antigravity", "grok_bot", "native", "wrap", "import", "other")
 ORIGINS = ("openshard_routed", "external_observed", "unknown")
 CAPTURE_DEPTHS = ("full", "partial", "unknown")
 FILES_SOURCES = ("git_diff", "hook_reported", "not_available", "other")
