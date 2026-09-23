@@ -787,3 +787,15 @@ and the OpenCode counterpart guard the server-side p50 < 25 ms / p95 <
   signal), pre-PR12 buffer / queue-line compatibility, the same through
   one running service, and a crash mid-queue with agent-scoped queue files
   (hook and status lines) replaying into separate Shards.
+
+## Grok Bot (Cursor)
+
+Grok Bot runs on a cloud computer and does **not** use the capture service
+above: there are no hooks and no local repository to diff. Enterprise teams
+can ingest Cursor's OpenTelemetry Export of Action Recording (`openshard
+grok-bot ingest` / `serve`). Those events are observed by Cursor's platform
+and recorded `directly_observed` with `metadata.observer =
+cursor_action_recording`. Every other plan can only use the self-report skill
+(`openshard grok-bot skill` / `report`), whose facts are all
+`agent_reported`. See [Grok Bot](grok-bot.md) for the evidence comparison and
+the limits.

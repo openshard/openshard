@@ -20,6 +20,15 @@ openshard capture rotate-token                     # Replace the local capture t
 openshard mcp uninstall claude                     # Remove Openshard's Claude Code config; history is never deleted
 ```
 
+Grok Bot (Cursor's cloud teammate; see [grok-bot.md](grok-bot.md)):
+
+```bash
+openshard grok-bot ingest export.pb --repo PATH    # Enterprise: ingest an OTLP logs export of Action Recording (protobuf or OTLP/JSON)
+openshard grok-bot serve --repo PATH               # Enterprise: OTLP/HTTP receiver; needs OPENSHARD_GROK_BOT_OTLP_TOKEN
+openshard grok-bot skill                           # Print the self-report skill to give to the Bot
+openshard grok-bot report -                        # Record a Bot self-report (JSON on stdin) as an agent_reported Shard
+```
+
 Most developers who want the interactive experience should start with the TUI:
 
 ```bash

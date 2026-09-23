@@ -54,6 +54,27 @@ All notable changes to OpenShard are documented here.
   `attrs` carrier on the reduced payload (durations, correlation ids, subagent
   and approval facts), and `AgentProfile.opt_in_repo` for agents whose hooks are
   configured user-globally.
+- **Grok Bot (Cursor) capture**, two paths with explicitly different
+  evidence (`docs/grok-bot.md`). *Enterprise:* `openshard grok-bot ingest`
+  (file/stdin) and `openshard grok-bot serve` (bearer-authenticated OTLP/HTTP
+  receiver) read Cursor's OpenTelemetry Export of Grok Bot Action Recording
+  (`cursor.surface=grok_bot`; protobuf or OTLP/JSON, gzip, no new
+  dependency). One Cursor conversation becomes one Shard, idempotent on
+  `cursor.event.id`. Shell commands, Cursor shell-policy denials, MCP tool
+  calls, browser hosts and computer-use counts become `directly_observed`
+  Events with `observer = cursor_action_recording`, and tokens come from
+  `api_request`. Exit codes, file changes, task text, cost and the
+  conversation end are not exported and stay Not recorded / Not observable.
+  *Every plan:* `openshard grok-bot skill` prints a skill that has the Bot
+  run `openshard grok-bot report` on the user's desktop (Execution on Local
+  Computer). Those Shards are `agent_reported` throughout and always
+  `incomplete` (`integration_limitation`). No MCP connector is shipped: Grok
+  Bot cannot reach local MCP servers, and a public one would add no
+  evidence.
+- Receipts: the Evidence row names a
+  third-party observer when every directly-observed event has the same one.
+  "Changed" reads "Not observable" when an integration stores
+  `changes.files_observable = false`. Existing records render unchanged.
 
 - **Google Antigravity support**, through the same capture path as the
   other agents. `openshard setup` detects `agy` / `antigravity` and adds an
