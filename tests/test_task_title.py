@@ -76,6 +76,35 @@ def test_derive_examples(task: str, expected: str) -> None:
     _assert_clean(title)
 
 
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [
+        # Balanced parentheses survive edge cleanup (capture placeholders included).
+        ("Google Antigravity session (task not captured)", "Google Antigravity session (task not captured)"),
+        ("Claude Code session (task not captured)", "Claude Code session (task not captured)"),
+        ("Fix the header (mobile)", "Fix header (mobile)"),
+        ("Fix the header (mobile).", "Fix header (mobile)"),
+        ("Fix the header ((mobile))", "Fix header ((mobile))"),
+        # Unmatched or wrapping edge punctuation is still cleaned up.
+        ("Fix the header)", "Fix header"),
+        ("(Fix the header", "Fix header"),
+        ("(Fix the header)", "Fix header"),
+        ('"Fix the header."', "Fix header"),
+        ("Fix the header!!", "Fix header"),
+        ("Update deps (see notes", "Update deps (see notes"),
+    ],
+)
+def test_edge_punctuation_keeps_balanced_parentheses(task: str, expected: str) -> None:
+    title = derive_task_title(task)
+    assert title == expected
+    _assert_clean(title)
+
+
+def test_stored_title_with_balanced_parentheses_is_kept() -> None:
+    entry = {"task": "t", "task_title": "Google Antigravity session (task not captured)"}
+    assert resolve_task_title(entry) == "Google Antigravity session (task not captured)"
+
+
 def test_very_long_task_is_bounded_at_a_word() -> None:
     task = (
         "Please add retry logic to the sync client when the platform returns 503, because right "

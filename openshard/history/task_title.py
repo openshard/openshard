@@ -120,6 +120,21 @@ _RE_CLAUSE_BREAK = re.compile(
     re.I,
 )
 _RE_EDGE_PUNCT = re.compile(r"^[\s\"'`*_#>~()\[\]{}:,;.!?-]+|[\s\"'`*_#>~()\[\]{}:,;.!?-]+$")
+
+
+def _strip_edge_punct(s: str) -> str:
+    """Strip edge punctuation, keeping a parenthesis that pairs with one inside.
+
+    ``"Fix header (mobile)."`` keeps its ``)``; an unmatched edge bracket
+    (``"Fix header)"``, ``"(Fix header"``) is still removed.
+    """
+    out = _RE_EDGE_PUNCT.sub("", s)
+    if not out:
+        return out
+    start = s.find(out)
+    lead, tail = s[:start], s[start + len(out):]
+    out += ")" * min(tail.count(")"), max(out.count("(") - out.count(")"), 0))
+    return "(" * min(lead.count("("), max(out.count(")") - out.count("("), 0)) + out
 _REDACTED = re.compile(r"\w\.\.\.\w|\*\*\*")
 
 
@@ -194,7 +209,7 @@ def _clamp(title: str) -> str:
     title = " ".join(words)
     while True:
         trimmed = _RE_TRAILING_CONNECTIVE.sub("", title).strip()
-        trimmed = _RE_EDGE_PUNCT.sub("", trimmed)
+        trimmed = _strip_edge_punct(trimmed)
         if trimmed == title or not trimmed:
             break
         title = trimmed
@@ -202,11 +217,11 @@ def _clamp(title: str) -> str:
 
 
 def _finish(s: str) -> str:
-    s = _RE_EDGE_PUNCT.sub("", _RE_WS.sub(" ", s)).strip()
+    s = _strip_edge_punct(_RE_WS.sub(" ", s)).strip()
     if not s:
         return ""
     s = _clamp(s)
-    s = _RE_EDGE_PUNCT.sub("", s).strip()
+    s = _strip_edge_punct(s).strip()
     return s[:1].upper() + s[1:] if s else ""
 
 
