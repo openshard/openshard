@@ -388,6 +388,13 @@ terse per event; see the field audit in `adapters/antigravity_hooks.py`.
   rest of `.agents/`, which holds shared rules) is never counted as a
   task's changed file. No `timeout` is written (the documented default is
   30 s).
+* **Workspace hooks need an Antigravity project.** Antigravity loads a
+  workspace `.agents/hooks.json` only when the folder belongs to an
+  Antigravity project. Confirmed against Antigravity 1.2.9: plain `agy` run
+  in a folder that is not registered as a project can load zero workspace
+  hooks, so nothing is captured even though the file is installed. Register
+  the repository as an Antigravity project before relying on capture. IDE
+  behaviour has not been verified separately.
 * **Events** (all `openshard hooks antigravity --event <Name>`):
 
   | Antigravity event | Openshard event | Recorded |
@@ -432,7 +439,8 @@ terse per event; see the field audit in `adapters/antigravity_hooks.py`.
 * **Commands**: `openshard setup` (when `agy` or `antigravity` is on PATH),
   `openshard capture install antigravity`, `openshard capture uninstall
   antigravity`. Open the repository as the Antigravity workspace (or run
-  `agy` in it); restart Antigravity if it was already running.
+  `agy` in it once it belongs to an Antigravity project; see above);
+  restart Antigravity if it was already running.
 
 ## Hermes Agent integration
 
