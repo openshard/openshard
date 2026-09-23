@@ -169,7 +169,12 @@ def compute_history_stats(items: list[RecentShard], *, total_attempts: int | Non
         depths[shard.capture_depth or "unknown"] += 1
         for name in _model_names(r):
             models[name] += 1
-        verification[verification_status_from_receipt(r)] += 1
+        _v = verification_status_from_receipt(r)
+        # Nothing recorded at all is its own bucket; "unknown" means evidence
+        # exists (e.g. a check was attempted) without an observed outcome.
+        if _v == "unknown" and not (r.verification_status or "").strip() and r.status == "Not recorded":
+            _v = "not_recorded"
+        verification[_v] += 1
         if r.task_completion:
             completion[_TASK_COMPLETION_KEYS.get(r.task_completion, r.task_completion)] += 1
 

@@ -17,7 +17,9 @@ Canonical identity rules (see ``history/shard.py``):
   Claude Code is Anthropic's, Codex is OpenAI's; OpenCode is vendor-neutral
   and the underlying provider/model are recorded only when OpenCode itself
   exposes them (``provider_id`` on the status observation). OpenCode is
-  never collapsed into the model provider.
+  never collapsed into the model provider. Google Antigravity is Google's
+  product, but it also runs non-Google models, so its vendor says nothing
+  about the model provider either.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ AGENT_CLAUDE_CODE = "claude_code"
 AGENT_CODEX = "codex"
 AGENT_OPENCODE = "opencode"
 AGENT_CURSOR = "cursor"
+AGENT_ANTIGRAVITY = "antigravity"
 
 
 @dataclass(frozen=True)
@@ -140,8 +143,32 @@ CURSOR_PROFILE = AgentProfile(
     ),
 )
 
+ANTIGRAVITY_PROFILE = AgentProfile(
+    key=AGENT_ANTIGRAVITY,
+    label="Google Antigravity",
+    vendor="Google",
+    executor="antigravity_hooks",
+    import_source="antigravity",
+    import_method="openshard_antigravity_hooks_v0",
+    event_source="antigravity_hooks",
+    capture_source="antigravity_hooks",
+    hook_evidence_source="antigravity_hook",
+    files_source_label="antigravity_hook_reported",
+    model_source="antigravity_hook",
+    usage_provenance="agent_reported",
+    task_placeholder="Google Antigravity session (task not captured)",
+    import_note=(
+        "Captured automatically from Google Antigravity agent hooks. "
+        "Tool/file facts are as reported by Antigravity; files are inferred from git diff. "
+        "The model is the name Antigravity reports on each hook; the task prompt, cost and "
+        "token counts are not exposed to hooks and stay Not recorded. "
+        "Verification is never recorded by OpenShard for this capture path."
+    ),
+)
+
 AGENT_PROFILES: dict[str, AgentProfile] = {
-    p.key: p for p in (CLAUDE_CODE_PROFILE, CODEX_PROFILE, OPENCODE_PROFILE, CURSOR_PROFILE)
+    p.key: p
+    for p in (CLAUDE_CODE_PROFILE, CODEX_PROFILE, OPENCODE_PROFILE, CURSOR_PROFILE, ANTIGRAVITY_PROFILE)
 }
 CAPTURE_EXECUTORS: frozenset[str] = frozenset(p.executor for p in AGENT_PROFILES.values())
 

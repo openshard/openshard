@@ -296,10 +296,11 @@ class TestGetReceipt:
         server = build_server(repo_path=history)
         _, structured = _call(server, "get_receipt", {"shard_id": "shard-a"})
         # v0.4.4: receipt_id is an additive key (None for records written before it existed).
+        # task_title is additive display metadata (derived for records written before it existed).
         expected_keys = {
             "shard_id", "receipt_id", "task_id", "capture_completeness", "integrity", "run_id", "attempt_number",
             "created_at", "task_short",
-            "task_full", "agent", "origin", "capture_depth", "model",
+            "task_full", "task_title", "agent", "origin", "capture_depth", "model",
             "model_stages", "strategy", "risk", "sandbox", "files_changed",
             "files", "changes", "files_excluded", "diff_added", "diff_removed", "checks", "status",
             "verification_status", "verification_reason",

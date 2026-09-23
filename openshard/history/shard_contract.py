@@ -20,6 +20,18 @@ from openshard.history.shard import (
 )
 from openshard.history.shard_hash import verify_shard_hash
 from openshard.history.task_identity import stored_task_id
+from openshard.history.task_title import derive_task_title, resolve_task_title
+from openshard.history.verification import (
+    REASON_OUTCOME_NOT_OBSERVED,
+    STATUS_FAILED,
+    STATUS_NOT_RUN,
+    STATUS_PARTIAL,
+    STATUS_PASSED,
+    VerificationEvidence,
+    derive_verification,
+    status_token,
+    summary_reason,
+)
 from openshard.run.timeline import normalize_timeline
 
 _PROFILE_TO_STRATEGY: dict[str, str] = {
@@ -415,6 +427,9 @@ class ShardReceipt:
     result: str
     status: str
     duration_seconds: float | None
+    # Concise display title (history/task_title.py) -- display metadata only;
+    # task_short/task_full keep the recorded task text unchanged.
+    task_title: str = ""
     repo: str | None = None
     # Canonical ``host/owner/repo`` from the record's additive ``repo_identity``
     # field (history/repo_identity.py); None for records without one. ``repo``
@@ -493,6 +508,12 @@ class ShardReceipt:
     verification_returncode: int | None = None
     verification_duration_seconds: float | None = None
     verification_raw_output_stored: bool = False
+    # Structured verification evidence (history/verification.py, block v1):
+    # status, source, observation mode, check counts, artifact SHA and
+    # completeness. Always populated by build_shard_receipt -- from the
+    # record's stored ``verification`` block, or derived (``derived: True``)
+    # from an older record's fields. None only for hand-built receipts.
+    verification: dict | None = None
     # Canonical Shard identity — durable task + honest origin/capture-depth.
     # See openshard/history/shard.py. None only for receipts built without
     # going through build_shard_receipt (e.g. some hand-built test fixtures).
@@ -594,6 +615,27 @@ def _verification_from_osn_contract(
     duration = float(dur) if isinstance(dur, (int, float)) else None
     raw_stored = bool(osn.get("raw_output_stored"))
     return token, reason, returncode, duration, raw_stored
+
+
+_WEAK_VERIFICATION_STATUSES: frozenset[str] = frozenset(
+    {"Not recorded", "No checks run", "Checks attempted, result not verified"}
+)
+
+
+def _verification_display(ev: VerificationEvidence) -> tuple[str, str]:
+    """(checks_display, status) for structured evidence, in the receipt's existing vocabulary."""
+    attempted = ev.checks_attempted
+    if ev.status == STATUS_PASSED:
+        return (f"{ev.checks_passed}/{attempted} passed" if attempted else "Passed"), "Passed"
+    if ev.status == STATUS_FAILED:
+        return (f"{ev.checks_passed or 0}/{attempted} passed" if attempted else "Failed"), "Failed"
+    if ev.status == STATUS_PARTIAL:
+        return (f"{ev.checks_passed or 0}/{attempted} passed, rest unverified" if attempted else "Partial"), "Partial"
+    if ev.status == STATUS_NOT_RUN:
+        return "Not run", "No checks run"
+    if attempted or ev.checks or REASON_OUTCOME_NOT_OBSERVED in ev.incomplete_reasons:
+        return "Attempted (unverified)", "Checks attempted, result not verified"
+    return "Not recorded", "Not recorded"
 
 
 def _make_shard_id(timestamp: str, index: int | None) -> str:
@@ -864,6 +906,26 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         _v_duration,
         _v_raw_stored,
     ) = _verification_from_osn_contract(entry)
+
+    # Structured verification evidence. A stored ``verification`` block is
+    # authoritative; otherwise an OSN contract keeps its own token (manual_review
+    # / skipped stay distinct), and every other record gets the token derived
+    # from its fields -- so a hook/import/wrap Receipt no longer crosses the
+    # history --json / sync boundary with verification_status = null when a
+    # check was observed (or when the capture path cannot see checks at all).
+    _vev = derive_verification(entry)
+    if not _v_status or not _vev.derived:
+        _v_status = status_token(_vev)
+        _v_reason = summary_reason(_vev)
+        if _vev.exit_code is not None:
+            _v_returncode = _vev.exit_code
+        if _vev.duration_seconds is not None:
+            _v_duration = _vev.duration_seconds
+    if _vev.recorded and status in _WEAK_VERIFICATION_STATUSES:
+        # The legacy booleans said less than (or contradicted) the evidence:
+        # e.g. import/wrap stored verification_attempted=False, which read as
+        # "No checks run" although those paths cannot observe checks.
+        checks_display, status = _verification_display(_vev)
 
     check_results: list[str] = []
     _review_checks_raw = entry.get("review_checks")
@@ -1199,6 +1261,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         created_at=timestamp,
         task_short=_task_short_val,
         task_full=task,
+        task_title=resolve_task_title(entry),
         agent=agent,
         strategy=strategy,
         model_display=model_display,
@@ -1268,6 +1331,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         verification_returncode=_v_returncode,
         verification_duration_seconds=_v_duration,
         verification_raw_output_stored=_v_raw_stored,
+        verification=_vev.to_dict(),
         run_id=_run_id_val,
         attempt_number=_attempt_number_val,
         task_completion=_task_completion_display,
@@ -1619,8 +1683,9 @@ def build_live_run_receipt(
         _checks = "0/1 passed"
         _status = "Failed"
     else:
-        _checks = "Not run"
-        _status = "No checks run"
+        # Attempted with no recorded outcome is not "no checks run".
+        _checks = "Attempted (unverified)"
+        _status = "Checks attempted, result not verified"
 
     _check_results: list[str] = []
     if review_checks:
@@ -1635,6 +1700,7 @@ def build_live_run_receipt(
         created_at=run_id,
         task_short=_trunc(task, 70),
         task_full=task,
+        task_title=derive_task_title(task),
         agent=agent,
         strategy="Not recorded",
         model_display=_model_display,

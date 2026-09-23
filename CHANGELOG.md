@@ -2,6 +2,76 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Added
+
+- **Google Antigravity support**, through the same capture path as the
+  other agents. `openshard setup` detects `agy` / `antigravity` and adds an
+  `openshard` hook to the project-local `.agents/hooks.json` (other named
+  hooks preserved); `openshard capture install|uninstall antigravity` and
+  the `openshard hooks antigravity` entrypoint (fast path, authenticated
+  loopback POST to `/hooks/antigravity`, background fold). Sessions become
+  Shards labelled "Google Antigravity (external)". Subscribed events:
+  `PreInvocation` (one per model call: activity and the model used),
+  `PostToolUse` (commands, file writes with Antigravity's own success
+  signal, file reads) and `Stop`. `PreToolUse` is never installed: it is a
+  permission gate and OpenShard only observes. Every model a session used
+  is kept (`capture.models_seen`, one `model invoked` Event per switch).
+  Antigravity exposes no prompt, token counts, cost, provider or session
+  end to hooks, so those stay Not recorded and idle sessions are closed by
+  the sweep as `session_end_not_observed`. See `docs/agent-capture.md`.
+- Two agent-neutral additions to the shared fold: a `ModelInvocation`
+  lifecycle event and a `read` tool kind (a repo-relative path read, never
+  a change or an attempted edit). The capture service anchors a session's
+  change-attribution baseline at its first model invocation when the agent
+  has no start hook.
+- **Concise Receipt task titles.** Receipts carry a short `task_title`
+  (<= 60 chars, <= 9 words, `history/task_title.py`) alongside the unchanged
+  `task_short` / `task_full`, which keep the original task text. Capture
+  writers stamp a deterministic title (never a model call on the capture
+  path); older records derive one at read time. `task_title` appears in
+  `openshard history --json` and is withheld from the sync envelope until
+  the Platform contract defines it.
+
+### Fixed
+
+- **Verification evidence no longer disappears before the Receipt.** The
+  machine `verification_status` was filled only from native OSN runs, so
+  every hook-captured, imported or wrapped Receipt crossed `history --json`
+  and sync with `verification_status: null` -- shown by the Platform as "No
+  verification recorded" even when a check command had been observed.
+  Imports and wraps also stored `verification_attempted: false`, which read
+  as "No checks run" although those paths cannot see checks. Receipts now
+  carry a structured `verification` block (`history/verification.py`):
+  `status` (`passed` / `failed` / `partial` / `not_run` / `unknown`),
+  `source` (`agent_reported` / `directly_observed` / `git_verified` /
+  `independently_verified`), `observation_mode`, check counts and names,
+  timestamps, exit code, `artifact_sha`, and `complete` /
+  `incomplete_reasons`. "Attempted, outcome unknown" is `unknown`, never
+  `not_run`; malformed evidence becomes `unknown` and incomplete, never
+  silently dropped. Hook capture records every check-shaped command it sees
+  (bounded, surviving the event cap and buffer rebuilds). An invocation
+  seen in a received hook event is `directly_observed` with status
+  `unknown` and `outcome_not_observed`; only a failure resting on the
+  agent's own "tool failed" signal is `agent_reported`. Import and wrap
+  record `not_observable`.
+- `build_live_run_receipt` no longer shows "No checks run" for a run whose
+  verification was attempted without a recorded outcome.
+
+### Compatibility
+
+- Stored records are never rewritten. A record without a `verification`
+  block gets one derived at read time (`derived: true`) from the fields it
+  has; a record that recorded nothing about verification still projects
+  `verification_status: null`. OSN tokens (`skipped`, `manual_review`) are
+  unchanged. `verification_status` may now also be `partial`.
+- The full block appears in `openshard history --json` (extended
+  projection). It is withheld from the sync envelope until the Platform
+  contract defines it; sync carries the evidence as `verification_status`
+  plus a `verification_reason` that names the source (e.g.
+  `"... [directly_observed]"`).
+
 ## 0.4.6 - 2026-09-18
 
 OpenShard Platform sync arrives: `openshard sync connect` / `now` / `status`

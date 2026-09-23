@@ -94,6 +94,7 @@ from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.adapters.claude_hooks import (
+    EVENT_MODEL_INVOCATION,
     EVENT_SESSION_START,
     HookPayload,
     ReducedHookPayload,
@@ -292,6 +293,8 @@ class CaptureRecorder:
         self._locks_guard = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = {}
         self._root_cache: dict[tuple[str | None, str | None], Path | None] = {}
+        # Sessions already known to this service (see _opens_session).
+        self._known_sessions: set[str] = set()
         self._pending: queue.Queue[tuple[str, str] | None] = queue.Queue()
         self._stop = threading.Event()
         self._worker = threading.Thread(target=self._worker_loop, name="openshard-capture-worker", daemon=True)
@@ -510,23 +513,52 @@ class CaptureRecorder:
         if reduced is None:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
-        if payload.event == EVENT_SESSION_START:
+        key = queue_key(reduced.session_id, reduced.agent)
+        opens_session = self._opens_session(root, key, payload.event)
+        if opens_session:
             # v0.4.4: anchor change attribution at the moment the session was
             # observed, not at replay time (the worker may lag behind the
             # agent's first edits). SessionStart is a command hook for every
             # agent that has one, so this one-off git call is off the hot path.
+            # An agent without a start hook (Antigravity) opens its session
+            # with its first model invocation instead -- once per session.
             reduced.baseline = _snapshot_baseline(root, _now())
-        key = queue_key(reduced.session_id, reduced.agent)
         line = {"id": self._next_id(), "kind": "hook", "at": _now(), "data": reduced.to_dict()}
         self._queue_line(root, key, line)
         self._bump("queued", payload.event)
         self._note_agent_received(reduced.agent, payload.event)
         self.timings.add(time.perf_counter() - t0)
         self.enqueue(root, key)
-        if payload.event == EVENT_SESSION_START:
+        if opens_session:
             self._note_repo(root)
             self.recover(root)
         return "queued", payload.event
+
+    def _opens_session(self, root: Path, key: str, event: str) -> bool:
+        """Whether this event starts a session the service must anchor now.
+
+        Always for ``SessionStart``. For a ``ModelInvocation`` (an agent with
+        no start hook) only the first one of a session: neither a staging
+        buffer nor a queue file exists for it yet. Remembered in memory so
+        later invocations -- one per model call -- pay no filesystem check.
+        """
+        if event == EVENT_SESSION_START:
+            return True
+        if event != EVENT_MODEL_INVOCATION:
+            return False
+        marker = f"{root}|{key}"
+        if marker in self._known_sessions:
+            return False
+        if len(self._known_sessions) >= _ROOT_CACHE_MAX * 4:
+            self._known_sessions.clear()
+        self._known_sessions.add(marker)
+        directory = sessions_dir(root)
+        try:
+            if (directory / f"{key}.json").exists() or (directory / f"{key}{QUEUE_SUFFIX}").exists():
+                return False
+            return not any(directory.glob(f"{key}.queue.*.jsonl"))
+        except OSError:
+            return False
 
     def record_status(
         self,

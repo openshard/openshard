@@ -208,7 +208,7 @@ def classify_failure(entry: dict, receipt: ShardReceipt) -> FailureClassificatio
                 if manual_fix and feedback_outcome != "partial"
                 else ["Developer feedback outcome: partial."]
             )
-        elif verification in {"not_run", "unknown", "skipped"} and _changes_made(receipt):
+        elif verification in {"not_run", "unknown", "skipped", "partial"} and _changes_made(receipt):
             category = "verification_not_run"
             reasons = ["Changes were made but verification did not produce a result."]
         elif feedback_outcome == "retried":

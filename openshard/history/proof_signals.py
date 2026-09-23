@@ -17,20 +17,20 @@ if TYPE_CHECKING:
 
 
 _VERIFICATION_TOKENS: frozenset[str] = frozenset(
-    {"passed", "failed", "skipped", "manual_review", "not_run", "unknown"}
+    {"passed", "failed", "partial", "skipped", "manual_review", "not_run", "unknown"}
 )
 
 
 def verification_status_from_receipt(receipt: ShardReceipt) -> str:
     """Map a receipt's status into a verification enum.
 
-    Returns one of: ``passed`` | ``failed`` | ``skipped`` | ``manual_review`` |
-    ``not_run`` | ``unknown``.
+    Returns one of: ``passed`` | ``failed`` | ``partial`` | ``skipped`` |
+    ``manual_review`` | ``not_run`` | ``unknown``.
 
-    When the receipt carries a canonical ``verification_status`` (populated from
-    an OSN verification contract), that token is authoritative. Otherwise this
-    falls back to the boolean and string logic so old or non-native records keep
-    their existing behaviour.
+    When the receipt carries a canonical ``verification_status`` (from its
+    structured ``verification`` evidence or an OSN verification contract), that
+    token is authoritative. Otherwise this falls back to the display-string
+    logic for hand-built receipts.
     """
     try:
         canonical = (getattr(receipt, "verification_status", "") or "").strip()

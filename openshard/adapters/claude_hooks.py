@@ -164,6 +164,7 @@ from openshard.history.capture_completeness import (
     build_completeness,
     make_reason,
 )
+from openshard.history.task_title import derive_task_title
 from openshard.util.git import run_git
 
 # Claude Code identity constants -- kept as module names for existing
@@ -192,6 +193,10 @@ EVENT_FILE_EDITED = "FileEdited"
 # Unlike ``Stop`` it proves neither that an assistant turn completed nor
 # that anything succeeded, so it only snapshots the record.
 EVENT_SESSION_IDLE = "SessionIdle"
+# 0.4.7: the agent invoked its model (Google Antigravity ``PreInvocation``).
+# Proves the agent did work in this session and names the model it used for
+# that invocation; it is neither a user prompt nor a completed turn.
+EVENT_MODEL_INVOCATION = "ModelInvocation"
 SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_SESSION_START,
     EVENT_USER_PROMPT_SUBMIT,
@@ -202,12 +207,17 @@ SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_INTERRUPT,
     EVENT_FILE_EDITED,
     EVENT_SESSION_IDLE,
+    EVENT_MODEL_INVOCATION,
 )
 
 # Tools whose tool_input.file_path names a file Claude Code says it changed.
 FILE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 # Local agent/OpenShard state is never a task's work (see _git_changed_files).
-_LOCAL_STATE_PREFIXES: tuple[str, ...] = (".openshard/", ".claude/", ".codex/", ".opencode/", ".cursor/")
+# ``.agents/`` also holds a user's shared rules/workflows, so only
+# Antigravity's hook configuration file is excluded from it.
+_LOCAL_STATE_PREFIXES: tuple[str, ...] = (
+    ".openshard/", ".claude/", ".codex/", ".opencode/", ".cursor/", ".agents/hooks.json",
+)
 # v0.4.4 change attribution (see _snapshot_baseline / _classify_changed_files).
 _BASELINE_MAX_PATHS = 500  # dirty/untracked paths remembered at session start
 _GIT_DIFF_MAX_FILES = 200  # git diff rows examined at fold (pre-existing ones are then excluded)
@@ -224,6 +234,11 @@ COMMAND_TOOLS: frozenset[str] = frozenset({"Bash"})
 TOOL_KIND_FILE = "file"
 TOOL_KIND_COMMAND = "command"
 TOOL_KIND_OTHER = "other"
+# 0.4.7: a tool that reads one file or directory (Antigravity ``view_file``,
+# ``list_dir``...). Its target is the repo-relative path read; it is never a
+# change and never an attempted edit.
+TOOL_KIND_READ = "read"
+_TOOL_KINDS = frozenset({TOOL_KIND_FILE, TOOL_KIND_COMMAND, TOOL_KIND_OTHER, TOOL_KIND_READ})
 
 _TASK_CAP = 300
 _TASK_PLACEHOLDER = CLAUDE_CODE_PROFILE.task_placeholder
@@ -777,7 +792,7 @@ class ReducedHookPayload:
             command_kind=_str_or_none(data.get("command_kind"), 16),
             stop_hook_active=bool(data.get("stop_hook_active")),
             agent=agent_key,
-            tool_kind=tool_kind if tool_kind in (TOOL_KIND_FILE, TOOL_KIND_COMMAND, TOOL_KIND_OTHER) else None,
+            tool_kind=tool_kind if tool_kind in _TOOL_KINDS else None,
             file_targets=file_targets,
             model_id=_str_or_none(data.get("model_id"), 200),
             provider_id=_str_or_none(data.get("provider_id"), 80),
@@ -855,6 +870,9 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         elif kind == TOOL_KIND_COMMAND:
             action, target, ckind = summarize_command(payload.command, label=tool)
             reduced.command_action, reduced.command_target, reduced.command_kind = action, target, ckind
+        elif kind == TOOL_KIND_READ:
+            reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
+            reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
     elif payload.event == EVENT_FILE_EDITED:
         reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
         reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
@@ -958,6 +976,12 @@ def _new_buffer(
         # a completeness reason ({kind, count, detail}); see
         # history/capture_completeness.py and apply_capture_loss.
         "capture_losses": [],
+        # Check-shaped commands (test/lint) the agent's hook stream reported,
+        # kept apart from ``events`` so the verification evidence survives the
+        # event cap: [{"name", "kind", "status", "at"}], bounded; the total
+        # keeps counting past the bound. See _hook_verification.
+        "checks": [],
+        "checks_total": 0,
     }
     _append_event(
         buf,
@@ -1120,6 +1144,10 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "first_prompt_at": capture.get("first_prompt_at"),
         "last_stop_at": capture.get("last_turn_completed_at"),
         "idle_count": int(capture.get("idle_count") or 0),
+        "invocation_count": int(capture.get("invocation_count") or 0),
+        "last_invoked_model": (
+            entry.get("execution_model") if entry.get("execution_model") not in (None, "unknown") else None
+        ),
         "last_idle_at": capture.get("last_idle_at") if isinstance(capture.get("last_idle_at"), str) else None,
         "model_current": entry.get("execution_model") if entry.get("execution_model") not in (None, "unknown") else None,
         "models_seen": [m for m in (capture.get("models_seen") or []) if isinstance(m, str)],
@@ -1147,9 +1175,32 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         ),
         "applied_ids": [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)],
         "check_command_seen": bool(entry.get("verification_attempted")),
+        **_stored_checks(entry),
         "capture_losses": _stored_losses(capture),
         "baseline": _stored_baseline(entry, capture),
     }
+
+
+def _stored_checks(entry: dict) -> dict:
+    """The check list and total a persisted record's ``verification`` block carries.
+
+    A pre-v1 record has none: the rebuilt buffer then starts empty and
+    ``check_command_seen`` alone keeps the "attempted" fact (see
+    _hook_verification).
+    """
+    block = entry.get("verification")
+    if not isinstance(block, dict):
+        return {"checks": [], "checks_total": 0}
+    checks = [
+        {"name": c.get("name"), "kind": c.get("kind"), "status": c.get("status"), "at": None}
+        for c in (block.get("checks") or [])
+        if isinstance(c, dict) and isinstance(c.get("name"), str)
+    ][:_MAX_BUFFERED_CHECKS]
+    total = block.get("checks_attempted")
+    total = total if isinstance(total, int) and not isinstance(total, bool) and total >= 0 else len(checks)
+    if checks and isinstance(block.get("started_at"), str):
+        checks[0]["at"] = block["started_at"]
+    return {"checks": checks, "checks_total": max(total, len(checks))}
 
 
 def _stored_baseline(entry: dict, capture: dict) -> dict:
@@ -1422,6 +1473,8 @@ def _attempted_file_targets(buf: dict) -> set[str]:
         meta: dict = _meta_raw if isinstance(_meta_raw, dict) else {}
         if "command_kind" in meta:
             continue  # a shell command's first token, not a path
+        if meta.get("access") == "read":
+            continue  # a file the agent read, never an attempted edit
         target = ev.get("target")
         if isinstance(target, str) and target:
             out.add(target)
@@ -1584,6 +1637,89 @@ def _hook_file_events(buf: dict) -> list[dict]:
         )
         events.append(ev.to_dict())
     return events
+
+
+_MAX_BUFFERED_CHECKS = 20
+
+
+def _record_check(buf: dict, name: str, kind: str, *, failed: bool, at: str) -> None:
+    """Remember one hook-observed check command. Its outcome stays ``unknown``
+    unless the agent's own hook reported the tool call as failed."""
+    buf["checks_total"] = int(buf.get("checks_total") or 0) + 1
+    checks = buf.get("checks")
+    if not isinstance(checks, list):
+        checks = buf["checks"] = []
+    if len(checks) < _MAX_BUFFERED_CHECKS:
+        checks.append({"name": name, "kind": kind, "status": "failed" if failed else "unknown", "at": at})
+
+
+def _hook_verification(buf: dict) -> dict:
+    """The record's ``verification`` block (history/verification.py) for a hook session.
+
+    OpenShard receives the hook events itself, so a check-shaped command's
+    invocation is ``directly_observed`` -- but its exit code never is. So an
+    observed check is ``unknown`` with ``outcome_not_observed`` (never
+    ``passed``); a tool failure the agent's hook reported is ``failed`` and
+    ``agent_reported`` (the agent's own signal); and "no check command seen"
+    is ``not_run`` only while no capture evidence is known lost -- otherwise
+    ``unknown``. See history/verification.py ``hook_verification_source``.
+    """
+    from openshard.history.verification import (
+        MODE_HOOK_TOOL_EVENT,
+        REASON_CAPTURE_LOSS,
+        REASON_CHECKS_TRUNCATED,
+        REASON_OUTCOME_NOT_OBSERVED,
+        SOURCE_DIRECTLY_OBSERVED,
+        STATUS_FAILED,
+        STATUS_UNKNOWN,
+        build_verification,
+        hook_verification_source,
+    )
+
+    checks = [c for c in (buf.get("checks") or []) if isinstance(c, dict)]
+    total = max(int(buf.get("checks_total") or 0), len(checks))
+    lost = bool(_all_losses(buf))
+    incomplete: list[str] = [REASON_CAPTURE_LOSS] if lost else []
+    if total == 0 and bool(buf.get("check_command_seen")):
+        # Older buffer (rebuilt from a pre-v1 record): a check was seen but
+        # its details were never kept.
+        return build_verification(
+            source=SOURCE_DIRECTLY_OBSERVED, observation_mode=MODE_HOOK_TOOL_EVENT, status=STATUS_UNKNOWN,
+            reason="Check command(s) observed through agent hooks; outcome not observed.",
+            incomplete_reasons=[REASON_OUTCOME_NOT_OBSERVED, REASON_CAPTURE_LOSS],
+        )
+    if total == 0:
+        if lost:
+            return build_verification(
+                source=SOURCE_DIRECTLY_OBSERVED, observation_mode=MODE_HOOK_TOOL_EVENT, status=STATUS_UNKNOWN,
+                reason="No check command observed, but some capture events were lost.",
+                incomplete_reasons=incomplete,
+            )
+        return build_verification(
+            source=SOURCE_DIRECTLY_OBSERVED, observation_mode=MODE_HOOK_TOOL_EVENT, checks_attempted=0,
+            reason="No check command observed in the agent's tool events.",
+        )
+    failed = sum(1 for c in checks if c.get("status") == "failed")
+    stamps = [c["at"] for c in checks if isinstance(c.get("at"), str)]
+    if total > len(checks):
+        incomplete.append(REASON_CHECKS_TRUNCATED)
+    if failed:
+        reason = "The agent's hook reported a check command as failed; exit codes are not observed."
+    else:
+        incomplete.append(REASON_OUTCOME_NOT_OBSERVED)
+        reason = "Check command(s) observed through agent hooks; outcome not observed."
+    return build_verification(
+        source=hook_verification_source(STATUS_FAILED if failed else STATUS_UNKNOWN),
+        observation_mode=MODE_HOOK_TOOL_EVENT,
+        checks=[{"name": c.get("name"), "kind": c.get("kind"), "status": c.get("status")} for c in checks],
+        checks_attempted=total,
+        checks_passed=0,
+        checks_failed=failed,
+        checks_skipped=0,
+        started_at=min(stamps) if stamps else None,
+        reason=reason,
+        incomplete_reasons=incomplete,
+    )
 
 
 def _all_losses(buf: dict) -> list[dict]:
@@ -1767,6 +1903,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         "schema_version": SHARD_SCHEMA_VERSION,
         "timestamp": record["timestamp"],
         "task": task or profile.task_placeholder,
+        # Deterministic display title; never a model call on the capture path.
+        "task_title": derive_task_title(task or profile.task_placeholder),
         "execution_model": execution_model,
         "executor": profile.executor,
         "import_source": profile.import_source,
@@ -1781,6 +1919,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # here (see module docstring "Evidence honesty").
         "verification_attempted": bool(buf.get("check_command_seen")),
         "verification_passed": None,
+        # Structured evidence (history/verification.py): what was seen, who
+        # reported it and what is known missing. The two booleans above stay
+        # for older readers.
+        "verification": _hook_verification(buf),
         # Counts cover this session's changes only: agent-reported and
         # git-observed. Pre-existing / other-session changes are excluded
         # from the counts and listed after them in files_detail with their
@@ -1849,6 +1991,11 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # v0.4.4 global identity -- present on every record created by this
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
+    invocation_count = int(buf.get("invocation_count") or 0)
+    if invocation_count:
+        # Model invocations observed (Antigravity PreInvocation); absent for
+        # agents whose hooks expose no such event.
+        entry["capture"]["invocation_count"] = invocation_count
     if raw_usage:
         # Per-message usage memory (OpenCode), bounded; lets a buffer rebuilt
         # from this record keep deduplicating re-reported messages.
@@ -1951,7 +2098,11 @@ def sweep_stale_buffers(repo_root: Path, *, max_age_seconds: float = _STALE_BUFF
 
 
 def _has_activity(buf: dict) -> bool:
-    return int(buf.get("prompt_count") or 0) > 0 or int(buf.get("tool_call_count") or 0) > 0
+    return (
+        int(buf.get("prompt_count") or 0) > 0
+        or int(buf.get("tool_call_count") or 0) > 0
+        or int(buf.get("invocation_count") or 0) > 0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2041,6 +2192,29 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
             return "turn interrupted", True, False
         return "turn interrupted (no work yet; not recorded)", False, False
 
+    if event == EVENT_MODEL_INVOCATION:
+        # The agent invoked its model (Antigravity ``PreInvocation``): real
+        # work, so the record is created on the first one, exactly like a
+        # first prompt. Invocations are counted, not staged one by one (an
+        # agent loop can invoke the model hundreds of times); an Event is
+        # staged only when the reported model differs from the previous
+        # invocation's, so each model the session used keeps its own
+        # timestamped Event without flooding the buffer.
+        buf["invocation_count"] = int(buf.get("invocation_count") or 0) + 1
+        model = _sanitize_model_id(payload.model_id)
+        if model and model != buf.get("last_invoked_model"):
+            buf["last_invoked_model"] = model
+            _append_event(
+                buf, event_type="session.activity", action=f"model invoked: {model}",
+                status="unknown", evidence="agent_reported",
+                metadata={"hook": event, "model": model, "invocation_index": buf["invocation_count"]},
+                occurred_at=now,
+            )
+        created = buf.get("record") is None
+        if created:
+            _ensure_record(buf, repo_root)
+        return ("first model invocation: record created" if created else "model invocation counted"), created, False
+
     if event == EVENT_USER_PROMPT_SUBMIT:
         buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
         if not buf.get("first_prompt_at"):
@@ -2071,7 +2245,12 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         action = f"tool {tool}"
         status = "failed" if failed else "unknown"
         kind = payload.tool_kind or _classify_claude_tool(tool)
-        if kind == TOOL_KIND_FILE:
+        if kind == TOOL_KIND_READ:
+            target = payload.file_target
+            metadata["access"] = "read"
+            if target is None and payload.file_dropped:
+                metadata["path_dropped"] = "outside repository"
+        elif kind == TOOL_KIND_FILE:
             target = payload.file_target
             if target is None and payload.file_dropped:
                 metadata["path_dropped"] = "outside repository"
@@ -2107,9 +2286,10 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
                 # stdout/exit codes), so verification_passed stays None; see
                 # build_hook_entry.
                 buf["check_command_seen"] = True
+                _record_check(buf, action, payload.command_kind, failed=failed, at=now)
         _append_event(
             buf, event_type="tool.invoked", action=action, target=target,
-            target_is_path=(kind == TOOL_KIND_FILE),
+            target_is_path=(kind in (TOOL_KIND_FILE, TOOL_KIND_READ)),
             status=status, evidence="agent_reported", metadata=metadata, occurred_at=now,
         )
         # Bounded periodic snapshot (see _TOOL_FOLD_INTERVAL_SECONDS): only
@@ -2145,6 +2325,16 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         return f"session ended ({reason})", True, True
 
     return "unsupported event", False, False
+
+
+def _sanitize_model_id(model_id: str | None) -> str | None:
+    """The stored form of a reported model id, or None when there is none / it is unsafe."""
+    from openshard.adapters.claude_code_import import _sanitize_model
+
+    if not model_id:
+        return None
+    safe = _sanitize_model(model_id)
+    return None if safe == "unknown" else safe
 
 
 def _observe_model(buf: dict, model_id: str | None, provider_id: str | None, source: str) -> bool:
@@ -2268,7 +2458,12 @@ def apply_reduced_hook(
                 path.with_name(path.name + ".lock").unlink()
             except OSError:
                 pass
-        if payload.event == EVENT_SESSION_START:
+        if payload.event == EVENT_SESSION_START or (
+            payload.event == EVENT_MODEL_INVOCATION and detail.startswith("first model invocation")
+        ):
+            # An agent with no start hook (Antigravity) opens a session with
+            # its first model invocation; it has no end hook either, so this
+            # sweep is what eventually closes its idle sessions.
             sweep_stale_buffers(repo_root)
 
         record = buf.get("record") or {}
@@ -2370,6 +2565,10 @@ def extract_agent_payload(
         from openshard.adapters.cursor_hooks import extract_cursor_payload
 
         return extract_cursor_payload(data, event_override=event_override)
+    if agent == "antigravity":
+        from openshard.adapters.antigravity_hooks import extract_antigravity_payload
+
+        return extract_antigravity_payload(data, event_override=event_override)
     return None
 
 

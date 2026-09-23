@@ -86,11 +86,13 @@ STATUS_PATH = "/status/claude"
 CODEX_HOOK_PATH = "/hooks/codex"
 OPENCODE_HOOK_PATH = "/hooks/opencode"
 CURSOR_HOOK_PATH = "/hooks/cursor"
+ANTIGRAVITY_HOOK_PATH = "/hooks/antigravity"
 AGENT_HOOK_PATHS: dict[str, str] = {
     "claude_code": HOOK_PATH,
     "codex": CODEX_HOOK_PATH,
     "opencode": OPENCODE_HOOK_PATH,
     "cursor": CURSOR_HOOK_PATH,
+    "antigravity": ANTIGRAVITY_HOOK_PATH,
 }
 # Cursor reads a hook's stdout as a *decision*. This is the one Cursor event
 # OpenShard subscribes to that is blocking, and the only reply it ever
@@ -99,6 +101,14 @@ AGENT_HOOK_PATHS: dict[str, str] = {
 CURSOR_PROMPT_EVENT = "beforeSubmitPrompt"
 CURSOR_ALLOW_RESPONSE = '{"continue": true}'
 CURSOR_EMPTY_RESPONSE = "{}"
+# Antigravity parses every hook reply as a typed message: ``Stop`` needs a
+# decision (an empty object is rejected and can stall the stop), and
+# ``PreToolUse`` -- never installed by OpenShard, answered only defensively
+# -- denies the tool on anything but a decision. ``stop`` / ``allow`` are
+# the answers that change nothing; every other event takes ``{}``.
+ANTIGRAVITY_STOP_RESPONSE = '{"decision": "stop"}'
+ANTIGRAVITY_ALLOW_RESPONSE = '{"decision": "allow"}'
+ANTIGRAVITY_EMPTY_RESPONSE = "{}"
 HEALTH_PATH = "/health"
 SHUTDOWN_PATH = "/shutdown"
 PROJECT_DIR_HEADER = "X-OpenShard-Project-Dir"
@@ -738,6 +748,52 @@ def run_cursor_hook(
         # The reply is owed to Cursor whatever capture did; the in-process
         # fallback is itself never expected to raise, but a blocking hook
         # must not depend on that.
+        label = "error"
+    return label, reply
+
+
+def antigravity_hook_response(raw: bytes, event_override: str | None = None) -> str:
+    """The JSON ``openshard hooks antigravity`` writes to stdout for one payload.
+
+    Decided from the event name alone (the installed ``--event`` first, the
+    payload's ``hookEventName`` as a fallback), before and regardless of
+    capture: OpenShard only observes, so it lets the agent stop, allows any
+    tool, and injects nothing. Never raises.
+    """
+    event = event_override
+    if not event:
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+            value = data.get("hookEventName") if isinstance(data, dict) else None
+            event = value if isinstance(value, str) else None
+        except Exception:
+            event = None
+    if event == "Stop":
+        return ANTIGRAVITY_STOP_RESPONSE
+    if event == "PreToolUse":
+        return ANTIGRAVITY_ALLOW_RESPONSE
+    return ANTIGRAVITY_EMPTY_RESPONSE
+
+
+def run_antigravity_hook(
+    stream: object,
+    *,
+    env: dict | os._Environ | None = None,
+    event_override: str | None = None,
+    spawn: bool = True,
+) -> tuple[str, str]:
+    """Console-script body for ``openshard hooks antigravity``: ``(outcome label, stdout reply)``.
+
+    The same forward-or-fold path as ``run_hook_via_service(agent="antigravity")``
+    plus the reply Antigravity requires on stdout (see
+    ``antigravity_hook_response``). Never raises.
+    """
+    env = os.environ if env is None else env
+    raw = _read_all(stream)
+    reply = antigravity_hook_response(raw, event_override)
+    try:
+        label = _run_hook_raw(raw, env, event_override=event_override, agent="antigravity", spawn=spawn)
+    except Exception:
         label = "error"
     return label, reply
 

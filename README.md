@@ -141,8 +141,9 @@ Openshard currently captures receipts from:
 | Codex | Supported |
 | Cursor | Supported |
 | OpenCode | Supported |
+| Google Antigravity | Supported (hooks; see [agent capture](docs/agent-capture.md#google-antigravity-integration)) |
 
-All four can contribute to the same local Openshard history in a repo. You can move between supported agents without creating separate receipt stores or changing the way you normally use those tools.
+All five can contribute to the same local Openshard history in a repo. You can move between supported agents without creating separate receipt stores or changing the way you normally use those tools.
 
 Run:
 

@@ -37,6 +37,7 @@ _VERIFICATION_PHRASE = {
     "skipped": "verification skipped",
     "manual_review": "verification needs manual review",
     "not_run": "verification not run",
+    "partial": "verification partially observed",
     "unknown": "verification status unknown",
 }
 
