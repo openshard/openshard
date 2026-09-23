@@ -914,9 +914,10 @@ def build_report_entry(report: Mapping[str, Any], repo_root: Path, *, record: di
     )
     agent_summary = sanitize_text(report.get("summary"), 300)
     summary = (
-        f"Grok Bot self-report: status {status}, {len(actions_in)} action(s), "
-        f"{len(files_detail)} file(s), {len(checks)} check(s) claimed. "
-        "Every fact is the Bot's own claim; nothing was observed."
+        # First sentence kept short: it is the receipt's Result line.
+        f"Self-reported, not observed: {status}. "
+        f"Grok Bot claims {len(actions_in)} action(s), {len(files_detail)} file(s), "
+        f"{len(checks)} check(s); every fact is the Bot's own claim."
         + (f" Bot summary: {agent_summary}" if agent_summary else "")
     )
     model = sanitize_text(report.get("model"), 120)

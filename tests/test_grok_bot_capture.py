@@ -339,9 +339,12 @@ class TestSelfReport:
         (entry,) = _entries(repo)
         receipt = build_shard_receipt(entry)
         text = render_compact_shard_receipt(receipt)
-        assert "(agent claim, not observed)" in text
+        assert "Agent reported" in text
         assert "Directly observed" not in text
-        assert receipt.status == "Passed (agent claim)"
+        assert "Self-reported, not observed: completed." in text
+        # The weaker source crosses the sync boundary on the flat reason.
+        assert receipt.verification["source"] == "agent_reported"
+        assert receipt.verification_reason.endswith("[agent_reported]")
 
     def test_same_report_id_updates_in_place(self, repo: Path) -> None:
         gb.ingest_report(_report(status="partial"), repo)

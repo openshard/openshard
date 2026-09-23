@@ -25,7 +25,7 @@ and the receipts label them differently.
 | Browser | host of each navigation (path, query and page title dropped) | only what the Bot reports |
 | Computer use | action / screenshot counts and duration | only what the Bot reports |
 | Files changed | **not observable** | the Bot's claim |
-| Checks | invoked, outcome **unknown** | the Bot's claim, labelled "(agent claim, not observed)" |
+| Checks | invoked, outcome **unknown** | the Bot's claim (`verification.source = agent_reported`, `observation_mode = agent_claim`) |
 | Tokens / model | from `api_request` logs (`tokens_provenance = vendor_telemetry`) | model name if the Bot states it |
 | Cost | not recorded (Cursor exports cost only as a metric) | not recorded |
 | Conversation end | not exported | the report itself |
@@ -195,8 +195,11 @@ passes an `openshard.grok_bot.report/v1` JSON document on stdin:
 `report_id` (or `conversation_id`) makes the report idempotent: reporting
 again updates the same Shard. Commands and text are secret-scrubbed. Every
 Event is `agent_reported`. Verification is `source = agent_reported`,
-`observation_mode = agent_claim`, and the receipt shows
-`1/1 passed (agent claim, not observed)` and `Passed (agent claim)`.
+`observation_mode = agent_claim` (the flat `verification_reason` ends in
+`[agent_reported]`). The receipt's Evidence row reads "Agent reported", and
+its Result line reads "Self-reported, not observed: <status>." Note: the Checks row still
+reads `1/1 passed`, which is the existing receipt contract for agent claims
+(pinned in `tests/test_verification_evidence.py`).
 
 ### Why not an OpenShard MCP connector or plugin?
 

@@ -23,8 +23,7 @@ All notable changes to OpenShard are documented here.
   `incomplete` (`integration_limitation`). No MCP connector is shipped: Grok
   Bot cannot reach local MCP servers, and a public one would add no
   evidence.
-- Receipts label agent-claimed check results ("1/1 passed (agent claim, not
-  observed)", status "Passed (agent claim)"). The Evidence row names a
+- Receipts: the Evidence row names a
   third-party observer when every directly-observed event has the same one.
   "Changed" reads "Not observable" when an integration stores
   `changes.files_observable = false`. Existing records render unchanged.

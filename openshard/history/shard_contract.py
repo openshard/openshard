@@ -22,7 +22,6 @@ from openshard.history.shard_hash import verify_shard_hash
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
 from openshard.history.verification import (
-    MODE_AGENT_CLAIM,
     REASON_OUTCOME_NOT_OBSERVED,
     STATUS_FAILED,
     STATUS_NOT_RUN,
@@ -624,20 +623,7 @@ _WEAK_VERIFICATION_STATUSES: frozenset[str] = frozenset(
 
 
 def _verification_display(ev: VerificationEvidence) -> tuple[str, str]:
-    """(checks_display, status) for structured evidence, in the receipt's existing vocabulary.
-
-    A result the agent merely *stated* (``observation_mode == agent_claim``)
-    keeps its counts but is labelled as a claim, so it never reads like an
-    observed pass.
-    """
-    display, status = _verification_display_base(ev)
-    if ev.observation_mode == MODE_AGENT_CLAIM and ev.status in (STATUS_PASSED, STATUS_FAILED, STATUS_PARTIAL):
-        display += " (agent claim, not observed)"
-        status += " (agent claim)"
-    return display, status
-
-
-def _verification_display_base(ev: VerificationEvidence) -> tuple[str, str]:
+    """(checks_display, status) for structured evidence, in the receipt's existing vocabulary."""
     attempted = ev.checks_attempted
     if ev.status == STATUS_PASSED:
         return (f"{ev.checks_passed}/{attempted} passed" if attempted else "Passed"), "Passed"
