@@ -98,6 +98,7 @@ def _iter_fields(buf: bytes) -> Iterator[tuple[int, int, Any]]:
         number, wire_type = key >> 3, key & 7
         if number == 0:
             raise OtlpDecodeError("field number 0")
+        value: Any
         if wire_type == _WT_VARINT:
             value, pos = _read_varint(buf, pos)
         elif wire_type == _WT_I64:
@@ -146,7 +147,7 @@ def _pb_any_value(buf: bytes, depth: int = 0) -> Any:
         elif number == 4 and wt == _WT_I64:
             value = struct.unpack("<d", raw)[0]
         elif number == 5 and wt == _WT_LEN:
-            items = []
+            items: list[Any] = []
             for n2, wt2, raw2 in _iter_fields(raw):
                 if n2 == 1 and wt2 == _WT_LEN and len(items) < _MAX_ARRAY:
                     items.append(_pb_any_value(raw2, depth + 1))

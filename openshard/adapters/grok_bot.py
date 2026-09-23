@@ -390,8 +390,10 @@ def _state_from_entry(entry: dict | None, conversation_id: str) -> tuple[dict, l
     """(state, events, record identity) for an existing conversation record."""
     if not isinstance(entry, dict):
         return _new_state(conversation_id), [], None
-    capture = entry.get("capture") if isinstance(entry.get("capture"), dict) else {}
-    stored = capture.get("grok_bot") if isinstance(capture.get("grok_bot"), dict) else {}
+    _capture_raw = entry.get("capture")
+    capture: dict = _capture_raw if isinstance(_capture_raw, dict) else {}
+    _stored_raw = capture.get("grok_bot")
+    stored: dict = _stored_raw if isinstance(_stored_raw, dict) else {}
     state = _new_state(conversation_id)
     for key, default in list(state.items()):
         value = stored.get(key)
@@ -440,7 +442,7 @@ def _action_event(obs: Observation, record: dict, state: dict) -> dict | None:
 
     f = obs.fields
     meta = _obs_metadata(obs)
-    common = {
+    common: dict[str, Any] = {
         "source": SOURCE_OTEL,
         "occurred_at": obs.occurred_at,
         "evidence": EVIDENCE_DIRECTLY_OBSERVED,
@@ -686,7 +688,7 @@ class IngestResult:
     duplicates: int = 0
     skipped: dict[str, int] = field(default_factory=dict)
     conversations: dict[str, str] = field(default_factory=dict)  # conversation id -> appended/replaced
-    shard_ids: dict[str, str] = field(default_factory=dict)
+    shard_ids: dict[str, str | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -843,15 +845,17 @@ def build_report_entry(report: Mapping[str, Any], repo_root: Path, *, record: di
     if record is None:
         record = _mint_record(repo_root, received_at, session_id)
     task = sanitize_task_excerpt(report.get("task")) or REPORT_TASK_PLACEHOLDER
-    status = report.get("status") if report.get("status") in _REPORT_STATUSES else "unknown"
+    _status_raw = report.get("status")
+    status: str = _status_raw if isinstance(_status_raw, str) and _status_raw in _REPORT_STATUSES else "unknown"
     meta_base = {"reported_by": AGENT_GROK_BOT, "observer": None}
     events: list[dict] = []
-    common = {"source": SOURCE_REPORT, "evidence": EVIDENCE_AGENT_REPORTED, "occurred_at": received_at}
-    result_status = {"passed": STATUS_PASSED, "failed": STATUS_FAILED, "skipped": STATUS_SKIPPED}
+    common: dict[str, Any] = {"source": SOURCE_REPORT, "evidence": EVIDENCE_AGENT_REPORTED, "occurred_at": received_at}
+    result_status: dict[Any, str] = {"passed": STATUS_PASSED, "failed": STATUS_FAILED, "skipped": STATUS_SKIPPED}
 
     actions_in = [a for a in report.get("actions") or [] if isinstance(a, dict)]
     for a in actions_in[:_MAX_REPORT_ACTIONS]:
-        kind = a.get("kind") if a.get("kind") in _REPORT_ACTION_KINDS else "other"
+        _kind_raw = a.get("kind")
+        kind: str = _kind_raw if isinstance(_kind_raw, str) and _kind_raw in _REPORT_ACTION_KINDS else "other"
         if kind == "shell":
             action, target, _ = summarize_command(a.get("command") or a.get("name"), label="Shell")
         else:
@@ -881,7 +885,10 @@ def build_report_entry(report: Mapping[str, Any], repo_root: Path, *, record: di
     checks = []
     for c in checks_in[:_MAX_CHECKS]:
         action, _t, kind = summarize_command(c.get("command") or c.get("name"), label="Check")
-        check_status = c.get("result") if c.get("result") in _REPORT_RESULTS else "unknown"
+        _result_raw = c.get("result")
+        check_status: str = (
+            _result_raw if isinstance(_result_raw, str) and _result_raw in _REPORT_RESULTS else "unknown"
+        )
         checks.append({"name": action.removeprefix("Check: ")[:120],
                        "kind": kind if kind in ("test", "lint") else "other", "status": check_status})
         ev_type = {"passed": EVENT_VERIFICATION_PASSED, "failed": EVENT_VERIFICATION_FAILED,
