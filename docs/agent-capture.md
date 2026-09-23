@@ -1,4 +1,4 @@
-# Agent capture: Claude Code, Codex, Cursor, OpenCode, Google Antigravity and Grok Build
+# Agent capture: Claude Code, Codex, Cursor, OpenCode, Google Antigravity, Hermes Agent and Grok Build
 
 Openshard records the coding-agent work you already do. Six agents feed
 **one** capture path:
@@ -8,8 +8,9 @@ Claude Code hooks (HTTP + SessionStart command) ─┐
 Codex hooks (command)  ──────────────────────────┤
 Cursor hooks (command) ──────────────────────────┤
 Antigravity hooks (command) ─────────────────────┤
+Hermes shell hooks (command) ────────────────────┤
 Grok Build hooks (command) ──────────────────────┼──> local capture service (127.0.0.1, authenticated)
-OpenCode plugin (fetch) ─────────────────────────┘        POST /hooks/{claude,codex,cursor,antigravity,grok-build,opencode}
+OpenCode plugin (fetch) ─────────────────────────┘        POST /hooks/{claude,codex,cursor,antigravity,hermes,grok-build,opencode}
                                                                │  blocking path: authenticate -> validate -> translate -> reduce -> fsync queue -> 200
                                                                ▼  background: replay through the shared fold (undecodable lines quarantined)
                                                     canonical Events -> Run/Attempt -> Shard -> Receipt
@@ -25,17 +26,17 @@ another local account, a sandboxed process or a web page's cross-origin
 
 | Credential | Where it lives | Who presents it | Authorises |
 |---|---|---|---|
-| **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | our own processes only: `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, `openshard hooks antigravity`, `openshard hooks grok-build`, `openshard capture stop` | every endpoint, including `/shutdown` |
+| **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | our own processes only: `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, `openshard hooks antigravity`, `openshard hooks hermes`, `openshard hooks grok-build`, `openshard capture stop` | every endpoint, including `/shutdown` |
 | **Scoped capability** -- `r2.` + HMAC-SHA256(token, normalised repo root + `\n` + agent key) | third-party configuration that runs no process of ours at delivery time: the `X-OpenShard-Capture-Token` header of the Claude Code HTTP hook entries in `.claude/settings.local.json` (agent `claude_code`); the `CAPABILITY` constant in `.opencode/plugins/openshard.js` (agent `opencode`) | Claude Code's HTTP hooks; the OpenCode plugin | events **for that repository and that agent only**; never shutdown |
 
 The service checks a capability against the agent the receiver path records
 under (`/hooks/claude` -> `claude_code`, `/status/claude` -> `claude_code`,
 `/hooks/codex` -> `codex`, `/hooks/cursor` -> `cursor`, `/hooks/antigravity`
--> `antigravity`, `/hooks/grok-build` -> `grok_build`, `/hooks/opencode` -> `opencode`), so a leaked Claude capability for repo A cannot submit
+-> `antigravity`, `/hooks/hermes` -> `hermes`, `/hooks/grok-build` -> `grok_build`, `/hooks/opencode` -> `opencode`), so a leaked Claude capability for repo A cannot submit
 Cursor, Codex or OpenCode events for repo A, a Cursor capability cannot
 submit Claude events, and no capability for repo A works for repo B.
-Codex, Cursor, Antigravity and Grok Build need no capability: their hooks run
-`openshard hooks codex|cursor|antigravity|grok-build`, a process of ours that reads the
+Codex, Cursor, Antigravity, Hermes and Grok Build need no capability: their hooks run
+`openshard hooks codex|cursor|antigravity|hermes|grok-build`, a process of ours that reads the
 token file. The master
 token never appears in any agent's configuration.
 
@@ -190,6 +191,7 @@ translator and one installer per agent, and per-agent readiness in
 | OpenCode | `opencode_plugin` | OpenCode (external) | `opencode` / — | `providerID/modelID` OpenCode reports on the user/assistant message, only when present |
 | Google Antigravity | `antigravity_hooks` | Google Antigravity (external) | `antigravity` / Google | `modelName` from every hook payload; every distinct model kept; provider **not** exposed (Antigravity also runs non-Google models), so not recorded |
 | Grok Build | `grok_build_hooks` | Grok Build (external) | `grok_build` / xAI | **none**: the documented hook payload names no model, provider, tokens or cost, so all stay Not recorded; xAI is the vendor of the *agent*, never inferred as the model provider |
+| Hermes Agent | `hermes_hooks` | Hermes Agent (external) | `hermes` / Nous Research | `model` and `provider` Hermes reports on its request hooks (`provider/model` slug), only when present; token counts as Hermes reports them; no cost |
 
 Every one of these is `origin = external_observed`, `capture_depth =
 partial` (`history/shard.py`): Openshard observed the session, it did not
@@ -432,6 +434,126 @@ terse per event; see the field audit in `adapters/antigravity_hooks.py`.
   antigravity`. Open the repository as the Antigravity workspace (or run
   `agy` in it); restart Antigravity if it was already running.
 
+## Hermes Agent integration
+
+Sources: the Hermes Agent hooks documentation
+(`hermes-agent.nousresearch.com/docs/user-guide/features/hooks`, the plugin-hook
+catalog and the *Shell Hooks* section), cross-checked against the runtime that
+builds the payloads (`agent/shell_hooks.py`, `model_tools.py`,
+`tools/file_tools.py`, `tools/approval_context.py`); the full field audit is in
+`adapters/hermes_hooks.py`. This integration is **observation only**: Hermes'
+`pre_tool_call` hook can block, rewrite or escalate a tool call, and OpenShard
+never subscribes it and never returns a directive (every reply is `{}`).
+
+* **Mechanism.** Hermes *shell hooks*: a `hooks:` block in
+  `<hermes home>/config.yaml` runs a command per lifecycle event, with one JSON
+  document on stdin (`hook_event_name`, `tool_name`, `tool_input`, `session_id`,
+  `cwd`, `profile`, and every event-specific field under `extra`). Hermes runs a
+  shell hook only after the `(event, command)` pair is in
+  `<hermes home>/shell-hooks-allowlist.json`. The hook process is
+  `openshard hooks hermes` (fast console-script path), which presents the
+  capture token and POSTs the raw document to `/hooks/hermes`; a refused or
+  unreachable service never blocks or changes Hermes. `HERMES_HOME` is honoured
+  (default `~/.hermes`, `%LOCALAPPDATA%\hermes` on Windows); a Hermes profile has
+  its own home, so install once per profile with `HERMES_HOME` set.
+* **Scope is user-global; capture is per repository.** Hermes has no
+  project-level hook file, so the hooks fire in every directory Hermes runs
+  in. Hermes is captured only in a **git repository that already has an
+  `.openshard/` directory** (never in an arbitrary folder, never in the home
+  directory). `openshard capture install hermes` creates that marker in the
+  repository you run it in; run it in each repository you want captured.
+  `openshard setup` detects Hermes but does **not** edit Hermes' global config on
+  its own: it reports `detected; run openshard capture install hermes`.
+* **Config edit.** OpenShard adds one entry per event under `hooks:` (`command:
+  "openshard hooks hermes"`, `timeout: 15`, no `matcher`, no `fail_closed`), and
+  records Hermes' documented first-use consent in the allowlist file (the same
+  entry Hermes writes when a person approves its prompt). When `config.yaml` has
+  no `hooks:` key the block is appended between marker comments, so every
+  existing byte and comment survives; when `hooks:` already exists it is merged
+  and the file re-serialised (comments are not preserved) after a one-time
+  `config.yaml.openshard-backup`. Other hooks, `hooks.outbound` and
+  `hooks_auto_accept` are never touched; an unparsable file is never written.
+  `openshard capture uninstall hermes` removes only OpenShard's entries from both
+  files.
+* **Events** (Hermes name -> Openshard event -> recorded):
+
+  | Hermes hook | Openshard event | Recorded |
+  |---|---|---|
+  | `on_session_start` | `SessionStart` | session identity, `model` (new sessions only) |
+  | `pre_llm_call` | `UserPromptSubmit` | the turn's `user_message` (scrubbed excerpt becomes the task; text parts only for a multimodal message), `model`. Replies `{}`: no context is injected. The full `conversation_history` is never read |
+  | `post_tool_call`, `status: ok` | `PostToolUse` | tool name and arguments as below, `duration_ms`, `tool_call_id`, `turn_id`, `tool_status`; a file tool becomes `passed` and hook-reported (Hermes' success signal) |
+  | `post_tool_call`, `status: error` or `blocked` | `PostToolUseFailure` | the same record, `failed` (`blocked` = a policy hook stopped it; it never ran). A failed check command is `agent_reported` failed verification |
+  | `post_api_request` | usage observation | per-request `usage` (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`) keyed by request id, plus the `model` and `provider` Hermes called |
+  | `on_session_end` (fires **every turn**) | `Stop` (`completed`), `Interrupt` (`interrupted`), else `SessionIdle` | a completed / interrupted turn, or a neutral boundary that is never a completed turn |
+  | `on_session_finalize` | `SessionEnd` | the real teardown, with Hermes' `reason` |
+  | `subagent_start` / `subagent_stop` | `SubagentStart` / `SubagentStop` | child role, child session id, subagent ids, `child_status`, `duration_ms`, the *number* of child tool calls; counted in `capture.subagents` |
+  | `pre_approval_request` / `post_approval_response` | `ApprovalRequest` / `ApprovalDecision` | `surface`, `pattern_key`, the scrubbed command, and the `choice`; counted in `capture.approvals` |
+
+  Tool arguments read: `terminal` -> `command` (scrubbed, `command_kind`
+  test/lint/other); `write_file` / `patch` -> `path`, or for a V4A patch only the
+  `*** Add|Update|Delete|Move File:` header paths; `read_file` -> `path` (a read,
+  never a change). Everything else (`search_files`, `execute_code`,
+  `delegate_task`, web, browser, skill and MCP tools) is by name only. File
+  contents, replacement strings, patch hunks, the tool `result` /
+  `error_message`, the delegated goal, the child's summary and the transcript are
+  never read.
+
+  Not subscribed: `pre_tool_call` (control), `post_llm_call` (needs the whole
+  transcript and repeats `on_session_end`), the stream and auxiliary-call hooks,
+  and the gateway, kanban and skill hooks.
+* **Evidence classification.**
+  * *Directly observed*: the session/turn lifecycle (start, prompt, completed /
+    interrupted turn, session end), OpenShard receiving each hook.
+  * *Agent reported*: every tool call and its outcome (`status`), model and
+    provider, token counts, approvals and their decisions, subagent activity,
+    durations, correlation ids, and the *fact that a check command ran*.
+  * *Git observed / verified*: the changed files (`git diff` plus a baseline taken
+    when the session was first seen, exactly as for the other agents); a
+    hook-reported file path is used only as the no-git fallback, and only for a
+    tool Hermes reported `ok`.
+  * *Independently verified*: never. OpenShard does not run or read the outcome
+    of Hermes' checks: an observed check stays `unknown` with
+    `outcome_not_observed`, and a check Hermes reported as failed is
+    `agent_reported` failed. `verification_passed` stays `None`.
+  * *Unknown stays unknown*: absent `status`, `usage`, provider, session id or
+    `child_status` records nothing; an approval whose payload has no session id is
+    dropped rather than attributed; a `timeout` / `cancelled` / `notify_failed`
+    approval is recorded as "not decided", never as a grant or a denial.
+* **Provider / model.** `capture.provider` and the `provider/model` slug come from
+  Hermes' request hooks only; a hook that names the model without a provider
+  never downgrades an already-observed `provider/model`. Hermes is never
+  collapsed into its model provider (`agent_vendor` is Nous Research).
+* **Tokens and cost.** Token counts are Hermes' own per-request figures, summed
+  over distinct request ids (a re-reported request replaces, never
+  double-counts) and stamped `agent_reported`; how a provider splits cached
+  tokens between `input_tokens` and the cache fields is as Hermes reports it.
+  Hermes reports **no cost**, so cost stays Not recorded.
+* **Session boundaries.** One Hermes `session_id` = one Shard; `on_session_end`
+  is per turn, so a multi-turn conversation accumulates turns in one Shard and
+  `on_session_finalize` closes it. A subagent runs as a Hermes session of its
+  own: if it emits hooks it becomes its own Shard, linked from the parent's
+  `subagent started` Event by `child_session_id`. An interrupted CLI that never
+  reaches `on_session_finalize` is closed by the shared idle sweep
+  (`session_end_not_observed`).
+* **Performance.** Every subscribed event is a process start of `openshard hooks
+  hermes`; `post_tool_call` and `post_api_request` fire per tool call / request,
+  and `pre_llm_call` carries the conversation history in its stdin (read and
+  forwarded, never stored). Server-side work is validate + reduce + fsync; the
+  fold runs on the background worker. `tests/test_hermes_capture.py` guards the
+  blocking budget like the other agents.
+* **Known limitations.** Hermes registers shell hooks when a session starts, so a
+  session already running keeps its old hooks; `HERMES_SAFE_MODE=1` and an
+  un-allowlisted hook make Hermes skip them (`openshard doctor` reports both,
+  and a repository that has not opted in); the task is the first user message of
+  the session, which for a gateway platform is whatever Hermes passes as
+  `user_message`; the approval hooks carry a session id only when Hermes has
+  bound its correlation context.
+* **Commands**: `openshard capture install hermes` (works outside a repository;
+  inside one it also opts that repository in), `openshard capture uninstall
+  hermes`, `openshard doctor` (config, allowlist, safe mode, opt-in), and
+  `openshard setup` (detects Hermes, does not edit its config). Start a new
+  Hermes session afterwards.
+
 ## Grok Build integration
 
 Sources: xAI's hooks reference (`docs.x.ai/build/features/hooks`), read on
@@ -515,26 +637,22 @@ machine this was built on: every field below is either documented or marked
 
 ### Fidelity compared with the other agents
 
-| Fact | Claude Code | Google Antigravity | Grok Build |
-|---|---|---|---|
-| Session identity | `session_id` | `conversationId` | `sessionId` |
-| Task | first prompt excerpt (documented `prompt`) | never (no prompt to hooks) | first prompt excerpt **if** Grok delivers `prompt` (undocumented); else placeholder |
-| Model | status line (`model.id`) | `modelName` on every hook, every model kept | not exposed |
-| Provider | not exposed | not exposed | not exposed |
-| Tokens / cost | status line, `provider_reported` | not exposed | not exposed |
-| Tool calls | name; Bash command; Edit/Write/MultiEdit paths | name; command; file paths; reads | name; command; file paths; reads |
-| Tool success signal | `PostToolUse` = success-only (documented) -> `passed` file edits | empty `error` string | none (`PostToolUse` not documented as success-only) -> file tools `unknown` |
-| Tool failure | `PostToolUseFailure` | non-empty `error` | `PostToolUseFailure` |
-| Changed files | git diff + hook-reported (`agent_reported`) | git diff + hook-reported | git diff only (`git_observed`) |
-| Permission events | none | none | `PermissionDenied` -> `approval.denied` (tool name only) |
-| Verification | check command observed; failure from failure event | from `error` | check command observed; failure from failure event |
-| Turn completion | `Stop` | `Stop` (not when errored / not idle) | `Stop` (not `StopFailure`) |
-| Session end | `SessionEnd` | none (idle sweep) | `SessionEnd` |
-| Transport | HTTP hooks + capability header | command hook | command hook |
-
-Hermes is not in this comparison: there is no Hermes integration on `main`
-(or in the `feat/hermes-capture` worktree at the time of writing) to compare
-against.
+| Fact | Claude Code | Google Antigravity | Hermes Agent | Grok Build |
+|---|---|---|---|---|
+| Session identity | `session_id` | `conversationId` | `session_id` | `sessionId` |
+| Task | first prompt excerpt (documented `prompt`) | never (no prompt to hooks) | `user_message` on `pre_llm_call` | excerpt **if** Grok delivers `prompt` (undocumented); else placeholder |
+| Model | status line (`model.id`) | `modelName` on every hook | `model` on request hooks | not exposed |
+| Provider | not exposed | not exposed | `provider` on request hooks | not exposed |
+| Tokens / cost | status line, `provider_reported` | not exposed | tokens per request; no cost | not exposed |
+| Tool success signal | `PostToolUse` documented success-only -> `passed` edits | empty `error` string | `status: ok` -> `passed` edits | none (`PostToolUse` not documented as success-only) -> file tools `unknown` |
+| Tool failure | `PostToolUseFailure` | non-empty `error` | `status: error` / `blocked` | `PostToolUseFailure` |
+| Changed files | git plus hook-reported | git plus hook-reported | git plus hook-reported | git only (`git_observed`) |
+| Permission / approval | none | none | `ApprovalRequest` / `ApprovalDecision` with the choice | `PermissionDenied` -> `approval.denied` (tool name only; no grant or request) |
+| Subagents | none | none | counted, linked by child session | not subscribed |
+| Verification | check command observed; failure from failure event | from `error` | check command observed; failure from `status` | check command observed; failure from failure event |
+| Turn completion | `Stop` | `Stop` (not when errored / not idle) | `on_session_end` `completed` | `Stop` (not `StopFailure`) |
+| Session end | `SessionEnd` | none (idle sweep) | `on_session_finalize` | `SessionEnd` |
+| Transport / scope | HTTP hooks, per repository | command hook, per repository | command hook, user-global, per-repository opt-in | command hook, per repository (folder trust) |
 
 ## Setup / doctor / uninstall
 
@@ -648,6 +766,18 @@ and the OpenCode counterpart guard the server-side p50 < 25 ms / p95 <
   another agent's capability), installer (own file, other hook files
   untouched, idempotent, foreign entries kept, unparseable never clobbered),
   CLI install/uninstall/setup/doctor including "configured but unverified".
+* `tests/test_hermes_capture.py` — translator (`status` as the only success
+  signal, `on_session_end` per-turn semantics, tool classification incl. V4A
+  headers, usage keyed by request id, subagent/approval attrs, unsubscribed
+  events ignored, hostile shapes), inline and HTTP records (identical stable
+  view), tokens without invented cost, approval outcomes never guessed,
+  subagent linkage, repository opt-in (plain repo, non-repo, subdirectory,
+  other agents unchanged, a not-opted-in answer is never cached), the
+  authenticated service path, replies, blocking budget, installer (comment-
+  preserving append, merge + one-time backup, idempotence, foreign hooks and
+  allowlist entries preserved, refusal on unparsable input, exact uninstall),
+  CLI install/uninstall outside a repository, setup (opt-in only), doctor
+  readiness states.
 * `tests/test_cross_agent_capture.py` — all three agents in one
   repository: distinct Shards and executors, `list_shards` /
   `search_history` / `relevant_context` reach each, receipts keep identity

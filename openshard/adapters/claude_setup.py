@@ -348,7 +348,7 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
         )
 
     other_agents_present = [
-        a for a in ("codex", "opencode", "cursor", "antigravity", "grok_build") if detect_agent_cli(a)[0]
+        a for a in ("codex", "opencode", "cursor", "antigravity", "hermes", "grok_build") if detect_agent_cli(a)[0]
     ]
     if not claude_avail.available and not other_agents_present:
         return SetupResult(
@@ -360,7 +360,9 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
                 "Or install Codex (`npm install -g @openai/codex`) or OpenCode "
                 "(`npm install -g opencode-ai`); `openshard setup` configures whichever agents it finds. "
                 "If you use Cursor, run `openshard capture install cursor` in this repository; "
-                "for Google Antigravity, `openshard capture install antigravity`; for Grok Build, `openshard capture install grok-build`.",
+                "for Google Antigravity, `openshard capture install antigravity`; "
+                "for Hermes Agent, `openshard capture install hermes`; "
+                "for Grok Build, `openshard capture install grok-build`.",
             ],
         )
 
@@ -412,7 +414,7 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
         next_steps.extend(result.next_steps)
         if result.configured:
             agents_ok.append(key)
-        elif result.status == "skipped":
+        elif result.status in ("skipped", "skipped_optin"):
             continue
         else:
             agents_limited = True

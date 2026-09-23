@@ -20,7 +20,9 @@ Canonical identity rules (see ``history/shard.py``):
   never collapsed into the model provider. Grok Build is xAI's product; like
   the others its vendor says nothing about the model provider. Google Antigravity is Google's
   product, but it also runs non-Google models, so its vendor says nothing
-  about the model provider either.
+  about the model provider either. Hermes Agent is Nous Research's product
+  and is model-agnostic: the provider/model are recorded only from what
+  Hermes reports on its own hooks.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ AGENT_OPENCODE = "opencode"
 AGENT_CURSOR = "cursor"
 AGENT_ANTIGRAVITY = "antigravity"
 AGENT_GROK_BUILD = "grok_build"
+AGENT_HERMES = "hermes"
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,12 @@ class AgentProfile:
     usage_provenance: str  # cost/tokens provenance stamped for this agent's usage reports
     task_placeholder: str
     import_note: str
+    # 0.4.7: the agent's hooks are configured *user-globally* (Hermes reads
+    # only ``~/.hermes/config.yaml``), so they fire in every directory the
+    # agent runs in. Such an agent is captured only into a git repository
+    # that already has an ``.openshard/`` directory -- never into an
+    # arbitrary folder, where writing ``.openshard/`` would be clutter.
+    opt_in_repo: bool = False
 
 
 CLAUDE_CODE_PROFILE = AgentProfile(
@@ -192,10 +201,37 @@ GROK_BUILD_PROFILE = AgentProfile(
     ),
 )
 
+HERMES_PROFILE = AgentProfile(
+    key=AGENT_HERMES,
+    label="Hermes Agent",
+    vendor="Nous Research",
+    executor="hermes_hooks",
+    import_source="hermes",
+    import_method="openshard_hermes_hooks_v0",
+    event_source="hermes_hooks",
+    capture_source="hermes_hooks",
+    hook_evidence_source="hermes_hook",
+    files_source_label="hermes_hook_reported",
+    model_source="hermes_hook",
+    usage_provenance="agent_reported",
+    task_placeholder="Hermes Agent session (task not captured)",
+    import_note=(
+        "Captured automatically from Hermes Agent shell hooks. "
+        "Tool/file facts are as reported by Hermes; files are inferred from git diff. "
+        "The model and provider are the ones Hermes reports on its own hooks, and token "
+        "counts are the usage Hermes reports per provider request; Hermes reports no cost, "
+        "so cost stays Not recorded. "
+        "Verification is never recorded by OpenShard for this capture path."
+    ),
+    opt_in_repo=True,
+)
+
 AGENT_PROFILES: dict[str, AgentProfile] = {
     p.key: p
-    for p in (CLAUDE_CODE_PROFILE, CODEX_PROFILE, OPENCODE_PROFILE, CURSOR_PROFILE, ANTIGRAVITY_PROFILE,
-              GROK_BUILD_PROFILE)
+    for p in (
+        CLAUDE_CODE_PROFILE, CODEX_PROFILE, OPENCODE_PROFILE, CURSOR_PROFILE, ANTIGRAVITY_PROFILE,
+        HERMES_PROFILE, GROK_BUILD_PROFILE,
+    )
 }
 CAPTURE_EXECUTORS: frozenset[str] = frozenset(p.executor for p in AGENT_PROFILES.values())
 

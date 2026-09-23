@@ -19,6 +19,7 @@ _EXECUTOR_AGENTS: dict[str, str] = {
     "cursor_hooks": "cursor",
     "antigravity_hooks": "antigravity",
     "grok_build_hooks": "grok_build",
+    "hermes_hooks": "hermes",
     "claude_code_wrap": "wrap",
     "claude_code_import": "import",
     "native": "native",

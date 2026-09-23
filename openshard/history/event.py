@@ -230,6 +230,8 @@ SOURCE_CURSOR_HOOKS = "cursor_hooks"
 SOURCE_ANTIGRAVITY_HOOKS = "antigravity_hooks"
 # Unreleased: Grok Build native hooks (``adapters/grok_build_hooks.py``).
 SOURCE_GROK_BUILD_HOOKS = "grok_build_hooks"
+# 0.4.7: Hermes Agent shell hooks (``adapters/hermes_hooks.py``).
+SOURCE_HERMES_HOOKS = "hermes_hooks"
 SOURCE_NATIVE_RUN = "native_run"
 
 _ACTION_LIMIT = 120

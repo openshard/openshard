@@ -54,6 +54,7 @@ _EXTERNAL_AGENT_LABELS: dict[str, str] = {
     "cursor_hooks": "Cursor (external)",
     "antigravity_hooks": "Google Antigravity (external)",
     "grok_build_hooks": "Grok Build (external)",
+    "hermes_hooks": "Hermes Agent (external)",
 }
 _EXTERNAL_ADAPTER_EXECUTORS = frozenset(_EXTERNAL_AGENT_LABELS)
 

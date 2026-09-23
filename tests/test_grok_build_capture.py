@@ -69,6 +69,13 @@ def _make_repo(root: Path) -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def _pin_hermes_home(tmp_path, monkeypatch) -> None:
+    """setup/doctor also inspect Hermes' user-global config: never read the real ~/.hermes."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes home"))
+    monkeypatch.delenv("HERMES_SAFE_MODE", raising=False)
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     return _make_repo(tmp_path / "grok repo")
@@ -858,3 +865,30 @@ class TestCli:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["grok_build"]["cli_available"] is True and data["grok_build"]["configured"] is False
+
+
+class TestCoexistsWithHermes:
+    """Grok Build (repo-local, set up automatically) and Hermes (user-global, explicit opt-in) side by side."""
+
+    def test_setup_configures_grok_and_only_offers_hermes(self, repo, tmp_path, monkeypatch):
+        home = tmp_path / "hermes home"
+        which = {"grok": "/usr/local/bin/grok", "hermes": "/usr/local/bin/hermes",
+                 "openshard": "/usr/local/bin/openshard"}.get
+        with patch("shutil.which", side_effect=which):
+            result = CliRunner().invoke(cli, ["setup", "--json", "--yes", "--repo-path", str(repo)])
+        data = json.loads(result.output)
+        assert data["agents"]["grok_build"]["status"] == "installed"
+        assert data["agents"]["hermes"]["status"] == "skipped_optin"
+        assert data["configured_agents"] == ["grok_build"]
+        assert not home.exists()  # Hermes' global config is untouched
+        assert any("openshard capture install hermes" in s for s in data["next_steps"])
+
+    def test_two_agents_one_repository_stay_distinct_shards(self, repo):
+        _run(repo, "UserPromptSubmit", _doc(repo, "UserPromptSubmit", prompt="grok task"))
+        _run(repo, "Stop")
+        hermes_doc = {"hook_event_name": "pre_llm_call", "session_id": SID, "cwd": str(repo),
+                      "extra": {"user_message": "hermes task", "model": "m"}}
+        handle_hook(hermes_doc, env={}, agent="hermes", event_override="pre_llm_call")
+        lines = _lines(repo)
+        assert {e["executor"] for e in lines} >= {"grok_build_hooks"}
+        assert len({e["shard_id"] for e in lines}) == len(lines)
