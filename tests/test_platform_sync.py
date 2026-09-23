@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from openshard.adapters.claude_hooks import handle_claude_hook
+from openshard.adapters.claude_hooks import handle_claude_hook, handle_hook
 from openshard.history.receipt_identity import is_receipt_id
 from openshard.history.store import amend_latest_record, load_history
 from openshard.sync import client, config, envelope, outbox, transport
@@ -87,6 +87,15 @@ def _session(repo: Path, sid: str, *, end: bool = True) -> None:
     _hook(repo, sid, "Stop")
     if end:
         _hook(repo, sid, "SessionEnd", reason="clear")
+
+
+def _antigravity_session(repo: Path, sid: str) -> None:
+    """An Antigravity conversation: model call, tool use, completed turn -- and no end hook."""
+    doc = {"conversationId": sid, "workspacePaths": [str(repo)], "modelName": "gemini-3.1-pro"}
+    handle_hook({**doc, "invocationNum": 0}, env={}, agent="antigravity", event_override="PreInvocation")
+    handle_hook({**doc, "toolCall": {"name": "run_command", "args": {"CommandLine": "python -m pytest -q"}},
+                 "error": ""}, env={}, agent="antigravity", event_override="PostToolUse")
+    handle_hook({**doc, "fullyIdle": True, "error": ""}, env={}, agent="antigravity", event_override="Stop")
 
 
 def _sid(n: int) -> str:
@@ -510,6 +519,36 @@ class TestFlush:
         _session(repo, _sid(2), end=False)
         later = datetime.now(UTC) + timedelta(hours=2)
         assert client.flush(repo, env=env, now=later).created == 1
+
+    def test_session_without_end_hook_is_closed_before_it_is_sent(self, repo, env, link, recording):
+        # Antigravity has no session-end hook: the idle sweep must close the
+        # session (stamping session_end_not_observed) before sync sends it, or
+        # the hosted copy would claim a complete capture and go stale locally.
+        _antigravity_session(repo, _sid(7))
+        assert client.flush(repo, env=env).in_progress == 1
+        later = datetime.now(UTC) + timedelta(minutes=61)
+        assert client.flush(repo, env=env, now=later).created == 1
+        receipt = recording.envelopes[-1]["receipt"]
+        completeness = receipt["capture_completeness"]
+        assert completeness["status"] == "incomplete"
+        assert [r["kind"] for r in completeness["reasons"]] == ["session_end_not_observed"]
+        assert not list((repo / ".openshard").rglob(f"antigravity.{_sid(7)}.json"))  # buffer swept
+        # Nothing left to fold later: the synced copy matches the local record.
+        again = client.flush(repo, env=env, now=later + timedelta(hours=3))
+        assert again.sent == 0 and again.stale == 0
+
+    def test_quiet_record_with_newer_buffered_activity_waits(self, repo, env, link, recording):
+        _antigravity_session(repo, _sid(8))
+        buffers = list((repo / ".openshard").rglob(f"antigravity.{_sid(8)}.json"))
+        assert len(buffers) == 1
+        record_at = datetime.fromisoformat(_entries(repo)[0]["capture"]["last_activity_at"].replace("Z", "+00:00"))
+        buf = json.loads(buffers[0].read_text(encoding="utf-8"))
+        buf["last_activity_at"] = (record_at + timedelta(minutes=50)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        buffers[0].write_text(json.dumps(buf), encoding="utf-8")
+        # The record alone looks quiet for over an hour; its buffer does not.
+        waiting = client.flush(repo, env=env, now=record_at + timedelta(minutes=61))
+        assert waiting.sent == 0 and waiting.in_progress == 1
+        assert client.flush(repo, env=env, now=record_at + timedelta(minutes=111)).created == 1
 
     def test_local_change_after_sync_is_reported_as_stale_not_resent(self, repo, env, link, recording):
         _session(repo, _sid(1))
