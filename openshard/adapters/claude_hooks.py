@@ -434,6 +434,18 @@ def _clean_attrs(raw: object) -> dict[str, Any]:
     return clean
 
 
+# Keys only Grok Build puts in a hook document. Grok also emits Claude-compatible
+# aliases (``hook_event_name``, ``session_id``, ``tool_name``, ...) in the *same*
+# document, so to the Claude receiver a Grok Build event is otherwise a valid
+# Claude Code payload. Claude Code itself never sends any of these camelCase keys.
+_GROK_BUILD_MARKER_KEYS: tuple[str, ...] = ("hookEventName", "sessionId", "workspaceRoot")
+
+
+def is_grok_build_document(data: Mapping[str, Any]) -> bool:
+    """True for a hook document Grok Build sent (e.g. through its Claude compatibility layer)."""
+    return any(key in data for key in _GROK_BUILD_MARKER_KEYS)
+
+
 def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None = None) -> HookPayload | None:
     """Pick the supported fields out of a decoded hook payload.
 
@@ -442,6 +454,8 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     ``error``, ``last_assistant_message`` and every other field are never
     read.
     """
+    if is_grok_build_document(data):
+        return None  # Grok Build reaching Claude hooks through its compat layer: never a Claude Code record
     event = data.get("hook_event_name")
     if not isinstance(event, str) or not event:
         event = event_override

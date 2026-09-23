@@ -74,12 +74,13 @@ HOOK_SPECS: tuple[HookSpec, ...] = (
     HookSpec("PermissionDenied", None, 5, TRANSPORT_COMMAND),
     HookSpec("Stop", None, 5, TRANSPORT_COMMAND),
     HookSpec("StopFailure", None, 5, TRANSPORT_COMMAND),
+    HookSpec("StopCancelled", None, 5, TRANSPORT_COMMAND),
     HookSpec("SessionEnd", None, 5, TRANSPORT_COMMAND),
 )
 HOOK_EVENTS: tuple[str, ...] = tuple(s.event for s in HOOK_SPECS)
 assert set(HOOK_EVENTS) == set(GROK_BUILD_HOOK_EVENTS)
 # Events that never try to start a service (the session is over / failing).
-_NO_SPAWN_EVENTS: frozenset[str] = frozenset({"SessionEnd", "StopFailure"})
+_NO_SPAWN_EVENTS: frozenset[str] = frozenset({"SessionEnd", "StopFailure", "StopCancelled"})
 
 
 def _hook_entry(spec: HookSpec, port: int = 0) -> dict:  # noqa: ARG001 - signature shared with the merge

@@ -556,81 +556,112 @@ never subscribes it and never returns a directive (every reply is `{}`).
 
 ## Grok Build integration
 
-Sources: xAI's hooks reference (`docs.x.ai/build/features/hooks`), read on
-2026-09-23. Grok Build's hooks are Claude-Code-*shaped* but it is **not**
-Claude Code: the config lives in `.grok/hooks/*.json`, stdin is camelCase, the
-event set differs, and Grok also *loads* `.claude/settings.json` for
-compatibility. OpenShard reads only Grok's own vocabulary (a Claude
-snake_case document is never read as Grok, and a Grok document is never
-recorded by the Claude receiver), and the agent is fixed by the receiver
-path, so a Grok Build session is always a `grok_build_hooks` Shard. Field
-audit: `adapters/grok_build_hooks.py`. Grok Build was not installed on the
-machine this was built on: every field below is either documented or marked
-*tolerated* (not documented; read defensively, can only under-report).
+Sources: xAI's hooks reference (`docs.x.ai/build/features/hooks`), Grok's own
+bundled guide (`~/.grok/docs/user-guide/10-hooks.md`), and -- what the field
+audit in `adapters/grok_build_hooks.py` rests on -- **real payloads from Grok
+Build 1.0.41 on Windows** (a headless task that edited a file, added a test
+and ran pytest; a permission denial; a `--max-turns` interruption; a non-zero
+exit and a missing file; a subagent). Grok Build's hooks are
+Claude-Code-*shaped* but it is **not** Claude Code: the config lives in
+`.grok/hooks/*.json`, the event set differs, and Grok also *loads*
+`~/.claude/settings.json` and `<repo>/.claude/settings.json` for compatibility.
+OpenShard reads only Grok's own camelCase vocabulary, and the agent is fixed by
+the receiver path, so a Grok Build session is always a `grok_build_hooks`
+Shard.
 
-* **Documented to hooks**: every event carries `hookEventName`, `sessionId`,
-  `cwd`, `workspaceRoot`; tool events add `toolName` and `toolInput`. Hook
-  processes also get `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`
-  and `GROK_WORKSPACE_ROOT`. `command` and `http` handlers, regex `matcher`
-  on the tool name (omitted = every tool), `timeout` in seconds (default 5).
-  Only `PreToolUse` can block (a `deny` decision or exit code 2); timeouts,
-  crashes and bad output are fail-open. Only `PreToolUse`, `PostToolUse` and
-  `Stop` output reaches the model.
-* **Not documented** (so *tolerated*, never relied on): `prompt` on
-  `UserPromptSubmit` (the task; absent = placeholder), `source` on
-  `SessionStart`, `reason` on `SessionEnd`, the path/command key names inside
-  `toolInput`. **Not exposed at all** (never recorded, never inferred): the
-  model and provider, token counts, cost, tool results and exit codes,
-  who or what denied a permission. OpenShard does not read Grok's session
-  files under `~/.grok` to fill any of these in.
+* **The payload carries both vocabularies at once** (observed): Grok's
+  `hookEventName` (a *snake_case value*, e.g. `post_tool_use`), `sessionId`,
+  `cwd`, `workspaceRoot`, `toolName`, `toolInput`, `toolResult`, `promptId`,
+  `timestamp`, `permissionMode`, `transcriptPath` -- **and** Claude-compatible
+  aliases in the same document (`hook_event_name` with a PascalCase value,
+  `session_id`, `tool_name`, `tool_input`, `tool_response`, ...). Hook
+  processes also get `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`,
+  `GROK_WORKSPACE_ROOT` and a `CLAUDE_PROJECT_DIR` alias. Session ids are
+  UUIDv7. `PostToolUse` matchers alias Claude names (`Bash` matches
+  `run_terminal_command`) but a payload's `toolName` is always Grok's own:
+  `run_terminal_command`, `search_replace` (Grok's single edit tool),
+  `read_file`, `list_dir`, `search_tool`, `spawn_subagent`, MCP tools as
+  `server__tool`.
+* **Read**: the event (installed `--event`, else `hook_event_name`, else
+  `hookEventName`), `sessionId`, `cwd`, `prompt` (the task -- **confirmed**
+  delivered on `UserPromptSubmit`), `source` (`SessionStart`: `new`), `reason`
+  (`SessionEnd`: `shutdown`; `Stop`: `end_turn`), `toolName`, and from
+  `toolInput` only `command`, `file_path` (edit), `target_file` (read) or
+  `target_directory` (`list_dir`). **Never read**: `toolResult` (so a
+  command's `exit_code` is ignored -- outcomes stay unknown), `old_string` /
+  `new_string`, `lastAssistantMessage`, `transcriptPath`, Grok's session files
+  under `~/.grok`. **Not in any payload**: the model, provider, token counts,
+  cost, and who or what denied a permission.
+* **Claude compatibility -- a Grok session must never become a Claude Code
+  Receipt.** Because every document is also a valid Claude payload, a user who
+  has OpenShard's Claude Code hooks anywhere Grok looks (e.g. a user-level
+  `~/.claude/settings.json`, which Grok loads without a trust prompt) would get
+  a **duplicate Claude-labelled Shard** for the same Grok session. This was
+  observed on the first real run (a `claude_code_hooks` Shard next to the
+  `grok_build_hooks` one, same session id). The Claude receiver now refuses any
+  document carrying Grok's own keys (`hookEventName`, `sessionId`,
+  `workspaceRoot`; Claude Code never sends them) -- it counts as `ignored` --
+  and the native Grok hooks are the one recorder. An OpenShard build without
+  this check that is still installed as the Claude hook will keep producing the
+  duplicate: upgrade it too.
 * **Transport**: `command` handlers. Grok's `http` handler is documented only
   as "POST the event to a url" with no header or authentication contract,
   and the capture service requires a bearer token on every request, so
   nothing tokenised is ever written into `.grok/`. `openshard hooks
-  grok-build` (fast console-script path) posts the raw document over
-  authenticated loopback to `POST /hooks/grok-build`, exactly like the
-  other command-hook agents, and always prints `{}` and exits 0 (never
-  Grok's deny code 2).
+  grok-build` (fast console-script path, ~170 ms per event measured) posts the
+  raw document over authenticated loopback to `POST /hooks/grok-build`,
+  exactly like the other command-hook agents, and always prints `{}` and exits
+  0 (never Grok's deny code 2). A capture service that is older than the hook
+  (no `/hooks/grok-build` route) is not an error: the hook falls back to the
+  in-process fold, and `openshard capture stop` + the next hook restarts it
+  on the current build.
 * **Config**: `<repo>/.grok/hooks/openshard.json` -- a file OpenShard owns
   outright (Grok merges every `*.json` in the directory, so no other file is
-  ever touched; entries in our file that are not ours survive). A file it
+  ever touched; entries in our file that are not ours survive). It must be
+  valid JSON *without a BOM* (Grok silently skips a BOM file). A file it
   creates is added to `.git/info/exclude` and is never counted as a task's
   changed file (the rest of `.grok/`, which holds shared skills and rules,
   is). `timeout` is written explicitly (15 s `SessionStart`, 5 s others).
 * **Trust**: Grok Build does not run project hooks until the folder is
-  trusted (`/hooks-trust` inside Grok, or launch with `--trust`; kept in
-  `~/.grok/trusted_folders.toml`, a format OpenShard does not parse).
-  `capture install` prints the step, and `openshard doctor` reports
-  "Capture verified" only after a real Grok Build Shard exists in the
-  repository -- until then it says "configured but unverified" and names the
-  trust step. A hook file is structural evidence only.
+  trusted; until then they are silently skipped (`grok inspect` shows
+  `projectTrusted: false` and lists only the user-level hooks). Grant it with
+  `/hooks-trust` inside Grok, or launch with `--trust` (works in 1.0.41 though
+  it is missing from `grok --help`; it records `[folders.'<path>'] trusted =
+  true` in `~/.grok/trusted_folders.toml`, a file OpenShard does not parse).
+  `capture install` prints the step, and `openshard doctor` reports "Capture
+  verified" only after a real Grok Build Shard exists in the repository --
+  until then it says "configured but unverified" and names the trust step. A
+  hook file is structural evidence only.
 * **Events** (all `openshard hooks grok-build --event <Name>`):
 
   | Grok Build event | Openshard event | Recorded |
   |---|---|---|
   | `SessionStart` | `SessionStart` | anchors the change-attribution baseline; opens the session |
-  | `UserPromptSubmit` | `UserPromptSubmit` | first one creates the Shard; the scrubbed, bounded task excerpt when `prompt` is delivered |
-  | `PostToolUse` | `PostToolUse` | `run_terminal_command` / `Bash` -> command (scrubbed, `command_kind` test/lint/other, status **unknown**); `write` / `edit` / `multiedit` -> file target, status **unknown**, no hook-reported path (Grok does not document `PostToolUse` as success-only, so it is never an "edit succeeded" signal; git supplies the file evidence); `read` -> **read** (repo-relative, never a change); anything else (MCP, search, web) by name only |
-  | `PostToolUseFailure` | `PostToolUseFailure` | the same tool record, `failed` (a failed check -> `verification.status = failed`, `agent_reported`) |
+  | `UserPromptSubmit` | `UserPromptSubmit` | first one creates the Shard; the scrubbed, bounded task excerpt from `prompt` |
+  | `PostToolUse` | `PostToolUse` | `run_terminal_command` -> command (scrubbed, `command_kind` test/lint/other, status **unknown**); `search_replace` -> file target, status **unknown**, no hook-reported path; `read_file` / `list_dir` -> **read** (repo-relative, never a change); anything else (search, subagent, MCP) by name only. **Fires for every tool that ran** -- a shell command that exited non-zero and a `read_file` of a missing file both arrive here (observed) -- so it is never a success signal, and git supplies the file evidence |
+  | `PostToolUseFailure` | `PostToolUseFailure` | the same tool record, `failed` (a failed check -> `verification.status = failed`, `agent_reported`). Documented for a tool that failed to dispatch or an MCP error; **not provoked** in the real run |
   | `PermissionDenied` | `PermissionDenied` | an `approval.denied` Event, `agent_reported`, `failed`, naming the **tool only** (`capture.permission_denied_count`); never work, never opens a Shard, never an approval receipt |
-  | `Stop` | `Stop` | completed turn; fold |
-  | `StopFailure` | `SessionIdle` | snapshot, never a completed turn |
-  | `SessionEnd` | `SessionEnd` | finalises the Shard (`session_end_observed`, reason as delivered) |
+  | `Stop`, `reason: end_turn` | `Stop` | completed turn; fold |
+  | `Stop`, any other `reason` | *(ignored)* | Grok fires a **second** `Stop` (`reason: shutdown`) *after* `SessionEnd`; counting it doubled the turn count in the first real run |
+  | `StopFailure`, `StopCancelled` | `SessionIdle` | snapshot, never a completed turn (`StopCancelled` fires *instead of* `Stop` for `max_turns`, a user interrupt or a declined permission) |
+  | `SessionEnd` | `SessionEnd` | finalises the Shard (`session_end_observed`, reason `shutdown`) |
+  | any event carrying `subagentType` | *(ignored)* | a subagent is a session of its own (own `sessionId`, own `UserPromptSubmit` / `SessionEnd`); it must not become a phantom Shard. The parent's `spawn_subagent` call is an ordinary tool record and files a subagent changed are still found by git |
 
   Not subscribed, on purpose: `PreToolUse` (Grok's only blocking event;
   OpenShard records, it does not gate, and it adds no fact `PostToolUse` /
   `PermissionDenied` lack -- **no policy enforcement is implemented**),
-  `SubagentStart` / `SubagentStop` (documented without a payload; a subagent
-  may carry its own `sessionId`, so nothing safe can be read), and
-  `Notification`, `PreCompact`, `PostCompact`, `TaskCreated`,
-  `TaskCompleted`, `InstructionsLoaded`, `CwdChanged`.
-* **Known limitations**: (1) Grok also loads `.claude/settings.json`; if
-  OpenShard's Claude Code hooks are installed in the same repository, Grok
-  may deliver its events to them too. Grok-vocabulary documents fail the
-  Claude translator's checks and are ignored (tested), but this was not
-  observed against a real Grok Build. (2) Project hooks fire only for a
-  trusted folder. (3) `SessionEnd` is not guaranteed on a killed session;
-  the idle sweep then closes it (`session_end_not_observed`).
+  `SubagentStart` / `SubagentStop`, `Notification`, `PreCompact`,
+  `PostCompact`, `TaskCreated`, `TaskCompleted`, `InstructionsLoaded`,
+  `CwdChanged`.
+* **Known limitations**: (1) Project hooks fire only for a trusted folder.
+  (2) End-of-session hooks are best-effort: Grok gives queued turn-end hooks
+  about half a second and `SessionEnd` about 1.5 s at teardown, and a session
+  whose `grok` process is killed leaves no `SessionEnd` -- the idle sweep then
+  closes it (`session_end_not_observed`). (3) Grok exposes no exit code we are
+  willing to read, so a `pytest` run is "attempted, outcome not observed" --
+  never passed or failed. (4) Subagent activity is not attributed to the
+  parent (its own events are dropped); only its `spawn_subagent` call and the
+  files git sees are.
 * **Commands**: `openshard setup` (when `grok` is on PATH),
   `openshard capture install grok-build`, `openshard capture uninstall
   grok-build`. Trust the folder, then restart Grok Build if it was running.
@@ -639,19 +670,19 @@ machine this was built on: every field below is either documented or marked
 
 | Fact | Claude Code | Google Antigravity | Hermes Agent | Grok Build |
 |---|---|---|---|---|
-| Session identity | `session_id` | `conversationId` | `session_id` | `sessionId` |
-| Task | first prompt excerpt (documented `prompt`) | never (no prompt to hooks) | `user_message` on `pre_llm_call` | excerpt **if** Grok delivers `prompt` (undocumented); else placeholder |
+| Session identity | `session_id` | `conversationId` | `session_id` | `sessionId` (UUIDv7) |
+| Task | first prompt excerpt (documented `prompt`) | never (no prompt to hooks) | `user_message` on `pre_llm_call` | first prompt excerpt (`prompt`, observed) |
 | Model | status line (`model.id`) | `modelName` on every hook | `model` on request hooks | not exposed |
 | Provider | not exposed | not exposed | `provider` on request hooks | not exposed |
 | Tokens / cost | status line, `provider_reported` | not exposed | tokens per request; no cost | not exposed |
-| Tool success signal | `PostToolUse` documented success-only -> `passed` edits | empty `error` string | `status: ok` -> `passed` edits | none (`PostToolUse` not documented as success-only) -> file tools `unknown` |
-| Tool failure | `PostToolUseFailure` | non-empty `error` | `status: error` / `blocked` | `PostToolUseFailure` |
+| Tool success signal | `PostToolUse` documented success-only -> `passed` edits | empty `error` string | `status: ok` -> `passed` edits | none (`PostToolUse` fires for every tool that ran, even a non-zero exit) -> file tools `unknown` |
+| Tool failure | `PostToolUseFailure` | non-empty `error` | `status: error` / `blocked` | `PostToolUseFailure` (dispatch / MCP failures only) |
 | Changed files | git plus hook-reported | git plus hook-reported | git plus hook-reported | git only (`git_observed`) |
 | Permission / approval | none | none | `ApprovalRequest` / `ApprovalDecision` with the choice | `PermissionDenied` -> `approval.denied` (tool name only; no grant or request) |
-| Subagents | none | none | counted, linked by child session | not subscribed |
-| Verification | check command observed; failure from failure event | from `error` | check command observed; failure from `status` | check command observed; failure from failure event |
-| Turn completion | `Stop` | `Stop` (not when errored / not idle) | `on_session_end` `completed` | `Stop` (not `StopFailure`) |
-| Session end | `SessionEnd` | none (idle sweep) | `on_session_finalize` | `SessionEnd` |
+| Subagents | none | none | counted, linked by child session | own sessions ignored; parent's `spawn_subagent` call recorded |
+| Verification | check command observed; failure from failure event | from `error` | check command observed; failure from `status` | check command observed, outcome unknown (`exit_code` deliberately unread) |
+| Turn completion | `Stop` | `Stop` (not when errored / not idle) | `on_session_end` `completed` | `Stop` with `reason: end_turn` (not `StopFailure` / `StopCancelled`) |
+| Session end | `SessionEnd` | none (idle sweep) | `on_session_finalize` | `SessionEnd` (best-effort at teardown) |
 | Transport / scope | HTTP hooks, per repository | command hook, per repository | command hook, user-global, per-repository opt-in | command hook, per repository (folder trust) |
 
 ## Setup / doctor / uninstall

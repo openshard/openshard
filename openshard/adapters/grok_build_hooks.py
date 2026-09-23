@@ -25,58 +25,82 @@ path; reduction, queue, fold and receipt are the shared code in
 
 Sources and field audit -- what is read, and on what authority
 --------------------------------------------------------------
-**Documented** (docs.x.ai hooks reference): every event carries
-``hookEventName``, ``sessionId``, ``cwd`` and ``workspaceRoot``; tool events
-add ``toolName`` and ``toolInput``. The events are ``SessionStart``,
-``SessionEnd``, ``UserPromptSubmit``, ``PreToolUse``, ``PostToolUse``,
-``PostToolUseFailure``, ``PermissionDenied``, ``Stop``, ``StopFailure``,
-``Notification``, ``SubagentStart``, ``SubagentStop``, ``PreCompact`` and
-``PostCompact``. ``PostToolUseFailure`` is a separate event from
-``PostToolUse``. Tool names are Grok's own (``run_terminal_command`` ...);
-matchers alias the Claude names (``Bash`` matches ``run_terminal_command``).
+Verified against a real Grok Build 1.0.41 on Windows (a headless task that
+edited a file, added a test and ran pytest, plus a permission denial, a
+``--max-turns`` interruption, a non-zero exit, a missing file and a subagent)
+and Grok's own bundled documentation (``~/.grok/docs/user-guide/10-hooks.md``).
+Every document carries **both** vocabularies at once: Grok's camelCase keys
+(``hookEventName`` -- a *snake_case value* such as ``post_tool_use`` --,
+``sessionId``, ``cwd``, ``workspaceRoot``, ``toolName``, ``toolInput``,
+``toolResult``, ``promptId``, ``timestamp``, ``permissionMode``,
+``transcriptPath``) and Claude-compatible aliases (``hook_event_name`` with a
+PascalCase value, ``session_id``, ``tool_name``, ``tool_input``,
+``tool_response``, ``transcript_path``, ``permission_mode``). That is why the
+Claude Code receiver must recognise and refuse these documents
+(``claude_hooks.is_grok_build_document``): to it, a Grok document is a
+perfectly valid Claude payload.
 
-**Not documented -- read defensively, can only under-report.** The reference
-lists no per-event fields beyond the ones above, so these are tolerated
-rather than relied on, each behind an ``isinstance`` check and a length cap:
+Read here, all confirmed in real payloads:
 
-* ``prompt`` on ``UserPromptSubmit`` -> the scrubbed, bounded task excerpt.
-  Absent, the task stays the profile placeholder; it is never inferred from
-  a transcript or session file.
-* ``source`` on ``SessionStart`` and ``reason`` on ``SessionEnd``: short
-  strings carried as-is.
-* the file path (``filePath`` | ``file_path`` | ``path``) and command
-  (``command``) inside ``toolInput`` for tool names OpenShard recognises.
+* the event: the installed ``--event`` first, then ``hook_event_name``, then
+  ``hookEventName`` (snake_case, mapped back to the PascalCase name);
+* ``sessionId`` (a UUIDv7), ``cwd``;
+* ``prompt`` on ``UserPromptSubmit`` -> the scrubbed, bounded task excerpt;
+* ``source`` on ``SessionStart`` (``new``), ``reason`` on ``SessionEnd``
+  (``shutdown``) and on ``Stop`` (``end_turn`` for a real turn end);
+* ``toolName`` plus, from ``toolInput``, only: ``command`` for
+  ``run_terminal_command``; ``file_path`` for ``search_replace`` (Grok's one
+  edit tool -- Claude's ``Edit`` / ``Write`` / ``MultiEdit`` all alias to it);
+  ``target_file`` for ``read_file``; ``target_directory`` for ``list_dir``.
 
-**Never read:** any tool result / output / error field, ``toolInput``
-content other than the one path or the command line (file contents,
-replacement text, queries), transcript and session files under
-``~/.grok``, ``workspaceRoot`` (the working directory is ``cwd``), and every
-unknown key. An agent label in the payload is never read: the agent is fixed
-by the receiver path the hook process posts to.
+**Never read:** ``toolResult`` / ``tool_response`` (so a command's
+``exit_code`` is deliberately ignored: outcomes stay unknown rather than
+inferred), ``toolInput`` content other than the one path or the command line
+(``old_string`` / ``new_string``, ``description``, queries), ``transcriptPath``
+and Grok's session files, ``lastAssistantMessage``, ``workspaceRoot``, and
+every unknown key. An agent label in the payload is never read: the agent is
+fixed by the receiver path the hook process posts to.
+
+Real-payload behaviours the mapping depends on
+----------------------------------------------
+* ``PostToolUse`` fires for **every tool that ran**, including a shell
+  command that exited non-zero and a ``read_file`` of a missing file (both
+  observed); ``PostToolUseFailure`` is reserved for a tool that failed to
+  dispatch or an MCP error. So ``PostToolUse`` is never a success signal:
+  file tools are recorded ``unknown`` with no hook-reported path, and git
+  supplies the file evidence.
+* ``Stop`` fires **twice** for a normal one-turn session: ``reason:
+  "end_turn"`` with a ``promptId`` when the turn ends, and again *after*
+  ``SessionEnd`` with ``reason: "shutdown"``. Only ``end_turn`` is a completed
+  turn; a ``Stop`` with any other reason is ignored.
+* ``StopCancelled`` (``reason: max_turns`` observed; also a user interrupt or
+  a declined permission) fires **instead of** ``Stop`` -> a neutral
+  ``SessionIdle`` boundary, never a completed turn. ``StopFailure`` likewise.
+* A subagent runs as a session of its own: a new ``sessionId``, and every one
+  of its events (including its ``UserPromptSubmit`` and ``SessionEnd``) carries
+  ``subagentType``. Such an event is ignored, so a subagent never becomes a
+  phantom Shard. The parent's own ``spawn_subagent`` call is an ordinary tool
+  record, and files a subagent changed are still found by git.
 
 Event mapping (see ``docs/agent-capture.md`` for the full table)
 ----------------------------------------------------------------
 ``SessionStart`` -> ``SessionStart``; ``UserPromptSubmit`` ->
 ``UserPromptSubmit``; ``PostToolUse`` -> ``PostToolUse`` with **no success
-signal** (the reference does not say it fires only after a successful run,
-so a file tool is recorded ``unknown`` and contributes no hook-reported
-paths; git-observed changes are the file evidence); ``PostToolUseFailure`` ->
-``PostToolUseFailure`` (a failed call); ``PermissionDenied`` ->
-``PermissionDenied`` (an ``approval.denied`` Event, ``agent_reported``);
-``Stop`` -> ``Stop`` (a completed turn); ``StopFailure`` -> ``SessionIdle``
-(a neutral boundary -- the turn ended in an error, so it is never a
-completed turn); ``SessionEnd`` -> ``SessionEnd``.
+signal**; ``PostToolUseFailure`` -> ``PostToolUseFailure`` (a failed call);
+``PermissionDenied`` -> ``PermissionDenied`` (an ``approval.denied`` Event,
+``agent_reported``, tool name only); ``Stop`` (``end_turn``) -> ``Stop``;
+``StopFailure`` / ``StopCancelled`` -> ``SessionIdle``; ``SessionEnd`` ->
+``SessionEnd``.
 
 Not subscribed, on purpose: ``PreToolUse`` is Grok's only blocking event
 (a deny decision or exit code 2 stops the tool) and OpenShard records, it
 does not gate; it adds no fact ``PostToolUse`` / ``PermissionDenied`` do not
-carry. ``SubagentStart`` / ``SubagentStop`` are documented without a payload,
-so nothing useful (or safe -- a subagent may carry its own ``sessionId``) can
-be read from them. ``Notification``, ``PreCompact`` and ``PostCompact`` carry
-no fact a Receipt reports.
+carry. ``SubagentStart`` / ``SubagentStop`` (a subagent's id and type only;
+its own events are ignored, see above), ``Notification``, ``PreCompact`` and
+``PostCompact`` carry no fact a Receipt reports.
 
-Model, provider, token counts and cost are not part of the documented hook
-payload, so a Grok Build record never carries them.
+Model, provider, token counts and cost are not part of any hook payload
+(observed), so a Grok Build record never carries them.
 """
 
 from __future__ import annotations
@@ -112,18 +136,35 @@ GROK_BUILD_EVENT_MAP: dict[str, str] = {
     "PermissionDenied": EVENT_PERMISSION_DENIED,
     "Stop": EVENT_STOP,
     "StopFailure": EVENT_SESSION_IDLE,
+    "StopCancelled": EVENT_SESSION_IDLE,
     "SessionEnd": EVENT_SESSION_END,
 }
 GROK_BUILD_HOOK_EVENTS: tuple[str, ...] = tuple(GROK_BUILD_EVENT_MAP)
 
-# Tool names compared case-insensitively. Grok's own shell tool is
-# ``run_terminal_command``; ``bash`` / ``edit`` / ``write`` / ``read`` are the
-# Claude names Grok's matchers alias. Anything else (MCP tools, search, web,
-# future tools) is recorded by name only.
-COMMAND_TOOL_NAMES: frozenset[str] = frozenset({"run_terminal_command", "bash"})
-FILE_TOOL_NAMES: dict[str, str] = {"edit": "update", "multiedit": "update", "write": "create"}
-READ_TOOL_NAMES: frozenset[str] = frozenset({"read"})
-_PATH_KEYS: tuple[str, ...] = ("filePath", "file_path", "path")
+# Grok's own tool names, as they appear in ``toolName`` (observed). Claude's
+# names (``Bash``, ``Edit``, ...) only exist as matcher aliases, never in a
+# payload. Anything else (MCP, search, web, subagent tools) is recorded by name
+# only. ``search_replace`` is Grok's single edit tool.
+COMMAND_TOOL_NAMES: frozenset[str] = frozenset({"run_terminal_command"})
+FILE_TOOL_NAMES: dict[str, str] = {"search_replace": "update"}
+READ_TOOL_NAMES: frozenset[str] = frozenset({"read_file", "list_dir"})
+_WRITE_PATH_KEYS: tuple[str, ...] = ("file_path",)
+_READ_PATH_KEYS: tuple[str, ...] = ("target_file", "target_directory")
+# Stop's ``reason`` for a real turn end; the session-end Stop says "shutdown".
+_TURN_END_REASON = "end_turn"
+
+# ``hookEventName``'s snake_case values -> the PascalCase event name.
+_SNAKE_EVENT_NAMES: dict[str, str] = {
+    "session_start": "SessionStart",
+    "user_prompt_submit": "UserPromptSubmit",
+    "post_tool_use": "PostToolUse",
+    "post_tool_use_failure": "PostToolUseFailure",
+    "permission_denied": "PermissionDenied",
+    "stop": "Stop",
+    "stop_failure": "StopFailure",
+    "stop_cancelled": "StopCancelled",
+    "session_end": "SessionEnd",
+}
 
 
 def classify_grok_build_tool(tool_name: str | None) -> str:
@@ -138,11 +179,20 @@ def classify_grok_build_tool(tool_name: str | None) -> str:
 
 
 def resolve_event_name(data: Mapping[str, Any], event_override: str | None) -> str | None:
-    """The Grok event a document belongs to: the installed ``--event`` first, then ``hookEventName``."""
+    """The Grok event a document belongs to.
+
+    The installed ``--event`` first, then the PascalCase ``hook_event_name``
+    every document carries, then ``hookEventName`` (a snake_case value).
+    """
     if isinstance(event_override, str) and event_override:
         return event_override
-    name = data.get("hookEventName")
-    return name if isinstance(name, str) and name else None
+    pascal = data.get("hook_event_name")
+    if isinstance(pascal, str) and pascal:
+        return pascal
+    snake = data.get("hookEventName")
+    if isinstance(snake, str) and snake:
+        return _SNAKE_EVENT_NAMES.get(snake, snake)
+    return None
 
 
 def _first_str(args: Mapping[str, Any], keys: tuple[str, ...], limit: int) -> str | None:
@@ -165,6 +215,12 @@ def extract_grok_build_payload(
     name = resolve_event_name(data, event_override)
     if name not in GROK_BUILD_EVENT_MAP:
         return None
+    if "subagentType" in data:
+        return None  # a subagent's own session (own sessionId): never a Shard of its own
+    if name == "Stop":
+        reason = data.get("reason")
+        if isinstance(reason, str) and reason != _TURN_END_REASON:
+            return None  # the extra Stop Grok fires at session end ("shutdown") is not a turn
     event = GROK_BUILD_EVENT_MAP[name]
 
     session_id = data.get("sessionId")
@@ -197,10 +253,10 @@ def extract_grok_build_payload(
         if kind == TOOL_KIND_COMMAND:
             payload.command = _first_str(tool_input, ("command",), 4_000)
         elif kind == TOOL_KIND_FILE:
-            path = _first_str(tool_input, _PATH_KEYS, 2_000)
+            path = _first_str(tool_input, _WRITE_PATH_KEYS, 2_000)
             if path:
                 payload.file_path = path
                 payload.file_paths = [(path, FILE_TOOL_NAMES.get((tool_name or "").lower(), "update"))]
         elif kind == TOOL_KIND_READ:
-            payload.file_path = _first_str(tool_input, _PATH_KEYS, 2_000)
+            payload.file_path = _first_str(tool_input, _READ_PATH_KEYS, 2_000)
     return payload

@@ -194,9 +194,8 @@ GROK_BUILD_PROFILE = AgentProfile(
     import_note=(
         "Captured automatically from Grok Build's native hooks. "
         "Tool/file facts are as reported by Grok Build; files are inferred from git diff. "
-        "Grok Build's documented hook payload names no model, provider, cost or token counts, "
-        "so those stay Not recorded; the task is recorded only when Grok Build delivers the prompt "
-        "on its UserPromptSubmit hook. "
+        "Grok Build's hook payloads name no model, provider, cost or token counts, so those "
+        "stay Not recorded; the task is the prompt Grok Build delivers on its UserPromptSubmit hook. "
         "Verification is never recorded by OpenShard for this capture path."
     ),
 )

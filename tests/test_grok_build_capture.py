@@ -28,7 +28,12 @@ from openshard.adapters import claude_capture_client as client
 from openshard.adapters import claude_capture_service as svc
 from openshard.adapters import grok_build_hooks as gb
 from openshard.adapters.capture_agents import profile_for
-from openshard.adapters.claude_hooks import handle_claude_hook, handle_hook, reduce_hook_payload
+from openshard.adapters.claude_hooks import (
+    handle_claude_hook,
+    handle_hook,
+    reduce_hook_payload,
+)
+from openshard.adapters.claude_hooks import is_grok_build_document as _is_grok_doc
 from openshard.adapters.grok_build_hooks_install import (
     HOOK_COMMAND,
     HOOK_EVENTS,
@@ -81,11 +86,27 @@ def repo(tmp_path: Path) -> Path:
     return _make_repo(tmp_path / "grok repo")
 
 
+_SNAKE = {
+    "SessionStart": "session_start", "UserPromptSubmit": "user_prompt_submit", "PreToolUse": "pre_tool_use",
+    "PostToolUse": "post_tool_use", "PostToolUseFailure": "post_tool_use_failure",
+    "PermissionDenied": "permission_denied", "Stop": "stop", "StopFailure": "stop_failure",
+    "StopCancelled": "stop_cancelled", "SessionEnd": "session_end", "SubagentStart": "subagent_start",
+    "SubagentStop": "subagent_stop", "Notification": "notification", "PreCompact": "pre_compact",
+    "PostCompact": "post_compact", "TaskCreated": "task_created", "InstructionsLoaded": "instructions_loaded",
+    "session_start": "session_start", "Nope": "nope",
+}
+
+
 def _doc(repo: Path, event: str | None = None, sid: str = SID, **fields) -> dict:
     """A Grok Build hook document with the base fields every event carries."""
-    base: dict = {"sessionId": sid, "cwd": str(repo), "workspaceRoot": str(repo)}
+    base: dict = {
+        "sessionId": sid, "cwd": str(repo), "workspaceRoot": str(repo), "permissionMode": "default",
+        "timestamp": "2026-09-23T21:00:58.446076900+00:00", "session_id": sid, "permission_mode": "default",
+        "transcriptPath": "C:\\Users\\u\\.grok\\sessions\\x\\updates.jsonl",
+    }
     if event:
-        base["hookEventName"] = event
+        base["hook_event_name"] = event
+        base["hookEventName"] = _SNAKE.get(event, event.lower())
     base.update(fields)
     return base
 
@@ -103,10 +124,11 @@ def _drive_inline(repo: Path, sid: str = SID) -> None:
     _run(repo, "SessionStart", _doc(repo, "SessionStart", sid, source="startup"))
     _run(repo, "UserPromptSubmit", _doc(repo, "UserPromptSubmit", sid,
                                         prompt=f"add a calc module. key={SECRET}"))
-    _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "read", {"filePath": str(repo / "README.md")}, sid))
+    _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "read_file", {"target_file": str(repo / "README.md")}, sid))
     (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
-    _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "write",
-                                    {"filePath": str(repo / "calc.py"), "content": FILE_BODY + SECRET}, sid))
+    _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "search_replace",
+                                    {"file_path": str(repo / "calc.py"), "old_string": "x", "new_string": FILE_BODY + SECRET},
+                                    sid))
     _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "run_terminal_command",
                                     {"command": "python -m pytest -q"}, sid))
     _run(repo, "PostToolUseFailure", _tool(repo, "PostToolUseFailure", "run_terminal_command",
@@ -115,7 +137,9 @@ def _drive_inline(repo: Path, sid: str = SID) -> None:
                                          {"command": f"rm -rf / {SECRET}"}, sid))
     _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "mcp__github__create_issue", {"title": SECRET}, sid))
     _run(repo, "Stop", _doc(repo, "Stop", sid, reason="end_turn"))
-    _run(repo, "SessionEnd", _doc(repo, "SessionEnd", sid, reason="user_exit"))
+    _run(repo, "SessionEnd", _doc(repo, "SessionEnd", sid, reason="shutdown"))
+    # Grok fires a second Stop *after* SessionEnd ("shutdown"): not a turn.
+    _run(repo, "Stop", _doc(repo, "Stop", sid, reason="shutdown"))
 
 
 def _lines(repo: Path) -> list[dict]:
@@ -140,7 +164,7 @@ class TestTranslator:
             "SessionStart": "SessionStart", "UserPromptSubmit": "UserPromptSubmit",
             "PostToolUse": "PostToolUse", "PostToolUseFailure": "PostToolUseFailure",
             "PermissionDenied": "PermissionDenied", "Stop": "Stop", "StopFailure": "SessionIdle",
-            "SessionEnd": "SessionEnd",
+            "StopCancelled": "SessionIdle", "SessionEnd": "SessionEnd",
         }
         assert gb.GROK_BUILD_EVENT_MAP == expected
         for grok_event, neutral in expected.items():
@@ -164,9 +188,12 @@ class TestTranslator:
     def test_claude_vocabulary_is_never_read_as_grok(self, repo):
         claude_doc = {"session_id": SID, "cwd": str(repo), "hook_event_name": "PostToolUse",
                       "tool_name": "Bash", "tool_input": {"command": "ls"}}
-        assert gb.extract_grok_build_payload(claude_doc) is None
-        p = gb.extract_grok_build_payload(claude_doc, event_override="PostToolUse")
-        assert p.session_id is None and p.tool_name is None and p.command is None  # nothing borrowed
+        # Only the event name is shared vocabulary; no session, tool or command is borrowed from Claude's keys,
+        # so such a document has no session id and is dropped downstream.
+        for override in (None, "PostToolUse"):
+            p = gb.extract_grok_build_payload(claude_doc, event_override=override)
+            assert p.session_id is None and p.tool_name is None and p.command is None
+            assert reduce_hook_payload(p, Path(".")) is None
 
     def test_session_id_is_validated(self, repo):
         for bad in ("../../etc/passwd", 42, None, "", "a b"):
@@ -186,18 +213,21 @@ class TestTranslator:
         def post(name, tool_input, event="PostToolUse"):
             return gb.extract_grok_build_payload(_tool(repo, event, name, tool_input), event_override=event)
 
-        for name in ("run_terminal_command", "Bash", "bash"):
-            cmd = post(name, {"command": "npm test", "cwd": "/x", "timeout": 5})
-            assert cmd.tool_kind == "command" and cmd.command == "npm test" and cmd.file_path is None, name
-        write = post("write", {"filePath": "a.py", "content": FILE_BODY})
-        assert write.tool_kind == "file" and write.file_paths == [("a.py", "create")] and write.tool_success is None
-        for name in ("edit", "Edit", "multiedit"):
-            p = post(name, {"file_path": "b.py", "path": "c.py", "old_string": SECRET})
-            assert p.tool_kind == "file" and p.file_paths == [("b.py", "update")], name
-        read = post("read", {"path": "/r/x.py", "offset": 3})
+        cmd = post("run_terminal_command", {"command": "npm test", "description": "Run the tests"})
+        assert cmd.tool_kind == "command" and cmd.command == "npm test" and cmd.file_path is None
+        edit = post("search_replace", {"file_path": "a.py", "old_string": SECRET, "new_string": FILE_BODY})
+        assert edit.tool_kind == "file" and edit.file_paths == [("a.py", "update")] and edit.tool_success is None
+        read = post("read_file", {"target_file": "/r/x.py"})
         assert read.tool_kind == "read" and read.file_path == "/r/x.py" and read.command is None
-        for name in ("grep", "web_fetch", "web_search", "mcp__github__create_issue", "SomethingNew"):
-            p = post(name, {"command": "rm -rf /", "filePath": "/etc/passwd", "query": SECRET})
+        listing = post("list_dir", {"target_directory": "/r/src"})
+        assert listing.tool_kind == "read" and listing.file_path == "/r/src"
+        # Claude's tool names only exist as matcher aliases: they never appear in a real payload.
+        for name in ("Bash", "bash", "Edit", "Write", "MultiEdit", "Read", "edit", "write", "read"):
+            p = post(name, {"command": "ls", "file_path": "/etc/passwd", "target_file": "/etc/passwd"})
+            assert p.tool_kind == "other" and p.command is None and p.file_path is None, name
+        for name in ("grep", "web_fetch", "web_search", "search_tool", "spawn_subagent",
+                     "mcp__github__create_issue", "SomethingNew"):
+            p = post(name, {"command": "rm -rf /", "file_path": "/etc/passwd", "query": SECRET})
             assert p.tool_kind == "other" and p.command is None and p.file_path is None, name
         failed = post("run_terminal_command", {"command": "false"}, event="PostToolUseFailure")
         assert failed.event == "PostToolUseFailure" and failed.command == "false"
@@ -213,8 +243,8 @@ class TestTranslator:
         assert SECRET not in blob
 
     def test_malformed_shapes_under_report(self, repo):
-        for tool_input in (None, "ls", [], {"command": ["ls"]}, {"command": 7}, {"filePath": 7}):
-            for name in ("run_terminal_command", "write", "read"):
+        for tool_input in (None, "ls", [], {"command": ["ls"]}, {"command": 7}, {"file_path": 7, "target_file": 7}):
+            for name in ("run_terminal_command", "search_replace", "read_file"):
                 p = gb.extract_grok_build_payload(
                     _doc(repo, "PostToolUse", toolName=name, toolInput=tool_input), event_override="PostToolUse")
                 assert p is not None and p.command is None and p.file_path is None, (name, tool_input)
@@ -233,8 +263,8 @@ class TestTranslator:
     def test_never_reads_results_transcripts_or_contents(self, repo):
         for event, doc in (
             ("UserPromptSubmit", _doc(repo, prompt="hi", transcriptPath=f"/x/{SECRET}")),
-            ("PostToolUse", _tool(repo, "PostToolUse", "write", {"filePath": str(repo / "a.py"),
-                                                                 "content": FILE_BODY + SECRET},
+            ("PostToolUse", _tool(repo, "PostToolUse", "search_replace", {"file_path": str(repo / "a.py"),
+                                                                 "new_string": FILE_BODY + SECRET},
                                   toolResponse=f"out {SECRET}", toolOutput=SECRET)),
             ("PostToolUseFailure", _tool(repo, "PostToolUseFailure", "run_terminal_command",
                                          {"command": "ls"}, error=f"boom {SECRET}")),
@@ -261,7 +291,7 @@ class TestCanonicalRecord:
         assert cap["source"] == "grok_build_hooks" and cap["agent"] == "grok_build"
         assert cap["agent_vendor"] == "xAI" and cap["provider"] is None
         assert cap["session_id"] == SID
-        assert cap["session_end_observed"] is True and cap["session_end_reason"] == "user_exit"
+        assert cap["session_end_observed"] is True and cap["session_end_reason"] == "shutdown"
         assert cap["prompt_count"] == 1 and cap["tool_call_count"] == 5 and cap["tool_failure_count"] == 1
         assert cap["turn_count"] == 1 and cap["permission_denied_count"] == 1
         assert cap["task_status"] == "turn_completed"
@@ -291,10 +321,10 @@ class TestCanonicalRecord:
         for wanted in ("session.started", "tool.invoked", "file.changed", "approval.denied", "run.completed"):
             assert wanted in types, wanted
         tools = {e.metadata.get("tool"): e for e in events if e.event_type == "tool.invoked"}
-        read = tools["read"]
+        read = tools["read_file"]
         assert read.target == "README.md" and read.metadata.get("access") == "read" and read.status == "unknown"
         # Grok does not document PostToolUse as success-only: a write is never "passed".
-        write = tools["write"]
+        write = tools["search_replace"]
         assert write.target == "calc.py" and write.status == "unknown" and write.evidence == "agent_reported"
         assert tools["mcp__github__create_issue"].target is None
         failed = next(e for e in events if e.event_type == "tool.invoked" and e.status == "failed")
@@ -326,7 +356,7 @@ class TestCanonicalRecord:
     def test_written_file_is_git_evidence_not_hook_evidence(self, repo):
         _run(repo, "UserPromptSubmit", _doc(repo, "UserPromptSubmit", prompt="add calc"))
         (repo / "calc.py").write_text("x = 1\n", encoding="utf-8")
-        _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "write", {"filePath": str(repo / "calc.py")}))
+        _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "search_replace", {"file_path": str(repo / "calc.py")}))
         _run(repo, "Stop")
         entry = _lines(repo)[0]
         calc = next(f for f in entry["files_detail"] if f["path"] == "calc.py")
@@ -354,7 +384,7 @@ class TestCanonicalRecord:
 
     def test_read_outside_the_repository_is_dropped(self, repo, tmp_path):
         _run(repo, "UserPromptSubmit", _doc(repo, "UserPromptSubmit", prompt="x"))
-        _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "read", {"path": str(tmp_path / "secret.txt")}))
+        _run(repo, "PostToolUse", _tool(repo, "PostToolUse", "read_file", {"target_file": str(tmp_path / "secret.txt")}))
         _run(repo, "Stop")
         ev = next(e for e in _lines(repo)[0]["events"] if e["event_type"] == "tool.invoked")
         assert ev["target"] is None and ev["metadata"]["path_dropped"] == "outside repository"
@@ -373,7 +403,7 @@ class TestCanonicalRecord:
         _drive_inline(repo)
         events = events_from_entry(_lines(repo)[0])
         done = next(e for e in events if e.event_type == "run.completed")
-        assert "Grok Build session ended (reason=user_exit)" in done.action
+        assert "Grok Build session ended (reason=shutdown)" in done.action
 
     def test_receipt_identity(self, repo):
         _drive_inline(repo)
@@ -433,10 +463,10 @@ class TestCanonicalRecord:
         from openshard.adapters.claude_hooks import buffer_path
 
         _run(repo, "UserPromptSubmit", _doc(repo, "UserPromptSubmit", prompt="x"))
-        _run(repo, "PermissionDenied", _tool(repo, "PermissionDenied", "write", {}))
+        _run(repo, "PermissionDenied", _tool(repo, "PermissionDenied", "search_replace", {}))
         _run(repo, "Stop")
         buffer_path(repo, SID, "grok_build").unlink()  # force a rebuild from runs.jsonl
-        _run(repo, "PermissionDenied", _tool(repo, "PermissionDenied", "write", {}))
+        _run(repo, "PermissionDenied", _tool(repo, "PermissionDenied", "search_replace", {}))
         _run(repo, "Stop")
         assert _lines(repo)[0]["capture"]["permission_denied_count"] == 2
 
@@ -568,14 +598,15 @@ class TestServicePath:
             return [
                 ("SessionStart", _doc(r, "SessionStart", source="startup")),
                 ("UserPromptSubmit", _doc(r, "UserPromptSubmit", prompt=f"add calc {SECRET}")),
-                ("PostToolUse", _tool(r, "PostToolUse", "write", {"filePath": str(r / "calc.py"),
-                                                                 "content": FILE_BODY + SECRET})),
+                ("PostToolUse", _tool(r, "PostToolUse", "search_replace", {"file_path": str(r / "calc.py"),
+                                                                        "new_string": FILE_BODY + SECRET})),
                 ("PostToolUse", _tool(r, "PostToolUse", "run_terminal_command", {"command": "pytest -q"})),
                 ("PostToolUseFailure", _tool(r, "PostToolUseFailure", "run_terminal_command",
                                              {"command": "git push"})),
                 ("PermissionDenied", _tool(r, "PermissionDenied", "run_terminal_command", {"command": "rm x"})),
                 ("Stop", _doc(r, "Stop")),
-                ("SessionEnd", _doc(r, "SessionEnd", reason="user_exit")),
+                ("SessionEnd", _doc(r, "SessionEnd", reason="shutdown")),
+                ("Stop", _doc(r, "Stop", reason="shutdown")),
             ]
 
         for i, (event, doc) in enumerate(steps(via_http)):
@@ -595,8 +626,8 @@ class TestServicePath:
     def test_queue_line_is_reduced_and_agent_tagged(self, service, repo):
         service.server.recorder.pause_processing()
         assert _post(service.port, "PostToolUse",
-                     _tool(repo, "PostToolUse", "write", {"filePath": str(repo / "calc.py"),
-                                                          "content": FILE_BODY + SECRET}))
+                     _tool(repo, "PostToolUse", "search_replace", {"file_path": str(repo / "calc.py"),
+                                                          "new_string": FILE_BODY + SECRET}))
         queue_file = repo / ".openshard" / "claude_sessions" / f"grok_build.{SID}{svc.QUEUE_SUFFIX}"
         line = json.loads(queue_file.read_text(encoding="utf-8").splitlines()[0])
         assert line["kind"] == "hook" and line["data"]["agent"] == "grok_build"
@@ -892,3 +923,206 @@ class TestCoexistsWithHermes:
         lines = _lines(repo)
         assert {e["executor"] for e in lines} >= {"grok_build_hooks"}
         assert len({e["shard_id"] for e in lines}) == len(lines)
+
+
+# ---------------------------------------------------------------------------
+# Regression: the payload shapes a REAL Grok Build 1.0.41 sent (Windows, headless task:
+# edit calc.py, add a test, run pytest). Paths and the session id are normalised; large
+# ``toolResult`` bodies are trimmed but the keys that matter (``exit_code``) are kept so
+# the tests prove they are *ignored*.
+# ---------------------------------------------------------------------------
+
+REAL_SID = "01a0d012-55af-7fb0-b8d1-c9a017d54206"
+CHILD_SID = "01a0d014-f38f-73b1-8b2e-27e296940bf3"
+_REAL_TRANSCRIPT = "C:\\Users\\u\\.grok\\sessions\\C%3A%5Ctmp%5Crepo\\{sid}\\updates.jsonl"
+
+
+def _real(repo: Path, event: str, sid: str = REAL_SID, **fields) -> dict:
+    """The envelope every real event carried: camelCase *and* Claude-compatible snake_case keys."""
+    root = str(repo)
+    transcript = _REAL_TRANSCRIPT.format(sid=sid)
+    base = {
+        "hookEventName": _SNAKE[event], "sessionId": sid, "cwd": root, "workspaceRoot": root.replace("\\", "/") + "/",
+        "timestamp": "2026-09-23T21:00:58.446076900+00:00", "permissionMode": "bypassPermissions",
+        "transcriptPath": transcript,
+        "hook_event_name": event, "session_id": sid, "permission_mode": "bypassPermissions",
+        "transcript_path": transcript,
+    }
+    base.update(fields)
+    return base
+
+
+def _real_tool(repo: Path, event: str, name: str, tool_input: dict, result: dict | None = None,
+               sid: str = REAL_SID, use_id: str = "call-1", **fields) -> dict:
+    doc = _real(repo, event, sid, toolName=name, toolInput=tool_input, toolUseId=use_id,
+                toolInputTruncated=False, tool_name=name, tool_input=tool_input, tool_use_id=use_id, **fields)
+    if result is not None:
+        doc.update(toolResult=result, tool_response=result, toolResultTruncated=False, durationMs=5, duration_ms=5)
+    return doc
+
+
+def _real_session(repo: Path, sid: str = REAL_SID) -> list[tuple[str, dict]]:
+    """The observed order: ... Stop(end_turn), SessionEnd(shutdown), Stop(shutdown)."""
+    calc, tests = str(repo / "calc.py"), str(repo / "test_calc.py")
+    edit = {"type": "SearchReplace", "EditsApplied": {"old_string": "x", "new_string": "y"}}
+    prompt_id = "0c7cd520-cdc8-4b15-a4f3-aa9709c65bd0"
+    return [
+        ("SessionStart", _real(repo, "SessionStart", sid, source="new")),
+        ("UserPromptSubmit", _real(repo, "UserPromptSubmit", sid, promptId=prompt_id,
+                                   prompt=f"In calc.py, change add(a, b) to take an optional c. key={SECRET}")),
+        ("PostToolUse", _real_tool(repo, "PostToolUse", "search_tool", {"query": "codegraph explore", "limit": 3},
+                                   {"type": "SearchTool", "result_count": 3}, sid, "call-0")),
+        ("PostToolUse", _real_tool(repo, "PostToolUse", "read_file", {"target_file": calc},
+                                   {"type": "ReadFile", "FileContent": {"content": "1->def add(a, b): ..."}},
+                                   sid, "call-1")),
+        ("PostToolUse", _real_tool(repo, "PostToolUse", "search_replace",
+                                   {"file_path": calc, "old_string": "def add(a, b):", "new_string": "def add(a, b, c=0):"},
+                                   edit, sid, "call-3")),
+        ("PostToolUse", _real_tool(repo, "PostToolUse", "search_replace",
+                                   {"file_path": tests, "old_string": "a", "new_string": "b" + SECRET},
+                                   edit, sid, "call-4")),
+        ("PostToolUse", _real_tool(repo, "PostToolUse", "run_terminal_command",
+                                   {"command": "python -m pytest -q", "description": "Run pytest quietly"},
+                                   {"type": "Bash", "output_for_prompt": f"exit: 0\n2 passed {SECRET}", "exit_code": 0},
+                                   sid, "call-5")),
+        ("Stop", _real(repo, "Stop", sid, promptId=prompt_id, reason="end_turn", stopHookActive=False,
+                       lastAssistantMessage=f"pytest passed {SECRET}", backgroundTasks=[], sessionCrons=[])),
+        ("SessionEnd", _real(repo, "SessionEnd", sid, reason="shutdown")),
+        ("Stop", _real(repo, "Stop", sid, reason="shutdown", stopHookActive=False)),
+    ]
+
+
+class TestObservedRealPayloads:
+    def _apply(self, repo: Path, docs: list[tuple[str, dict]]) -> None:
+        for i, (event, doc) in enumerate(docs):
+            if i == 1:  # the edit happens after the session began (the baseline is taken at SessionStart)
+                (repo / "calc.py").write_text("def add(a, b, c=0):\n    return a + b + c\n", encoding="utf-8")
+            handle_hook(doc, env={}, agent="grok_build", event_override=event)
+
+    def test_a_real_session_is_one_finalised_grok_build_shard(self, repo):
+        self._apply(repo, _real_session(repo))
+        (entry,) = _lines(repo)
+        cap = entry["capture"]
+        assert entry["executor"] == "grok_build_hooks" and cap["agent"] == "grok_build"
+        assert cap["session_id"] == REAL_SID
+        assert entry["task"].startswith("In calc.py, change add") and SECRET not in json.dumps(entry)
+        assert cap["prompt_count"] == 1 and cap["tool_call_count"] == 5
+        # the post-SessionEnd Stop("shutdown") is not a second turn
+        assert cap["turn_count"] == 1 and cap["task_status"] == "turn_completed"
+        assert cap["session_end_observed"] is True and cap["session_end_reason"] == "shutdown"
+        assert cap["tool_failure_count"] == 0 and cap["model_source"] == "not_captured"
+        assert entry["execution_model"] == "unknown"
+
+    def test_verification_is_observed_but_never_inferred_from_the_exit_code(self, repo):
+        self._apply(repo, _real_session(repo))
+        (entry,) = _lines(repo)
+        assert entry["verification_attempted"] is True and entry["verification_passed"] is None
+        block = entry["verification"]
+        assert block["status"] == "unknown" and block["source"] == "directly_observed"
+        assert "outcome_not_observed" in block["incomplete_reasons"]
+        assert "2 passed" not in json.dumps(entry)
+
+    def test_edit_tools_are_unknown_and_files_come_from_git(self, repo):
+        self._apply(repo, _real_session(repo))
+        (entry,) = _lines(repo)
+        tools = {e["metadata"].get("tool"): e for e in entry["events"] if e["event_type"] == "tool.invoked"}
+        assert set(tools) == {"search_tool", "read_file", "search_replace", "run_terminal_command"}
+        assert tools["search_replace"]["status"] == "unknown" and tools["read_file"]["metadata"]["access"] == "read"
+        assert tools["read_file"]["target"] == "calc.py"
+        calc = next(f for f in entry["files_detail"] if f["path"] == "calc.py")
+        assert calc["attribution"] == "git_observed"
+
+    def test_the_same_documents_never_become_a_claude_code_record(self, repo):
+        for event, doc in _real_session(repo):
+            outcome = handle_claude_hook(doc, env={"CLAUDE_PROJECT_DIR": str(repo)})
+            assert outcome.action == "ignored", event
+            assert _is_grok_doc(doc), event
+        assert _lines(repo) == []
+
+    def test_a_subagent_session_never_becomes_a_shard(self, repo):
+        child = [
+            ("UserPromptSubmit", _real(repo, "UserPromptSubmit", CHILD_SID, promptId="p-child",
+                                       prompt="List every file", subagentType="general-purpose")),
+            ("PostToolUse", _real_tool(repo, "PostToolUse", "list_dir", {"target_directory": str(repo)},
+                                       {"type": "ListDir"}, CHILD_SID, "c-1", subagentType="general-purpose")),
+            ("SessionEnd", _real(repo, "SessionEnd", CHILD_SID, reason="shutdown", subagentType="general-purpose")),
+        ]
+        for event, doc in child:
+            assert gb.extract_grok_build_payload(doc, event_override=event) is None, event
+            handle_hook(doc, env={}, agent="grok_build", event_override=event)
+        assert _lines(repo) == []
+        # ...while the parent's own spawn_subagent call is an ordinary tool record.
+        parent = _real_session(repo)
+        parent.insert(4, ("PostToolUse", _real_tool(
+            repo, "PostToolUse", "spawn_subagent",
+            {"description": "List directory files", "prompt": SECRET, "background": True}, {"type": "Text"},
+            use_id="call-2")))
+        self._apply(repo, parent)
+        (entry,) = _lines(repo)
+        assert entry["capture"]["session_id"] == REAL_SID and SECRET not in json.dumps(entry)
+        assert any(e["metadata"].get("tool") == "spawn_subagent" for e in entry["events"])
+
+    def test_max_turns_stop_cancelled_is_an_idle_boundary_not_a_completed_turn(self, repo):
+        docs = _real_session(repo)[:2] + [
+            ("PostToolUse", _real_tool(repo, "PostToolUse", "read_file", {"target_file": str(repo / "calc.py")},
+                                       {"type": "ReadFile"})),
+            ("StopCancelled", _real(repo, "StopCancelled", promptId="p", reason="max_turns", cancelledBy="runtime")),
+            ("SessionEnd", _real(repo, "SessionEnd", reason="shutdown")),
+            ("Stop", _real(repo, "Stop", reason="shutdown", stopHookActive=False)),
+        ]
+        self._apply(repo, docs)
+        (entry,) = _lines(repo)
+        assert entry["capture"]["turn_count"] == 0 and entry["capture"]["idle_count"] == 1
+        assert entry["capture"]["task_status"] != "turn_completed" and entry["capture"]["session_end_observed"]
+
+    def test_permission_denied_real_shape(self, repo):
+        docs = _real_session(repo)
+        docs.insert(7, ("PermissionDenied", _real_tool(
+            repo, "PermissionDenied", "run_terminal_command", {"command": f"curl {SECRET}", "description": "x"},
+            use_id="call-6", permissionMode="default")))
+        self._apply(repo, docs)
+        (entry,) = _lines(repo)
+        assert entry["capture"]["permission_denied_count"] == 1
+        denied = next(e for e in entry["events"] if e["event_type"] == "approval.denied")
+        assert denied["action"] == "permission denied: run_terminal_command" and denied["target"] is None
+        assert SECRET not in json.dumps(entry)
+
+    def test_nonzero_exit_and_missing_file_stay_unknown(self, repo):
+        # Observed: both arrive as PostToolUse (not PostToolUseFailure); their outcomes are in toolResult,
+        # which is never read, so they are recorded as unknown -- never failed, never passed.
+        docs = [
+            ("UserPromptSubmit", _real(repo, "UserPromptSubmit", promptId="p", prompt="run things")),
+            ("PostToolUse", _real_tool(repo, "PostToolUse", "run_terminal_command",
+                                       {"command": 'python -c "raise SystemExit(3)"', "description": "exit 3"},
+                                       {"type": "Bash", "exit_code": 1}, use_id="c1")),
+            ("PostToolUse", _real_tool(repo, "PostToolUse", "read_file", {"target_file": str(repo / "nope.txt")},
+                                       {"type": "ReadFile", "FileNotFound": {}}, use_id="c2")),
+            ("Stop", _real(repo, "Stop", promptId="p", reason="end_turn")),
+        ]
+        self._apply(repo, docs)
+        (entry,) = _lines(repo)
+        statuses = {e["metadata"]["tool"]: e["status"] for e in entry["events"] if e["event_type"] == "tool.invoked"}
+        assert statuses == {"run_terminal_command": "unknown", "read_file": "unknown"}
+        assert entry["capture"]["tool_failure_count"] == 0
+
+    def test_event_name_falls_back_to_the_document_when_there_is_no_command_line_event(self, repo):
+        for event, doc in _real_session(repo):
+            p = gb.extract_grok_build_payload(doc)
+            assert (p is None) == (event == "Stop" and doc["reason"] == "shutdown"), event
+        doc = _real(repo, "UserPromptSubmit", prompt="x")
+        del doc["hook_event_name"]  # only hookEventName (a snake_case value) left
+        assert gb.extract_grok_build_payload(doc).event == "UserPromptSubmit"
+
+    def test_service_path_matches_the_inline_record_for_a_real_session(self, service, tmp_path):
+        via_http = _make_repo(tmp_path / "http")
+        via_inline = _make_repo(tmp_path / "inline")
+        for i, (event, doc) in enumerate(_real_session(via_http)):
+            if i == 1:
+                (via_http / "calc.py").write_text("def add(a, b, c=0):\n    return a + b + c\n", encoding="utf-8")
+            assert _post(service.port, event, doc), event
+        self._apply(via_inline, _real_session(via_inline))
+        assert _wait_for(lambda: bool(_lines(via_http)) and _lines(via_http)[0]["capture"]["session_end_observed"])
+        assert service.server.recorder.wait_idle(20)
+        http_entry, inline_entry = _lines(via_http)[0], _lines(via_inline)[0]
+        assert _stable(http_entry) == _stable(inline_entry)
+        assert http_entry["capture"]["turn_count"] == 1
