@@ -173,6 +173,24 @@ def _try_fast_path(argv: list[str]) -> bool:
         sys.stdout.flush()
         return True
 
+    if sub == "antigravity":
+        # 0.4.7: Google Antigravity runs command hooks only (every event pays
+        # a process start, so it stays on this fast path) and reads stdout as
+        # a typed reply, written exactly as the Click command writes it.
+        parsed = _parse_hooks_codex_argv(rest)
+        if parsed is None:
+            return False
+        import os
+
+        from openshard.adapters.claude_capture_client import run_antigravity_hook
+
+        _label, reply = run_antigravity_hook(  # type: ignore[arg-type]
+            sys.stdin, env=os.environ, event_override=parsed[0], spawn=parsed[1],
+        )
+        sys.stdout.write(reply + "\n")
+        sys.stdout.flush()
+        return True
+
     return False
 
 

@@ -2,6 +2,31 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Added
+
+- **Google Antigravity support**, through the same capture path as the
+  other agents. `openshard setup` detects `agy` / `antigravity` and adds an
+  `openshard` hook to the project-local `.agents/hooks.json` (other named
+  hooks preserved); `openshard capture install|uninstall antigravity` and
+  the `openshard hooks antigravity` entrypoint (fast path, authenticated
+  loopback POST to `/hooks/antigravity`, background fold). Sessions become
+  Shards labelled "Google Antigravity (external)". Subscribed events:
+  `PreInvocation` (one per model call: activity and the model used),
+  `PostToolUse` (commands, file writes with Antigravity's own success
+  signal, file reads) and `Stop`. `PreToolUse` is never installed: it is a
+  permission gate and OpenShard only observes. Every model a session used
+  is kept (`capture.models_seen`, one `model invoked` Event per switch).
+  Antigravity exposes no prompt, token counts, cost, provider or session
+  end to hooks, so those stay Not recorded and idle sessions are closed by
+  the sweep as `session_end_not_observed`. See `docs/agent-capture.md`.
+- Two agent-neutral additions to the shared fold: a `ModelInvocation`
+  lifecycle event and a `read` tool kind (a repo-relative path read, never
+  a change or an attempted edit). The capture service anchors a session's
+  change-attribution baseline at its first model invocation when the agent
+  has no start hook.
+
 ## 0.4.6 - 2026-09-18
 
 OpenShard Platform sync arrives: `openshard sync connect` / `now` / `status`
