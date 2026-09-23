@@ -18,6 +18,7 @@ _EXECUTOR_AGENTS: dict[str, str] = {
     "opencode_plugin": "opencode",
     "cursor_hooks": "cursor",
     "antigravity_hooks": "antigravity",
+    "grok_build_hooks": "grok_build",
     "hermes_hooks": "hermes",
     "grok_bot_otel": "grok_bot",
     "grok_bot_report": "grok_bot",

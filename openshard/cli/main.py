@@ -571,6 +571,7 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
             "opencode": agent_statuses["opencode"].to_dict(),
             "cursor": agent_statuses["cursor"].to_dict(),
             "antigravity": agent_statuses["antigravity"].to_dict(),
+            "grok_build": agent_statuses["grok_build"].to_dict(),
             "hermes": agent_statuses["hermes"].to_dict(),
             "telemetry": _telemetry_status_for_agents(),
             "next_actions": [
@@ -626,7 +627,7 @@ def _telemetry_after_setup(result) -> None:
         service_state = str(service.get("state") or "")
         _telemetry_emit(
             "setup.completed",
-            agents=[a for a in result.configured_agents() if a in ("claude_code", "codex", "opencode", "cursor", "antigravity", "hermes")],
+            agents=[a for a in result.configured_agents() if a in ("claude_code", "codex", "opencode", "cursor", "antigravity", "hermes", "grok_build")],
             mcp=bool(result.mcp is not None and result.mcp.status in ("installed", "updated", "already_installed")),
             capture_service=(
                 "ok" if service_state in ("running", "started")
@@ -685,6 +686,7 @@ def _render_setup_result(result) -> None:
     }
     for key, label in (
         ("codex", "Codex:        "), ("opencode", "OpenCode:     "), ("cursor", "Cursor:       "),
+        ("antigravity", "Antigravity:  "), ("grok_build", "Grok Build:   "),
         ("antigravity", "Antigravity:  "), ("hermes", "Hermes:       "),
     ):
         agent_result = (result.agents or {}).get(key)
@@ -2893,6 +2895,37 @@ def hooks_antigravity(event_override: str | None, no_spawn: bool) -> None:
     click.echo(reply)
 
 
+@hooks_group.command("grok-build")
+@click.option(
+    "--event",
+    "event_override",
+    default=None,
+    help="Grok Build hook event name (installed on the command line; hookEventName is the fallback).",
+)
+@click.option(
+    "--no-spawn",
+    "no_spawn",
+    is_flag=True,
+    default=False,
+    help="Never start the capture service from this hook.",
+)
+def hooks_grok_build(event_override: str | None, no_spawn: bool) -> None:
+    """Grok Build hook entrypoint: read one Grok Build hook payload (JSON) from stdin and record it.
+
+    Installed into this repository's .grok/hooks/openshard.json by
+    `openshard setup` / `openshard capture install grok-build`. Observational
+    only: never blocks Grok Build beyond a loopback POST to the local capture
+    service, never denies a tool (it prints `{}` and always exits 0, never 2).
+    Evidence lands in .openshard/runs.jsonl as normal Shard records.
+    """
+    from openshard.adapters.claude_capture_client import run_grok_build_hook
+
+    _label, reply = run_grok_build_hook(
+        sys.stdin, env=os.environ, event_override=event_override, spawn=not no_spawn,
+    )
+    click.echo(reply)
+
+
 @hooks_group.command("hermes")
 @click.option(
     "--event",
@@ -3094,10 +3127,17 @@ def grok_bot_skill(output: Path | None) -> None:
 
 @cli.group("capture")
 def capture_group() -> None:
-    """The local capture service shared by Claude Code, Codex, OpenCode, Cursor, Google Antigravity and Hermes Agent, and its per-agent integrations."""
+    """The local capture service shared by Claude Code, Codex, OpenCode, Cursor, Google Antigravity, Hermes Agent and Grok Build, and its per-agent integrations."""
 
 
-_AGENT_CHOICE = click.Choice(["codex", "opencode", "cursor", "antigravity", "hermes"], case_sensitive=False)
+_AGENT_CHOICE = click.Choice(
+    ["codex", "opencode", "cursor", "antigravity", "hermes", "grok-build"], case_sensitive=False
+)
+
+
+def _agent_key(agent: str) -> str:
+    """The internal agent key for a CLI choice (``grok-build`` -> ``grok_build``)."""
+    return agent.lower().replace("-", "_")
 
 
 def _render_agent_result(result, *, verb: str) -> None:
@@ -3145,7 +3185,9 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
     in its shell-hooks allowlist; it works outside a repository, and a
     repository is captured once it has an .openshard/ directory (created when
     you run this inside it). All are idempotent and target the shared local
-    capture service. Safe to re-run.
+    grok-build: writes OpenShard's own .grok/hooks/openshard.json (Grok Build runs project
+    hooks only for a trusted folder: `/hooks-trust` or `--trust`). All are
+    idempotent and target the shared local capture service. Safe to re-run.
     """
     from openshard.adapters.agent_setup import install_agent
     from openshard.adapters.claude_mcp_install import find_repo_root
@@ -3155,7 +3197,7 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
     if root is None and agent.lower() != "hermes":
         raise click.ClickException("Not inside a git repository. Run this from within a repository.")
     service = ensure_capture_service()
-    result = install_agent(agent.lower(), repo_root=root, port=service.get("port") or None)
+    result = install_agent(_agent_key(agent), repo_root=root, port=service.get("port") or None)
     if as_json:
         click.echo(json.dumps({**result.to_dict(), "capture_service": service}, indent=2))
     else:
@@ -3172,7 +3214,7 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool) -> None:
-    """Remove OpenShard's Codex, OpenCode, Cursor, Antigravity or Hermes capture integration.
+    """Remove OpenShard's Codex, OpenCode, Cursor, Antigravity, Hermes or Grok Build capture integration.
 
     Only OpenShard's own entries/files are removed; unrelated hooks, plugins
     and settings survive. Local history under .openshard/ is never deleted.
@@ -3186,7 +3228,7 @@ def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool) -> None
     root = find_repo_root(repo_path)
     if root is None and agent.lower() != "hermes":
         raise click.ClickException("Not inside a git repository. Run this from within a repository.")
-    result = uninstall_agent(agent.lower(), repo_root=root)
+    result = uninstall_agent(_agent_key(agent), repo_root=root)
     if as_json:
         click.echo(json.dumps(result.to_dict(), indent=2))
     else:
@@ -6547,13 +6589,15 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     for key, status in agent_statuses.items():
         label = agent_label(key)
         integration_label = (
-            "Auto-capture hooks" if key in ("codex", "cursor", "antigravity", "hermes") else "Capture plugin"
+            "Auto-capture hooks" if key in ("codex", "cursor", "antigravity", "hermes", "grok_build")
+            else "Capture plugin"
         )
         cli_detail = {
             "cursor": "not found on PATH (`cursor` / `cursor-agent`); `openshard capture install cursor` still works",
             "antigravity": (
                 "not found on PATH (`agy` / `antigravity`); `openshard capture install antigravity` still works"
             ),
+            "grok_build": "not found on PATH (`grok`); `openshard capture install grok-build` still works",
             "hermes": "not found on PATH (`hermes`); `openshard capture install hermes` still works",
         }.get(key, "CLI not found on PATH")
         integration_ok = status.configured
@@ -6585,6 +6629,16 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
                     "no OpenCode session captured yet; run one to verify (if a completed session "
                     "records nothing, OpenCode is not loading the plugin)",
                 ))
+        elif key == "grok_build" and integration_ok:
+            if status.capture_observed is True:
+                agent_checks.append(("Capture verified", True, ""))
+            else:
+                opencode_unverified = True
+                agent_checks.append((
+                    "Capture verified", False,
+                    "no Grok Build session captured yet; run one to verify (Grok Build skips project "
+                    "hooks until the folder is trusted: `/hooks-trust` inside Grok Build, or launch with `--trust`)",
+                ))
         click.echo(f"\n{label}\n")
         for check_label, ok, detail in agent_checks:
             mark = "✓" if ok else "✗"
@@ -6606,9 +6660,10 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
         click.echo("Not ready -- run `openshard setup` to configure capture for the coding agents you use.")
     if unverified_agents:
         click.echo(
-            f"Configured but unverified: {', '.join(unverified_agents)} -- the plugin is installed but "
-            "no capture has been recorded yet. Run a session to confirm; if nothing is captured, "
-            "OpenCode is not loading the plugin (e.g. `--pure` or an OpenCode build that cannot load it)."
+            f"Configured but unverified: {', '.join(unverified_agents)} -- the integration is installed but "
+            "no capture has been recorded yet. Run a session to confirm. If nothing is captured: OpenCode "
+            "may not be loading the plugin (e.g. `--pure` or an OpenCode build that cannot load it); "
+            "Grok Build needs the folder trusted (`/hooks-trust` or `--trust`)."
         )
     click.echo("")
 

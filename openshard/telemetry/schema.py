@@ -116,8 +116,8 @@ def _token_list(*allowed: str, max_items: int = 8) -> Validator:
 # ---------------------------------------------------------------------------
 
 AGENTS = (
-    "claude_code", "codex", "opencode", "cursor", "antigravity", "hermes", "grok_bot", "native", "wrap", "import",
-    "other",
+    "claude_code", "codex", "opencode", "cursor", "antigravity", "hermes", "grok_build", "grok_bot", "native",
+    "wrap", "import", "other",
 )
 ORIGINS = ("openshard_routed", "external_observed", "unknown")
 CAPTURE_DEPTHS = ("full", "partial", "unknown")
@@ -165,7 +165,7 @@ _RECEIPT_PROPERTIES: dict[str, Validator] = {
 EVENT_TYPES: dict[str, dict[str, Validator]] = {
     "install.seen": {"first_run": _bool},
     "setup.completed": {
-        "agents": _token_list("claude_code", "codex", "opencode", "cursor", "antigravity", "hermes"),
+        "agents": _token_list("claude_code", "codex", "opencode", "cursor", "antigravity", "hermes", "grok_build"),
         "mcp": _bool,
         "capture_service": _enum("ok", "failed", "disabled"),
         "result": _enum(*RESULTS),

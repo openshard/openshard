@@ -142,6 +142,7 @@ Openshard currently captures receipts from:
 | Cursor | Supported |
 | OpenCode | Supported |
 | Google Antigravity | Supported (hooks; see [agent capture](docs/agent-capture.md#google-antigravity-integration)) |
+| Grok Build | Supported (native hooks; see [agent capture](docs/agent-capture.md#grok-build-integration)) |
 | Hermes Agent | Supported (shell hooks, observation only; `openshard capture install hermes`; see [agent capture](docs/agent-capture.md#hermes-agent-integration)) |
 | Grok Bot (Cursor) | Enterprise: Cursor Action Recording via OpenTelemetry (platform-observed). Other plans: self-report skill (agent-reported only). See [Grok Bot](docs/grok-bot.md) |
 

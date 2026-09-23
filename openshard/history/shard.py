@@ -53,6 +53,7 @@ _EXTERNAL_AGENT_LABELS: dict[str, str] = {
     "opencode_plugin": "OpenCode (external)",
     "cursor_hooks": "Cursor (external)",
     "antigravity_hooks": "Google Antigravity (external)",
+    "grok_build_hooks": "Grok Build (external)",
     "hermes_hooks": "Hermes Agent (external)",
     # Grok Bot (adapters/grok_bot.py): Cursor's Action Recording export
     # (platform-observed) and the Bot's own self-report (agent_reported).

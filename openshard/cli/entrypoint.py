@@ -191,6 +191,24 @@ def _try_fast_path(argv: list[str]) -> bool:
         sys.stdout.flush()
         return True
 
+    if sub == "grok-build":
+        # Unreleased: Grok Build command hooks; stdout is discarded on every
+        # event OpenShard subscribes to except Stop (an optional decision),
+        # so the reply is always the empty object.
+        parsed = _parse_hooks_codex_argv(rest)
+        if parsed is None:
+            return False
+        import os
+
+        from openshard.adapters.claude_capture_client import run_grok_build_hook
+
+        _label, reply = run_grok_build_hook(  # type: ignore[arg-type]
+            sys.stdin, env=os.environ, event_override=parsed[0], spawn=parsed[1],
+        )
+        sys.stdout.write(reply + "\n")
+        sys.stdout.flush()
+        return True
+
     if sub == "hermes":
         # 0.4.7: Hermes Agent runs shell hooks (one process start per
         # subscribed event, so this stays on the fast path) and reads stdout

@@ -1,4 +1,4 @@
-"""Codex, OpenCode, Cursor, Google Antigravity and Hermes Agent integration detection and setup (PR12).
+"""Codex, OpenCode, Cursor, Google Antigravity, Hermes Agent and Grok Build integration detection and setup (PR12).
 
 The Codex/OpenCode counterpart of ``claude_setup``: read-only detection
 for ``openshard doctor`` / ``openshard setup --agent``, and the install
@@ -57,6 +57,18 @@ from openshard.adapters.cursor_hooks_install import (
     load_cursor_hooks,
     uninstall_cursor_hooks,
 )
+from openshard.adapters.grok_build_hooks_install import (
+    HOOK_EVENTS as GROK_BUILD_HOOK_EVENTS,
+)
+from openshard.adapters.grok_build_hooks_install import (
+    HOOKS_RELPATH as GROK_BUILD_HOOKS_RELPATH,
+)
+from openshard.adapters.grok_build_hooks_install import (
+    install_grok_build_hooks,
+    installed_grok_build_events,
+    load_grok_build_hooks,
+    uninstall_grok_build_hooks,
+)
 from openshard.adapters.hermes_hooks_install import (
     HOOK_EVENTS as HERMES_HOOK_EVENTS,
 )
@@ -89,8 +101,9 @@ AGENT_OPENCODE = "opencode"
 AGENT_CURSOR = "cursor"
 AGENT_ANTIGRAVITY = "antigravity"
 AGENT_HERMES = "hermes"
+AGENT_GROK_BUILD = "grok_build"
 SUPPORTED_AGENTS: tuple[str, ...] = (
-    AGENT_CODEX, AGENT_OPENCODE, AGENT_CURSOR, AGENT_ANTIGRAVITY, AGENT_HERMES,
+    AGENT_CODEX, AGENT_OPENCODE, AGENT_CURSOR, AGENT_ANTIGRAVITY, AGENT_HERMES, AGENT_GROK_BUILD,
 )
 # Agents ``openshard setup`` never configures on its own: their hooks live in a
 # user-global file (Hermes: ``~/.hermes/config.yaml``), which is a bigger change
@@ -111,11 +124,12 @@ _CLI_NAMES: dict[str, tuple[str, ...]] = {
     # Google Antigravity: ``agy`` is its CLI; ``antigravity`` is the IDE's
     # optional shell command. Same PATH-only rule as Cursor.
     AGENT_ANTIGRAVITY: ("agy", "antigravity"),
+    AGENT_GROK_BUILD: ("grok",),
     AGENT_HERMES: ("hermes",),
 }
 _LABELS: dict[str, str] = {
     AGENT_CODEX: "Codex", AGENT_OPENCODE: "OpenCode", AGENT_CURSOR: "Cursor",
-    AGENT_ANTIGRAVITY: "Google Antigravity",
+    AGENT_ANTIGRAVITY: "Google Antigravity", AGENT_GROK_BUILD: "Grok Build",
     AGENT_HERMES: "Hermes Agent",
 }
 _INSTALL_GUIDANCE: dict[str, str] = {
@@ -123,6 +137,7 @@ _INSTALL_GUIDANCE: dict[str, str] = {
     AGENT_OPENCODE: "npm install -g opencode-ai",
     AGENT_CURSOR: "install Cursor and enable its `cursor` shell command",
     AGENT_ANTIGRAVITY: "install Google Antigravity or its `agy` CLI",
+    AGENT_GROK_BUILD: "install Grok Build (the `grok` CLI)",
     AGENT_HERMES: "install Hermes Agent (https://hermes-agent.nousresearch.com)",
 }
 # Agents whose "not found" message is not "install it": Cursor may well be
@@ -136,6 +151,10 @@ _SKIPPED_MESSAGES: dict[str, str] = {
     AGENT_ANTIGRAVITY: (
         "Google Antigravity not found on PATH (`agy` / `antigravity`); skipped. If you use the "
         "Antigravity IDE, run `openshard capture install antigravity` in this repository."
+    ),
+    AGENT_GROK_BUILD: (
+        "Grok Build not found on PATH (`grok`); skipped. If you use it, install it and re-run "
+        "`openshard setup`, or run `openshard capture install grok-build` in this repository."
     ),
     AGENT_HERMES: (
         "Hermes Agent not found on PATH (`hermes`); skipped. `openshard capture install hermes` "
@@ -209,6 +228,48 @@ def opencode_capture_observed(repo_root: Path | None) -> bool | None:
         return False
     except OSError:
         return None
+
+
+_GROK_BUILD_RECORD_MARKERS: tuple[tuple[str, str], ...] = (
+    ("executor", "grok_build_hooks"),
+    ("import_source", "grok_build"),
+)
+
+
+def _capture_observed(repo_root: Path | None, markers: tuple[tuple[str, str], ...]) -> bool | None:
+    """``opencode_capture_observed``'s rule for any agent's record *markers*."""
+    if repo_root is None:
+        return None
+    path = Path(repo_root) / _RUNS_RELPATH
+    try:
+        if not path.is_file() or path.stat().st_size > _MAX_RUNS_SCAN_BYTES:
+            return None
+        import json as _json
+
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = _json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and any(entry.get(k) == v for k, v in markers):
+                    return True
+        return False
+    except OSError:
+        return None
+
+
+def grok_build_capture_observed(repo_root: Path | None) -> bool | None:
+    """Whether OpenShard has an actual Grok Build capture recorded for *repo_root*.
+
+    Grok Build runs project hooks only once the folder is trusted, and a hook
+    that does not run leaves no trace, so an installed hook file is structural
+    evidence only. Same tri-state as ``opencode_capture_observed``.
+    """
+    return _capture_observed(repo_root, _GROK_BUILD_RECORD_MARKERS)
 
 
 def detect_agent_cli(agent: str) -> tuple[bool, str | None]:
@@ -449,6 +510,38 @@ def detect_antigravity_integration(repo_root: Path | None) -> AgentIntegrationSt
     )
 
 
+def detect_grok_build_integration(repo_root: Path | None) -> AgentIntegrationStatus:
+    """Read-only snapshot of the Grok Build hook integration for *repo_root*."""
+    available, path = detect_agent_cli(AGENT_GROK_BUILD)
+    rel = GROK_BUILD_HOOKS_RELPATH.as_posix()
+    if repo_root is None:
+        return AgentIntegrationStatus(
+            AGENT_GROK_BUILD, available, path, None, "absent", "Not checked (no repository).", rel,
+            events_missing=list(GROK_BUILD_HOOK_EVENTS),
+        )
+    config, err = load_grok_build_hooks(repo_root)
+    if err or config is None:
+        return AgentIntegrationStatus(
+            AGENT_GROK_BUILD, available, path, repo_root, "error", err or "unreadable", rel,
+            events_missing=list(GROK_BUILD_HOOK_EVENTS), config_error=err,
+        )
+    installed = installed_grok_build_events(config)
+    missing = [e for e in GROK_BUILD_HOOK_EVENTS if e not in installed]
+    if not installed:
+        state, detail = "absent", "not configured"
+    elif missing:
+        state, detail = (
+            "partial", f"hooks missing for {', '.join(missing)}; run `openshard capture install grok-build`",
+        )
+    else:
+        state, detail = "openshard", f"configured ({rel})"
+    return AgentIntegrationStatus(
+        AGENT_GROK_BUILD, available, path, repo_root, state, detail, rel,
+        events_installed=installed, events_missing=missing,
+        capture_observed=grok_build_capture_observed(repo_root) if state == "openshard" else None,
+)
+
+
 def detect_hermes_integration(repo_root: Path | None) -> AgentIntegrationStatus:
     """Read-only snapshot of the Hermes Agent hook integration.
 
@@ -516,6 +609,7 @@ def detect_agent_integrations(repo_root: Path | None, *, service_port: int | Non
         AGENT_OPENCODE: detect_opencode_integration(repo_root, service_port=service_port),
         AGENT_CURSOR: detect_cursor_integration(repo_root),
         AGENT_ANTIGRAVITY: detect_antigravity_integration(repo_root),
+        AGENT_GROK_BUILD: detect_grok_build_integration(repo_root),
         AGENT_HERMES: detect_hermes_integration(repo_root),
     }
 
@@ -587,6 +681,15 @@ def install_agent(agent: str, *, repo_root: Path | None, port: int | None = None
                 "Open this repository as an Antigravity workspace (or run `agy` in it); "
                 "restart Antigravity if it is already running."
             )
+    elif agent == AGENT_GROK_BUILD:
+        result = install_grok_build_hooks(repo_root=repo_root)
+        steps = []
+        if result.status in ("installed", "updated", "already_installed"):
+            steps.append(
+                "Grok Build runs project hooks only for trusted folders: in this repository run "
+                "`/hooks-trust` inside Grok Build, or launch it with `--trust`. Restart Grok Build "
+                "if it is already running."
+            )
     else:
         return AgentSetupResult(agent, available, path, "error", f"unknown agent {agent!r}")
     if result.status == "error":
@@ -648,6 +751,8 @@ def uninstall_agent(agent: str, *, repo_root: Path | None) -> AgentSetupResult:
         result = uninstall_cursor_hooks(repo_root=repo_root)
     elif agent == AGENT_ANTIGRAVITY:
         result = uninstall_antigravity_hooks(repo_root=repo_root)
+    elif agent == AGENT_GROK_BUILD:
+        result = uninstall_grok_build_hooks(repo_root=repo_root)
     else:
         return AgentSetupResult(agent, available, path, "error", f"unknown agent {agent!r}")
     return AgentSetupResult(

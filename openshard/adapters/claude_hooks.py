@@ -197,6 +197,11 @@ EVENT_SESSION_IDLE = "SessionIdle"
 # Proves the agent did work in this session and names the model it used for
 # that invocation; it is neither a user prompt nor a completed turn.
 EVENT_MODEL_INVOCATION = "ModelInvocation"
+# Unreleased: the agent reported that a tool call was denied by its permission
+# system (Grok Build ``PermissionDenied``). A directly reported fact about one
+# tool name; not work done (it never opens a record) and not a policy
+# decision OpenShard made.
+EVENT_PERMISSION_DENIED = "PermissionDenied"
 # 0.4.7 (Hermes Agent): a subagent the agent delegated work to started /
 # stopped, and a human-approval gate was raised / answered. Agent-reported
 # facts about the session; they are never work (``_has_activity``) on their own.
@@ -215,6 +220,7 @@ SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_FILE_EDITED,
     EVENT_SESSION_IDLE,
     EVENT_MODEL_INVOCATION,
+    EVENT_PERMISSION_DENIED,
     EVENT_SUBAGENT_START,
     EVENT_SUBAGENT_STOP,
     EVENT_APPROVAL_REQUEST,
@@ -224,10 +230,12 @@ SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
 # Tools whose tool_input.file_path names a file Claude Code says it changed.
 FILE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 # Local agent/OpenShard state is never a task's work (see _git_changed_files).
-# ``.agents/`` also holds a user's shared rules/workflows, so only
-# Antigravity's hook configuration file is excluded from it.
+# ``.agents/`` and ``.grok/`` also hold a user's shared rules/skills, so only
+# Antigravity's and Grok Build's OpenShard hook configuration files are
+# excluded from them.
 _LOCAL_STATE_PREFIXES: tuple[str, ...] = (
     ".openshard/", ".claude/", ".codex/", ".opencode/", ".cursor/", ".agents/hooks.json",
+    ".grok/hooks/openshard.json",
 )
 _MAX_ATTRS = 12  # small scalar facts one payload may carry (see _clean_attrs)
 _ATTR_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -426,6 +434,18 @@ def _clean_attrs(raw: object) -> dict[str, Any]:
     return clean
 
 
+# Keys only Grok Build puts in a hook document. Grok also emits Claude-compatible
+# aliases (``hook_event_name``, ``session_id``, ``tool_name``, ...) in the *same*
+# document, so to the Claude receiver a Grok Build event is otherwise a valid
+# Claude Code payload. Claude Code itself never sends any of these camelCase keys.
+_GROK_BUILD_MARKER_KEYS: tuple[str, ...] = ("hookEventName", "sessionId", "workspaceRoot")
+
+
+def is_grok_build_document(data: Mapping[str, Any]) -> bool:
+    """True for a hook document Grok Build sent (e.g. through its Claude compatibility layer)."""
+    return any(key in data for key in _GROK_BUILD_MARKER_KEYS)
+
+
 def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None = None) -> HookPayload | None:
     """Pick the supported fields out of a decoded hook payload.
 
@@ -434,6 +454,8 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     ``error``, ``last_assistant_message`` and every other field are never
     read.
     """
+    if is_grok_build_document(data):
+        return None  # Grok Build reaching Claude hooks through its compat layer: never a Claude Code record
     event = data.get("hook_event_name")
     if not isinstance(event, str) or not event:
         event = event_override
@@ -937,6 +959,8 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         elif kind == TOOL_KIND_READ:
             reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
             reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
+    elif payload.event == EVENT_PERMISSION_DENIED:
+        reduced.tool_name = payload.tool_name or "unknown"
     elif payload.event == EVENT_FILE_EDITED:
         reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
         reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
@@ -1214,6 +1238,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "last_stop_at": capture.get("last_turn_completed_at"),
         "idle_count": int(capture.get("idle_count") or 0),
         "invocation_count": int(capture.get("invocation_count") or 0),
+        "permission_denied_count": int(capture.get("permission_denied_count") or 0),
         "subagents": _stored_counts(capture.get("subagents"), ("started", "stopped", "failed")),
         "approvals": _stored_counts(capture.get("approvals"), ("requested", "granted", "denied", "unanswered")),
         "last_invoked_model": (
@@ -2074,6 +2099,11 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # Model invocations observed (Antigravity PreInvocation); absent for
         # agents whose hooks expose no such event.
         entry["capture"]["invocation_count"] = invocation_count
+    permission_denied_count = int(buf.get("permission_denied_count") or 0)
+    if permission_denied_count:
+        # Permission denials the agent reported (Grok Build PermissionDenied);
+        # absent for agents whose hooks expose no such event.
+        entry["capture"]["permission_denied_count"] = permission_denied_count
     for count_key, count_names in (
         ("subagents", ("started", "stopped", "failed")),
         ("approvals", ("requested", "granted", "denied", "unanswered")),
@@ -2304,6 +2334,20 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         if created:
             _ensure_record(buf, repo_root)
         return ("first model invocation: record created" if created else "model invocation counted"), created, False
+
+    if event == EVENT_PERMISSION_DENIED:
+        # The agent says its permission system denied a tool call. Recorded
+        # as reported (agent_reported, failed approval); it is not work done,
+        # so it neither opens a record nor counts as activity, and OpenShard
+        # never claims to know who or what decided (user, rule, or policy).
+        buf["permission_denied_count"] = int(buf.get("permission_denied_count") or 0) + 1
+        tool = payload.tool_name or "unknown"
+        _append_event(
+            buf, event_type="approval.denied", action=f"permission denied: {tool}",
+            status="failed", evidence="agent_reported",
+            metadata={"hook": event, "tool": tool}, occurred_at=now,
+        )
+        return f"permission denied for {tool}; buffered", False, False
 
     if event == EVENT_USER_PROMPT_SUBMIT:
         buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
@@ -2741,6 +2785,10 @@ def extract_agent_payload(
         from openshard.adapters.antigravity_hooks import extract_antigravity_payload
 
         return extract_antigravity_payload(data, event_override=event_override)
+    if agent == "grok_build":
+        from openshard.adapters.grok_build_hooks import extract_grok_build_payload
+
+        return extract_grok_build_payload(data, event_override=event_override)
     if agent == "hermes":
         from openshard.adapters.hermes_hooks import extract_hermes_payload
 

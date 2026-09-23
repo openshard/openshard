@@ -140,9 +140,29 @@ def make_handler(
             else:
                 self._reply(200, b"", "application/x-protobuf")
 
+        def _drain_body(self) -> None:
+            # Read and discard a refused request's body (bounded) before
+            # replying: closing a socket with unread data makes Windows send a
+            # TCP reset, and the client then sees a connection abort instead
+            # of the status code.
+            try:
+                remaining = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                return
+            if remaining <= 0 or remaining > MAX_REQUEST_BYTES:
+                return
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+
         def _reject(self, code: int) -> None:
             with counters.lock:
                 counters.rejected += 1
+            self.close_connection = True
+            if code != 413:
+                self._drain_body()
             self._reply(code, json.dumps({"error": "unauthorized" if code in (401, 403) else "rejected"}).encode())
 
     return Handler

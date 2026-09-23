@@ -28,9 +28,10 @@ openshard setup
 ```
 
 `openshard setup` detects whichever of Claude Code, Codex, Cursor,
-OpenCode or Google Antigravity are available for the repo and configures
-capture for each (for the Antigravity IDE without the `agy` CLI on PATH,
-run `openshard capture install antigravity`). Hermes Agent's hooks live in
+OpenCode, Google Antigravity or Grok Build are available for the repo and
+configures capture for each (for the Antigravity IDE without the `agy` CLI
+on PATH, run `openshard capture install antigravity`; for Grok Build, trust
+the folder with `/hooks-trust` or `--trust`). Hermes Agent's hooks live in
 its user-global `~/.hermes/config.yaml`, so `setup` only detects it: run
 `openshard capture install hermes` (in each repository you want captured) to
 enable it. Then

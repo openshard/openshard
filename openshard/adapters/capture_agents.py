@@ -17,7 +17,8 @@ Canonical identity rules (see ``history/shard.py``):
   Claude Code is Anthropic's, Codex is OpenAI's; OpenCode is vendor-neutral
   and the underlying provider/model are recorded only when OpenCode itself
   exposes them (``provider_id`` on the status observation). OpenCode is
-  never collapsed into the model provider. Google Antigravity is Google's
+  never collapsed into the model provider. Grok Build is xAI's product; like
+  the others its vendor says nothing about the model provider. Google Antigravity is Google's
   product, but it also runs non-Google models, so its vendor says nothing
   about the model provider either. Hermes Agent is Nous Research's product
   and is model-agnostic: the provider/model are recorded only from what
@@ -33,6 +34,7 @@ AGENT_CODEX = "codex"
 AGENT_OPENCODE = "opencode"
 AGENT_CURSOR = "cursor"
 AGENT_ANTIGRAVITY = "antigravity"
+AGENT_GROK_BUILD = "grok_build"
 AGENT_HERMES = "hermes"
 
 
@@ -175,6 +177,29 @@ ANTIGRAVITY_PROFILE = AgentProfile(
     ),
 )
 
+GROK_BUILD_PROFILE = AgentProfile(
+    key=AGENT_GROK_BUILD,
+    label="Grok Build",
+    vendor="xAI",
+    executor="grok_build_hooks",
+    import_source="grok_build",
+    import_method="openshard_grok_build_hooks_v0",
+    event_source="grok_build_hooks",
+    capture_source="grok_build_hooks",
+    hook_evidence_source="grok_build_hook",
+    files_source_label="grok_build_hook_reported",
+    model_source="grok_build_hook",
+    usage_provenance="agent_reported",
+    task_placeholder="Grok Build session (task not captured)",
+    import_note=(
+        "Captured automatically from Grok Build's native hooks. "
+        "Tool/file facts are as reported by Grok Build; files are inferred from git diff. "
+        "Grok Build's hook payloads name no model, provider, cost or token counts, so those "
+        "stay Not recorded; the task is the prompt Grok Build delivers on its UserPromptSubmit hook. "
+        "Verification is never recorded by OpenShard for this capture path."
+    ),
+)
+
 HERMES_PROFILE = AgentProfile(
     key=AGENT_HERMES,
     label="Hermes Agent",
@@ -204,7 +229,7 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
     p.key: p
     for p in (
         CLAUDE_CODE_PROFILE, CODEX_PROFILE, OPENCODE_PROFILE, CURSOR_PROFILE, ANTIGRAVITY_PROFILE,
-        HERMES_PROFILE,
+        HERMES_PROFILE, GROK_BUILD_PROFILE,
     )
 }
 CAPTURE_EXECUTORS: frozenset[str] = frozenset(p.executor for p in AGENT_PROFILES.values())
