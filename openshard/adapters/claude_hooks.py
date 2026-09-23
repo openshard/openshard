@@ -958,6 +958,12 @@ def _new_buffer(
         # a completeness reason ({kind, count, detail}); see
         # history/capture_completeness.py and apply_capture_loss.
         "capture_losses": [],
+        # Check-shaped commands (test/lint) the agent's hook stream reported,
+        # kept apart from ``events`` so the verification evidence survives the
+        # event cap: [{"name", "kind", "status", "at"}], bounded; the total
+        # keeps counting past the bound. See _hook_verification.
+        "checks": [],
+        "checks_total": 0,
     }
     _append_event(
         buf,
@@ -1147,9 +1153,32 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         ),
         "applied_ids": [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)],
         "check_command_seen": bool(entry.get("verification_attempted")),
+        **_stored_checks(entry),
         "capture_losses": _stored_losses(capture),
         "baseline": _stored_baseline(entry, capture),
     }
+
+
+def _stored_checks(entry: dict) -> dict:
+    """The check list and total a persisted record's ``verification`` block carries.
+
+    A pre-v1 record has none: the rebuilt buffer then starts empty and
+    ``check_command_seen`` alone keeps the "attempted" fact (see
+    _hook_verification).
+    """
+    block = entry.get("verification")
+    if not isinstance(block, dict):
+        return {"checks": [], "checks_total": 0}
+    checks = [
+        {"name": c.get("name"), "kind": c.get("kind"), "status": c.get("status"), "at": None}
+        for c in (block.get("checks") or [])
+        if isinstance(c, dict) and isinstance(c.get("name"), str)
+    ][:_MAX_BUFFERED_CHECKS]
+    total = block.get("checks_attempted")
+    total = total if isinstance(total, int) and not isinstance(total, bool) and total >= 0 else len(checks)
+    if checks and isinstance(block.get("started_at"), str):
+        checks[0]["at"] = block["started_at"]
+    return {"checks": checks, "checks_total": max(total, len(checks))}
 
 
 def _stored_baseline(entry: dict, capture: dict) -> dict:
@@ -1586,6 +1615,85 @@ def _hook_file_events(buf: dict) -> list[dict]:
     return events
 
 
+_MAX_BUFFERED_CHECKS = 20
+
+
+def _record_check(buf: dict, name: str, kind: str, *, failed: bool, at: str) -> None:
+    """Remember one agent-reported check command. Its outcome stays ``unknown``
+    unless the agent's own hook reported the tool call as failed."""
+    buf["checks_total"] = int(buf.get("checks_total") or 0) + 1
+    checks = buf.get("checks")
+    if not isinstance(checks, list):
+        checks = buf["checks"] = []
+    if len(checks) < _MAX_BUFFERED_CHECKS:
+        checks.append({"name": name, "kind": kind, "status": "failed" if failed else "unknown", "at": at})
+
+
+def _hook_verification(buf: dict) -> dict:
+    """The record's ``verification`` block (history/verification.py) for a hook session.
+
+    Everything here is agent-reported: the hook payload says a check-shaped
+    command ran, OpenShard never sees its exit code. So an observed check is
+    ``unknown`` (never ``passed``), a hook-reported tool failure is
+    ``failed``, and "no check command seen" is ``not_run`` only while no
+    capture evidence is known lost -- otherwise ``unknown``.
+    """
+    from openshard.history.verification import (
+        MODE_HOOK_TOOL_EVENT,
+        REASON_CAPTURE_LOSS,
+        REASON_CHECKS_TRUNCATED,
+        REASON_OUTCOME_NOT_OBSERVED,
+        SOURCE_AGENT_REPORTED,
+        STATUS_UNKNOWN,
+        build_verification,
+    )
+
+    checks = [c for c in (buf.get("checks") or []) if isinstance(c, dict)]
+    total = max(int(buf.get("checks_total") or 0), len(checks))
+    lost = bool(_all_losses(buf))
+    incomplete: list[str] = [REASON_CAPTURE_LOSS] if lost else []
+    if total == 0 and bool(buf.get("check_command_seen")):
+        # Older buffer (rebuilt from a pre-v1 record): a check was seen but
+        # its details were never kept.
+        return build_verification(
+            source=SOURCE_AGENT_REPORTED, observation_mode=MODE_HOOK_TOOL_EVENT, status=STATUS_UNKNOWN,
+            reason="Check command(s) observed through agent hooks; outcome not observed.",
+            incomplete_reasons=[REASON_OUTCOME_NOT_OBSERVED, REASON_CAPTURE_LOSS],
+        )
+    if total == 0:
+        if lost:
+            return build_verification(
+                source=SOURCE_AGENT_REPORTED, observation_mode=MODE_HOOK_TOOL_EVENT, status=STATUS_UNKNOWN,
+                reason="No check command observed, but some capture events were lost.",
+                incomplete_reasons=incomplete,
+            )
+        return build_verification(
+            source=SOURCE_AGENT_REPORTED, observation_mode=MODE_HOOK_TOOL_EVENT, checks_attempted=0,
+            reason="No check command observed in the agent's tool events.",
+        )
+    failed = sum(1 for c in checks if c.get("status") == "failed")
+    stamps = [c["at"] for c in checks if isinstance(c.get("at"), str)]
+    if total > len(checks):
+        incomplete.append(REASON_CHECKS_TRUNCATED)
+    if failed:
+        reason = "The agent's hook reported a check command as failed; exit codes are not observed."
+    else:
+        incomplete.append(REASON_OUTCOME_NOT_OBSERVED)
+        reason = "Check command(s) observed through agent hooks; outcome not observed."
+    return build_verification(
+        source=SOURCE_AGENT_REPORTED,
+        observation_mode=MODE_HOOK_TOOL_EVENT,
+        checks=[{"name": c.get("name"), "kind": c.get("kind"), "status": c.get("status")} for c in checks],
+        checks_attempted=total,
+        checks_passed=0,
+        checks_failed=failed,
+        checks_skipped=0,
+        started_at=min(stamps) if stamps else None,
+        reason=reason,
+        incomplete_reasons=incomplete,
+    )
+
+
 def _all_losses(buf: dict) -> list[dict]:
     """Every loss reason for *buf*: recorded losses plus the buffer's own drop counter."""
     losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
@@ -1781,6 +1889,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # here (see module docstring "Evidence honesty").
         "verification_attempted": bool(buf.get("check_command_seen")),
         "verification_passed": None,
+        # Structured evidence (history/verification.py): what was seen, who
+        # reported it and what is known missing. The two booleans above stay
+        # for older readers.
+        "verification": _hook_verification(buf),
         # Counts cover this session's changes only: agent-reported and
         # git-observed. Pre-existing / other-session changes are excluded
         # from the counts and listed after them in files_detail with their
@@ -2107,6 +2219,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
                 # stdout/exit codes), so verification_passed stays None; see
                 # build_hook_entry.
                 buf["check_command_seen"] = True
+                _record_check(buf, action, payload.command_kind, failed=failed, at=now)
         _append_event(
             buf, event_type="tool.invoked", action=action, target=target,
             target_is_path=(kind == TOOL_KIND_FILE),

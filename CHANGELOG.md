@@ -2,6 +2,43 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **Verification evidence no longer disappears before the Receipt.** The
+  machine `verification_status` was filled only from native OSN runs, so
+  every hook-captured, imported or wrapped Receipt crossed `history --json`
+  and sync with `verification_status: null` -- shown by the Platform as "No
+  verification recorded" even when a check command had been observed.
+  Imports and wraps also stored `verification_attempted: false`, which read
+  as "No checks run" although those paths cannot see checks. Receipts now
+  carry a structured `verification` block (`history/verification.py`):
+  `status` (`passed` / `failed` / `partial` / `not_run` / `unknown`),
+  `source` (`agent_reported` / `directly_observed` / `git_verified` /
+  `independently_verified`), `observation_mode`, check counts and names,
+  timestamps, exit code, `artifact_sha`, and `complete` /
+  `incomplete_reasons`. "Attempted, outcome unknown" is `unknown`, never
+  `not_run`; malformed evidence becomes `unknown` and incomplete, never
+  silently dropped. Hook capture records every check-shaped command it sees
+  (bounded, surviving the event cap and buffer rebuilds); import and wrap
+  record `not_observable`.
+- `build_live_run_receipt` no longer shows "No checks run" for a run whose
+  verification was attempted without a recorded outcome.
+
+### Compatibility
+
+- Stored records are never rewritten. A record without a `verification`
+  block gets one derived at read time (`derived: true`) from the fields it
+  has; a record that recorded nothing about verification still projects
+  `verification_status: null`. OSN tokens (`skipped`, `manual_review`) are
+  unchanged. `verification_status` may now also be `partial`.
+- The full block appears in `openshard history --json` (extended
+  projection). It is withheld from the sync envelope until the Platform
+  contract defines it; sync carries the evidence as `verification_status`
+  plus a `verification_reason` that names the source (e.g.
+  `"... [agent_reported]"`).
+
 ## 0.4.6 - 2026-09-18
 
 OpenShard Platform sync arrives: `openshard sync connect` / `now` / `status`

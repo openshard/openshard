@@ -23,6 +23,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from openshard.history.verification import not_observable_verification
 from openshard.util.git import NO_WINDOW_KW
 
 _MAX_FILES = 20
@@ -352,6 +353,10 @@ def build_claude_code_import_entry(
         "files_source": files_source,
         "verification_attempted": False,
         "verification_passed": None,
+        # The booleans above are kept for older readers; they never meant
+        # "no checks ran". This capture path cannot observe checks at all,
+        # and the structured block says exactly that (history/verification.py).
+        "verification": not_observable_verification(),
         "files_created": files_created,
         "files_updated": files_updated,
         "files_deleted": files_deleted,

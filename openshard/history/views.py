@@ -21,6 +21,7 @@ from typing import Any
 from openshard.history.query import RecoveryObservation, RelevantAttempt, RelevantMatch, SearchHit
 from openshard.history.shard import Shard
 from openshard.history.shard_contract import ShardFinding, ShardReceipt
+from openshard.history.verification import parse_verification_block
 
 MAX_FILES = 50
 MAX_FINDINGS = 20
@@ -173,8 +174,25 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
             # Canonical host/owner/repo (from the record's repo_identity field);
             # ``repo`` above stays the folder name. None when never captured.
             "repo_identity": receipt.repo_identity,
+            # Structured verification evidence (history/verification.py).
+            "verification": verification_to_dict(receipt.verification),
         })
     return d
+
+
+def verification_to_dict(block: dict | None) -> dict[str, Any] | None:
+    """Re-validated, bounded copy of a receipt's ``verification`` block.
+
+    The block is parsed again here (not trusted because it came from a
+    ``ShardReceipt``) so the privacy/shape boundary cannot drift: check
+    names and the reason are scrubbed and capped, counts are non-negative
+    ints, and anything malformed comes out ``unknown`` / incomplete.
+    """
+    if block is None:
+        return None
+    ev = parse_verification_block(block)
+    ev.derived = bool(block.get("derived")) if isinstance(block, dict) else False
+    return ev.to_dict()
 
 
 def relevant_attempt_to_dict(attempt: RelevantAttempt) -> dict[str, Any]:

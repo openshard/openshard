@@ -473,7 +473,9 @@ class TestBenchmarkPipeline:
         evidence = burn["openshard"]["expected_evidence"]
         assert evidence["present"] is True, evidence["checks"]
         shard = burn["openshard"]["history"]["shards"][0]
-        assert shard["agent"] == "Claude Code (external)" and shard["verification_status"] in (None, "Not recorded")
+        # The hook stream saw the agent run a check command but never its exit
+        # code: "attempted, outcome unknown" -- never passed/failed, never null.
+        assert shard["agent"] == "Claude Code (external)" and shard["verification_status"] == "unknown"
         assert "relay/_schema.py" in shard["files"] and "schema/jobs.json" not in shard["files"]
         assert "priority" in shard["task_short"].lower()
         assert bench["burn_in"]["retrievable"] is True

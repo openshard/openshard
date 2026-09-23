@@ -1,10 +1,10 @@
 """Canonical record -> receipt sync envelope v1, and when a record may go.
 
-The ``receipt`` object is exactly ``history.views.receipt_to_dict(receipt,
+The ``receipt`` object is ``history.views.receipt_to_dict(receipt,
 extended=True)`` built from the stored record -- the projection
-``openshard history --json`` prints. Nothing is added, renamed or filled in
-here: a key the Platform contract does not define is the Platform's to
-reject, and that rejection is recorded locally rather than papered over.
+``openshard history --json`` prints -- minus the keys in
+:data:`WITHHELD_RECEIPT_KEYS`, which the hosted contract does not define
+yet. Nothing is added, renamed or filled in here.
 
 Quiescence
 ----------
@@ -77,9 +77,23 @@ def eligibility(entry: dict, *, now: datetime | None = None) -> Eligibility:
     return Eligibility(False, REASON_SESSION_IN_PROGRESS)
 
 
+# Projection keys the hosted receipt-sync contract v1 does not define yet.
+# The Platform's receipt object is closed and a rejection is final (never
+# retried), so a key is withheld here until the contract accepts it rather
+# than stranding every Receipt as ``rejected``. The structured
+# ``verification`` block is summarised into the contract's existing
+# ``verification_status`` / ``verification_reason`` fields (source kept
+# explicit in the reason) by ``build_shard_receipt``; the full block ships
+# once the Platform contract defines it.
+WITHHELD_RECEIPT_KEYS: frozenset[str] = frozenset({"verification"})
+
+
 def receipt_payload(entry: dict, index: int) -> dict:
     """The privacy-bounded machine receipt for the record at history position *index*."""
-    return receipt_to_dict(build_shard_receipt(entry, index=index), extended=True)
+    payload = receipt_to_dict(build_shard_receipt(entry, index=index), extended=True)
+    for key in WITHHELD_RECEIPT_KEYS:
+        payload.pop(key, None)
+    return payload
 
 
 def build_envelope(entry: dict, index: int, *, core_version: str) -> dict:
@@ -118,6 +132,7 @@ __all__ = [
     "QUIESCENT_SECONDS",
     "SHARD_SCHEMA_VERSION",
     "SOURCE_PRODUCT",
+    "WITHHELD_RECEIPT_KEYS",
     "Eligibility",
     "build_envelope",
     "eligibility",
