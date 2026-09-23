@@ -83,7 +83,9 @@ open. It is sent only when:
 
 - the session ended (`capture.session_end_observed`), or
 - it has been idle for an hour (the same threshold after which capture
-  itself sweeps a stale session).
+  itself sweeps a stale session). Sync runs that sweep first, so the copy
+  it sends already says `session_end_not_observed`, and it waits while the
+  session's capture buffer is still open.
 
 Until then `status` reports it as "still in progress".
 

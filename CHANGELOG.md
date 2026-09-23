@@ -105,6 +105,13 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- A session without an end hook (Google Antigravity, or any session whose
+  end was missed) was synced after an hour idle *before* capture closed it:
+  the hosted copy claimed a complete capture, and the later idle sweep
+  (which only ran when the agent's next session started) changed the local
+  record to `session_end_not_observed`, leaving the hosted copy stale.
+  Sync now runs the idle sweep first and waits while a session's capture
+  buffer is still open.
 - A hook that names the model without a provider (Hermes' session hooks) no
   longer downgrades an already-observed `provider/model` to the bare model slug.
 - **Verification evidence no longer disappears before the Receipt.** The

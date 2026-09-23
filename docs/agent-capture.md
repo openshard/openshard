@@ -408,9 +408,9 @@ terse per event; see the field audit in `adapters/antigravity_hooks.py`.
   hook, the service anchors the change-attribution baseline when it
   *receives* a session's first `PreInvocation` (one `git status`, once per
   session); with no end hook, the idle sweep (run on each session's first
-  invocation) closes a session after an hour idle and its completeness says
-  `session_end_not_observed`. Sync treats the session as eligible once it
-  has been quiet for an hour.
+  invocation, and by every sync run) closes a session after an hour idle and
+  its completeness says `session_end_not_observed`. Sync sends the session
+  only after that sweep has closed it.
 * **Performance**: every event is a process start of `openshard hooks
   antigravity` on the fast console-script path plus a loopback POST whose
   server-side work is validate + reduce + fsync; the fold, git diff and

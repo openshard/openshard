@@ -328,15 +328,16 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _seconds_since(stamp: object) -> float | None:
-    """Seconds elapsed since an OpenShard UTC timestamp string; None if unparsable."""
+def _seconds_since(stamp: object, now: datetime | None = None) -> float | None:
+    """Seconds elapsed since an OpenShard UTC timestamp string (until *now*,
+    default the current time); None if unparsable."""
     if not isinstance(stamp, str) or not stamp:
         return None
     try:
         then = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return (datetime.now(UTC) - then).total_seconds()
+    return ((now or datetime.now(UTC)) - then).total_seconds()
 
 
 def _diag(message: str) -> None:
@@ -2144,10 +2145,13 @@ def _fold(buf: dict, repo_root: Path) -> tuple[dict, str]:
     return entry, outcome
 
 
-def sweep_stale_buffers(repo_root: Path, *, max_age_seconds: float = _STALE_BUFFER_SECONDS) -> list[str]:
+def sweep_stale_buffers(
+    repo_root: Path, *, max_age_seconds: float = _STALE_BUFFER_SECONDS, now: datetime | None = None,
+) -> list[str]:
     """Fold and remove staging buffers of sessions idle for *max_age_seconds*.
 
-    Called (outside the caller's own session lock) on SessionStart. A stale
+    Called (outside the caller's own session lock) on SessionStart, and by
+    Platform sync before it picks what to send (sync/client.py). A stale
     buffer is snapshotted into runs.jsonl exactly as a Stop would do it --
     ``capture.session_end_observed`` stays False and no ``run.completed``
     Event is fabricated -- then removed; a later hook for that session
@@ -2168,7 +2172,7 @@ def sweep_stale_buffers(repo_root: Path, *, max_age_seconds: float = _STALE_BUFF
             peek = _read_buffer(path)
             if peek is None:
                 continue
-            age = _seconds_since(peek.get("last_activity_at"))
+            age = _seconds_since(peek.get("last_activity_at"), now)
             if age is None or age < max_age_seconds:
                 continue
             sid = str(peek.get("session_id") or path.stem)
@@ -2179,7 +2183,7 @@ def sweep_stale_buffers(repo_root: Path, *, max_age_seconds: float = _STALE_BUFF
                     buf = _read_buffer(path)
                     if buf is None:
                         continue
-                    age = _seconds_since(buf.get("last_activity_at"))
+                    age = _seconds_since(buf.get("last_activity_at"), now)
                     if age is None or age < max_age_seconds:
                         continue
                     if _has_activity(buf):
