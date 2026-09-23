@@ -116,7 +116,8 @@ def _token_list(*allowed: str, max_items: int = 8) -> Validator:
 # ---------------------------------------------------------------------------
 
 AGENTS = (
-    "claude_code", "codex", "opencode", "cursor", "antigravity", "hermes", "native", "wrap", "import", "other",
+    "claude_code", "codex", "opencode", "cursor", "antigravity", "hermes", "grok_bot", "native", "wrap", "import",
+    "other",
 )
 ORIGINS = ("openshard_routed", "external_observed", "unknown")
 CAPTURE_DEPTHS = ("full", "partial", "unknown")
