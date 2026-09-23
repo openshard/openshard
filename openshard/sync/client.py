@@ -35,7 +35,10 @@ from openshard.sync import outbox as _outbox
 from openshard.sync import transport as _transport
 from openshard.sync.config import PlatformLink, resolve_link, sync_disabled
 from openshard.sync.envelope import (
+    QUIESCENT_SECONDS,
     REASON_SESSION_IN_PROGRESS,
+    REASON_SESSION_QUIESCENT,
+    Eligibility,
     build_envelope,
     eligibility,
     payload_hash,
@@ -153,12 +156,49 @@ def discover(
                     found.synced += 1
                 continue
         verdict = eligibility(entry, now=current)
+        if verdict.reason == REASON_SESSION_QUIESCENT and _capture_buffer_open(root, entry):
+            # Quiet on disk, but capture has not closed the session yet (its
+            # staging buffer may hold newer events, and the idle sweep has not
+            # stamped ``session_end_not_observed``): sending now would ship a
+            # copy that changes locally right after.
+            verdict = Eligibility(False, REASON_SESSION_IN_PROGRESS)
         if not verdict.eligible:
             if verdict.reason == REASON_SESSION_IN_PROGRESS:
                 found.in_progress += 1
             continue
         found.candidates.append(Candidate(rid, index, entry, verdict.reason))
     return found
+
+
+def _capture_buffer_open(root: Path, entry: dict) -> bool:
+    """True while the capture staging buffer of *entry*'s hook session still exists."""
+    try:
+        from openshard.adapters.claude_hooks import buffer_path
+
+        capture = entry.get("capture")
+        if not isinstance(capture, dict) or capture.get("session_end_observed") is True:
+            return False
+        sid, agent = capture.get("session_id"), capture.get("agent")
+        if not isinstance(sid, str) or not isinstance(agent, str):
+            return False
+        return buffer_path(root, sid, agent).is_file()
+    except Exception:
+        return False
+
+
+def _close_idle_sessions(root: Path, now: datetime | None) -> None:
+    """Let capture close sessions idle past the sync threshold before choosing what to send.
+
+    An agent with no session-end hook (Antigravity) is otherwise only swept
+    when its next session starts in this repository -- after its Receipt was
+    already sent without ``session_end_not_observed``.
+    """
+    try:
+        from openshard.adapters.claude_hooks import sweep_stale_buffers
+
+        sweep_stale_buffers(root, max_age_seconds=QUIESCENT_SECONDS, now=now)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -221,6 +261,7 @@ def flush(
             report.stopped = f"paused: {paused}"
             return report
 
+        _close_idle_sessions(root, now)
         records = _outbox.load_outbox(root)
         found = discover(root, link=link, now=now, records=records)
         _persist_stale(root, found, records, link)
