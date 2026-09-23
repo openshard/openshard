@@ -20,6 +20,7 @@ from openshard.history.shard import (
 )
 from openshard.history.shard_hash import verify_shard_hash
 from openshard.history.task_identity import stored_task_id
+from openshard.history.task_title import derive_task_title, resolve_task_title
 from openshard.run.timeline import normalize_timeline
 
 _PROFILE_TO_STRATEGY: dict[str, str] = {
@@ -415,6 +416,9 @@ class ShardReceipt:
     result: str
     status: str
     duration_seconds: float | None
+    # Concise display title (history/task_title.py) -- display metadata only;
+    # task_short/task_full keep the recorded task text unchanged.
+    task_title: str = ""
     repo: str | None = None
     # Canonical ``host/owner/repo`` from the record's additive ``repo_identity``
     # field (history/repo_identity.py); None for records without one. ``repo``
@@ -1199,6 +1203,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         created_at=timestamp,
         task_short=_task_short_val,
         task_full=task,
+        task_title=resolve_task_title(entry),
         agent=agent,
         strategy=strategy,
         model_display=model_display,
@@ -1635,6 +1640,7 @@ def build_live_run_receipt(
         created_at=run_id,
         task_short=_trunc(task, 70),
         task_full=task,
+        task_title=derive_task_title(task),
         agent=agent,
         strategy="Not recorded",
         model_display=_model_display,

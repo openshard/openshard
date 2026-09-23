@@ -164,6 +164,7 @@ from openshard.history.capture_completeness import (
     build_completeness,
     make_reason,
 )
+from openshard.history.task_title import derive_task_title
 from openshard.util.git import run_git
 
 # Claude Code identity constants -- kept as module names for existing
@@ -1767,6 +1768,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         "schema_version": SHARD_SCHEMA_VERSION,
         "timestamp": record["timestamp"],
         "task": task or profile.task_placeholder,
+        # Deterministic display title; never a model call on the capture path.
+        "task_title": derive_task_title(task or profile.task_placeholder),
         "execution_model": execution_model,
         "executor": profile.executor,
         "import_source": profile.import_source,

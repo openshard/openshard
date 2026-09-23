@@ -1,10 +1,17 @@
 """Canonical record -> receipt sync envelope v1, and when a record may go.
 
-The ``receipt`` object is exactly ``history.views.receipt_to_dict(receipt,
+The ``receipt`` object is ``history.views.receipt_to_dict(receipt,
 extended=True)`` built from the stored record -- the projection
-``openshard history --json`` prints. Nothing is added, renamed or filled in
-here: a key the Platform contract does not define is the Platform's to
-reject, and that rejection is recorded locally rather than papered over.
+``openshard history --json`` prints -- minus :data:`SYNC_WITHHELD_KEYS`.
+Nothing is added, renamed or filled in here: a key the Platform contract does
+not define is the Platform's to reject, and that rejection is recorded locally
+rather than papered over.
+
+``SYNC_WITHHELD_KEYS`` holds additive display fields a deployed Platform may
+not accept yet. The contract is strict and a rejection is never retried, so
+a new key is sent only once the Platform contract defines it. ``task_title``
+is withheld today; the Platform derives the same deterministic title from
+``task_full`` at display time.
 
 Quiescence
 ----------
@@ -35,6 +42,9 @@ CONTRACT_VERSION = "1"
 SOURCE_PRODUCT = "openshard-core"
 
 QUIESCENT_SECONDS = 60 * 60
+
+# Display-only keys not sent until the hosted contract accepts them (see module docstring).
+SYNC_WITHHELD_KEYS: tuple[str, ...] = ("task_title",)
 
 REASON_NO_RECEIPT_ID = "no_receipt_id"
 REASON_SESSION_IN_PROGRESS = "session_in_progress"
@@ -79,7 +89,10 @@ def eligibility(entry: dict, *, now: datetime | None = None) -> Eligibility:
 
 def receipt_payload(entry: dict, index: int) -> dict:
     """The privacy-bounded machine receipt for the record at history position *index*."""
-    return receipt_to_dict(build_shard_receipt(entry, index=index), extended=True)
+    receipt = receipt_to_dict(build_shard_receipt(entry, index=index), extended=True)
+    for key in SYNC_WITHHELD_KEYS:
+        receipt.pop(key, None)
+    return receipt
 
 
 def build_envelope(entry: dict, index: int, *, core_version: str) -> dict:
@@ -118,6 +131,7 @@ __all__ = [
     "QUIESCENT_SECONDS",
     "SHARD_SCHEMA_VERSION",
     "SOURCE_PRODUCT",
+    "SYNC_WITHHELD_KEYS",
     "Eligibility",
     "build_envelope",
     "eligibility",

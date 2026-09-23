@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from openshard.history.task_title import derive_task_title
+
 _MAX_FILES = 20
 _SUMMARY_CAP = 300
 _TASK_CAP = 500
@@ -274,6 +276,7 @@ def build_wrap_entry(
         "schema_version": SHARD_SCHEMA_VERSION,
         "timestamp": now,
         "task": safe_task,
+        "task_title": derive_task_title(safe_task),
         "execution_model": safe_model,
         "executor": "claude_code_wrap",
         "import_source": "claude_code",

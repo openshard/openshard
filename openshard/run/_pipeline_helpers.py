@@ -22,6 +22,7 @@ from openshard.analysis.repo import RepoFacts
 from openshard.execution.generator import ChangedFile, ExecutionGenerator, ExecutionResult
 from openshard.history.jsonl_store import append_jsonl
 from openshard.history.shard_schema import SHARD_SCHEMA_VERSION, coerce_shard_entry
+from openshard.history.task_title import derive_task_title
 from openshard.providers.openrouter import MODEL_PRICING, compute_cost
 from openshard.routing.form_factor_policy import ExecutionFormFactorDecision
 from openshard.routing.profiles import ProfileDecision
@@ -468,6 +469,7 @@ def _log_run(
         "timestamp": _timestamp_val,
         "run_id": _timestamp_val,
         "task": task,
+        "task_title": derive_task_title(task),
         "execution_model": model or generator.model,
         "retry_triggered": retry_triggered,
         "duration_seconds": round(time.time() - start, 2),

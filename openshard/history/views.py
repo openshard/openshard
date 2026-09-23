@@ -129,6 +129,7 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         "created_at": receipt.created_at,
         "task_short": receipt.task_short,
         "task_full": receipt.task_full,
+        "task_title": receipt.task_title,
         "agent": receipt.agent,
         "origin": shard.origin if shard else None,
         "capture_depth": shard.capture_depth if shard else None,
