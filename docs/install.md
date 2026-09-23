@@ -28,9 +28,10 @@ openshard setup
 ```
 
 `openshard setup` detects whichever of Claude Code, Codex, Cursor,
-OpenCode or Google Antigravity are available for the repo and configures
-capture for each (for the Antigravity IDE without the `agy` CLI on PATH,
-run `openshard capture install antigravity`). Then
+OpenCode, Google Antigravity or Grok Build are available for the repo and
+configures capture for each (for the Antigravity IDE without the `agy` CLI
+on PATH, run `openshard capture install antigravity`; for Grok Build, trust
+the folder with `/hooks-trust` or `--trust`). Then
 use your coding agent normally and look at what was captured:
 
 ```sh

@@ -1,14 +1,15 @@
-# Agent capture: Claude Code, Codex, Cursor, OpenCode and Google Antigravity
+# Agent capture: Claude Code, Codex, Cursor, OpenCode, Google Antigravity and Grok Build
 
-Openshard records the coding-agent work you already do. Five agents feed
+Openshard records the coding-agent work you already do. Six agents feed
 **one** capture path:
 
 ```text
 Claude Code hooks (HTTP + SessionStart command) ─┐
 Codex hooks (command)  ──────────────────────────┤
 Cursor hooks (command) ──────────────────────────┤
-Antigravity hooks (command) ─────────────────────┼──> local capture service (127.0.0.1, authenticated)
-OpenCode plugin (fetch) ─────────────────────────┘        POST /hooks/{claude,codex,cursor,antigravity,opencode}
+Antigravity hooks (command) ─────────────────────┤
+Grok Build hooks (command) ──────────────────────┼──> local capture service (127.0.0.1, authenticated)
+OpenCode plugin (fetch) ─────────────────────────┘        POST /hooks/{claude,codex,cursor,antigravity,grok-build,opencode}
                                                                │  blocking path: authenticate -> validate -> translate -> reduce -> fsync queue -> 200
                                                                ▼  background: replay through the shared fold (undecodable lines quarantined)
                                                     canonical Events -> Run/Attempt -> Shard -> Receipt
@@ -24,17 +25,17 @@ another local account, a sandboxed process or a web page's cross-origin
 
 | Credential | Where it lives | Who presents it | Authorises |
 |---|---|---|---|
-| **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | our own processes only: `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, `openshard hooks antigravity`, `openshard capture stop` | every endpoint, including `/shutdown` |
+| **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | our own processes only: `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, `openshard hooks antigravity`, `openshard hooks grok-build`, `openshard capture stop` | every endpoint, including `/shutdown` |
 | **Scoped capability** -- `r2.` + HMAC-SHA256(token, normalised repo root + `\n` + agent key) | third-party configuration that runs no process of ours at delivery time: the `X-OpenShard-Capture-Token` header of the Claude Code HTTP hook entries in `.claude/settings.local.json` (agent `claude_code`); the `CAPABILITY` constant in `.opencode/plugins/openshard.js` (agent `opencode`) | Claude Code's HTTP hooks; the OpenCode plugin | events **for that repository and that agent only**; never shutdown |
 
 The service checks a capability against the agent the receiver path records
 under (`/hooks/claude` -> `claude_code`, `/status/claude` -> `claude_code`,
 `/hooks/codex` -> `codex`, `/hooks/cursor` -> `cursor`, `/hooks/antigravity`
--> `antigravity`, `/hooks/opencode` -> `opencode`), so a leaked Claude capability for repo A cannot submit
+-> `antigravity`, `/hooks/grok-build` -> `grok_build`, `/hooks/opencode` -> `opencode`), so a leaked Claude capability for repo A cannot submit
 Cursor, Codex or OpenCode events for repo A, a Cursor capability cannot
 submit Claude events, and no capability for repo A works for repo B.
-Codex, Cursor and Antigravity need no capability: their hooks run
-`openshard hooks codex|cursor|antigravity`, a process of ours that reads the
+Codex, Cursor, Antigravity and Grok Build need no capability: their hooks run
+`openshard hooks codex|cursor|antigravity|grok-build`, a process of ours that reads the
 token file. The master
 token never appears in any agent's configuration.
 
@@ -188,6 +189,7 @@ translator and one installer per agent, and per-agent readiness in
 | Codex | `codex_hooks` | Codex (external) | `codex` / OpenAI | model slug from every hook payload; provider **not** exposed, so not recorded |
 | OpenCode | `opencode_plugin` | OpenCode (external) | `opencode` / — | `providerID/modelID` OpenCode reports on the user/assistant message, only when present |
 | Google Antigravity | `antigravity_hooks` | Google Antigravity (external) | `antigravity` / Google | `modelName` from every hook payload; every distinct model kept; provider **not** exposed (Antigravity also runs non-Google models), so not recorded |
+| Grok Build | `grok_build_hooks` | Grok Build (external) | `grok_build` / xAI | **none**: the documented hook payload names no model, provider, tokens or cost, so all stay Not recorded; xAI is the vendor of the *agent*, never inferred as the model provider |
 
 Every one of these is `origin = external_observed`, `capture_depth =
 partial` (`history/shard.py`): Openshard observed the session, it did not
@@ -430,6 +432,110 @@ terse per event; see the field audit in `adapters/antigravity_hooks.py`.
   antigravity`. Open the repository as the Antigravity workspace (or run
   `agy` in it); restart Antigravity if it was already running.
 
+## Grok Build integration
+
+Sources: xAI's hooks reference (`docs.x.ai/build/features/hooks`), read on
+2026-09-23. Grok Build's hooks are Claude-Code-*shaped* but it is **not**
+Claude Code: the config lives in `.grok/hooks/*.json`, stdin is camelCase, the
+event set differs, and Grok also *loads* `.claude/settings.json` for
+compatibility. OpenShard reads only Grok's own vocabulary (a Claude
+snake_case document is never read as Grok, and a Grok document is never
+recorded by the Claude receiver), and the agent is fixed by the receiver
+path, so a Grok Build session is always a `grok_build_hooks` Shard. Field
+audit: `adapters/grok_build_hooks.py`. Grok Build was not installed on the
+machine this was built on: every field below is either documented or marked
+*tolerated* (not documented; read defensively, can only under-report).
+
+* **Documented to hooks**: every event carries `hookEventName`, `sessionId`,
+  `cwd`, `workspaceRoot`; tool events add `toolName` and `toolInput`. Hook
+  processes also get `GROK_HOOK_EVENT`, `GROK_HOOK_NAME`, `GROK_SESSION_ID`
+  and `GROK_WORKSPACE_ROOT`. `command` and `http` handlers, regex `matcher`
+  on the tool name (omitted = every tool), `timeout` in seconds (default 5).
+  Only `PreToolUse` can block (a `deny` decision or exit code 2); timeouts,
+  crashes and bad output are fail-open. Only `PreToolUse`, `PostToolUse` and
+  `Stop` output reaches the model.
+* **Not documented** (so *tolerated*, never relied on): `prompt` on
+  `UserPromptSubmit` (the task; absent = placeholder), `source` on
+  `SessionStart`, `reason` on `SessionEnd`, the path/command key names inside
+  `toolInput`. **Not exposed at all** (never recorded, never inferred): the
+  model and provider, token counts, cost, tool results and exit codes,
+  who or what denied a permission. OpenShard does not read Grok's session
+  files under `~/.grok` to fill any of these in.
+* **Transport**: `command` handlers. Grok's `http` handler is documented only
+  as "POST the event to a url" with no header or authentication contract,
+  and the capture service requires a bearer token on every request, so
+  nothing tokenised is ever written into `.grok/`. `openshard hooks
+  grok-build` (fast console-script path) posts the raw document over
+  authenticated loopback to `POST /hooks/grok-build`, exactly like the
+  other command-hook agents, and always prints `{}` and exits 0 (never
+  Grok's deny code 2).
+* **Config**: `<repo>/.grok/hooks/openshard.json` -- a file OpenShard owns
+  outright (Grok merges every `*.json` in the directory, so no other file is
+  ever touched; entries in our file that are not ours survive). A file it
+  creates is added to `.git/info/exclude` and is never counted as a task's
+  changed file (the rest of `.grok/`, which holds shared skills and rules,
+  is). `timeout` is written explicitly (15 s `SessionStart`, 5 s others).
+* **Trust**: Grok Build does not run project hooks until the folder is
+  trusted (`/hooks-trust` inside Grok, or launch with `--trust`; kept in
+  `~/.grok/trusted_folders.toml`, a format OpenShard does not parse).
+  `capture install` prints the step, and `openshard doctor` reports
+  "Capture verified" only after a real Grok Build Shard exists in the
+  repository -- until then it says "configured but unverified" and names the
+  trust step. A hook file is structural evidence only.
+* **Events** (all `openshard hooks grok-build --event <Name>`):
+
+  | Grok Build event | Openshard event | Recorded |
+  |---|---|---|
+  | `SessionStart` | `SessionStart` | anchors the change-attribution baseline; opens the session |
+  | `UserPromptSubmit` | `UserPromptSubmit` | first one creates the Shard; the scrubbed, bounded task excerpt when `prompt` is delivered |
+  | `PostToolUse` | `PostToolUse` | `run_terminal_command` / `Bash` -> command (scrubbed, `command_kind` test/lint/other, status **unknown**); `write` / `edit` / `multiedit` -> file target, status **unknown**, no hook-reported path (Grok does not document `PostToolUse` as success-only, so it is never an "edit succeeded" signal; git supplies the file evidence); `read` -> **read** (repo-relative, never a change); anything else (MCP, search, web) by name only |
+  | `PostToolUseFailure` | `PostToolUseFailure` | the same tool record, `failed` (a failed check -> `verification.status = failed`, `agent_reported`) |
+  | `PermissionDenied` | `PermissionDenied` | an `approval.denied` Event, `agent_reported`, `failed`, naming the **tool only** (`capture.permission_denied_count`); never work, never opens a Shard, never an approval receipt |
+  | `Stop` | `Stop` | completed turn; fold |
+  | `StopFailure` | `SessionIdle` | snapshot, never a completed turn |
+  | `SessionEnd` | `SessionEnd` | finalises the Shard (`session_end_observed`, reason as delivered) |
+
+  Not subscribed, on purpose: `PreToolUse` (Grok's only blocking event;
+  OpenShard records, it does not gate, and it adds no fact `PostToolUse` /
+  `PermissionDenied` lack -- **no policy enforcement is implemented**),
+  `SubagentStart` / `SubagentStop` (documented without a payload; a subagent
+  may carry its own `sessionId`, so nothing safe can be read), and
+  `Notification`, `PreCompact`, `PostCompact`, `TaskCreated`,
+  `TaskCompleted`, `InstructionsLoaded`, `CwdChanged`.
+* **Known limitations**: (1) Grok also loads `.claude/settings.json`; if
+  OpenShard's Claude Code hooks are installed in the same repository, Grok
+  may deliver its events to them too. Grok-vocabulary documents fail the
+  Claude translator's checks and are ignored (tested), but this was not
+  observed against a real Grok Build. (2) Project hooks fire only for a
+  trusted folder. (3) `SessionEnd` is not guaranteed on a killed session;
+  the idle sweep then closes it (`session_end_not_observed`).
+* **Commands**: `openshard setup` (when `grok` is on PATH),
+  `openshard capture install grok-build`, `openshard capture uninstall
+  grok-build`. Trust the folder, then restart Grok Build if it was running.
+
+### Fidelity compared with the other agents
+
+| Fact | Claude Code | Google Antigravity | Grok Build |
+|---|---|---|---|
+| Session identity | `session_id` | `conversationId` | `sessionId` |
+| Task | first prompt excerpt (documented `prompt`) | never (no prompt to hooks) | first prompt excerpt **if** Grok delivers `prompt` (undocumented); else placeholder |
+| Model | status line (`model.id`) | `modelName` on every hook, every model kept | not exposed |
+| Provider | not exposed | not exposed | not exposed |
+| Tokens / cost | status line, `provider_reported` | not exposed | not exposed |
+| Tool calls | name; Bash command; Edit/Write/MultiEdit paths | name; command; file paths; reads | name; command; file paths; reads |
+| Tool success signal | `PostToolUse` = success-only (documented) -> `passed` file edits | empty `error` string | none (`PostToolUse` not documented as success-only) -> file tools `unknown` |
+| Tool failure | `PostToolUseFailure` | non-empty `error` | `PostToolUseFailure` |
+| Changed files | git diff + hook-reported (`agent_reported`) | git diff + hook-reported | git diff only (`git_observed`) |
+| Permission events | none | none | `PermissionDenied` -> `approval.denied` (tool name only) |
+| Verification | check command observed; failure from failure event | from `error` | check command observed; failure from failure event |
+| Turn completion | `Stop` | `Stop` (not when errored / not idle) | `Stop` (not `StopFailure`) |
+| Session end | `SessionEnd` | none (idle sweep) | `SessionEnd` |
+| Transport | HTTP hooks + capability header | command hook | command hook |
+
+Hermes is not in this comparison: there is no Hermes integration on `main`
+(or in the `feat/hermes-capture` worktree at the time of writing) to compare
+against.
+
 ## Setup / doctor / uninstall
 
 * `openshard setup` starts the capture service, configures Claude Code
@@ -532,6 +638,16 @@ and the OpenCode counterpart guard the server-side p50 < 25 ms / p95 <
   idle sweep completeness, receipt identity, sync envelope and telemetry,
   replies, authentication (no token, another agent's capability),
   blocking budget, installer, CLI install/uninstall/setup/doctor.
+* `tests/test_grok_build_capture.py` — translator (documented vs tolerated
+  fields, event from the command line, Claude vocabulary never read as Grok,
+  tool classification, malformed shapes, results/contents/transcripts never
+  read), inline and HTTP records (identical stable view), `PermissionDenied`
+  (tool name only, never opens a Shard, no approval receipt), no success
+  signal from `PostToolUse`, `StopFailure` never a turn, receipt identity,
+  sync envelope and telemetry, empty reply, authentication (no token,
+  another agent's capability), installer (own file, other hook files
+  untouched, idempotent, foreign entries kept, unparseable never clobbered),
+  CLI install/uninstall/setup/doctor including "configured but unverified".
 * `tests/test_cross_agent_capture.py` — all three agents in one
   repository: distinct Shards and executors, `list_shards` /
   `search_history` / `relevant_context` reach each, receipts keep identity

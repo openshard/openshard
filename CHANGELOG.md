@@ -6,6 +6,27 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- **Grok Build support**, through Grok's own native hooks (not its Claude
+  compatibility layer) and the same capture path as the other agents.
+  `openshard capture install grok-build` (also run by `openshard setup` when
+  `grok` is on PATH) writes OpenShard's own `.grok/hooks/openshard.json`
+  (no other hook file is touched); `capture uninstall grok-build` and the
+  `openshard hooks grok-build` entrypoint (fast path, authenticated loopback
+  POST to `/hooks/grok-build`, always replies `{}`, never denies). Sessions
+  become Shards labelled "Grok Build (external)". Subscribed events:
+  `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure`,
+  `PermissionDenied`, `Stop`, `StopFailure`, `SessionEnd`. Grok's hook
+  payload names no model, provider, tokens or cost, so those stay Not
+  recorded; `PostToolUse` is not documented as success-only, so file tools
+  stay `unknown` and git supplies the file evidence. `PreToolUse` is never
+  installed (no policy enforcement). `openshard doctor` reports a Grok Build
+  install as unverified until a real session is captured and names the
+  folder-trust step. See `docs/agent-capture.md`.
+- One agent-neutral addition to the shared fold: a `PermissionDenied`
+  lifecycle event, recorded as an `agent_reported` `approval.denied` Event
+  naming the tool only (`capture.permission_denied_count`); it is never work
+  and never opens a Shard.
+
 - **Google Antigravity support**, through the same capture path as the
   other agents. `openshard setup` detects `agy` / `antigravity` and adds an
   `openshard` hook to the project-local `.agents/hooks.json` (other named

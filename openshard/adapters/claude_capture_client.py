@@ -87,12 +87,14 @@ CODEX_HOOK_PATH = "/hooks/codex"
 OPENCODE_HOOK_PATH = "/hooks/opencode"
 CURSOR_HOOK_PATH = "/hooks/cursor"
 ANTIGRAVITY_HOOK_PATH = "/hooks/antigravity"
+GROK_BUILD_HOOK_PATH = "/hooks/grok-build"
 AGENT_HOOK_PATHS: dict[str, str] = {
     "claude_code": HOOK_PATH,
     "codex": CODEX_HOOK_PATH,
     "opencode": OPENCODE_HOOK_PATH,
     "cursor": CURSOR_HOOK_PATH,
     "antigravity": ANTIGRAVITY_HOOK_PATH,
+    "grok_build": GROK_BUILD_HOOK_PATH,
 }
 # Cursor reads a hook's stdout as a *decision*. This is the one Cursor event
 # OpenShard subscribes to that is blocking, and the only reply it ever
@@ -109,6 +111,12 @@ CURSOR_EMPTY_RESPONSE = "{}"
 ANTIGRAVITY_STOP_RESPONSE = '{"decision": "stop"}'
 ANTIGRAVITY_ALLOW_RESPONSE = '{"decision": "allow"}'
 ANTIGRAVITY_EMPTY_RESPONSE = "{}"
+# Grok Build discards stdout on every event except ``Stop`` (parsed as an
+# optional decision / additionalContext) and ``PreToolUse`` (an optional
+# allow/deny decision). OpenShard only observes, so the one reply it ever
+# writes is an empty object: no decision, no injected context. It never
+# exits 2 (Grok's deny code) and installs no ``PreToolUse`` hook.
+GROK_BUILD_EMPTY_RESPONSE = "{}"
 HEALTH_PATH = "/health"
 SHUTDOWN_PATH = "/shutdown"
 PROJECT_DIR_HEADER = "X-OpenShard-Project-Dir"
@@ -796,6 +804,29 @@ def run_antigravity_hook(
     except Exception:
         label = "error"
     return label, reply
+
+
+def run_grok_build_hook(
+    stream: object,
+    *,
+    env: dict | os._Environ | None = None,
+    event_override: str | None = None,
+    spawn: bool = True,
+) -> tuple[str, str]:
+    """Console-script body for ``openshard hooks grok-build``: ``(outcome label, stdout reply)``.
+
+    The same forward-or-fold path as ``run_hook_via_service(agent="grok_build")``
+    (an authenticated loopback POST to the local capture service, or the
+    in-process fold when it is unreachable); the reply is always the empty
+    object -- never a decision. Never raises.
+    """
+    env = os.environ if env is None else env
+    raw = _read_all(stream)
+    try:
+        label = _run_hook_raw(raw, env, event_override=event_override, agent="grok_build", spawn=spawn)
+    except Exception:
+        label = "error"
+    return label, GROK_BUILD_EMPTY_RESPONSE
 
 
 def _fallback_status_text(raw: bytes) -> str:

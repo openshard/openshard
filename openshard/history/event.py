@@ -228,6 +228,8 @@ SOURCE_OPENCODE_PLUGIN = "opencode_plugin"
 SOURCE_CURSOR_HOOKS = "cursor_hooks"
 # 0.4.7: Google Antigravity agent hooks (``adapters/antigravity_hooks.py``).
 SOURCE_ANTIGRAVITY_HOOKS = "antigravity_hooks"
+# Unreleased: Grok Build native hooks (``adapters/grok_build_hooks.py``).
+SOURCE_GROK_BUILD_HOOKS = "grok_build_hooks"
 SOURCE_NATIVE_RUN = "native_run"
 
 _ACTION_LIMIT = 120
