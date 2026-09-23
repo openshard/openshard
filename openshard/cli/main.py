@@ -571,6 +571,7 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
             "opencode": agent_statuses["opencode"].to_dict(),
             "cursor": agent_statuses["cursor"].to_dict(),
             "antigravity": agent_statuses["antigravity"].to_dict(),
+            "hermes": agent_statuses["hermes"].to_dict(),
             "telemetry": _telemetry_status_for_agents(),
             "next_actions": [
                 "openshard env --json",
@@ -625,7 +626,7 @@ def _telemetry_after_setup(result) -> None:
         service_state = str(service.get("state") or "")
         _telemetry_emit(
             "setup.completed",
-            agents=[a for a in result.configured_agents() if a in ("claude_code", "codex", "opencode", "cursor", "antigravity")],
+            agents=[a for a in result.configured_agents() if a in ("claude_code", "codex", "opencode", "cursor", "antigravity", "hermes")],
             mcp=bool(result.mcp is not None and result.mcp.status in ("installed", "updated", "already_installed")),
             capture_service=(
                 "ok" if service_state in ("running", "started")
@@ -679,11 +680,12 @@ def _render_setup_result(result) -> None:
     _agent_state_labels = {
         "installed": "installed", "updated": "updated", "already_installed": "already configured",
         "skipped": "not found (skipped)", "skipped_existing": "skipped (custom file present)",
+        "skipped_optin": "detected; run `openshard capture install hermes`",
         "error": "NOT configured",
     }
     for key, label in (
         ("codex", "Codex:        "), ("opencode", "OpenCode:     "), ("cursor", "Cursor:       "),
-        ("antigravity", "Antigravity:  "),
+        ("antigravity", "Antigravity:  "), ("hermes", "Hermes:       "),
     ):
         agent_result = (result.agents or {}).get(key)
         if agent_result is None:
@@ -2891,6 +2893,38 @@ def hooks_antigravity(event_override: str | None, no_spawn: bool) -> None:
     click.echo(reply)
 
 
+@hooks_group.command("hermes")
+@click.option(
+    "--event",
+    "event_override",
+    default=None,
+    help="Hermes hook event name, used only when the payload carries no hook_event_name.",
+)
+@click.option(
+    "--no-spawn",
+    "no_spawn",
+    is_flag=True,
+    default=False,
+    help="Never start the capture service from this hook.",
+)
+def hooks_hermes(event_override: str | None, no_spawn: bool) -> None:
+    """Hermes Agent hook entrypoint: read one Hermes shell-hook payload (JSON) from stdin and record it.
+
+    Installed into Hermes' config.yaml (`hooks:`) by `openshard capture
+    install hermes`. Observational only: never blocks, rewrites or escalates
+    a Hermes tool call, injects no context, and its one stdout line is the
+    empty object Hermes documents as a no-op, regardless of whether capture
+    succeeded. Always exits 0. Evidence lands in .openshard/runs.jsonl as
+    normal Shard records, for repositories that have opted in.
+    """
+    from openshard.adapters.claude_capture_client import run_hermes_hook
+
+    _label, reply = run_hermes_hook(
+        sys.stdin, env=os.environ, event_override=event_override, spawn=not no_spawn,
+    )
+    click.echo(reply)
+
+
 @hooks_group.command("claude-status")
 def hooks_claude_status() -> None:
     """Claude Code status-line entrypoint: read status JSON from stdin, print a status line.
@@ -2908,10 +2942,10 @@ def hooks_claude_status() -> None:
 
 @cli.group("capture")
 def capture_group() -> None:
-    """The local capture service shared by Claude Code, Codex, OpenCode, Cursor and Google Antigravity, and its per-agent integrations."""
+    """The local capture service shared by Claude Code, Codex, OpenCode, Cursor, Google Antigravity and Hermes Agent, and its per-agent integrations."""
 
 
-_AGENT_CHOICE = click.Choice(["codex", "opencode", "cursor", "antigravity"], case_sensitive=False)
+_AGENT_CHOICE = click.Choice(["codex", "opencode", "cursor", "antigravity", "hermes"], case_sensitive=False)
 
 
 def _render_agent_result(result, *, verb: str) -> None:
@@ -2923,7 +2957,13 @@ def _render_agent_result(result, *, verb: str) -> None:
         click.echo(f"  ! {w}")
     for step in result.next_steps:
         click.echo(f"  ! {step}")
-    if verb == "install" and result.configured:
+    if verb == "install" and result.configured and result.agent == "hermes":
+        click.echo(
+            f"\n{label} sessions in git repositories that have an .openshard/ directory are now recorded as "
+            "Shards automatically (the hooks are user-global; run this in each repository you want captured)."
+        )
+        click.echo(f"Start a new {label} session; sessions already running keep their old hooks.")
+    elif verb == "install" and result.configured:
         click.echo(f"\n{label} sessions in this repository are now recorded as Shards automatically.")
         if result.agent != "cursor":  # Cursor hot-reloads .cursor/hooks.json
             click.echo(f"Restart {label} if it is already running.")
@@ -2939,7 +2979,7 @@ def _render_agent_result(result, *, verb: str) -> None:
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
-    """Configure Codex hooks, the OpenCode plugin or Cursor hooks for this repository (what `openshard setup` does).
+    """Configure Codex hooks, the OpenCode plugin, Cursor, Antigravity or Hermes hooks (what `openshard setup` does).
 
     codex: merges `openshard hooks codex` into .codex/hooks.json (project-local;
     unrelated hooks preserved). opencode: writes the OpenShard plugin to
@@ -2947,15 +2987,20 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
     OpenShard's). cursor: merges `openshard hooks cursor` into
     .cursor/hooks.json (project-local; unrelated hooks preserved; Cursor
     reloads it without a restart). antigravity: adds an `openshard` hook to
-    .agents/hooks.json (project-local; other named hooks preserved). All are
-    idempotent and target the shared local capture service. Safe to re-run.
+    .agents/hooks.json (project-local; other named hooks preserved). hermes:
+    adds `openshard hooks hermes` to the `hooks:` section of Hermes' user-global
+    config.yaml (other hooks preserved) and records Hermes' first-use consent
+    in its shell-hooks allowlist; it works outside a repository, and a
+    repository is captured once it has an .openshard/ directory (created when
+    you run this inside it). All are idempotent and target the shared local
+    capture service. Safe to re-run.
     """
     from openshard.adapters.agent_setup import install_agent
     from openshard.adapters.claude_mcp_install import find_repo_root
     from openshard.adapters.claude_setup import ensure_capture_service
 
     root = find_repo_root(repo_path)
-    if root is None:
+    if root is None and agent.lower() != "hermes":
         raise click.ClickException("Not inside a git repository. Run this from within a repository.")
     service = ensure_capture_service()
     result = install_agent(agent.lower(), repo_root=root, port=service.get("port") or None)
@@ -2975,17 +3020,19 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool) -> None:
-    """Remove OpenShard's Codex hooks, OpenCode plugin, Cursor hooks or Antigravity hooks from this repository.
+    """Remove OpenShard's Codex, OpenCode, Cursor, Antigravity or Hermes capture integration.
 
     Only OpenShard's own entries/files are removed; unrelated hooks, plugins
     and settings survive. Local history under .openshard/ is never deleted.
-    The shared capture service keeps running for other agents.
+    The shared capture service keeps running for other agents. hermes: removes
+    OpenShard's entries from Hermes' user-global config.yaml and allowlist
+    (for every repository), and works outside a repository.
     """
     from openshard.adapters.agent_setup import uninstall_agent
     from openshard.adapters.claude_mcp_install import find_repo_root
 
     root = find_repo_root(repo_path)
-    if root is None:
+    if root is None and agent.lower() != "hermes":
         raise click.ClickException("Not inside a git repository. Run this from within a repository.")
     result = uninstall_agent(agent.lower(), repo_root=root)
     if as_json:
@@ -6347,12 +6394,15 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     )
     for key, status in agent_statuses.items():
         label = agent_label(key)
-        integration_label = "Auto-capture hooks" if key in ("codex", "cursor", "antigravity") else "Capture plugin"
+        integration_label = (
+            "Auto-capture hooks" if key in ("codex", "cursor", "antigravity", "hermes") else "Capture plugin"
+        )
         cli_detail = {
             "cursor": "not found on PATH (`cursor` / `cursor-agent`); `openshard capture install cursor` still works",
             "antigravity": (
                 "not found on PATH (`agy` / `antigravity`); `openshard capture install antigravity` still works"
             ),
+            "hermes": "not found on PATH (`hermes`); `openshard capture install hermes` still works",
         }.get(key, "CLI not found on PATH")
         integration_ok = status.configured
         integration_detail = status.detail

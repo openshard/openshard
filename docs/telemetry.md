@@ -51,7 +51,7 @@ is the source of truth):
 | Event | Properties |
 | --- | --- |
 | `install.seen` | `first_run` (bool) |
-| `setup.completed` | `agents` (list from `claude_code`/`codex`/`opencode`/`cursor`), `mcp` (bool), `capture_service` (`ok`/`failed`/`disabled`), `result`, `error_category` |
+| `setup.completed` | `agents` (list from `claude_code`/`codex`/`opencode`/`cursor`/`antigravity`/`hermes`), `mcp` (bool), `capture_service` (`ok`/`failed`/`disabled`), `result`, `error_category` |
 | `command.invoked` | `command` (a fixed list: `setup`, `doctor`, `last`, `history`, `context`, `stats`, `capture.*`, `mcp.*`, `telemetry.*`, ...), `duration_ms`, `result` (`ok`/`error`), `error_category` |
 | `receipt.created`, `receipt.completed` | `agent`, `origin` (`openshard_routed`/`external_observed`/`unknown`), `capture_depth` (`full`/`partial`/`unknown`), `files_changed` (count), `files_source` (`git_diff`/`hook_reported`/`not_available`/`other`), `tool_calls`, `tool_failures`, `checks` (`none`/`attempted_unverified`/`passed`/`failed`), `attempt_number`, `is_retry`, `turn_count`, `duration_s`, `cost_usd` (2 decimals), `model_family` |
 | `history.queried` | `command` (`history`/`context`/`search`/`relevant_context`/`last`/`stats`), `results` (count), `duration_ms` |

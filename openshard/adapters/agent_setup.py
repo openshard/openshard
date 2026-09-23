@@ -1,4 +1,4 @@
-"""Codex, OpenCode, Cursor and Google Antigravity integration detection and setup (PR12).
+"""Codex, OpenCode, Cursor, Google Antigravity and Hermes Agent integration detection and setup (PR12).
 
 The Codex/OpenCode counterpart of ``claude_setup``: read-only detection
 for ``openshard doctor`` / ``openshard setup --agent``, and the install
@@ -15,6 +15,7 @@ the same capture service, so the service is checked once and shared.
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ from openshard.adapters.antigravity_hooks_install import (
     load_antigravity_hooks,
     uninstall_antigravity_hooks,
 )
+from openshard.adapters.claude_hooks import _is_forbidden_capture_root
 from openshard.adapters.codex_hooks_install import (
     HOOK_EVENTS as CODEX_HOOK_EVENTS,
 )
@@ -55,6 +57,23 @@ from openshard.adapters.cursor_hooks_install import (
     load_cursor_hooks,
     uninstall_cursor_hooks,
 )
+from openshard.adapters.hermes_hooks_install import (
+    HOOK_EVENTS as HERMES_HOOK_EVENTS,
+)
+from openshard.adapters.hermes_hooks_install import (
+    approved_hermes_events,
+    hermes_home,
+    install_hermes_hooks,
+    installed_hermes_events,
+    load_hermes_config,
+    uninstall_hermes_hooks,
+)
+from openshard.adapters.hermes_hooks_install import (
+    config_path as hermes_config_path,
+)
+from openshard.adapters.hermes_hooks_install import (
+    load_allowlist as load_hermes_allowlist,
+)
 from openshard.adapters.opencode_plugin_install import (
     PLUGIN_RELPATH as OPENCODE_PLUGIN_RELPATH,
 )
@@ -69,7 +88,15 @@ AGENT_CODEX = "codex"
 AGENT_OPENCODE = "opencode"
 AGENT_CURSOR = "cursor"
 AGENT_ANTIGRAVITY = "antigravity"
-SUPPORTED_AGENTS: tuple[str, ...] = (AGENT_CODEX, AGENT_OPENCODE, AGENT_CURSOR, AGENT_ANTIGRAVITY)
+AGENT_HERMES = "hermes"
+SUPPORTED_AGENTS: tuple[str, ...] = (
+    AGENT_CODEX, AGENT_OPENCODE, AGENT_CURSOR, AGENT_ANTIGRAVITY, AGENT_HERMES,
+)
+# Agents ``openshard setup`` never configures on its own: their hooks live in a
+# user-global file (Hermes: ``~/.hermes/config.yaml``), which is a bigger change
+# than a repo-local file, so it happens only on an explicit
+# ``openshard capture install <agent>``.
+EXPLICIT_INSTALL_ONLY: frozenset[str] = frozenset({AGENT_HERMES})
 
 # Executables that mean "this agent is installed", first found wins. Cursor
 # is an IDE: its ``cursor`` shell command is added to PATH by the Windows
@@ -84,16 +111,19 @@ _CLI_NAMES: dict[str, tuple[str, ...]] = {
     # Google Antigravity: ``agy`` is its CLI; ``antigravity`` is the IDE's
     # optional shell command. Same PATH-only rule as Cursor.
     AGENT_ANTIGRAVITY: ("agy", "antigravity"),
+    AGENT_HERMES: ("hermes",),
 }
 _LABELS: dict[str, str] = {
     AGENT_CODEX: "Codex", AGENT_OPENCODE: "OpenCode", AGENT_CURSOR: "Cursor",
     AGENT_ANTIGRAVITY: "Google Antigravity",
+    AGENT_HERMES: "Hermes Agent",
 }
 _INSTALL_GUIDANCE: dict[str, str] = {
     AGENT_CODEX: "npm install -g @openai/codex",
     AGENT_OPENCODE: "npm install -g opencode-ai",
     AGENT_CURSOR: "install Cursor and enable its `cursor` shell command",
     AGENT_ANTIGRAVITY: "install Google Antigravity or its `agy` CLI",
+    AGENT_HERMES: "install Hermes Agent (https://hermes-agent.nousresearch.com)",
 }
 # Agents whose "not found" message is not "install it": Cursor may well be
 # installed without its shell command on PATH.
@@ -106,6 +136,16 @@ _SKIPPED_MESSAGES: dict[str, str] = {
     AGENT_ANTIGRAVITY: (
         "Google Antigravity not found on PATH (`agy` / `antigravity`); skipped. If you use the "
         "Antigravity IDE, run `openshard capture install antigravity` in this repository."
+    ),
+    AGENT_HERMES: (
+        "Hermes Agent not found on PATH (`hermes`); skipped. `openshard capture install hermes` "
+        "still works."
+    ),
+}
+_OPT_IN_MESSAGES: dict[str, str] = {
+    AGENT_HERMES: (
+        "Hermes Agent detected. `openshard setup` does not edit Hermes' user-global config "
+        "(~/.hermes/config.yaml); run `openshard capture install hermes` in this repository to enable capture."
     ),
 }
 
@@ -409,12 +449,74 @@ def detect_antigravity_integration(repo_root: Path | None) -> AgentIntegrationSt
     )
 
 
+def detect_hermes_integration(repo_root: Path | None) -> AgentIntegrationStatus:
+    """Read-only snapshot of the Hermes Agent hook integration.
+
+    The hooks live in Hermes' user-global ``config.yaml`` and only count once
+    Hermes has approved them, and a repository is captured only when it has
+    opted in (an ``.openshard/`` directory) -- each of those has its own
+    "partial" reason so the doctor can say exactly what is missing.
+    """
+    available, path = detect_agent_cli(AGENT_HERMES)
+    home = hermes_home()
+    rel = str(hermes_config_path(home))
+    config, err = load_hermes_config(home)
+    if err or config is None:
+        return AgentIntegrationStatus(
+            AGENT_HERMES, available, path, repo_root, "error", err or "unreadable", rel,
+            events_missing=list(HERMES_HOOK_EVENTS), config_error=err,
+        )
+    installed = installed_hermes_events(config)
+    missing = [e for e in HERMES_HOOK_EVENTS if e not in installed]
+    if not installed:
+        return AgentIntegrationStatus(
+            AGENT_HERMES, available, path, repo_root, "absent", "not configured", rel,
+            events_missing=missing,
+        )
+    if missing:
+        return AgentIntegrationStatus(
+            AGENT_HERMES, available, path, repo_root, "partial",
+            f"hooks missing for {', '.join(missing)}; run `openshard capture install hermes`", rel,
+            events_installed=installed, events_missing=missing,
+        )
+    allowlist, aerr = load_hermes_allowlist(home)
+    approved = approved_hermes_events(allowlist) if allowlist is not None else []
+    unapproved = [e for e in installed if e not in approved]
+    if aerr or unapproved:
+        detail = aerr or (
+            "Hermes has not approved the hooks yet (it skips unapproved shell hooks); "
+            "run `openshard capture install hermes`"
+        )
+        return AgentIntegrationStatus(
+            AGENT_HERMES, available, path, repo_root, "partial", detail, rel,
+            events_installed=installed, events_missing=[], config_error=aerr,
+        )
+    if os.environ.get("HERMES_SAFE_MODE", "").strip().lower() in ("1", "true", "yes", "on"):
+        return AgentIntegrationStatus(
+            AGENT_HERMES, available, path, repo_root, "partial",
+            "HERMES_SAFE_MODE is set in this environment, so Hermes skips every shell hook", rel,
+            events_installed=installed, events_missing=[],
+        )
+    if repo_root is not None and not (Path(repo_root) / ".openshard").is_dir():
+        return AgentIntegrationStatus(
+            AGENT_HERMES, available, path, repo_root, "partial",
+            "configured (user-global), but this repository has not opted in (no .openshard/ directory), "
+            "so Hermes sessions here are not captured; run `openshard capture install hermes` here",
+            rel, events_installed=installed, events_missing=[],
+        )
+    return AgentIntegrationStatus(
+        AGENT_HERMES, available, path, repo_root, "openshard", f"configured ({rel})", rel,
+        events_installed=installed, events_missing=[],
+    )
+
+
 def detect_agent_integrations(repo_root: Path | None, *, service_port: int | None = None) -> dict[str, AgentIntegrationStatus]:
     return {
         AGENT_CODEX: detect_codex_integration(repo_root),
         AGENT_OPENCODE: detect_opencode_integration(repo_root, service_port=service_port),
         AGENT_CURSOR: detect_cursor_integration(repo_root),
         AGENT_ANTIGRAVITY: detect_antigravity_integration(repo_root),
+        AGENT_HERMES: detect_hermes_integration(repo_root),
     }
 
 
@@ -448,9 +550,17 @@ class AgentSetupResult:
         }
 
 
-def install_agent(agent: str, *, repo_root: Path, port: int | None = None) -> AgentSetupResult:
-    """Configure one agent's capture integration for *repo_root* (idempotent). Never raises."""
+def install_agent(agent: str, *, repo_root: Path | None, port: int | None = None) -> AgentSetupResult:
+    """Configure one agent's capture integration for *repo_root* (idempotent). Never raises.
+
+    *repo_root* may be ``None`` only for an agent configured user-globally
+    (Hermes); every other agent's files live inside a repository.
+    """
     available, path = detect_agent_cli(agent)
+    if agent == AGENT_HERMES:
+        return _install_hermes(repo_root, available, path)
+    if repo_root is None:
+        return AgentSetupResult(agent, available, path, "error", "a repository is required")
     if agent == AGENT_CODEX:
         result = install_codex_hooks(repo_root=repo_root)
         steps: list[str] = []
@@ -487,9 +597,49 @@ def install_agent(agent: str, *, repo_root: Path, port: int | None = None) -> Ag
     )
 
 
-def uninstall_agent(agent: str, *, repo_root: Path) -> AgentSetupResult:
+def _install_hermes(repo_root: Path | None, available: bool, path: str | None) -> AgentSetupResult:
+    """Hermes' hooks are user-global (no repository needed to install them)."""
+    result = install_hermes_hooks()
+    steps: list[str] = []
+    if result.status in ("installed", "updated", "already_installed") and repo_root is not None:
+        # The hooks fire in every directory Hermes runs in; a repository is
+        # captured only once it has opted in with an ``.openshard/`` directory.
+        # The user's home directory (or an ancestor) is never such a repository,
+        # even when it happens to be a git repository.
+        try:
+            if _is_forbidden_capture_root(Path(repo_root)):
+                raise OSError("the home directory is never captured")
+            (Path(repo_root) / ".openshard").mkdir(exist_ok=True)
+        except OSError as exc:
+            result.warnings.append(
+                f"Could not create .openshard/ in this repository ({type(exc).__name__}); "
+                "Hermes sessions here will not be captured until it exists."
+            )
+    if result.status in ("installed", "updated"):
+        steps.append(
+            "Start a new Hermes session (Hermes registers shell hooks when a session starts). "
+            "Hermes is captured in git repositories that have an .openshard/ directory; "
+            "run `openshard capture install hermes` in each repository you want captured."
+        )
+    if result.status == "error":
+        steps.append(result.message)
+    return AgentSetupResult(
+        AGENT_HERMES, available, path, result.status, result.message,
+        warnings=list(result.warnings), events=dict(result.events), next_steps=steps,
+    )
+
+
+def uninstall_agent(agent: str, *, repo_root: Path | None) -> AgentSetupResult:
     """Remove one agent's OpenShard-owned capture integration. Never raises."""
     available, path = detect_agent_cli(agent)
+    if agent == AGENT_HERMES:
+        result = uninstall_hermes_hooks()
+        return AgentSetupResult(
+            agent, available, path, result.status, result.message,
+            warnings=list(result.warnings), events=dict(result.events),
+        )
+    if repo_root is None:
+        return AgentSetupResult(agent, available, path, "error", "a repository is required")
     if agent == AGENT_CODEX:
         result = uninstall_codex_hooks(repo_root=repo_root)
     elif agent == AGENT_OPENCODE:
@@ -523,6 +673,12 @@ def setup_detected_agents(*, repo_root: Path, port: int | None = None) -> dict[s
                 f"`{_INSTALL_GUIDANCE[agent]}`, then re-run `openshard setup`)."
             )
             results[agent] = AgentSetupResult(agent, False, None, "skipped", message)
+            continue
+        if agent in EXPLICIT_INSTALL_ONLY:
+            results[agent] = AgentSetupResult(
+                agent, True, path, "skipped_optin", _OPT_IN_MESSAGES[agent],
+                next_steps=[_OPT_IN_MESSAGES[agent]],
+            )
             continue
         results[agent] = install_agent(agent, repo_root=repo_root, port=port)
     return results
