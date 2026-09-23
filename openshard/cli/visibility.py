@@ -353,7 +353,9 @@ _VERIFICATION_LABELS = {
     "not_run": "not run",
     "skipped": "skipped",
     "manual_review": "manual review",
-    "unknown": "not recorded",
+    "partial": "partial",
+    "unknown": "unknown",
+    "not_recorded": "not recorded",
 }
 _COMPLETION_LABELS = {
     "completed": "turn completed (unverified)",

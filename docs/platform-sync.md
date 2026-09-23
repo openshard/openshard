@@ -48,6 +48,22 @@ One HTTPS `POST` per Receipt to `<endpoint>/v1/orgs/<org>/receipts` with
 }
 ```
 
+The one exception is the structured `verification` block
+(`history/verification.py`), which `history --json` prints but the v1
+contract does not define yet. It is withheld from the envelope
+(`sync/envelope.py: WITHHELD_RECEIPT_KEYS`) rather than sent and rejected,
+and its evidence travels in the existing fields instead:
+`verification_status` (`passed`, `failed`, `partial`, `not_run`, `unknown`,
+or the OSN tokens `skipped` / `manual_review`; `null` only when nothing
+about verification was recorded) and `verification_reason`, which ends in
+the evidence source, e.g. `[directly_observed]` (a hook saw the check
+command invoked; outcome not observed), `[agent_reported]` or
+`[independently_verified @ abc123f]`.
+
+`task_title` (the concise display title from `history/task_title.py`) is
+withheld the same way; the Platform derives the same deterministic title
+from `task_full`, which still carries the original task text unchanged.
+
 `source.receipt_schema_version` is the record's own stamped version
 (`unknown` for records that predate stamping), never today's. The
 Platform's contract is closed: it rejects any key it does not define, so a

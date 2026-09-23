@@ -1,4 +1,4 @@
-"""Codex and OpenCode integration detection and setup (PR12).
+"""Codex, OpenCode, Cursor and Google Antigravity integration detection and setup (PR12).
 
 The Codex/OpenCode counterpart of ``claude_setup``: read-only detection
 for ``openshard doctor`` / ``openshard setup --agent``, and the install
@@ -19,6 +19,18 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from openshard.adapters.antigravity_hooks_install import (
+    HOOK_EVENTS as ANTIGRAVITY_HOOK_EVENTS,
+)
+from openshard.adapters.antigravity_hooks_install import (
+    HOOKS_RELPATH as ANTIGRAVITY_HOOKS_RELPATH,
+)
+from openshard.adapters.antigravity_hooks_install import (
+    install_antigravity_hooks,
+    installed_antigravity_events,
+    load_antigravity_hooks,
+    uninstall_antigravity_hooks,
+)
 from openshard.adapters.codex_hooks_install import (
     HOOK_EVENTS as CODEX_HOOK_EVENTS,
 )
@@ -56,7 +68,8 @@ from openshard.adapters.opencode_plugin_install import (
 AGENT_CODEX = "codex"
 AGENT_OPENCODE = "opencode"
 AGENT_CURSOR = "cursor"
-SUPPORTED_AGENTS: tuple[str, ...] = (AGENT_CODEX, AGENT_OPENCODE, AGENT_CURSOR)
+AGENT_ANTIGRAVITY = "antigravity"
+SUPPORTED_AGENTS: tuple[str, ...] = (AGENT_CODEX, AGENT_OPENCODE, AGENT_CURSOR, AGENT_ANTIGRAVITY)
 
 # Executables that mean "this agent is installed", first found wins. Cursor
 # is an IDE: its ``cursor`` shell command is added to PATH by the Windows
@@ -68,12 +81,19 @@ _CLI_NAMES: dict[str, tuple[str, ...]] = {
     AGENT_CODEX: ("codex",),
     AGENT_OPENCODE: ("opencode",),
     AGENT_CURSOR: ("cursor", "cursor-agent"),
+    # Google Antigravity: ``agy`` is its CLI; ``antigravity`` is the IDE's
+    # optional shell command. Same PATH-only rule as Cursor.
+    AGENT_ANTIGRAVITY: ("agy", "antigravity"),
 }
-_LABELS: dict[str, str] = {AGENT_CODEX: "Codex", AGENT_OPENCODE: "OpenCode", AGENT_CURSOR: "Cursor"}
+_LABELS: dict[str, str] = {
+    AGENT_CODEX: "Codex", AGENT_OPENCODE: "OpenCode", AGENT_CURSOR: "Cursor",
+    AGENT_ANTIGRAVITY: "Google Antigravity",
+}
 _INSTALL_GUIDANCE: dict[str, str] = {
     AGENT_CODEX: "npm install -g @openai/codex",
     AGENT_OPENCODE: "npm install -g opencode-ai",
     AGENT_CURSOR: "install Cursor and enable its `cursor` shell command",
+    AGENT_ANTIGRAVITY: "install Google Antigravity or its `agy` CLI",
 }
 # Agents whose "not found" message is not "install it": Cursor may well be
 # installed without its shell command on PATH.
@@ -82,6 +102,10 @@ _SKIPPED_MESSAGES: dict[str, str] = {
         "Cursor not found on PATH (`cursor` / `cursor-agent`); skipped. If you use Cursor, run "
         "`openshard capture install cursor` in this repository (or enable Cursor's `cursor` shell "
         "command and re-run `openshard setup`)."
+    ),
+    AGENT_ANTIGRAVITY: (
+        "Google Antigravity not found on PATH (`agy` / `antigravity`); skipped. If you use the "
+        "Antigravity IDE, run `openshard capture install antigravity` in this repository."
     ),
 }
 
@@ -354,11 +378,43 @@ def detect_cursor_integration(repo_root: Path | None) -> AgentIntegrationStatus:
     )
 
 
+def detect_antigravity_integration(repo_root: Path | None) -> AgentIntegrationStatus:
+    """Read-only snapshot of the Google Antigravity hook integration for *repo_root*."""
+    available, path = detect_agent_cli(AGENT_ANTIGRAVITY)
+    rel = ANTIGRAVITY_HOOKS_RELPATH.as_posix()
+    if repo_root is None:
+        return AgentIntegrationStatus(
+            AGENT_ANTIGRAVITY, available, path, None, "absent", "Not checked (no repository).", rel,
+            events_missing=list(ANTIGRAVITY_HOOK_EVENTS),
+        )
+    config, err = load_antigravity_hooks(repo_root)
+    if err or config is None:
+        return AgentIntegrationStatus(
+            AGENT_ANTIGRAVITY, available, path, repo_root, "error", err or "unreadable", rel,
+            events_missing=list(ANTIGRAVITY_HOOK_EVENTS), config_error=err,
+        )
+    installed = installed_antigravity_events(config)
+    missing = [e for e in ANTIGRAVITY_HOOK_EVENTS if e not in installed]
+    if not installed:
+        state, detail = "absent", "not configured"
+    elif missing:
+        state, detail = (
+            "partial", f"hooks missing for {', '.join(missing)}; run `openshard capture install antigravity`",
+        )
+    else:
+        state, detail = "openshard", f"configured ({rel})"
+    return AgentIntegrationStatus(
+        AGENT_ANTIGRAVITY, available, path, repo_root, state, detail, rel,
+        events_installed=installed, events_missing=missing,
+    )
+
+
 def detect_agent_integrations(repo_root: Path | None, *, service_port: int | None = None) -> dict[str, AgentIntegrationStatus]:
     return {
         AGENT_CODEX: detect_codex_integration(repo_root),
         AGENT_OPENCODE: detect_opencode_integration(repo_root, service_port=service_port),
         AGENT_CURSOR: detect_cursor_integration(repo_root),
+        AGENT_ANTIGRAVITY: detect_antigravity_integration(repo_root),
     }
 
 
@@ -413,6 +469,14 @@ def install_agent(agent: str, *, repo_root: Path, port: int | None = None) -> Ag
         steps = []
         if result.status in ("installed", "updated"):
             steps.append("Cursor reloads .cursor/hooks.json automatically; no restart is needed.")
+    elif agent == AGENT_ANTIGRAVITY:
+        result = install_antigravity_hooks(repo_root=repo_root)
+        steps = []
+        if result.status in ("installed", "updated"):
+            steps.append(
+                "Open this repository as an Antigravity workspace (or run `agy` in it); "
+                "restart Antigravity if it is already running."
+            )
     else:
         return AgentSetupResult(agent, available, path, "error", f"unknown agent {agent!r}")
     if result.status == "error":
@@ -432,6 +496,8 @@ def uninstall_agent(agent: str, *, repo_root: Path) -> AgentSetupResult:
         result = uninstall_opencode_plugin(repo_root=repo_root)
     elif agent == AGENT_CURSOR:
         result = uninstall_cursor_hooks(repo_root=repo_root)
+    elif agent == AGENT_ANTIGRAVITY:
+        result = uninstall_antigravity_hooks(repo_root=repo_root)
     else:
         return AgentSetupResult(agent, available, path, "error", f"unknown agent {agent!r}")
     return AgentSetupResult(

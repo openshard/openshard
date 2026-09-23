@@ -27,8 +27,10 @@ cd my-project
 openshard setup
 ```
 
-`openshard setup` detects whichever of Claude Code, Codex, Cursor or
-OpenCode are available for the repo and configures capture for each. Then
+`openshard setup` detects whichever of Claude Code, Codex, Cursor,
+OpenCode or Google Antigravity are available for the repo and configures
+capture for each (for the Antigravity IDE without the `agy` CLI on PATH,
+run `openshard capture install antigravity`). Then
 use your coding agent normally and look at what was captured:
 
 ```sh

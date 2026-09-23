@@ -226,6 +226,8 @@ SOURCE_CODEX_HOOKS = "codex_hooks"
 SOURCE_OPENCODE_PLUGIN = "opencode_plugin"
 # 0.4.2: Cursor agent hooks (``adapters/cursor_hooks.py``), same shared fold.
 SOURCE_CURSOR_HOOKS = "cursor_hooks"
+# 0.4.7: Google Antigravity agent hooks (``adapters/antigravity_hooks.py``).
+SOURCE_ANTIGRAVITY_HOOKS = "antigravity_hooks"
 SOURCE_NATIVE_RUN = "native_run"
 
 _ACTION_LIMIT = 120

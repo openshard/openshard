@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # The 224 tests across these 7 files spin up a real background HTTP
+  # The tests across these 8 files spin up a real background HTTP
   # capture service (threads, an OS-assigned socket, in one case a spawned
   # Node subprocess) and poll with real timeouts. They're correct under
   # pytest-xdist (each test gets its own tmp OPENSHARD_HOME and its own
@@ -31,6 +31,7 @@ env:
   # PR, and unrestricted on every OS/Python combination once code lands
   # on main (see test-full-matrix below).
   SERVICE_TEST_FILES: >-
+    tests/test_antigravity_capture.py
     tests/test_claude_capture_service.py
     tests/test_cross_agent_capture.py
     tests/test_codex_capture.py

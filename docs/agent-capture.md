@@ -1,13 +1,14 @@
-# Agent capture: Claude Code, Codex, Cursor and OpenCode
+# Agent capture: Claude Code, Codex, Cursor, OpenCode and Google Antigravity
 
-Openshard records the coding-agent work you already do. Four agents feed
+Openshard records the coding-agent work you already do. Five agents feed
 **one** capture path:
 
 ```text
 Claude Code hooks (HTTP + SessionStart command) ─┐
 Codex hooks (command)  ──────────────────────────┤
-Cursor hooks (command) ──────────────────────────┼──> local capture service (127.0.0.1, authenticated)
-OpenCode plugin (fetch) ─────────────────────────┘        POST /hooks/{claude,codex,cursor,opencode}
+Cursor hooks (command) ──────────────────────────┤
+Antigravity hooks (command) ─────────────────────┼──> local capture service (127.0.0.1, authenticated)
+OpenCode plugin (fetch) ─────────────────────────┘        POST /hooks/{claude,codex,cursor,antigravity,opencode}
                                                                │  blocking path: authenticate -> validate -> translate -> reduce -> fsync queue -> 200
                                                                ▼  background: replay through the shared fold (undecodable lines quarantined)
                                                     canonical Events -> Run/Attempt -> Shard -> Receipt
@@ -23,17 +24,18 @@ another local account, a sandboxed process or a web page's cross-origin
 
 | Credential | Where it lives | Who presents it | Authorises |
 |---|---|---|---|
-| **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | our own processes only: `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, `openshard capture stop` | every endpoint, including `/shutdown` |
+| **Capture token** -- 64 hex chars, random, generated locally on first use | `<OPENSHARD_HOME>/capture-token` (`~/.openshard/capture-token`), mode 0600, never inside a repository | our own processes only: `openshard hooks claude` (SessionStart), `openshard hooks claude-status`, `openshard hooks codex`, `openshard hooks cursor`, `openshard hooks antigravity`, `openshard capture stop` | every endpoint, including `/shutdown` |
 | **Scoped capability** -- `r2.` + HMAC-SHA256(token, normalised repo root + `\n` + agent key) | third-party configuration that runs no process of ours at delivery time: the `X-OpenShard-Capture-Token` header of the Claude Code HTTP hook entries in `.claude/settings.local.json` (agent `claude_code`); the `CAPABILITY` constant in `.opencode/plugins/openshard.js` (agent `opencode`) | Claude Code's HTTP hooks; the OpenCode plugin | events **for that repository and that agent only**; never shutdown |
 
 The service checks a capability against the agent the receiver path records
 under (`/hooks/claude` -> `claude_code`, `/status/claude` -> `claude_code`,
-`/hooks/codex` -> `codex`, `/hooks/cursor` -> `cursor`, `/hooks/opencode`
--> `opencode`), so a leaked Claude capability for repo A cannot submit
+`/hooks/codex` -> `codex`, `/hooks/cursor` -> `cursor`, `/hooks/antigravity`
+-> `antigravity`, `/hooks/opencode` -> `opencode`), so a leaked Claude capability for repo A cannot submit
 Cursor, Codex or OpenCode events for repo A, a Cursor capability cannot
 submit Claude events, and no capability for repo A works for repo B.
-Codex and Cursor need no capability: their hooks run `openshard hooks
-codex|cursor`, a process of ours that reads the token file. The master
+Codex, Cursor and Antigravity need no capability: their hooks run
+`openshard hooks codex|cursor|antigravity`, a process of ours that reads the
+token file. The master
 token never appears in any agent's configuration.
 
 Rules the service enforces (`adapters/claude_capture_service.py`,
@@ -185,6 +187,7 @@ translator and one installer per agent, and per-agent readiness in
 | Claude Code | `claude_code_hooks` | Claude Code (external) | `claude_code` / Anthropic | model from the status line (unchanged) |
 | Codex | `codex_hooks` | Codex (external) | `codex` / OpenAI | model slug from every hook payload; provider **not** exposed, so not recorded |
 | OpenCode | `opencode_plugin` | OpenCode (external) | `opencode` / — | `providerID/modelID` OpenCode reports on the user/assistant message, only when present |
+| Google Antigravity | `antigravity_hooks` | Google Antigravity (external) | `antigravity` / Google | `modelName` from every hook payload; every distinct model kept; provider **not** exposed (Antigravity also runs non-Google models), so not recorded |
 
 Every one of these is `origin = external_observed`, `capture_depth =
 partial` (`history/shard.py`): Openshard observed the session, it did not
@@ -353,6 +356,80 @@ never invented evidence.
   `openshard capture install opencode`, `openshard capture uninstall
   opencode`.
 
+## Google Antigravity integration
+
+Sources: Google's hooks reference (`antigravity.google/docs/hooks`, and
+`/docs/ide/hooks` for the IDE). Field shapes are cross-checked against
+open-source integrations that parse live payloads, because the reference is
+terse per event; see the field audit in `adapters/antigravity_hooks.py`.
+
+* **What Antigravity exposes to hooks, and nothing more is claimed.** Five
+  command-hook events (`PreToolUse`, `PostToolUse`, `PreInvocation`,
+  `PostInvocation`, `Stop`); camelCase stdin with `conversationId`,
+  `workspacePaths`, `modelName`, `transcriptPath`, `artifactDirectoryPath`;
+  `toolCall.{name,args}`, `stepIdx` and an `error` string (empty on
+  success) on `PostToolUse`; `terminationReason`, `fullyIdle` and `error` on
+  `Stop`. The event name is not reliably in the payload, so each installed
+  command carries `--event <Name>`.
+* **Not exposed** (so never recorded, never inferred): the user's prompt
+  (the task stays "Google Antigravity session (task not captured)"), token
+  counts, cost, the model provider, a session end, a numeric exit code, and
+  who approved a tool (Antigravity's own permission prompts are not
+  visible to hooks). OpenShard does not read the transcript or artifact
+  directory to fill any of these in.
+* **Config**: `<repo>/.agents/hooks.json`, a map of hook *names* to event
+  configurations; OpenShard owns the `openshard` name only and refuses to
+  touch an `openshard` entry holding someone else's command. A file it
+  creates is added to `.git/info/exclude`; `.agents/hooks.json` (not the
+  rest of `.agents/`, which holds shared rules) is never counted as a
+  task's changed file. No `timeout` is written (the documented default is
+  30 s).
+* **Events** (all `openshard hooks antigravity --event <Name>`):
+
+  | Antigravity event | Openshard event | Recorded |
+  |---|---|---|
+  | `PreInvocation` (before every model call) | `ModelInvocation` | the first one creates the Shard; each is counted (`capture.invocation_count`); the model is observed, and a `session.activity` "model invoked: <model>" Event is staged whenever it differs from the previous call's |
+  | `PostToolUse`, empty `error` | `PostToolUse` | `run_command` -> command (`CommandLine`, scrubbed, `command_kind` test/lint/other, status unknown); `write_to_file` / `replace_file_content` / `multi_replace_file_content` / `client_*_file` -> file write, `passed` and hook-reported (Antigravity's success signal); `view_file` / `view_file_outline` / `view_code_item` / `list_dir` / `client_view_file` -> **read** (repo-relative path, `metadata.access = read`, never a change); anything else (search, browser, MCP) by name only |
+  | `PostToolUse`, non-empty `error` | `PostToolUseFailure` | the same tool record, `failed` |
+  | `Stop`, no error and not `fullyIdle: false` | `Stop` | completed turn; fold |
+  | `Stop`, error or `fullyIdle: false` | `SessionIdle` | snapshot, never a completed turn |
+
+  Not subscribed: `PreToolUse` (a permission gate; any reply but a decision
+  denies the tool, and recording never needs to gate) and `PostInvocation`
+  (repeats the model and would double the per-call cost).
+* **Replies**: `{"decision": "stop"}` for `Stop` (an empty object is
+  reported to be rejected there), `{}` otherwise, written whatever capture did. A
+  refused or unreachable service never blocks or changes the agent.
+* **Session boundaries**: one `conversationId` = one Shard. With no start
+  hook, the service anchors the change-attribution baseline when it
+  *receives* a session's first `PreInvocation` (one `git status`, once per
+  session); with no end hook, the idle sweep (run on each session's first
+  invocation) closes a session after an hour idle and its completeness says
+  `session_end_not_observed`. Sync treats the session as eligible once it
+  has been quiet for an hour.
+* **Performance**: every event is a process start of `openshard hooks
+  antigravity` on the fast console-script path plus a loopback POST whose
+  server-side work is validate + reduce + fsync; the fold, git diff and
+  `runs.jsonl` write happen on the service's background worker.
+  `PreInvocation` runs once per model call, so its cost is the process
+  start (tens to a few hundred ms depending on the machine) next to a model
+  call that takes seconds; `tests/test_antigravity_capture.py` guards the
+  server-side budget like the other agents. Measured on the Linux
+  container this was built in (Python 3.11, warm service): real
+  `openshard hooks antigravity` subprocess median 42 ms / p95 54 ms per
+  event; server-side blocking p50 0.8 ms / p95 1.1 ms; loopback POST alone
+  median 2.3 ms. A regression signal, not a universal claim.
+* **Known Antigravity limitations**: hook delivery differs by build (some
+  CLI builds are reported not to fire `PostToolUse`, and some IDE builds
+  not to fire workspace hooks at all). Git-observed changes are still
+  recorded whenever `PreInvocation`/`Stop` arrive; if no hook fires, nothing
+  is recorded and `openshard doctor` can only show that the hooks are
+  configured, not that Antigravity runs them.
+* **Commands**: `openshard setup` (when `agy` or `antigravity` is on PATH),
+  `openshard capture install antigravity`, `openshard capture uninstall
+  antigravity`. Open the repository as the Antigravity workspace (or run
+  `agy` in it); restart Antigravity if it was already running.
+
 ## Setup / doctor / uninstall
 
 * `openshard setup` starts the capture service, configures Claude Code
@@ -447,6 +524,14 @@ and the OpenCode counterpart guard the server-side p50 < 25 ms / p95 <
   missing/too-old node into a failure), installer idempotence / port
   update / preservation of other plugins and `opencode.json` / user-owned
   file / uninstall, CLI.
+* `tests/test_antigravity_capture.py` — translator (event from the command
+  line, `error`/`fullyIdle` semantics, tool classification, malformed
+  shapes, payload agent labels ignored, transcript/contents never read),
+  inline and HTTP records (identical stable view), per-model Events,
+  read vs write evidence, invocation-only sessions, baseline at receipt,
+  idle sweep completeness, receipt identity, sync envelope and telemetry,
+  replies, authentication (no token, another agent's capability),
+  blocking budget, installer, CLI install/uninstall/setup/doctor.
 * `tests/test_cross_agent_capture.py` — all three agents in one
   repository: distinct Shards and executors, `list_shards` /
   `search_history` / `relevant_context` reach each, receipts keep identity
