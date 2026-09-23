@@ -115,7 +115,10 @@ def _token_list(*allowed: str, max_items: int = 8) -> Validator:
 # Closed vocabularies
 # ---------------------------------------------------------------------------
 
-AGENTS = ("claude_code", "codex", "opencode", "cursor", "antigravity", "grok_bot", "native", "wrap", "import", "other")
+AGENTS = (
+    "claude_code", "codex", "opencode", "cursor", "antigravity", "hermes", "grok_bot", "native", "wrap", "import",
+    "other",
+)
 ORIGINS = ("openshard_routed", "external_observed", "unknown")
 CAPTURE_DEPTHS = ("full", "partial", "unknown")
 FILES_SOURCES = ("git_diff", "hook_reported", "not_available", "other")
@@ -162,7 +165,7 @@ _RECEIPT_PROPERTIES: dict[str, Validator] = {
 EVENT_TYPES: dict[str, dict[str, Validator]] = {
     "install.seen": {"first_run": _bool},
     "setup.completed": {
-        "agents": _token_list("claude_code", "codex", "opencode", "cursor", "antigravity"),
+        "agents": _token_list("claude_code", "codex", "opencode", "cursor", "antigravity", "hermes"),
         "mcp": _bool,
         "capture_service": _enum("ok", "failed", "disabled"),
         "result": _enum(*RESULTS),

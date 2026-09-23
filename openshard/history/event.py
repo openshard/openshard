@@ -228,6 +228,8 @@ SOURCE_OPENCODE_PLUGIN = "opencode_plugin"
 SOURCE_CURSOR_HOOKS = "cursor_hooks"
 # 0.4.7: Google Antigravity agent hooks (``adapters/antigravity_hooks.py``).
 SOURCE_ANTIGRAVITY_HOOKS = "antigravity_hooks"
+# 0.4.7: Hermes Agent shell hooks (``adapters/hermes_hooks.py``).
+SOURCE_HERMES_HOOKS = "hermes_hooks"
 # Grok Bot (``adapters/grok_bot.py``): Cursor's OpenTelemetry export of
 # Action Recording, and the Bot's own self-report.
 SOURCE_GROK_BOT_ACTION_RECORDING = "grok_bot_action_recording"

@@ -6,6 +6,34 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- **Hermes Agent support** (Nous Research), observation only, through the same
+  authenticated capture path as the other agents. `openshard capture install
+  hermes` adds `openshard hooks hermes` to the `hooks:` section of Hermes'
+  user-global `config.yaml` (other hooks, `hooks.outbound` and comments
+  preserved when there is no existing `hooks:` block; otherwise merged after a
+  one-time backup) and records Hermes' documented first-use consent in
+  `shell-hooks-allowlist.json`; `openshard capture uninstall hermes` removes
+  only OpenShard's entries. Subscribed Hermes hooks: `on_session_start`,
+  `pre_llm_call` (the task; replies `{}`, never injects context),
+  `post_tool_call` (tool, arguments, Hermes' own `ok` / `error` / `blocked`
+  status, duration, correlation ids), `post_api_request` (Hermes' per-request
+  token counts, model and provider; no cost is reported, so none is
+  recorded), `on_session_end` (per turn: completed / interrupted / neutral),
+  `on_session_finalize`, `subagent_start` / `subagent_stop` and
+  `pre_approval_request` / `post_approval_response`. `pre_tool_call` (the hook
+  that can block or rewrite a tool call) is never subscribed. Sessions become
+  Shards labelled "Hermes Agent (external)" with `capture.subagents` /
+  `capture.approvals` counts and agent-reported approval Events. Hermes' hooks
+  are user-global, so a repository is captured only when it has an
+  `.openshard/` directory (created by `capture install hermes` in it) and never
+  the home directory; `openshard setup` detects Hermes but does not edit its
+  global config. `openshard doctor` reports the config, Hermes' allowlist,
+  `HERMES_SAFE_MODE` and the repository opt-in. See `docs/agent-capture.md`.
+- Agent-neutral additions to the shared fold: `SubagentStart` / `SubagentStop`
+  and `ApprovalRequest` / `ApprovalDecision` lifecycle events, a bounded scalar
+  `attrs` carrier on the reduced payload (durations, correlation ids, subagent
+  and approval facts), and `AgentProfile.opt_in_repo` for agents whose hooks are
+  configured user-globally.
 - **Grok Bot (Cursor) capture**, two paths with explicitly different
   evidence (`docs/grok-bot.md`). *Enterprise:* `openshard grok-bot ingest`
   (file/stdin) and `openshard grok-bot serve` (bearer-authenticated OTLP/HTTP
@@ -57,6 +85,8 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- A hook that names the model without a provider (Hermes' session hooks) no
+  longer downgrades an already-observed `provider/model` to the bare model slug.
 - **Verification evidence no longer disappears before the Receipt.** The
   machine `verification_status` was filled only from native OSN runs, so
   every hook-captured, imported or wrapped Receipt crossed `history --json`

@@ -197,6 +197,13 @@ EVENT_SESSION_IDLE = "SessionIdle"
 # Proves the agent did work in this session and names the model it used for
 # that invocation; it is neither a user prompt nor a completed turn.
 EVENT_MODEL_INVOCATION = "ModelInvocation"
+# 0.4.7 (Hermes Agent): a subagent the agent delegated work to started /
+# stopped, and a human-approval gate was raised / answered. Agent-reported
+# facts about the session; they are never work (``_has_activity``) on their own.
+EVENT_SUBAGENT_START = "SubagentStart"
+EVENT_SUBAGENT_STOP = "SubagentStop"
+EVENT_APPROVAL_REQUEST = "ApprovalRequest"
+EVENT_APPROVAL_DECISION = "ApprovalDecision"
 SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_SESSION_START,
     EVENT_USER_PROMPT_SUBMIT,
@@ -208,6 +215,10 @@ SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_FILE_EDITED,
     EVENT_SESSION_IDLE,
     EVENT_MODEL_INVOCATION,
+    EVENT_SUBAGENT_START,
+    EVENT_SUBAGENT_STOP,
+    EVENT_APPROVAL_REQUEST,
+    EVENT_APPROVAL_DECISION,
 )
 
 # Tools whose tool_input.file_path names a file Claude Code says it changed.
@@ -218,6 +229,24 @@ FILE_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "NotebookE
 _LOCAL_STATE_PREFIXES: tuple[str, ...] = (
     ".openshard/", ".claude/", ".codex/", ".opencode/", ".cursor/", ".agents/hooks.json",
 )
+_MAX_ATTRS = 12  # small scalar facts one payload may carry (see _clean_attrs)
+_ATTR_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+# Which ``HookPayload.attrs`` reach an Event's metadata, per event family
+# (``sanitize_metadata`` keeps at most ten keys, so each list is short).
+_TOOL_ATTR_KEYS: tuple[str, ...] = ("duration_ms", "tool_status", "tool_call_id", "turn_id")
+_SUBAGENT_ATTR_KEYS: tuple[str, ...] = (
+    "child_role", "child_status", "duration_ms", "tool_calls", "child_subagent_id",
+    "child_session_id", "parent_subagent_id",
+)
+_APPROVAL_ATTR_KEYS: tuple[str, ...] = (
+    "choice", "surface", "pattern_key", "decided_by", "tool_call_id", "turn_id",
+)
+# Hermes' ``post_approval_response.choice`` values. A grant lets the command
+# run; ``deny`` / ``smart_deny`` is a refusal; the rest mean nobody answered
+# (or the prompt could not be delivered), so the command did not run and no
+# one refused it either.
+_APPROVAL_GRANTED = frozenset({"once", "session", "always", "smart_approve"})
+_APPROVAL_DENIED = frozenset({"deny", "smart_deny"})
 # v0.4.4 change attribution (see _snapshot_baseline / _classify_changed_files).
 _BASELINE_MAX_PATHS = 500  # dirty/untracked paths remembered at session start
 _GIT_DIFF_MAX_FILES = 200  # git diff rows examined at fold (pre-existing ones are then excluded)
@@ -344,6 +373,10 @@ class HookPayload:
     # successful tool run (Claude Code's PostToolUse). None = not known;
     # the fold then never marks the call ``passed`` nor trusts its paths.
     tool_success: bool | None = None
+    # 0.4.7: small scalar facts a translator read off the payload (durations,
+    # correlation ids, subagent role/status, approval choice...). Bounded and
+    # sanitised by ``_clean_attrs`` when reduced; never free-form content.
+    attrs: dict[str, Any] = field(default_factory=dict)
 
 
 def parse_hook_payload(raw: object) -> dict | None:
@@ -373,6 +406,23 @@ def _str_or_none(value: object, limit: int = 4_000) -> str | None:
     if isinstance(value, str) and value:
         return value[:limit]
     return None
+
+
+def _clean_attrs(raw: object) -> dict[str, Any]:
+    """Bounded scalar attributes: snake_case keys, bool/int/float/short-string values."""
+    if not isinstance(raw, Mapping):
+        return {}
+    clean: dict[str, Any] = {}
+    for key, value in raw.items():
+        if len(clean) >= _MAX_ATTRS:
+            break
+        if not isinstance(key, str) or not _ATTR_KEY_RE.match(key):
+            continue
+        if isinstance(value, bool | int | float):
+            clean[key] = value
+        elif isinstance(value, str) and value:
+            clean[key] = value[:80]
+    return clean
 
 
 def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None = None) -> HookPayload | None:
@@ -586,7 +636,9 @@ def resolve_repo_root(payload: HookPayload | StatusPayload, env: Mapping[str, st
     """Locate the repository this hook/status payload belongs to. Never raises.
 
     ``CLAUDE_PROJECT_DIR`` (the project root whose ``.claude/settings.local.json``
-    fired this hook) wins, then the payload's ``cwd``. The nearest enclosing
+    fired this hook) wins, then the payload's ``cwd``. An agent whose hooks
+    are configured user-globally (``AgentProfile.opt_in_repo``) resolves only
+    to a git repository that already has an ``.openshard/`` directory. The nearest enclosing
     git root is used; a directory that is not inside a git repository is
     used as-is (``.openshard/`` is created there). Environment variables
     are only ever *read* here to find the repo -- never stored. A resolved
@@ -603,12 +655,18 @@ def resolve_repo_root(payload: HookPayload | StatusPayload, env: Mapping[str, st
         candidates.append(project_dir.strip())
     if payload.cwd:
         candidates.append(payload.cwd)
+    opt_in = profile_for(payload.agent).opt_in_repo
     for raw in candidates:
         try:
             p = Path(raw)
             if not p.is_dir():
                 continue
             root = find_repo_root(p)
+            if opt_in and (root is None or not (root / ".openshard").is_dir()):
+                # A user-global agent hook (Hermes) fires in every directory:
+                # only a git repository that already has ``.openshard/`` has
+                # opted in to capture.
+                continue
             resolved = root if root is not None else p.resolve()
             if _is_forbidden_capture_root(resolved):
                 continue
@@ -716,6 +774,7 @@ class ReducedHookPayload:
     model_id: str | None = None
     provider_id: str | None = None
     tool_success: bool | None = None  # see HookPayload.tool_success
+    attrs: dict[str, Any] = field(default_factory=dict)  # see HookPayload.attrs
     # v0.4.4: on a SessionStart queued by the capture service, the working-tree
     # baseline taken when the event was *received* (see _snapshot_baseline),
     # so a replay that lags behind the agent's first edits still anchors
@@ -743,6 +802,8 @@ class ReducedHookPayload:
             "provider_id": self.provider_id,
             "tool_success": self.tool_success,
         }
+        if self.attrs:
+            data["attrs"] = dict(self.attrs)
         if self.baseline is not None:
             data["baseline"] = self.baseline
         return data
@@ -797,6 +858,7 @@ class ReducedHookPayload:
             model_id=_str_or_none(data.get("model_id"), 200),
             provider_id=_str_or_none(data.get("provider_id"), 80),
             tool_success=tool_success,
+            attrs=_clean_attrs(data.get("attrs")),
             baseline=_valid_baseline(data.get("baseline")),
         )
 
@@ -847,6 +909,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         model_id=_str_or_none(payload.model_id, 200),
         provider_id=_str_or_none(payload.provider_id, 80),
         tool_success=payload.tool_success if isinstance(payload.tool_success, bool) else None,
+        attrs=_clean_attrs(payload.attrs),
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
@@ -876,6 +939,11 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
     elif payload.event == EVENT_FILE_EDITED:
         reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
         reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
+    elif payload.event in (EVENT_APPROVAL_REQUEST, EVENT_APPROVAL_DECISION):
+        # The command the gate was raised for: scrubbed and capped like any
+        # other command; the raw text is never persisted.
+        action, target, _kind = summarize_command(payload.command, label="command")
+        reduced.command_action, reduced.command_target = action, target
     return reduced
 
 
@@ -1145,6 +1213,8 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "last_stop_at": capture.get("last_turn_completed_at"),
         "idle_count": int(capture.get("idle_count") or 0),
         "invocation_count": int(capture.get("invocation_count") or 0),
+        "subagents": _stored_counts(capture.get("subagents"), ("started", "stopped", "failed")),
+        "approvals": _stored_counts(capture.get("approvals"), ("requested", "granted", "denied", "unanswered")),
         "last_invoked_model": (
             entry.get("execution_model") if entry.get("execution_model") not in (None, "unknown") else None
         ),
@@ -1179,6 +1249,13 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "capture_losses": _stored_losses(capture),
         "baseline": _stored_baseline(entry, capture),
     }
+
+
+def _stored_counts(raw: object, names: tuple[str, ...]) -> dict:
+    """The per-name counters a persisted ``capture`` block carries (empty when none)."""
+    if not isinstance(raw, dict):
+        return {}
+    return {n: int(raw.get(n) or 0) for n in names if isinstance(raw.get(n), int)}
 
 
 def _stored_checks(entry: dict) -> dict:
@@ -1996,6 +2073,15 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # Model invocations observed (Antigravity PreInvocation); absent for
         # agents whose hooks expose no such event.
         entry["capture"]["invocation_count"] = invocation_count
+    for count_key, count_names in (
+        ("subagents", ("started", "stopped", "failed")),
+        ("approvals", ("requested", "granted", "denied", "unanswered")),
+    ):
+        raw_counts = buf.get(count_key)
+        if isinstance(raw_counts, dict) and any(raw_counts.get(n) for n in count_names):
+            # Delegation / approval-gate facts the agent reported (Hermes);
+            # absent for agents whose hooks expose none.
+            entry["capture"][count_key] = {n: int(raw_counts.get(n) or 0) for n in count_names}
     if raw_usage:
         # Per-message usage memory (OpenCode), bounded; lets a buffer rebuilt
         # from this record keep deduplicating re-reported messages.
@@ -2241,6 +2327,9 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         if failed:
             buf["tool_failure_count"] = int(buf.get("tool_failure_count") or 0) + 1
         metadata: dict[str, Any] = {"hook": event, "tool": tool}
+        for attr_key in _TOOL_ATTR_KEYS:  # agent-reported facts about this call, when supplied
+            if attr_key in payload.attrs:
+                metadata[attr_key] = payload.attrs[attr_key]
         target: str | None = None
         action = f"tool {tool}"
         status = "failed" if failed else "unknown"
@@ -2300,6 +2389,76 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
                 return f"tool {tool} buffered; periodic snapshot", True, False
         return f"tool {tool} buffered", False, False
 
+    if event in (EVENT_SUBAGENT_START, EVENT_SUBAGENT_STOP):
+        # A subagent the agent delegated work to (Hermes ``subagent_start`` /
+        # ``subagent_stop``). Counted and staged as agent-reported; the
+        # delegated goal and the child's summary are free text and are never
+        # stored. The child's own session, if it emits hooks, is its own Shard.
+        started = event == EVENT_SUBAGENT_START
+        counts = buf.get("subagents")
+        if not isinstance(counts, dict):
+            counts = buf["subagents"] = {}
+        child_status = payload.attrs.get("child_status")
+        failed_child = (not started) and child_status in ("failed", "error")
+        counts["started" if started else "stopped"] = int(counts.get("started" if started else "stopped") or 0) + 1
+        if failed_child:
+            counts["failed"] = int(counts.get("failed") or 0) + 1
+        meta: dict[str, Any] = {"hook": event}
+        for attr_key in _SUBAGENT_ATTR_KEYS:
+            if attr_key in payload.attrs:
+                meta[attr_key] = payload.attrs[attr_key]
+        role = payload.attrs.get("child_role")
+        if started:
+            action = f"subagent started (role={role})" if isinstance(role, str) else "subagent started"
+            status = "started"
+        else:
+            action = f"subagent stopped ({child_status})" if isinstance(child_status, str) else "subagent stopped"
+            status = "failed" if failed_child else "unknown"
+        _append_event(
+            buf, event_type="session.activity", action=action, status=status,
+            evidence="agent_reported", metadata=meta, occurred_at=now,
+        )
+        return ("subagent started" if started else "subagent stopped"), False, False
+
+    if event in (EVENT_APPROVAL_REQUEST, EVENT_APPROVAL_DECISION):
+        # The agent's human-approval gate (Hermes ``pre_approval_request`` /
+        # ``post_approval_response``). Observed only -- OpenShard neither
+        # raises nor answers it. Only a documented grant/deny choice becomes a
+        # granted/denied Event; a timeout, withdrawal or undeliverable prompt
+        # means nobody decided, and is recorded as exactly that.
+        counts = buf.get("approvals")
+        if not isinstance(counts, dict):
+            counts = buf["approvals"] = {}
+        meta = {"hook": event}
+        for attr_key in _APPROVAL_ATTR_KEYS:
+            if attr_key in payload.attrs:
+                meta[attr_key] = payload.attrs[attr_key]
+        command_text = payload.command_action or "command"
+        if event == EVENT_APPROVAL_REQUEST:
+            counts["requested"] = int(counts.get("requested") or 0) + 1
+            _append_event(
+                buf, event_type="approval.requested", action=f"approval requested: {command_text}",
+                target=payload.command_target, status="started", evidence="agent_reported",
+                metadata=meta, occurred_at=now,
+            )
+            return "approval requested", False, False
+        choice = payload.attrs.get("choice")
+        if choice in _APPROVAL_GRANTED:
+            counts["granted"] = int(counts.get("granted") or 0) + 1
+            event_type, status, verb = "approval.granted", "passed", f"approval granted ({choice})"
+        elif choice in _APPROVAL_DENIED:
+            counts["denied"] = int(counts.get("denied") or 0) + 1
+            event_type, status, verb = "approval.denied", "failed", f"approval denied ({choice})"
+        else:
+            counts["unanswered"] = int(counts.get("unanswered") or 0) + 1
+            event_type, status = "session.activity", "unknown"
+            verb = f"approval not decided ({choice})" if isinstance(choice, str) else "approval not decided"
+        _append_event(
+            buf, event_type=event_type, action=f"{verb}: {command_text}", target=payload.command_target,
+            status=status, evidence="agent_reported", metadata=meta, occurred_at=now,
+        )
+        return "approval decision", False, False
+
     if event == EVENT_STOP:
         buf["turn_count"] = int(buf.get("turn_count") or 0) + 1
         buf["last_stop_at"] = now
@@ -2352,6 +2511,15 @@ def _observe_model(buf: dict, model_id: str | None, provider_id: str | None, sou
     if safe_model == "unknown":
         return False
     safe_provider = _sanitize_model(provider_id) if provider_id else "unknown"
+    known_provider = buf.get("provider_current")
+    if (
+        safe_provider == "unknown" and isinstance(known_provider, str) and known_provider
+        and buf.get("model_current") == f"{known_provider}/{safe_model}"
+    ):
+        # The same model, named again by a hook that carries no provider
+        # (Hermes: only its request hooks do): keep the provider-qualified
+        # form already observed rather than downgrading it to the bare slug.
+        return False
     if safe_provider != "unknown":
         if buf.get("provider_current") != safe_provider:
             buf["provider_current"] = safe_provider
@@ -2569,6 +2737,10 @@ def extract_agent_payload(
         from openshard.adapters.antigravity_hooks import extract_antigravity_payload
 
         return extract_antigravity_payload(data, event_override=event_override)
+    if agent == "hermes":
+        from openshard.adapters.hermes_hooks import extract_hermes_payload
+
+        return extract_hermes_payload(data, event_override=event_override)
     return None
 
 
