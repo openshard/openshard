@@ -155,10 +155,10 @@ def test_receipt_dict_carries_title_and_keeps_raw_task() -> None:
     assert d["task_full"] == task
 
 
-def test_sync_payload_withholds_title_until_platform_accepts_it() -> None:
+def test_sync_payload_carries_title_and_the_original_task() -> None:
     entry = {"timestamp": "2026-01-02T03:04:05Z", "task": "Fix the header", "task_title": "Fix header"}
     payload = receipt_payload(entry, 0)
-    assert "task_title" not in payload
+    assert payload["task_title"] == "Fix header"
     assert payload["task_full"] == "Fix the header"
 
 

@@ -361,7 +361,7 @@ class TestSerialization:
         projected = json.loads(json.dumps(_receipt_json(stored)))  # history --json boundary
         assert projected["verification"] == block
 
-    def test_sync_payload_stays_within_the_hosted_contract(self):
+    def test_sync_payload_carries_the_complete_verification_block(self):
         block = v.build_verification(source="independently_verified", observation_mode="ci_report",
                                      status="passed", checks_attempted=1, checks_passed=1, checks_failed=0,
                                      artifact_sha="abc123f")
@@ -369,8 +369,13 @@ class TestSerialization:
                  "verification": block}
         doc = envelope.build_envelope(entry, 0, core_version="x")
         receipt = doc["receipt"]
-        assert "verification" not in receipt  # withheld until the Platform contract defines it
-        assert envelope.WITHHELD_RECEIPT_KEYS == {"verification", "task_title"}
+        # The structured v1 block travels unchanged: source, status, mode, counts, sha...
+        assert receipt["verification"] == block
+        assert receipt["verification"]["source"] == "independently_verified"
+        assert receipt["verification"]["observation_mode"] == "ci_report"
+        assert (receipt["verification"]["checks_attempted"], receipt["verification"]["checks_passed"],
+                receipt["verification"]["checks_failed"]) == (1, 1, 0)
+        assert receipt["task_full"] == "t"
         assert receipt["verification_status"] == "passed"
         assert receipt["verification_reason"].endswith("[independently_verified @ abc123f]")
         assert len(receipt["verification_reason"]) <= 300
