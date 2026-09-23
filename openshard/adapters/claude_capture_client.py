@@ -87,12 +87,14 @@ CODEX_HOOK_PATH = "/hooks/codex"
 OPENCODE_HOOK_PATH = "/hooks/opencode"
 CURSOR_HOOK_PATH = "/hooks/cursor"
 ANTIGRAVITY_HOOK_PATH = "/hooks/antigravity"
+HERMES_HOOK_PATH = "/hooks/hermes"
 AGENT_HOOK_PATHS: dict[str, str] = {
     "claude_code": HOOK_PATH,
     "codex": CODEX_HOOK_PATH,
     "opencode": OPENCODE_HOOK_PATH,
     "cursor": CURSOR_HOOK_PATH,
     "antigravity": ANTIGRAVITY_HOOK_PATH,
+    "hermes": HERMES_HOOK_PATH,
 }
 # Cursor reads a hook's stdout as a *decision*. This is the one Cursor event
 # OpenShard subscribes to that is blocking, and the only reply it ever
@@ -109,6 +111,10 @@ CURSOR_EMPTY_RESPONSE = "{}"
 ANTIGRAVITY_STOP_RESPONSE = '{"decision": "stop"}'
 ANTIGRAVITY_ALLOW_RESPONSE = '{"decision": "allow"}'
 ANTIGRAVITY_EMPTY_RESPONSE = "{}"
+# Hermes reads a shell hook's stdout as an optional directive; the empty
+# object is its documented no-op, and it is the only reply OpenShard ever
+# gives (observation only: no block, no modify, no injected context).
+HERMES_EMPTY_RESPONSE = "{}"
 HEALTH_PATH = "/health"
 SHUTDOWN_PATH = "/shutdown"
 PROJECT_DIR_HEADER = "X-OpenShard-Project-Dir"
@@ -796,6 +802,28 @@ def run_antigravity_hook(
     except Exception:
         label = "error"
     return label, reply
+
+
+def run_hermes_hook(
+    stream: object,
+    *,
+    env: dict | os._Environ | None = None,
+    event_override: str | None = None,
+    spawn: bool = True,
+) -> tuple[str, str]:
+    """Console-script body for ``openshard hooks hermes``: ``(outcome label, stdout reply)``.
+
+    The same forward-or-fold path as ``run_hook_via_service(agent="hermes")``
+    plus the reply Hermes reads on stdout: always the empty object, whatever
+    capture did. Never raises.
+    """
+    env = os.environ if env is None else env
+    raw = _read_all(stream)
+    try:
+        label = _run_hook_raw(raw, env, event_override=event_override, agent="hermes", spawn=spawn)
+    except Exception:
+        label = "error"
+    return label, HERMES_EMPTY_RESPONSE
 
 
 def _fallback_status_text(raw: bytes) -> str:

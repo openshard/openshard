@@ -30,7 +30,10 @@ openshard setup
 `openshard setup` detects whichever of Claude Code, Codex, Cursor,
 OpenCode or Google Antigravity are available for the repo and configures
 capture for each (for the Antigravity IDE without the `agy` CLI on PATH,
-run `openshard capture install antigravity`). Then
+run `openshard capture install antigravity`). Hermes Agent's hooks live in
+its user-global `~/.hermes/config.yaml`, so `setup` only detects it: run
+`openshard capture install hermes` (in each repository you want captured) to
+enable it. Then
 use your coding agent normally and look at what was captured:
 
 ```sh

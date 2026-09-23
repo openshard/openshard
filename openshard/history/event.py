@@ -228,6 +228,8 @@ SOURCE_OPENCODE_PLUGIN = "opencode_plugin"
 SOURCE_CURSOR_HOOKS = "cursor_hooks"
 # 0.4.7: Google Antigravity agent hooks (``adapters/antigravity_hooks.py``).
 SOURCE_ANTIGRAVITY_HOOKS = "antigravity_hooks"
+# 0.4.7: Hermes Agent shell hooks (``adapters/hermes_hooks.py``).
+SOURCE_HERMES_HOOKS = "hermes_hooks"
 SOURCE_NATIVE_RUN = "native_run"
 
 _ACTION_LIMIT = 120

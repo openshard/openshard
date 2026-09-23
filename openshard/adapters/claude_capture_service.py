@@ -92,7 +92,7 @@ from typing import Any
 
 from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
-from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
+from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE, profile_for
 from openshard.adapters.claude_hooks import (
     EVENT_MODEL_INVOCATION,
     EVENT_SESSION_START,
@@ -292,7 +292,7 @@ class CaptureRecorder:
         self._seq_lock = threading.Lock()
         self._locks_guard = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = {}
-        self._root_cache: dict[tuple[str | None, str | None], Path | None] = {}
+        self._root_cache: dict[tuple[str | None, str | None, str], Path | None] = {}
         # Sessions already known to this service (see _opens_session).
         self._known_sessions: set[str] = set()
         self._pending: queue.Queue[tuple[str, str] | None] = queue.Queue()
@@ -450,14 +450,25 @@ class CaptureRecorder:
                 self._session_locks[key] = lock
             return lock
 
-    def resolve_root(self, project_dir: str | None, cwd: str | None) -> Path | None:
-        """Repository root for (*project_dir*, *cwd*), cached -- the same rule as the hook path."""
-        key = (project_dir or None, cwd or None)
+    def resolve_root(
+        self, project_dir: str | None, cwd: str | None, agent: str = AGENT_CLAUDE_CODE
+    ) -> Path | None:
+        """Repository root for (*project_dir*, *cwd*), cached -- the same rule as the hook path.
+
+        *agent* matters for an agent whose hooks are configured user-globally
+        (Hermes): it resolves only to a repository that has opted in.
+        """
+        key = (project_dir or None, cwd or None, agent)
         if key in self._root_cache:
             return self._root_cache[key]
-        probe = HookPayload(event=EVENT_SESSION_START, session_id=None, cwd=cwd)
+        probe = HookPayload(event=EVENT_SESSION_START, session_id=None, cwd=cwd, agent=agent)
         env = {"CLAUDE_PROJECT_DIR": project_dir} if project_dir else {}
         root = resolve_repo_root(probe, env)
+        if root is None and profile_for(agent).opt_in_repo:
+            # "Not opted in" is not permanent: `openshard capture install
+            # hermes` in that repository must take effect without a service
+            # restart, so this answer is never cached.
+            return None
         if len(self._root_cache) >= _ROOT_CACHE_MAX:
             self._root_cache.clear()
         self._root_cache[key] = root
@@ -493,7 +504,7 @@ class CaptureRecorder:
         if payload.session_id is None:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
-        root = self.resolve_root(project_dir, payload.cwd)
+        root = self.resolve_root(project_dir, payload.cwd, payload.agent)
         if root is None:
             self._bump("ignored")
             return "ignored", "could not resolve repository directory"
