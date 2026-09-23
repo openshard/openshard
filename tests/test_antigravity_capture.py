@@ -326,7 +326,7 @@ class TestCanonicalRecord:
         started = next(e for e in events if e.event_type == "session.started")
         assert "Google Antigravity session observed" in started.action
 
-    def test_observed_check_is_directly_observed_unknown_with_title_and_sync_withheld(self, repo):
+    def test_observed_check_is_directly_observed_unknown_with_title_and_synced(self, repo):
         from openshard.sync import envelope
 
         _drive_inline(repo)
@@ -341,7 +341,7 @@ class TestCanonicalRecord:
         assert entry["task"] and entry["task_title"]
         payload = envelope.receipt_payload(entry, 0)
         assert payload["task_full"] == entry["task"]
-        assert "verification" not in payload and "task_title" not in payload
+        assert payload["verification"] == block and payload["task_title"] == entry["task_title"]
         assert payload["verification_status"] == "unknown"
         assert payload["verification_reason"].endswith("[directly_observed]")
 

@@ -45,7 +45,7 @@ CONTRACT_RECEIPT_KEYS = frozenset({
     "verification_duration_seconds", "approval", "cost", "result", "repo", "repo_identity", "branch",
     "git_state", "duration_seconds", "context_quality", "findings", "task_completion", "cost_usd",
     "cost_provenance", "cost_is_estimate", "tokens_input", "tokens_output", "tokens_cache_read",
-    "tokens_cache_creation", "tokens_provenance",
+    "tokens_cache_creation", "tokens_provenance", "task_title", "verification",
 })
 FORBIDDEN_KEYS = {"prompt", "transcript", "stdout", "stderr", "diff", "patch", "agent_notes", "run_timeline",
                   "timeline", "env", "environment", "api_key", "password"}
@@ -209,6 +209,13 @@ class TestEnvelope:
         assert receipt["repo"] is None
         assert receipt["repo_identity"] == "github.com/openshard/widget"  # credentials and .git stripped by Core
         assert receipt["capture_completeness"]["depth"] in ("full", "partial", "unknown")
+        # Display title and structured verification travel next to the raw task.
+        assert receipt["task_title"] and receipt["task_full"]
+        verification = receipt["verification"]
+        assert verification["version"] == 1 and verification["observation_mode"] == "hook_tool_event"
+        assert verification["status"] in ("passed", "failed", "partial", "not_run", "unknown")
+        assert {"source", "checks_attempted", "checks_passed", "checks_failed", "complete",
+                "incomplete_reasons"} <= set(verification)
         blob = json.dumps(doc)
         assert "user:token" not in blob and str(repo) not in blob
         assert not (FORBIDDEN_KEYS & set(receipt))

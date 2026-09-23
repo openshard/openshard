@@ -31,8 +31,7 @@ All notable changes to OpenShard are documented here.
   `task_short` / `task_full`, which keep the original task text. Capture
   writers stamp a deterministic title (never a model call on the capture
   path); older records derive one at read time. `task_title` appears in
-  `openshard history --json` and is withheld from the sync envelope until
-  the Platform contract defines it.
+  `openshard history --json` and in the sync envelope.
 
 ### Fixed
 
@@ -67,10 +66,9 @@ All notable changes to OpenShard are documented here.
   `verification_status: null`. OSN tokens (`skipped`, `manual_review`) are
   unchanged. `verification_status` may now also be `partial`.
 - The full block appears in `openshard history --json` (extended
-  projection). It is withheld from the sync envelope until the Platform
-  contract defines it; sync carries the evidence as `verification_status`
-  plus a `verification_reason` that names the source (e.g.
-  `"... [directly_observed]"`).
+  projection) and in the sync envelope, alongside the flat
+  `verification_status` and a `verification_reason` that names the source
+  (e.g. `"... [directly_observed]"`).
 
 ## 0.4.6 - 2026-09-18
 
