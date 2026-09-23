@@ -665,7 +665,14 @@ class TestServicePath:
         (repo / "made.py").write_text("x = 1\n", encoding="utf-8")
         assert _post(service.port, "Stop", _doc(repo, fullyIdle=True, error=""))
         service.server.recorder.resume_processing()
-        assert _wait_for(lambda: bool(_lines(repo)) and _lines(repo)[0]["capture"]["turn_count"] == 1)
+        def _first_line_has_one_turn() -> bool:
+            # Read once per poll. On Windows the recorder atomically replaces
+            # runs.jsonl; two back-to-back reads can straddle that replace and
+            # make the second read briefly observe an empty file.
+            lines = _lines(repo)
+            return bool(lines) and lines[0]["capture"]["turn_count"] == 1
+
+        assert _wait_for(_first_line_has_one_turn)
         entry = _lines(repo)[0]
         made = next(f for f in entry["files_detail"] if f["path"] == "made.py")
         assert made["attribution"] == "git_observed" and not made.get("pre_existing")
