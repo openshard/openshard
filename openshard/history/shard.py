@@ -28,7 +28,13 @@ from openshard.history.task_identity import stored_task_id
 ORIGIN_OPENSHARD_ROUTED = "openshard_routed"
 ORIGIN_EXTERNAL_OBSERVED = "external_observed"
 ORIGIN_UNKNOWN = "unknown"
-VALID_ORIGINS = frozenset({ORIGIN_OPENSHARD_ROUTED, ORIGIN_EXTERNAL_OBSERVED, ORIGIN_UNKNOWN})
+# Historical Ingestion v1 (openshard/ingest/): rebuilt afterwards from an
+# agent's own on-disk history. OpenShard observed nothing live, so this ranks
+# below ``external_observed`` and its capture depth is always ``partial``.
+ORIGIN_HISTORICAL_IMPORT = "historical_import"
+VALID_ORIGINS = frozenset(
+    {ORIGIN_OPENSHARD_ROUTED, ORIGIN_EXTERNAL_OBSERVED, ORIGIN_HISTORICAL_IMPORT, ORIGIN_UNKNOWN}
+)
 
 CAPTURE_FULL = "full"
 CAPTURE_PARTIAL = "partial"
@@ -66,6 +72,14 @@ _EXTERNAL_ADAPTER_EXECUTORS = frozenset(_EXTERNAL_AGENT_LABELS)
 
 _EXTERNAL_AGENT_LABEL = _EXTERNAL_AGENT_LABELS["claude_code_hooks"]
 
+# Historical Ingestion v1: one executor per parser. Same "agent that did the
+# work" rule as above, with its own origin (see ORIGIN_HISTORICAL_IMPORT).
+HISTORICAL_IMPORT_LABELS: dict[str, str] = {
+    "claude_code_history_import": "Claude Code (imported history)",
+    "codex_history_import": "Codex (imported history)",
+}
+HISTORICAL_IMPORT_EXECUTORS = frozenset(HISTORICAL_IMPORT_LABELS)
+
 
 @dataclass
 class Shard:
@@ -98,6 +112,9 @@ def derive_shard_identity(entry: dict) -> tuple[str, str, str]:
 
     if executor in _EXTERNAL_ADAPTER_EXECUTORS:
         return _EXTERNAL_AGENT_LABELS[executor], ORIGIN_EXTERNAL_OBSERVED, CAPTURE_PARTIAL
+
+    if executor in HISTORICAL_IMPORT_EXECUTORS:
+        return HISTORICAL_IMPORT_LABELS[executor], ORIGIN_HISTORICAL_IMPORT, CAPTURE_PARTIAL
 
     if workflow == "native" or executor == "native":
         return "OpenShard Native", ORIGIN_OPENSHARD_ROUTED, CAPTURE_FULL

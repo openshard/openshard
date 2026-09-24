@@ -125,6 +125,17 @@ def _utc_now_iso() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
+SEALED_AT_FIELD = "sealed_at"
+
+
+class SealedReceiptError(ValueError):
+    """The latest record is a sealed Receipt, which is never amended in place.
+
+    Historical imports (``openshard/ingest/``) are written once with
+    ``sealed_at``; later evidence goes to append-only attachments instead.
+    """
+
+
 def amend_latest_record(
     runs_path: Path,
     kind: str,
@@ -141,11 +152,15 @@ def amend_latest_record(
 
     Returns the record exactly as written, or ``None`` when there is no record
     to amend (nothing is written and no directory is created in that case).
+    Raises :class:`SealedReceiptError` (nothing written) when the latest
+    record is sealed.
     See the module docstring for the integrity contract.
     """
     runs_path = Path(runs_path)
 
     def _transform(stored: dict) -> dict:
+        if stored.get(SEALED_AT_FIELD):
+            raise SealedReceiptError("the latest receipt is sealed and cannot be amended")
         before = verify_shard_hash(stored)
         record = copy.deepcopy(stored)
         mutate(record)

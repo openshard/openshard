@@ -185,7 +185,7 @@ _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Getting Started", ("setup", "doctor")),
     ("Receipts", ("last", "history", "report", "context")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
-    ("Integrations", ("mcp", "capture", "sync", "import", "wrap", "adapters", "telemetry")),
+    ("Integrations", ("mcp", "capture", "sync", "import", "ingest", "wrap", "adapters", "telemetry")),
     # Everything else (run, plan, models, roster, eval, packs, ...) falls
     # into "Advanced" below rather than needing to be named here.
 ]
@@ -4515,7 +4515,7 @@ def _record_feedback(
     pr_created: bool,
     pr_merged: bool,
 ) -> None:
-    from openshard.history.store import amend_latest_record
+    from openshard.history.store import SealedReceiptError, amend_latest_record
 
     loc = _locate_history()
     log_path = loc.runs_path
@@ -4536,7 +4536,10 @@ def _record_feedback(
     def _attach(record: dict) -> None:
         record["developer_feedback"] = df
 
-    amended = amend_latest_record(log_path, "developer_feedback", _attach)
+    try:
+        amended = amend_latest_record(log_path, "developer_feedback", _attach)
+    except SealedReceiptError as exc:
+        raise click.ClickException(f"{exc}; sealed (imported) receipts are never amended.") from None
     if amended is None:
         raise click.ClickException("No run history found. Run a task first with 'openshard run'.")
     try:
@@ -4721,7 +4724,7 @@ def memory_stats() -> None:
 @click.argument("text")
 def note_cmd(text: str) -> None:
     """Attach a note to the most recent run."""
-    from openshard.history.store import amend_latest_record
+    from openshard.history.store import SealedReceiptError, amend_latest_record
     from openshard.security.secret_scan import scrub_text_for_secrets
 
     log_path = _locate_history().runs_path
@@ -4740,7 +4743,11 @@ def note_cmd(text: str) -> None:
         else:
             record["notes"] = [note_item]
 
-    if amend_latest_record(log_path, "note", _attach) is None:
+    try:
+        amended = amend_latest_record(log_path, "note", _attach)
+    except SealedReceiptError as exc:
+        raise click.ClickException(f"{exc}; sealed (imported) receipts are never amended.") from None
+    if amended is None:
         click.echo("No run history found.")
         raise SystemExit(1)
     click.echo("Note recorded.")
@@ -7427,6 +7434,12 @@ def roster_reset() -> None:
     save_config(config)
     click.echo("Roster cleared. Mode reset to 'auto'.")
     click.echo(f"Saved to {path or config_search_path()}")
+
+
+# Historical Ingestion v1 (``openshard ingest``); defined in its own module.
+from openshard.cli.ingest import ingest_group  # noqa: E402
+
+cli.add_command(ingest_group)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,6 @@
 # Historical Ingestion v1 — Architecture
 
-Status: **design, not implemented.** No Core, Platform, schema, sync-contract or test changes have been made for this yet.
-
-Hold points: the schema version, verification vocabulary, sync contract, and Core implementation are **on hold until the Capture Verification v2 branch (`feat/capture-verification-v2`) has merged and been reviewed**. Items marked *(proposed)* are directional, not final.
+Status: **v1 implemented in Core** (`openshard/ingest/`, `openshard ingest`): foundation, Claude Code history, Codex history, and local git evidence. §16 records how the §15 open decisions were settled for v1 and where the implementation differs from this design. The sync contract and the Platform are unchanged. Items marked *(proposed)* further down are kept for context; §16 overrides them where they differ.
 
 ## 1. Why
 
@@ -421,3 +419,40 @@ Tests follow the `tests/test_grok_bot_capture.py` structure (Normalize / Ingest 
 7. **Grouping evidence threshold.** What counts as "strong evidence" before the grouping policy may combine sessions into one Shard beyond the v1 default? One-session-per-Shard stays the default until this is decided.
 8. **Sync.** When do historical receipts become sync-eligible? What is the contract shape for `origin`/`import`/`facts` and attachments? Should hosted orgs be able to opt out of receiving historical receipts?
 9. **Retention of source hashes.** Is `source_sha256` plus `locator_hash` enough for re-verification, or should the user be able to register an archive location (never copied) for later audit?
+
+## 16. v1 implementation notes
+
+### How the §15 decisions were settled for v1
+
+| # | Decision | v1 choice |
+|---|---|---|
+| 1 | Evidence vocabulary | `imported_transcript` and `git_verified` are new values on the existing Event evidence ladder (`history/event.py` `VALID_EVIDENCE`). They are not a separate channel field. Verification blocks use the new `observation_mode = imported_transcript`. Transcript-recorded outcomes use `source = agent_reported`. An invocation with no recorded outcome has `source = null` and status `unknown`. |
+| 2 | Attachments store | A separate append-only `.openshard/attachments.jsonl`, next to Verification v2's `verifications.jsonl`. It is not merged into that sidecar. |
+| 3 | Schema version | Not bumped. `import`, `facts`, `origin` and `sealed_at` are additive keys, and `coerce_shard_entry` passes them through. |
+| 4 | Origin / executor | `origin = historical_import` (`history/shard.py`, capture depth `partial`), with one executor per parser: `claude_code_history_import` and `codex_history_import`. |
+| 5 | Model and cost | Model ids are stored as the transcript records them (scrubbed), with no catalog normalization. Cost is not produced in v1: `facts.cost` is `unknown`. Tokens are kept, with `tokens_provenance = imported_transcript`. |
+| 6 | Grown sources | A grown source produces a new receipt with `import.supersedes`, as proposed. `--no-update` skips it. |
+| 7 | Grouping | One session → one Shard, recorded as `import.grouping`. |
+| 8 | Sync | Historical receipts are **not sync-eligible** (`sync/envelope.py` reason `historical_import_sync_deferred`) until the contract gains `origin`/`import`/`facts`. |
+| 9 | Retention | Only `source_sha256` and `locator_hash` are kept. |
+
+### Differences from the design above
+
+- **`locator_display` is `<source>:<file name>`** (e.g. `claude-code:<session>.jsonl`), not a home-relative path, because Claude Code project directory names encode the absolute project path. Job item logs store `object_key` (a hash of the object id) instead of the locator.
+- **Parse losses and deliberate drops are recorded separately.** Unreadable, malformed or unknown source records go to `import.source_losses`, and to the receipt's known gaps as `unparsed_source_records`. Facts OpenShard chose not to keep go to `import.dropped` (e.g. `path_outside_repo`).
+- **Claude `tool_result.is_error` omitted = success.** The Messages API defines `is_error` as optional with default false, and Claude Code omits it on many successful results. `interrupted` or a background task id means `not_completed`, which resolves to `unknown`.
+- **Codex prompts.** Newer rollouts have no `user_message` event. The first `response_item` user message that is not Codex-injected context (`<environment_context>`, `AGENTS.md`) is used instead.
+- **Subagent transcripts.** Sidechain records inside a session file fold into the session. Separate `<session>/subagents/*.jsonl` files are not read yet.
+- **Sealed receipts refuse amendment.** `history.store.amend_latest_record` raises `SealedReceiptError` for a record with `sealed_at`, so `openshard note` and `feedback` fail with a clear message instead of rewriting an imported receipt.
+- **Defensive seal check.** `receipt_builder.assert_no_live_evidence` refuses to write any record or attachment whose `evidence`, `source` or `observation_mode` is `directly_observed` or `openshard_executed`.
+
+### Deferred from the first milestone
+
+- `ingest enrich` (post-seal attachments from later git or CI evidence)
+- the read-time `assess()` merge and the `facts` projection in `views.py` / MCP
+- `history --origin historical`
+- `--detach`
+- CI/GitHub evidence (`independently_verified`)
+- the sync contract change
+- all hosted/blob connectors (upload, Drive, Dropbox, S3)
+- Cursor, OpenCode, Hermes and Grok parsers

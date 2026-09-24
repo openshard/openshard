@@ -131,12 +131,20 @@ EVIDENCE_AGENT_REPORTED = "agent_reported"
 EVIDENCE_GIT_OBSERVED = "git_observed"
 EVIDENCE_INDEPENDENTLY_VERIFIED = "independently_verified"
 EVIDENCE_UNKNOWN = "unknown"
+# Historical Ingestion v1 (openshard/ingest/). ``imported_transcript``: the
+# agent host's own log recorded this at the time and OpenShard read it later
+# -- never ``directly_observed``. ``git_verified``: a git object that exists
+# and is strongly linked to the session (same term as verification.SOURCES).
+EVIDENCE_IMPORTED_TRANSCRIPT = "imported_transcript"
+EVIDENCE_GIT_VERIFIED = "git_verified"
 VALID_EVIDENCE: frozenset[str] = frozenset(
     {
         EVIDENCE_DIRECTLY_OBSERVED,
         EVIDENCE_AGENT_REPORTED,
         EVIDENCE_GIT_OBSERVED,
         EVIDENCE_INDEPENDENTLY_VERIFIED,
+        EVIDENCE_IMPORTED_TRANSCRIPT,
+        EVIDENCE_GIT_VERIFIED,
         EVIDENCE_UNKNOWN,
     }
 )
@@ -237,6 +245,9 @@ SOURCE_HERMES_HOOKS = "hermes_hooks"
 SOURCE_GROK_BOT_ACTION_RECORDING = "grok_bot_action_recording"
 SOURCE_GROK_BOT_SELF_REPORT = "grok_bot_self_report"
 SOURCE_NATIVE_RUN = "native_run"
+# Historical Ingestion v1: Events rebuilt from an agent's on-disk history.
+SOURCE_CLAUDE_CODE_HISTORY = "claude_code_history"
+SOURCE_CODEX_HISTORY = "codex_history"
 
 _ACTION_LIMIT = 120
 _TARGET_LIMIT = 80
