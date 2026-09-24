@@ -42,12 +42,16 @@ Confirmed against Cursor's hooks reference (``cursor.com/docs/agent/hooks``):
   is the command tool (``tool_input.command``); ``Write`` / ``Delete`` are
   file tools whose ``tool_input`` path key is not documented, so
   ``file_path`` / ``path`` are tolerated and anything else under-reports.
-  Every other tool is recorded by name only. **``tool_output``,
-  ``error_message`` and ``working_directory`` are never read.** Cursor does
-  not document ``postToolUse`` as firing only after success, so unlike
-  Claude Code no success signal is attached (``tool_success`` stays
-  ``None``): file tools are recorded ``unknown`` and contribute no
-  hook-reported paths.
+  Every other tool is recorded by name only. **``error_message``,
+  ``working_directory`` and ``tool_output`` -- except the one ``exitCode``
+  integer of a ``Shell`` result (verification v2, see ``_shell_outcome``) --
+  are never read.** Cursor now documents ``postToolUse`` as "Called after
+  successful tool execution", but that is the *tool* succeeding (its
+  ``Shell`` example carries an ``exitCode``), so no file-tool success
+  signal is attached yet (``tool_success`` stays ``None``): file tools are
+  recorded ``unknown`` and contribute no hook-reported paths.
+  ``failure_type`` / ``is_interrupt`` only tell a shell timeout / denial /
+  interrupt (no result) apart from an error.
 * ``afterFileEdit`` (``file_path``, ``edits``) -> ``FileEdited``. Cursor
   fires it after an edit was applied, so, like OpenCode's ``file.edited``,
   the path is the positive signal that feeds the hook-reported file list
@@ -80,6 +84,7 @@ guessed from the model name.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -95,6 +100,7 @@ from openshard.adapters.claude_hooks import (
     EVENT_SESSION_START,
     EVENT_STOP,
     EVENT_USER_PROMPT_SUBMIT,
+    OUTCOME_NOT_COMPLETED,
     TOOL_KIND_COMMAND,
     TOOL_KIND_FILE,
     TOOL_KIND_OTHER,
@@ -162,12 +168,50 @@ def _model(data: Mapping[str, Any]) -> str | None:
     return _str_or_none(data.get("model_id"), 200) or _str_or_none(data.get("model"), 200)
 
 
+_MAX_TOOL_OUTPUT_CHARS = 1_000_000  # a larger tool_output is not parsed (exit code stays unknown)
+_NOT_COMPLETED_FAILURES = frozenset({"timeout", "permission_denied"})
+
+
+def _shell_outcome(name: str, data: Mapping[str, Any]) -> tuple[str | None, int | None]:
+    """The outcome Cursor reports for one ``Shell`` call (verification v2).
+
+    ``postToolUse``: Cursor documents ``tool_output`` as the "JSON-stringified
+    result payload from the tool" and its reference ``Shell`` example carries
+    ``exitCode``. Only that one integer is read (``stdout`` and the rest are
+    never looked at); no ``exitCode`` -> no outcome, because "successful tool
+    execution" means the tool ran, not that the command exited 0.
+    ``postToolUseFailure``: ``is_interrupt`` or a ``failure_type`` of
+    ``timeout`` / ``permission_denied`` means the command has no result
+    (``not_completed``); ``error`` stays a failed tool call.
+    """
+    if name == "postToolUseFailure":
+        if data.get("is_interrupt") is True or data.get("failure_type") in _NOT_COMPLETED_FAILURES:
+            return OUTCOME_NOT_COMPLETED, None
+        return None, None
+    raw = data.get("tool_output")
+    parsed: object = raw
+    if isinstance(raw, str):
+        if len(raw) > _MAX_TOOL_OUTPUT_CHARS:
+            return None, None
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, RecursionError):
+            return None, None
+    if not isinstance(parsed, Mapping):
+        return None, None
+    code = parsed.get("exitCode")
+    if isinstance(code, bool) or not isinstance(code, int):
+        return None, None
+    return None, code
+
+
 def extract_cursor_payload(data: Mapping[str, Any], *, event_override: str | None = None) -> HookPayload | None:
     """Pick the supported fields out of a decoded Cursor hook document.
 
     Returns ``None`` for an event OpenShard does not subscribe to or when
     the document is not a Cursor hook. Unknown keys are ignored. Never
-    attaches a success signal: Cursor documents no such thing.
+    attaches a file-tool success signal; a ``Shell`` call carries only the
+    exit code Cursor reported (see ``_shell_outcome``).
     """
     name = data.get("hook_event_name")
     if not isinstance(name, str) or not name:
@@ -210,6 +254,7 @@ def extract_cursor_payload(data: Mapping[str, Any], *, event_override: str | Non
         if kind == TOOL_KIND_COMMAND:
             command = tool_input.get("command")
             payload.command = command if isinstance(command, str) and command else None
+            payload.command_outcome, payload.command_exit_code = _shell_outcome(name, data)
         elif kind == TOOL_KIND_FILE:
             for key in _FILE_INPUT_KEYS:
                 path = tool_input.get(key)

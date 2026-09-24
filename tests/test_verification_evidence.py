@@ -226,8 +226,12 @@ class TestCapturePaths:
     def test_hook_observed_check_invocation_is_directly_observed_unknown(self, repo):
         _hook(repo, "SessionStart", source="startup")
         _hook(repo, "UserPromptSubmit", prompt="fix the bug")
-        _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"})
-        _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ruff check ."})
+        # Background calls return before the command finishes: the invocation is
+        # seen, the outcome is not (a foreground PostToolUse would be a reported pass).
+        _hook(repo, "PostToolUse", tool_name="Bash",
+              tool_input={"command": "python -m pytest -q", "run_in_background": True})
+        _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ruff check ."},
+              tool_response={"stdout": "", "backgroundTaskId": "bg1"})
         _hook(repo, "Stop")
         entry = _runs(repo)[-1]
         block = entry["verification"]
@@ -267,11 +271,15 @@ class TestCapturePaths:
         _hook(repo, "Stop")
         _hook(repo, "SessionEnd", reason="clear")  # buffer deleted
         _hook(repo, "UserPromptSubmit", prompt="resume")  # rebuilt from runs.jsonl
-        _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "go test ./..."})
+        _hook(repo, "PostToolUseFailure", tool_name="Bash", tool_input={"command": "go test ./..."},
+              error="Exit code 2\nFAIL pkg")
         _hook(repo, "Stop")
         block = _runs(repo)[-1]["verification"]
         assert block["checks_attempted"] == 2
-        assert block["status"] == "unknown"
+        # The first check's reported pass survives the rebuild; the second failed.
+        assert [(c["status"], c["exit_code"]) for c in block["checks"]] == [("passed", None), ("failed", 2)]
+        assert block["status"] == "failed" and block["source"] == "agent_reported"
+        assert block["checks_passed"] == 1 and block["checks_failed"] == 1
 
     def test_import_is_not_observable_not_no_checks_run(self, repo):
         from openshard.adapters.claude_code_import import build_claude_code_import_entry

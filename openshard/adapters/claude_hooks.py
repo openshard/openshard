@@ -37,7 +37,11 @@ Evidence honesty
 * Claims relayed *inside* the payload (tool X ran on file Y, a Bash command
   ran) -> ``EVIDENCE_AGENT_REPORTED``: Claude Code reported them; OpenShard
   did not execute or verify them. A Bash test command is recorded as a tool
-  invocation, never as a verification result -- OpenShard did not run it.
+  invocation; the outcome Claude Code reports for it (verification v2: a
+  foreground ``PostToolUse`` = succeeded, ``PostToolUseFailure`` with
+  ``Exit code N`` = failed) is recorded as ``agent_reported``, never as an
+  OpenShard-observed result -- OpenShard did not run it (``openshard verify``
+  does).
 * Files from ``git diff`` (against the HEAD snapshotted at session start,
   so commits made during the session are still seen) ->
   ``EVIDENCE_GIT_OBSERVED``.
@@ -53,8 +57,8 @@ excerpt of the *first* user prompt as the Shard task (the same thing
 ``import claude --task`` asks the user to type), a scrubbed bounded Bash
 command summary, prompt/tool/turn counts, git branch/HEAD/dirty state.
 Never stored: transcripts or ``transcript_path``, full prompts, later
-prompts, assistant messages (``last_assistant_message``), tool responses,
-tool errors, file contents, environment variables, absolute paths, or
+prompts, assistant messages (``last_assistant_message``), tool responses
+and tool error text (only a shell command's exit code is kept), file contents, environment variables, absolute paths, or
 anything matching the secret scrubber.
 
 Staging buffer
@@ -266,7 +270,8 @@ ATTR_GIT_OBSERVED = "git_observed"
 ATTR_PRE_EXISTING = "pre_existing"
 ATTR_OTHER_SESSION = "other_session"
 _EXCLUDED_ATTRIBUTIONS = frozenset({ATTR_PRE_EXISTING, ATTR_OTHER_SESSION})
-COMMAND_TOOLS: frozenset[str] = frozenset({"Bash"})
+# Claude Code's shell tools (``PowerShell`` on Windows; same hook contract as Bash).
+COMMAND_TOOLS: frozenset[str] = frozenset({"Bash", "PowerShell"})
 # Agent-neutral tool classification carried on the reduced payload.
 TOOL_KIND_FILE = "file"
 TOOL_KIND_COMMAND = "command"
@@ -386,6 +391,34 @@ class HookPayload:
     # correlation ids, subagent role/status, approval choice...). Bounded and
     # sanitised by ``_clean_attrs`` when reduced; never free-form content.
     attrs: dict[str, Any] = field(default_factory=dict)
+    # Verification v2: the outcome of *this shell command*, set only by a
+    # translator whose agent documents a per-command outcome on the same
+    # event (an exit code, or an error field defined as empty on success).
+    # Deliberately separate from ``tool_success``: Claude Code's PostToolUse
+    # proves a tool call completed, not that a shell command exited 0, so it
+    # never sets these. ``command_outcome`` is ``passed`` | ``failed`` |
+    # ``not_completed`` (interrupted / timed out / denied: the command has no
+    # result, so even on a failure event it is ``unknown``, never a failed
+    # check) | None (not reported). Any outcome is the agent's report ->
+    # ``agent_reported``.
+    command_outcome: str | None = None
+    command_exit_code: int | None = None
+
+
+OUTCOME_PASSED = "passed"
+OUTCOME_FAILED = "failed"
+OUTCOME_NOT_COMPLETED = "not_completed"
+_COMMAND_OUTCOMES = frozenset({OUTCOME_PASSED, OUTCOME_FAILED, OUTCOME_NOT_COMPLETED})
+
+
+def _command_outcome_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value in _COMMAND_OUTCOMES else None
+
+
+def _exit_code_or_none(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not -(2**31) <= value < 2**32:
+        return None
+    return value
 
 
 def parse_hook_payload(raw: object) -> dict | None:
@@ -450,9 +483,12 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     """Pick the supported fields out of a decoded hook payload.
 
     Unknown keys are ignored. Returns None when no supported event name can
-    be determined. ``transcript_path``, ``tool_response``/``tool_result``,
-    ``error``, ``last_assistant_message`` and every other field are never
-    read.
+    be determined. ``transcript_path``, ``tool_result``,
+    ``last_assistant_message`` and every other field are never read; for a
+    shell tool only the documented outcome markers are (see
+    ``_claude_command_outcome``: two booleans in ``tool_response``, the
+    ``Exit code N`` first line of ``error``, ``is_interrupt``) -- never
+    command output or the rest of the error text.
     """
     if is_grok_build_document(data):
         return None  # Grok Build reaching Claude hooks through its compat layer: never a Claude Code record
@@ -476,6 +512,12 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     if prompt is None:
         prompt = _str_or_none(data.get("user_message"))
 
+    tool_name = _str_or_none(data.get("tool_name"), 80)
+    command_outcome: str | None = None
+    command_exit_code: int | None = None
+    if tool_name in COMMAND_TOOLS:
+        command_outcome, command_exit_code = _claude_command_outcome(event, data, tool_input)
+
     return HookPayload(
         event=event,
         session_id=session_id,
@@ -483,7 +525,7 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
         source=_str_or_none(data.get("source"), 40),
         reason=_str_or_none(data.get("reason"), 40) or _str_or_none(data.get("end_reason"), 40),
         prompt=prompt,
-        tool_name=_str_or_none(data.get("tool_name"), 80),
+        tool_name=tool_name,
         file_path=_str_or_none(tool_input.get("file_path") or tool_input.get("notebook_path"), 2_000),
         command=_str_or_none(tool_input.get("command")),
         stop_hook_active=bool(data.get("stop_hook_active")),
@@ -491,7 +533,56 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
         # completes successfully" (failures fire PostToolUseFailure instead),
         # so the event itself is the positive success signal for Claude.
         tool_success=True if event == EVENT_POST_TOOL_USE else None,
+        command_outcome=command_outcome,
+        command_exit_code=command_exit_code,
     )
+
+
+# ``PostToolUseFailure.error`` for a shell tool: "a command that ran and
+# exited produces a first line ``Exit code N``" -- the only part of the
+# string Claude Code documents as stable; the rest is display text and is
+# never read.
+_CLAUDE_EXIT_LINE_RE = re.compile(r"^Exit code (-?\d{1,10})\s*$")
+_CLAUDE_TIMEOUT_LINE_RE = re.compile(r"^Command timed out\b")
+
+
+def _claude_command_outcome(
+    event: str, data: Mapping[str, Any], tool_input: Mapping[str, Any]
+) -> tuple[str | None, int | None]:
+    """The outcome Claude Code reports for one Bash/PowerShell call (verification v2).
+
+    Per the hooks reference: ``PostToolUse`` "runs immediately after a tool
+    completes successfully" and a shell command that exits non-zero fires
+    ``PostToolUseFailure`` with an ``Exit code N`` first line. So a
+    *foreground*, uninterrupted shell call reaching ``PostToolUse`` is
+    Claude Code's report that the command succeeded. Excluded, because the
+    call returns before the command finishes or without a result: a
+    ``run_in_background`` call, a response carrying ``backgroundTaskId``, and
+    one whose ``tool_response.interrupted`` is true. On a failure,
+    ``is_interrupt`` (an abort) and a timeout line mean the command has no
+    result (``not_completed``); otherwise the documented exit line gives N.
+    Only booleans, one integer and one first line are read -- never
+    ``stdout`` / ``stderr`` or the rest of ``error``.
+    """
+    if event == EVENT_POST_TOOL_USE:
+        if tool_input.get("run_in_background") is True:
+            return None, None
+        response = data.get("tool_response")
+        if isinstance(response, Mapping):
+            if response.get("interrupted") is True or response.get("backgroundTaskId"):
+                return None, None
+        return OUTCOME_PASSED, None
+    if event == EVENT_POST_TOOL_USE_FAILURE:
+        if data.get("is_interrupt") is True:
+            return OUTCOME_NOT_COMPLETED, None
+        error = data.get("error")
+        first = error.split("\n", 1)[0].strip() if isinstance(error, str) else ""
+        match = _CLAUDE_EXIT_LINE_RE.match(first)
+        if match:
+            return OUTCOME_FAILED, _exit_code_or_none(int(match.group(1)))
+        if _CLAUDE_TIMEOUT_LINE_RE.match(first):
+            return OUTCOME_NOT_COMPLETED, None
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -803,6 +894,8 @@ class ReducedHookPayload:
     # so a replay that lags behind the agent's first edits still anchors
     # attribution at session start. Absent on every other line.
     baseline: dict | None = None
+    command_outcome: str | None = None  # see HookPayload.command_outcome
+    command_exit_code: int | None = None
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {
@@ -829,6 +922,11 @@ class ReducedHookPayload:
             data["attrs"] = dict(self.attrs)
         if self.baseline is not None:
             data["baseline"] = self.baseline
+        # Only when reported, so queue lines of every other event keep their shape.
+        if self.command_outcome is not None:
+            data["command_outcome"] = self.command_outcome
+        if self.command_exit_code is not None:
+            data["command_exit_code"] = self.command_exit_code
         return data
 
     @classmethod
@@ -883,6 +981,8 @@ class ReducedHookPayload:
             tool_success=tool_success,
             attrs=_clean_attrs(data.get("attrs")),
             baseline=_valid_baseline(data.get("baseline")),
+            command_outcome=_command_outcome_or_none(data.get("command_outcome")),
+            command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
         )
 
 
@@ -956,6 +1056,8 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         elif kind == TOOL_KIND_COMMAND:
             action, target, ckind = summarize_command(payload.command, label=tool)
             reduced.command_action, reduced.command_target, reduced.command_kind = action, target, ckind
+            reduced.command_outcome = _command_outcome_or_none(payload.command_outcome)
+            reduced.command_exit_code = _exit_code_or_none(payload.command_exit_code)
         elif kind == TOOL_KIND_READ:
             reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
             reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
@@ -1296,6 +1398,7 @@ def _stored_checks(entry: dict) -> dict:
         return {"checks": [], "checks_total": 0}
     checks = [
         {"name": c.get("name"), "kind": c.get("kind"), "status": c.get("status"), "at": None}
+        | ({"exit_code": c["exit_code"]} if isinstance(c.get("exit_code"), int) else {})
         for c in (block.get("checks") or [])
         if isinstance(c, dict) and isinstance(c.get("name"), str)
     ][:_MAX_BUFFERED_CHECKS]
@@ -1745,15 +1848,44 @@ def _hook_file_events(buf: dict) -> list[dict]:
 _MAX_BUFFERED_CHECKS = 20
 
 
-def _record_check(buf: dict, name: str, kind: str, *, failed: bool, at: str) -> None:
-    """Remember one hook-observed check command. Its outcome stays ``unknown``
-    unless the agent's own hook reported the tool call as failed."""
+def _command_status(payload: ReducedHookPayload, failed_event: bool) -> str:
+    """``passed`` / ``failed`` / ``unknown`` for one shell command, never guessed.
+
+    A command the translator says did not complete (interrupted, timed out,
+    denied) is ``unknown`` -- it has no result, even on a failure event.
+    Otherwise a failure event is ``failed``; a translator-supplied exit code
+    decides (0 -> passed); a translator-supplied outcome is used when there
+    is no exit code; an exit code and an outcome that disagree are
+    ``unknown`` rather than a pick of one. Nothing supplied -> ``unknown``.
+    """
+    code = payload.command_exit_code
+    outcome = payload.command_outcome
+    if outcome == OUTCOME_NOT_COMPLETED:
+        return "unknown"
+    if failed_event:
+        return "failed"
+    if code is not None:
+        from_code = "passed" if code == 0 else "failed"
+        if outcome is not None and outcome != from_code:
+            return "unknown"
+        return from_code
+    return outcome if outcome in (OUTCOME_PASSED, OUTCOME_FAILED) else "unknown"
+
+
+def _record_check(
+    buf: dict, name: str, kind: str, *, status: str, at: str, exit_code: int | None = None,
+) -> None:
+    """Remember one hook-observed check command with the outcome its hook reported
+    (``unknown`` when the hook reported none)."""
     buf["checks_total"] = int(buf.get("checks_total") or 0) + 1
     checks = buf.get("checks")
     if not isinstance(checks, list):
         checks = buf["checks"] = []
     if len(checks) < _MAX_BUFFERED_CHECKS:
-        checks.append({"name": name, "kind": kind, "status": "failed" if failed else "unknown", "at": at})
+        item: dict[str, Any] = {"name": name, "kind": kind, "status": status, "at": at}
+        if exit_code is not None:
+            item["exit_code"] = exit_code
+        checks.append(item)
 
 
 def _hook_verification(buf: dict) -> dict:
@@ -1774,6 +1906,8 @@ def _hook_verification(buf: dict) -> dict:
         REASON_OUTCOME_NOT_OBSERVED,
         SOURCE_DIRECTLY_OBSERVED,
         STATUS_FAILED,
+        STATUS_PARTIAL,
+        STATUS_PASSED,
         STATUS_UNKNOWN,
         build_verification,
         hook_verification_source,
@@ -1803,26 +1937,53 @@ def _hook_verification(buf: dict) -> dict:
             reason="No check command observed in the agent's tool events.",
         )
     failed = sum(1 for c in checks if c.get("status") == "failed")
+    passed = sum(1 for c in checks if c.get("status") == "passed")
     stamps = [c["at"] for c in checks if isinstance(c.get("at"), str)]
-    if total > len(checks):
+    truncated = total > len(checks)
+    if truncated:
         incomplete.append(REASON_CHECKS_TRUNCATED)
+    # Checks past the buffer bound have no recorded outcome, so they count as unknown.
+    unknown = total - passed - failed
     if failed:
-        reason = "The agent's hook reported a check command as failed; exit codes are not observed."
+        status = STATUS_FAILED
+    elif passed and not unknown:
+        status = STATUS_PASSED
+    elif passed:
+        status = STATUS_PARTIAL
     else:
+        status = STATUS_UNKNOWN
+    if unknown:
         incomplete.append(REASON_OUTCOME_NOT_OBSERVED)
+    if failed:
+        reason = "The agent's hook reported a check command as failed; OpenShard did not run it."
+    elif passed and not unknown:
+        reason = "The agent's hook reported the check command outcome(s); OpenShard did not run them."
+    elif passed:
+        reason = "The agent's hook reported some check outcomes; the rest were not observed."
+    else:
         reason = "Check command(s) observed through agent hooks; outcome not observed."
     return build_verification(
-        source=hook_verification_source(STATUS_FAILED if failed else STATUS_UNKNOWN),
+        source=hook_verification_source(status, outcome_reported=bool(passed or failed)),
         observation_mode=MODE_HOOK_TOOL_EVENT,
-        checks=[{"name": c.get("name"), "kind": c.get("kind"), "status": c.get("status")} for c in checks],
+        checks=[
+            {"name": c.get("name"), "kind": c.get("kind"), "status": c.get("status"), "exit_code": c.get("exit_code")}
+            for c in checks
+        ],
+        status=status,
         checks_attempted=total,
-        checks_passed=0,
+        checks_passed=passed,
         checks_failed=failed,
         checks_skipped=0,
         started_at=min(stamps) if stamps else None,
+        exit_code=_single_exit_code(checks) if total == 1 else None,
         reason=reason,
         incomplete_reasons=incomplete,
     )
+
+
+def _single_exit_code(checks: list[dict]) -> int | None:
+    code = checks[0].get("exit_code") if checks else None
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
 def _all_losses(buf: dict) -> list[dict]:
@@ -2414,16 +2575,31 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
             action = payload.command_action or f"{tool} command"
             target = payload.command_target
             metadata["command_kind"] = payload.command_kind or "other"
-            # A command exiting non-zero still fires PostToolUse; outcome unknown.
-            status = "failed" if failed else "unknown"
+            # The event alone never proves a command's outcome (a tool call
+            # can complete although its command exited non-zero). Only a
+            # failure event or a per-command outcome the translator read off
+            # a documented field (see _command_status) sets one.
+            outcome = _command_status(payload, failed)
+            # The tool call's own status keeps the failure event; the check
+            # outcome may still be unknown (e.g. the command was interrupted).
+            status = "failed" if failed else outcome
+            if payload.command_exit_code is not None:
+                metadata["exit_code"] = payload.command_exit_code
+            if payload.command_outcome == OUTCOME_NOT_COMPLETED:
+                metadata["not_completed"] = True
+            if outcome != "unknown":
+                metadata["outcome_source"] = "agent_reported"
             if payload.command_kind in ("test", "lint"):
                 # A check-shaped command was directly observed running --
-                # enough to say "attempted" honestly. Its pass/fail outcome
-                # is never inferred from this (OpenShard does not read tool
-                # stdout/exit codes), so verification_passed stays None; see
+                # enough to say "attempted" honestly. Its outcome is only what
+                # the agent's hook reported (agent_reported); OpenShard never
+                # reads tool stdout, so verification_passed stays None; see
                 # build_hook_entry.
                 buf["check_command_seen"] = True
-                _record_check(buf, action, payload.command_kind, failed=failed, at=now)
+                _record_check(
+                    buf, action, payload.command_kind, status=outcome, at=now,
+                    exit_code=payload.command_exit_code,
+                )
         _append_event(
             buf, event_type="tool.invoked", action=action, target=target,
             target_is_path=(kind in (TOOL_KIND_FILE, TOOL_KIND_READ)),

@@ -2017,6 +2017,9 @@ def last(more: bool, full: bool, as_json: bool):
             },
             proof_contract=build_shard_proof_contract(entry),
             shard_quality=build_shard_quality_summary(entry, receipt),
+            # Verification v2: the latest ``openshard verify`` attestation
+            # (sidecar, OpenShard-executed); None when never re-verified.
+            post_session_verification=_post_session_verification_for(entry, log_path),
             **_content_hash_fields(entry),
         )
         click.echo(json.dumps(payload, indent=2))
@@ -2034,6 +2037,134 @@ def last(more: bool, full: bool, as_json: bool):
     for line in repo_note_lines(loc):
         click.echo(line)
     _render_log_entry(entries[-1], detail, index=len(entries) - 1)
+    _post_verification = _post_session_verification_for(entries[-1], log_path)
+    if _post_verification is not None:
+        from openshard.verification.post_session import display_line
+
+        click.echo(f"\nRe-verified: {display_line(_post_verification)}")
+
+
+def _post_session_verification_for(entry: dict, log_path: Path) -> dict | None:
+    """The latest ``openshard verify`` attestation for *entry* (sidecar next to runs.jsonl), or None."""
+    try:
+        from openshard.verification.post_session import latest_for_entry, load_attestations
+
+        return latest_for_entry(entry, load_attestations(log_path.parent))
+    except Exception:
+        return None
+
+
+def _select_entry(entries: list[dict], ref: str | None) -> dict | None:
+    """The latest entry, or the newest one whose receipt_id / shard_id / run_id equals *ref*."""
+    if not entries:
+        return None
+    if not ref:
+        return entries[-1]
+    for entry in reversed(entries):
+        if ref in (entry.get("receipt_id"), entry.get("shard_id"), entry.get("run_id")):
+            return entry
+    return None
+
+
+@cli.command("verify")
+@click.option("--receipt", "receipt_ref", default=None, metavar="ID",
+              help="Receipt to verify (receipt_id, shard_id or run_id). Defaults to the latest.")
+@click.option("--from-observed", is_flag=True, default=False,
+              help="Also re-run the check commands the agent was observed running (safe ones only).")
+@click.option("--approve", is_flag=True, default=False,
+              help="Also run checks classified as needing approval. Blocked commands never run.")
+@click.option("--dry-run", is_flag=True, default=False, help="Show what would run; run nothing.")
+@click.option("--timeout", default=600.0, show_default=True, type=click.FloatRange(min=1.0),
+              help="Seconds before a check is stopped (its outcome is then unknown).")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Machine-readable output (check output is not shown).")
+def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run: bool, timeout: float,
+           as_json: bool) -> None:
+    """Re-run approved checks and record the outcome OpenShard itself observed.
+
+    Picks the repository's verification contract (``verification_commands``
+    in .openshard/config.yml), else its detected test command, plus -- with
+    --from-observed -- the check commands the agent ran. OpenShard runs them
+    (never through a shell), reads each exit code, and appends an attestation
+    to .openshard/verifications.jsonl linked to the receipt: evidence
+    ``directly_observed``, bound to the commit only when the working tree is
+    clean. The receipt itself is never modified. This records evidence; it
+    never blocks anything, and exits 0 whatever the checks' outcome.
+    """
+    from openshard.config.settings import load_config_safe
+    from openshard.verification.post_session import (
+        build_attestation,
+        display_line,
+        plan_checks,
+        record_attestation,
+        run_checks,
+        summarize_attestation,
+        tree_state,
+    )
+
+    loc = _locate_history()
+    repo_root = loc.root
+    entries = _load_run_entries(loc.runs_path)
+    entry = _select_entry(entries, receipt_ref)
+    if entry is None:
+        message = (f"No receipt matches {receipt_ref!r}." if receipt_ref
+                   else "No receipt to verify yet: run or capture an agent task first.")
+        if as_json:
+            click.echo(json.dumps(_machine_envelope("verify", "not_found", message=message), indent=2))
+        else:
+            click.echo(message)
+        sys.exit(1)
+
+    config, _valid, _path = load_config_safe(cwd=repo_root)
+    planned = plan_checks(repo_root, config, entry, include_observed=from_observed)
+    receipt_label = entry.get("receipt_id") or entry.get("shard_id") or entry.get("run_id")
+
+    if not as_json:
+        click.echo(f"Verifying receipt {receipt_label}")
+        if not planned:
+            click.echo("  No check to run: set verification_commands in .openshard/config.yml.")
+        for check in planned:
+            click.echo(f"  {check.name}  [{check.origin}, {check.safety}]")
+    if dry_run:
+        if as_json:
+            click.echo(json.dumps(_machine_envelope(
+                "verify", "dry_run", receipt=receipt_label,
+                planned=[{"name": c.name, "kind": c.kind, "origin": c.origin, "safety": c.safety,
+                          "reason": c.reason} for c in planned],
+            ), indent=2))
+        return
+
+    started_at = _utc_stamp()
+    before = tree_state(repo_root)
+    results = run_checks(
+        planned, repo_root, approve=approve, timeout=timeout, stream=not as_json,
+        on_start=None if as_json else (lambda c: click.echo(f"\n[verify] running {c.name}")),
+    )
+    after = tree_state(repo_root)
+    attestation = build_attestation(
+        entry, results, before=before, after=after, started_at=started_at, completed_at=_utc_stamp(),
+    )
+    record_attestation(repo_root, attestation)
+    summary = summarize_attestation(attestation)
+
+    if as_json:
+        click.echo(json.dumps(_machine_envelope(
+            "verify", "ok", receipt=receipt_label, attestation_id=attestation["attestation_id"],
+            checks=attestation["checks"], verification=summary["verification"],
+        ), indent=2))
+        return
+    click.echo("")
+    for result in results:
+        detail = f"exit {result.exit_code}" if result.exit_code is not None else result.note
+        click.echo(f"  {result.check.name}: {result.status}" + (f" ({detail})" if detail else ""))
+    click.echo(f"\nRe-verified: {display_line(summary)}")
+    click.echo("Recorded in .openshard/verifications.jsonl (evidence: directly_observed).")
+
+
+def _utc_stamp() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @cli.command("history")

@@ -14,20 +14,24 @@ after that -- reduction, queue, fold, receipt -- is the shared code in
 
 Sources and field audit -- what is read, and on what authority
 --------------------------------------------------------------
-Google documents hooks at ``antigravity.google/docs/hooks`` (CLI) and
-``antigravity.google/docs/ide/hooks`` (IDE). The documented events are
-``PreToolUse``, ``PostToolUse``, ``PreInvocation``, ``PostInvocation`` and
-``Stop``; stdin is camelCase JSON; ``PreToolUse`` / ``PostToolUse`` take a
-regex ``matcher`` and the three others a plain handler list. Field shapes
+Google documents hooks for Antigravity 2.0, the CLI and the IDE on one page,
+``antigravity.google/docs/hooks`` (``/docs/ide/hooks`` now redirects to its
+``?tab=ide``; re-audited 2026-09 for verification v2). The documented events
+are ``PreToolUse``, ``PostToolUse``, ``PreInvocation``, ``PostInvocation``
+and ``Stop``; stdin is camelCase JSON; ``PreToolUse`` / ``PostToolUse`` take
+a regex ``matcher`` and the three others a plain handler list. Field shapes
 below are cross-checked against independent open-source integrations that
-parse live Antigravity payloads (atuin, AgentNotch, emdash), because the
-reference is terse on per-event fields:
+parse live Antigravity payloads (atuin, AgentNotch, emdash):
 
 * Every document carries ``conversationId`` (the session), ``workspacePaths``
-  (the first entry is the working directory), ``modelName``,
-  ``transcriptPath`` and ``artifactDirectoryPath``. OpenShard reads
-  ``conversationId``, ``workspacePaths[0]`` and ``modelName``.
-  **``transcriptPath`` and ``artifactDirectoryPath`` are never read.**
+  (the first entry is the working directory), ``modelName`` ("The
+  name/identifier of the model handling the invocation", e.g.
+  ``gemini-3.6-flash-medium`` -- kept verbatim, never split into a
+  provider), ``transcriptPath`` and ``artifactDirectoryPath``. OpenShard
+  reads ``conversationId``, ``workspacePaths[0]`` and ``modelName``.
+  **``transcriptPath`` and ``artifactDirectoryPath`` are never read**:
+  the transcript is the full conversation (``transcript.jsonl``) with no
+  published schema, so it is neither stored nor mined for outcomes.
 * The event name is **not reliably in the payload** (some builds send
   ``hookEventName``, others nothing), so the installer puts it on the
   command line (``--event PreInvocation``). The command-line name wins;
@@ -36,16 +40,29 @@ reference is terse on per-event fields:
   posts to, not by anything the document claims.
 * ``PreInvocation`` (``invocationNum``) fires before every model call ->
   ``ModelInvocation``: the session did work, with ``modelName`` as the
-  model for that call. ``invocationNum`` is not read (integrations
-  disagree on whether it starts at 0 or 1 and whether it resets per turn).
-  No user prompt text is delivered to a command hook, so the task stays
-  the profile placeholder -- never inferred from the transcript.
-* ``PostToolUse`` (``toolCall.name``, ``toolCall.args``, ``stepIdx``,
-  ``error``) -> ``PostToolUse``, or ``PostToolUseFailure`` when ``error``
-  is a non-empty string (a failed call, including a command exiting
-  non-zero). The reference describes ``error`` as empty on success, so an
-  *explicitly present, empty* ``error`` is the success signal for a file
-  tool; an absent ``error`` attaches none. Tool classification uses the
+  model for that call. ``invocationNum`` (documented 0-indexed) is not
+  read: nothing here needs it. No user prompt text is delivered to a
+  command hook, so the task stays the profile placeholder -- never
+  inferred from the transcript.
+* ``PostToolUse`` ("Fires after a tool completes": ``toolCall.name``,
+  ``toolCall.args``, ``stepIdx``, ``error``) -> ``PostToolUse``, or
+  ``PostToolUseFailure`` when ``error`` is a non-empty string. ``error`` is
+  documented as "Optional. The detailed runtime error message if the tool
+  call failed. Empty if successful." -- and the reference's own example is
+  a ``run_command`` ``npm test`` with ``"error": "exit status 1"``. So a
+  non-empty ``error`` on a check command is the agent's report that it
+  failed (``agent_reported``); the message text, including the ``exit
+  status N`` wording, is never parsed (it is not a documented format).
+  An *explicitly present, empty* ``error`` is the success signal for a
+  **file** tool, but deliberately **not** for ``run_command``: "successful"
+  is the tool call, and ``run_command`` hands a command still running after
+  ``WaitMsBeforeAsync`` to the background, so the tool can complete before
+  the command exits -- an empty ``error`` there does not prove exit 0, and
+  no exit code is documented. A check command's outcome therefore stays
+  ``unknown`` unless it failed (``openshard verify`` can re-run it). An
+  absent ``error`` attaches nothing. A ``PostToolUse`` document with no
+  ``toolCall.name`` is ignored: CLI builds before 1.1.9 fired it on non-tool
+  steps (user input, model responses). Tool classification uses the
   documented agent tool names (PascalCase args in the IDE, snake_case for
   the ACP ``client_*`` tools)::
 
@@ -214,6 +231,8 @@ def extract_antigravity_payload(
     if not isinstance(call, dict):
         call = {}
     tool_name = _str_or_none(call.get("name"), 80)
+    if tool_name is None:
+        return None  # not a tool step (pre-1.1.9 CLI fired PostToolUse for those too)
     payload.tool_name = tool_name
     kind = classify_antigravity_tool(tool_name)
     payload.tool_kind = kind
@@ -222,6 +241,9 @@ def extract_antigravity_payload(
         args = {}
     if kind == TOOL_KIND_COMMAND:
         payload.command = _first_str(args, _COMMAND_KEYS, 4_000)
+        # A non-empty ``error`` already makes this PostToolUseFailure (the
+        # agent's failure report). An empty one is never read as a pass: the
+        # command may still be running in the background (module docstring).
     elif kind == TOOL_KIND_FILE:
         path = _first_str(args, _WRITE_PATH_KEYS, 2_000)
         if path:

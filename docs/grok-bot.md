@@ -197,9 +197,11 @@ again updates the same Shard. Commands and text are secret-scrubbed. Every
 Event is `agent_reported`. Verification is `source = agent_reported`,
 `observation_mode = agent_claim` (the flat `verification_reason` ends in
 `[agent_reported]`). The receipt's Evidence row reads "Agent reported", and
-its Result line reads "Self-reported, not observed: <status>." Note: the Checks row still
-reads `1/1 passed`, which is the existing receipt contract for agent claims
-(pinned in `tests/test_verification_evidence.py`).
+its Result line reads "Self-reported, not observed: <status>." The rendered
+Checks row reads `1/1 passed (agent-reported)` (Verification v2); the synced
+`checks` string stays `1/1 passed`, the existing receipt contract for agent
+claims (pinned in `tests/test_verification_evidence.py`), and
+`verification.source` carries the distinction.
 
 ### Why not an OpenShard MCP connector or plugin?
 

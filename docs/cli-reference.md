@@ -48,6 +48,9 @@ Inspect what Openshard captured (local, offline, works from any subdirectory of 
 openshard last                                     # Show the latest run summary
 openshard last --more                              # Show the expanded receipt
 openshard last --full                              # Show full stored/debug details
+openshard verify                                   # Re-run approved checks for the latest receipt (OpenShard-observed evidence)
+openshard verify --dry-run                         # Show which checks would run, and their safety class
+openshard verify --from-observed --approve         # Also re-run the agent's observed checks; allow needs-approval commands
 openshard history                                  # Recent receipts for this repo, newest first
 openshard history --limit 20 --json                # Same, more rows, machine-readable
 openshard context "fix the flaky auth test"        # What relevant_context would give an agent, and why

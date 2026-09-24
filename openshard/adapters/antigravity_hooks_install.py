@@ -7,7 +7,8 @@ Layout
 ------
 Antigravity's ``hooks.json`` maps *hook names* to event configurations.
 ``PreToolUse`` / ``PostToolUse`` take matcher groups (the matcher is a
-regular expression; ``*`` is rejected, ``.*`` matches every tool) and the
+regular expression; the current reference lets ``""`` / ``*`` match all
+tools, and ``.*`` -- valid regex on every build -- is what is installed) and the
 other events take a plain handler list::
 
     {

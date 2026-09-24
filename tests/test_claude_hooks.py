@@ -64,11 +64,12 @@ from openshard.history.query import (
 from openshard.history.shard import CAPTURE_PARTIAL, ORIGIN_EXTERNAL_OBSERVED
 from openshard.history.shard_contract import (
     build_shard_receipt,
+    checks_label,
     render_compact_shard_receipt,
     render_full_shard_receipt,
 )
 
-SID = "0f1e2d3c-4b5a-4697-8877-665544332211"
+SID ="0f1e2d3c-4b5a-4697-8877-665544332211"
 SID2 = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 SECRET = "sk-ant-api03-SECRETSECRET12345678901234567890"
 
@@ -568,7 +569,11 @@ class TestEvidence:
         assert by_target["calc.py"]["status"] == STATUS_PASSED
         assert by_target["README.md"]["status"] == STATUS_PASSED
         bash = next(e for e in tools if e["action"].startswith("Bash:"))
-        assert bash["status"] == STATUS_UNKNOWN  # OpenShard did not observe the exit code
+        # Verification v2: a foreground Bash call reaching PostToolUse is Claude
+        # Code's documented report that it succeeded -- agent_reported, not observed.
+        assert bash["status"] == STATUS_PASSED
+        assert bash["evidence"] == EVIDENCE_AGENT_REPORTED
+        assert bash["metadata"]["outcome_source"] == "agent_reported"
         assert bash["metadata"]["command_kind"] == "test"
         assert bash["target"] == "python"
 
@@ -595,9 +600,11 @@ class TestEvidence:
         assert receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED
         assert receipt.shard.capture_depth == CAPTURE_PARTIAL
         # _session() runs a "python -m pytest -q" Bash call (command_kind
-        # "test"): directly observed as *attempted*, but never verified --
-        # OpenShard never reads its stdout/exit code for an external session.
-        assert receipt.status == "Checks attempted, result not verified"
+        # "test") that reaches PostToolUse: Claude Code reports it succeeded.
+        # That is the agent's report -- OpenShard never ran it or read stdout.
+        assert receipt.status == "Passed"
+        assert receipt.verification["source"] == "agent_reported"
+        assert receipt.verification["observation_mode"] == "hook_tool_event"
 
 
 # ---------------------------------------------------------------------------
@@ -750,12 +757,14 @@ class TestFiles:
         edit_ev = next(e for e in _events(entry, EVENT_TOOL_INVOKED) if e["action"] == "tool Edit")
         assert edit_ev["target"] == "evals/basic/bug_fix/fixtures/word_utils.py"
         assert "path_dropped" not in edit_ev["metadata"]
-        # The pytest command is directly-observed as *attempted*; its
-        # pass/fail outcome is still never fabricated (see module docstring).
+        # The pytest command's outcome is only what Claude Code reported (a
+        # foreground PostToolUse = succeeded): agent_reported, and the legacy
+        # verification_passed boolean (OpenShard-run semantics) stays None.
         assert entry["verification_attempted"] is True
         assert entry["verification_passed"] is None
         receipt = build_shard_receipt(entry)
-        assert receipt.checks_display == "Attempted (unverified)"
+        assert receipt.checks_display == "1/1 passed"
+        assert checks_label(receipt) == "1/1 passed (agent-reported)"
         assert set(receipt.files_touched) == {"evals/basic/bug_fix/fixtures/word_utils.py"}
 
     def test_deeply_nested_hook_reported_path_survives_git_unavailable(self, tmp_path: Path):
@@ -1015,7 +1024,8 @@ class TestHistoryIntegration:
         assert receipt.attempt_number == 1
         assert set(receipt.files_touched) == {"calc.py", "README.md"}
         assert {e.event_id for e in receipt.events} == {e["event_id"] for e in entry["events"]}
-        assert receipt.checks_display == "Attempted (unverified)"
+        assert receipt.checks_display == "1/1 passed"
+        assert receipt.verification["source"] == "agent_reported"
         assert receipt.cost_display == "Not recorded"
         by_run = get_receipt(run_id=entry["run_id"], repo_path=repo)
         assert by_run.shard_id == entry["shard_id"]
@@ -1113,11 +1123,12 @@ class TestTaskCompletion:
         assert receipt.checks_display == "Not run"
         assert receipt.task_completion == "Turn completed (unverified)"  # completion != verification
 
-    def test_checks_attempted_but_unverified_when_turn_completed(self, repo: Path):
-        # with_tools=True (default) drives a "python -m pytest -q" Bash call.
+    def test_agent_reported_check_when_turn_completed(self, repo: Path):
+        # with_tools=True (default) drives a "python -m pytest -q" Bash call
+        # that Claude Code reports as succeeded (foreground PostToolUse).
         entry = _session(repo, end=False)
         receipt = build_shard_receipt(entry)
-        assert receipt.checks_display == "Attempted (unverified)"
+        assert checks_label(receipt) == "1/1 passed (agent-reported)"
         assert receipt.task_completion == "Turn completed (unverified)"  # completion != verification
 
 

@@ -1013,14 +1013,17 @@ class TestObservedRealPayloads:
         assert cap["tool_failure_count"] == 0 and cap["model_source"] == "not_captured"
         assert entry["execution_model"] == "unknown"
 
-    def test_verification_is_observed_but_never_inferred_from_the_exit_code(self, repo):
+    def test_verification_outcome_is_grok_reported_exit_code_never_output(self, repo):
         self._apply(repo, _real_session(repo))
         (entry,) = _lines(repo)
+        # Verification v2: toolResult.exit_code is Grok's report of the command's
+        # exit status -> agent_reported; the legacy OpenShard-run boolean stays None.
         assert entry["verification_attempted"] is True and entry["verification_passed"] is None
         block = entry["verification"]
-        assert block["status"] == "unknown" and block["source"] == "directly_observed"
-        assert "outcome_not_observed" in block["incomplete_reasons"]
-        assert "2 passed" not in json.dumps(entry)
+        assert block["status"] == "passed" and block["source"] == "agent_reported"
+        assert block["checks"][0]["exit_code"] == 0 and block["exit_code"] == 0
+        assert "outcome_not_observed" not in block["incomplete_reasons"]
+        assert "2 passed" not in json.dumps(entry)  # the command output is never read
 
     def test_edit_tools_are_unknown_and_files_come_from_git(self, repo):
         self._apply(repo, _real_session(repo))
@@ -1087,9 +1090,10 @@ class TestObservedRealPayloads:
         assert denied["action"] == "permission denied: run_terminal_command" and denied["target"] is None
         assert SECRET not in json.dumps(entry)
 
-    def test_nonzero_exit_and_missing_file_stay_unknown(self, repo):
-        # Observed: both arrive as PostToolUse (not PostToolUseFailure); their outcomes are in toolResult,
-        # which is never read, so they are recorded as unknown -- never failed, never passed.
+    def test_nonzero_exit_is_reported_failed_and_missing_file_stays_unknown(self, repo):
+        # Observed: both arrive as PostToolUse (not PostToolUseFailure). Only a shell command's
+        # toolResult.exit_code is read (verification v2): non-zero -> failed (Grok's report).
+        # The read_file result is never read, so it stays unknown -- never failed, never passed.
         docs = [
             ("UserPromptSubmit", _real(repo, "UserPromptSubmit", promptId="p", prompt="run things")),
             ("PostToolUse", _real_tool(repo, "PostToolUse", "run_terminal_command",
@@ -1102,7 +1106,10 @@ class TestObservedRealPayloads:
         self._apply(repo, docs)
         (entry,) = _lines(repo)
         statuses = {e["metadata"]["tool"]: e["status"] for e in entry["events"] if e["event_type"] == "tool.invoked"}
-        assert statuses == {"run_terminal_command": "unknown", "read_file": "unknown"}
+        assert statuses == {"run_terminal_command": "failed", "read_file": "unknown"}
+        shell = next(e for e in entry["events"] if e["metadata"].get("tool") == "run_terminal_command")
+        assert shell["metadata"]["exit_code"] == 1 and shell["metadata"]["outcome_source"] == "agent_reported"
+        # The tool call itself did not fail (no PostToolUseFailure); only the command did.
         assert entry["capture"]["tool_failure_count"] == 0
 
     def test_event_name_falls_back_to_the_document_when_there_is_no_command_line_event(self, repo):

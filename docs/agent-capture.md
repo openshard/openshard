@@ -251,9 +251,11 @@ never invented evidence.
 
 ## Evidence and privacy semantics (fail closed)
 
-* **Verification is never recorded** for any of the three agents. A test
-  command is a `tool.invoked` with `command_kind = test`, not a
-  verification result.
+* **A hook never makes a check OpenShard-verified.** A test command is a
+  `tool.invoked` with `command_kind = test`. Its outcome is recorded only
+  where the agent documents one per command (Verification v2, below), and
+  then always as `agent_reported`; `directly_observed` outcomes come only
+  from `openshard verify`.
 * **File-tool success needs a provider signal.** Claude Code documents
   `PostToolUse` as firing only after a tool completed successfully
   (failures go to `PostToolUseFailure`), so a Claude file edit is
@@ -286,7 +288,8 @@ never invented evidence.
   bounded. A provider is never guessed from a model name; OpenCode's record
   is `provider/model` only when OpenCode itself exposed both.
 * **Never stored**: transcripts / `transcript_path`, `tool_response` /
-  tool output, `last_assistant_message`, patch bodies, tool arguments other
+  tool output and error text (a shell command's integer exit code is the
+  only thing read from them, see Verification v2), `last_assistant_message`, patch bodies, tool arguments other
   than the file path / command, absolute paths outside the repository,
   environment variables. Prompts are reduced to a secret-scrubbed, 300-char
   excerpt of the *first* prompt (the Shard task); commands to a scrubbed,
@@ -305,6 +308,95 @@ never invented evidence.
   directory is refused as a capture root; `.codex/` and `.opencode/` join
   `.openshard/`/`.claude/` as local state that is never counted as the
   task's changed files.
+
+## Verification evidence (v2)
+
+External-agent receipts used to show *Attempted (unverified)* or *Not run*
+because hooks show that a check command ran but rarely how it ended.
+Verification v2 records the strongest outcome each agent's **current official
+documentation** defines, and adds a way for OpenShard to re-run checks itself.
+The evidence rules stay strict:
+
+| What happened | `verification.status` | `source` |
+|---|---|---|
+| No check command observed | `not_run` | `directly_observed` (hook stream seen) |
+| Check invoked, outcome not available | `unknown` + `outcome_not_observed` | `directly_observed` (the invocation) |
+| Agent's hook reported the outcome (exit code / success-only event / failure event) | `passed` / `failed` / `partial` | `agent_reported` |
+| Interrupted, timed out, denied or backgrounded command | `unknown` (a failed *tool call*, never a failed *check*) | as above |
+| `openshard verify` ran the check and read its exit code | `passed` / `failed` | `directly_observed`, mode `openshard_executed` |
+| ...on a clean commit (same HEAD, no tracked change after) | same, plus `artifact_sha` | `directly_observed`; binding established by git |
+| CI result for the exact artifact | not implemented | would be `independently_verified` |
+
+A pass is never manufactured: a missing, truncated, conflicting (exit code vs
+event) or undocumented signal leaves the check `unknown`. Receipts label
+agent-reported outcomes on screen (`Checks  1/1 passed (agent-reported)`);
+the synced `checks` string is unchanged, and `verification.source` carries
+the distinction across sync.
+
+### Integration audit (latest official docs, 2026-09)
+
+| Agent | Check invocation | Check result | Exit / error | Transcript | Model / provider | Now recorded |
+|---|---|---|---|---|---|---|
+| Claude Code | `PostToolUse` / `PostToolUseFailure`, Bash + PowerShell `tool_input.command` | `PostToolUse` is documented success-only; a non-zero exit fires `PostToolUseFailure` | `error` first line `Exit code N` (the only stable part); `is_interrupt`; timeout line | `transcript_path` (lags; not read) | status line `model.id`; `SessionStart.model` sometimes; no provider | foreground Bash `PostToolUse` -> `passed`; `Exit code N` -> `failed` + N; interrupt/timeout, `run_in_background`, `backgroundTaskId`, `interrupted` -> `unknown` |
+| Codex | `PostToolUse` Bash | none: `PostToolUse` fires for non-zero exits too, and `tool_response` is only the output text | none documented | `transcript_path` (documented as unstable) | `model` every event; no provider | unchanged: `unknown` |
+| Cursor | `postToolUse` / `postToolUseFailure` `Shell` | `tool_output` JSON; the reference `Shell` example carries `exitCode` | `exitCode`; `failure_type` (`error`/`timeout`/`permission_denied`); `is_interrupt` | `transcript_path` (not read) | `model` / `model_id`; no provider | `exitCode` -> `passed` / `failed`; timeout / denied / interrupt -> `unknown`; no `exitCode` -> `unknown` |
+| OpenCode | `tool.execute.after` `bash` | not documented (source: `output.metadata.exit`, null on timeout/abort) | not documented | not exposed to plugins | `providerID` / `modelID` on messages | unchanged: `unknown` (source-only field not relied on) |
+| Google Antigravity 2.0 | `PostToolUse` `run_command` (`CommandLine`) | `error`: "detailed runtime error message if the tool call failed. Empty if successful" | non-empty `error` only; no exit code; `exit status N` is display text | `transcriptPath` (full conversation, no schema; not read) | `modelName` every event; no provider | non-empty `error` -> `failed`; empty `error` stays `unknown` (see below) |
+| Hermes Agent | `post_tool_call` `terminal` | `status` `ok` / `error` / `blocked` / `cancelled` | `error_type` / `error_message` (text; not read); exit code only in `result` text | `~/.hermes/state.db` (not read) | `model`, `provider` on request hooks | `error` -> `failed`; `blocked` / `cancelled` -> `unknown`; `ok` stays `unknown` (not documented as exit 0) |
+| Grok Build | `PostToolUse` `run_terminal_command` | `toolResult.exit_code` (bundled hooks reference); `PostToolUse` fires even for non-zero exits | `exit_code`; `toolResultTruncated` | session files (not read) | not in hooks | `exit_code` -> `passed` / `failed`; truncated -> `unknown` |
+| Grok Bot (Cursor) | OTel shell action | none attributable: shell actions carry no exit code or output; the only shell status is a metric without correlation ids | none | none | none | unchanged: `unknown` (`outcome_not_observed`) |
+
+**Antigravity 2.0 specifically.** The current contract includes
+`PostToolUse` after execution, an `error` string, `transcriptPath` and
+`modelName`, and the reference example is a `run_command` `npm test` with
+`"error": "exit status 1"`. A non-empty `error` is therefore recorded as the
+agent's failure report, as before. An **empty** `error` is deliberately
+*not* read as a command pass. "Successful" is defined for the tool call.
+`run_command` hands a command still running after `WaitMsBeforeAsync` to the
+background, so the call can complete before the command exits, and no exit
+code is documented. Also new: a `PostToolUse` document with no
+`toolCall.name` is ignored, because CLI builds before 1.1.9 fired it on
+non-tool steps. `modelName` stays verbatim (e.g. `gemini-3.6-flash-medium`,
+never split into a provider). `transcriptPath` is still never read. To get
+a real outcome for Antigravity (or Codex, OpenCode, Hermes, Grok Bot), run
+`openshard verify`.
+
+### `openshard verify`: post-session re-run
+
+```
+external agent completes
+  -> openshard verify [--receipt ID] [--from-observed] [--approve] [--dry-run] [--json]
+  -> checks: verification_commands in .openshard/config.yml (a list; the older
+     single verification_command also works), else the detected test command;
+     with --from-observed, also the check commands the agent ran
+  -> each classified by the native safety rules: blocked never runs,
+     needs_approval runs only with --approve, safe runs (argv, never a shell)
+  -> OpenShard reads each exit code: 0 passed, non-zero failed; a timeout or a
+     command that cannot start is unknown (check_not_completed)
+  -> one attestation appended to .openshard/verifications.jsonl
+```
+
+* **Binding.** `artifact_sha` is set only when the tree was a clean commit
+  before the run (no tracked or untracked change) and still has the same
+  HEAD with no tracked change afterwards. Untracked files a check writes,
+  such as caches, do not unbind it. Otherwise the result is recorded
+  unbound (`artifact_not_bound`), and the outcome itself is still real.
+* **Never written into a receipt.** Receipts are content-hashed, and a hook
+  session's line is rewritten on every fold, so the re-run lives in the
+  sidecar and names the receipt (`receipt_id`, else `run_id`).
+  `openshard last` shows `Re-verified: 1/1 passed @ <sha> (OpenShard re-run)`
+  and `last --json` carries `post_session_verification`. The receipt's own
+  session evidence is left as it was.
+* **Observed commands** are re-run only on request, only when the stored
+  summary is complete (not redacted, not at the 100-character cap where it
+  may be truncated), and only when classified safe. Shell chaining is
+  blocked.
+* **Read-only checkers** a contract names are treated as safe, but never
+  with a writing flag: `ruff check`, `ruff format --check`, `mypy`,
+  `flake8`, `pylint`, `black --check`, `tsc --noEmit`, `go vet`.
+* **Evidence, not policy.** `verify` exits 0 whatever the outcome and gates
+  nothing. Output streams to the terminal (discarded under `--json`) and is
+  never stored.
 
 ## Codex integration
 
@@ -362,8 +454,9 @@ never invented evidence.
 
 ## Google Antigravity integration
 
-Sources: Google's hooks reference (`antigravity.google/docs/hooks`, and
-`/docs/ide/hooks` for the IDE). Field shapes are cross-checked against
+Sources: Google's hooks reference, one page for Antigravity 2.0, the CLI and
+the IDE (`antigravity.google/docs/hooks`; `/docs/ide/hooks` now redirects
+to `?tab=ide`), re-audited for Verification v2. Field shapes are cross-checked against
 open-source integrations that parse live payloads, because the reference is
 terse per event; see the field audit in `adapters/antigravity_hooks.py`.
 
@@ -400,8 +493,9 @@ terse per event; see the field audit in `adapters/antigravity_hooks.py`.
   | Antigravity event | Openshard event | Recorded |
   |---|---|---|
   | `PreInvocation` (before every model call) | `ModelInvocation` | the first one creates the Shard; each is counted (`capture.invocation_count`); the model is observed, and a `session.activity` "model invoked: <model>" Event is staged whenever it differs from the previous call's |
-  | `PostToolUse`, empty `error` | `PostToolUse` | `run_command` -> command (`CommandLine`, scrubbed, `command_kind` test/lint/other, status unknown); `write_to_file` / `replace_file_content` / `multi_replace_file_content` / `client_*_file` -> file write, `passed` and hook-reported (Antigravity's success signal); `view_file` / `view_file_outline` / `view_code_item` / `list_dir` / `client_view_file` -> **read** (repo-relative path, `metadata.access = read`, never a change); anything else (search, browser, MCP) by name only |
-  | `PostToolUse`, non-empty `error` | `PostToolUseFailure` | the same tool record, `failed` |
+  | `PostToolUse`, empty `error` | `PostToolUse` | `run_command` -> command (`CommandLine`, scrubbed, `command_kind` test/lint/other, status unknown: an empty `error` is not a command pass, because the command may still be running in the background); `write_to_file` / `replace_file_content` / `multi_replace_file_content` / `client_*_file` -> file write, `passed` and hook-reported (Antigravity's success signal); `view_file` / `view_file_outline` / `view_code_item` / `list_dir` / `client_view_file` -> **read** (repo-relative path, `metadata.access = read`, never a change); anything else (search, browser, MCP) by name only |
+  | `PostToolUse`, non-empty `error` | `PostToolUseFailure` | the same tool record, `failed`; a check command -> `verification.status = failed`, `agent_reported` (the `error` text is never parsed or stored) |
+  | `PostToolUse` with no `toolCall.name` | *(ignored)* | not a tool step (pre-1.1.9 CLI builds fired it for user input / model responses) |
   | `Stop`, no error and not `fullyIdle: false` | `Stop` | completed turn; fold |
   | `Stop`, error or `fullyIdle: false` | `SessionIdle` | snapshot, never a completed turn |
 
@@ -490,7 +584,7 @@ never subscribes it and never returns a directive (every reply is `{}`).
   | `on_session_start` | `SessionStart` | session identity, `model` (new sessions only) |
   | `pre_llm_call` | `UserPromptSubmit` | the turn's `user_message` (scrubbed excerpt becomes the task; text parts only for a multimodal message), `model`. Replies `{}`: no context is injected. The full `conversation_history` is never read |
   | `post_tool_call`, `status: ok` | `PostToolUse` | tool name and arguments as below, `duration_ms`, `tool_call_id`, `turn_id`, `tool_status`; a file tool becomes `passed` and hook-reported (Hermes' success signal) |
-  | `post_tool_call`, `status: error` or `blocked` | `PostToolUseFailure` | the same record, `failed` (`blocked` = a policy hook stopped it; it never ran). A failed check command is `agent_reported` failed verification |
+  | `post_tool_call`, `status: error`, `blocked` or `cancelled` | `PostToolUseFailure` | the same record, `failed` (`blocked` = a policy hook stopped it; it never ran). A check command with `error` is `agent_reported` failed verification; with `blocked` / `cancelled` it has no result and stays `unknown` |
   | `post_api_request` | usage observation | per-request `usage` (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`) keyed by request id, plus the `model` and `provider` Hermes called |
   | `on_session_end` (fires **every turn**) | `Stop` (`completed`), `Interrupt` (`interrupted`), else `SessionIdle` | a completed / interrupted turn, or a neutral boundary that is never a completed turn |
   | `on_session_finalize` | `SessionEnd` | the real teardown, with Hermes' `reason` |
@@ -519,10 +613,11 @@ never subscribes it and never returns a directive (every reply is `{}`).
     when the session was first seen, exactly as for the other agents); a
     hook-reported file path is used only as the no-git fallback, and only for a
     tool Hermes reported `ok`.
-  * *Independently verified*: never. OpenShard does not run or read the outcome
-    of Hermes' checks: an observed check stays `unknown` with
-    `outcome_not_observed`, and a check Hermes reported as failed is
-    `agent_reported` failed. `verification_passed` stays `None`.
+  * *Independently verified*: never. OpenShard does not read the outcome
+    of Hermes' checks beyond `status`: an observed check stays `unknown` with
+    `outcome_not_observed` (`ok` is "completed normally", not documented as
+    exit 0), and a check Hermes reported as failed is `agent_reported` failed.
+    `verification_passed` stays `None`. `openshard verify` can re-run it.
   * *Unknown stays unknown*: absent `status`, `usage`, provider, session id or
     `child_status` records nothing; an approval whose payload has no session id is
     dropped rather than attributed; a `timeout` / `cancelled` / `notify_failed`
@@ -595,8 +690,9 @@ Shard.
   delivered on `UserPromptSubmit`), `source` (`SessionStart`: `new`), `reason`
   (`SessionEnd`: `shutdown`; `Stop`: `end_turn`), `toolName`, and from
   `toolInput` only `command`, `file_path` (edit), `target_file` (read) or
-  `target_directory` (`list_dir`). **Never read**: `toolResult` (so a
-  command's `exit_code` is ignored -- outcomes stay unknown), `old_string` /
+  `target_directory` (`list_dir`); on `run_terminal_command` only the integer
+  `toolResult.exit_code` (Verification v2; `agent_reported`). **Never read**:
+  the rest of `toolResult` (the command output), `old_string` /
   `new_string`, `lastAssistantMessage`, `transcriptPath`, Grok's session files
   under `~/.grok`. **Not in any payload**: the model, provider, token counts,
   cost, and who or what denied a permission.
@@ -646,7 +742,7 @@ Shard.
   |---|---|---|
   | `SessionStart` | `SessionStart` | anchors the change-attribution baseline; opens the session |
   | `UserPromptSubmit` | `UserPromptSubmit` | first one creates the Shard; the scrubbed, bounded task excerpt from `prompt` |
-  | `PostToolUse` | `PostToolUse` | `run_terminal_command` -> command (scrubbed, `command_kind` test/lint/other, status **unknown**); `search_replace` -> file target, status **unknown**, no hook-reported path; `read_file` / `list_dir` -> **read** (repo-relative, never a change); anything else (search, subagent, MCP) by name only. **Fires for every tool that ran** -- a shell command that exited non-zero and a `read_file` of a missing file both arrive here (observed) -- so it is never a success signal, and git supplies the file evidence |
+  | `PostToolUse` | `PostToolUse` | `run_terminal_command` -> command (scrubbed, `command_kind` test/lint/other; outcome from the one integer `toolResult.exit_code`, `agent_reported`: 0 `passed`, else `failed`; `unknown` when `toolResultTruncated`); `search_replace` -> file target, status **unknown**, no hook-reported path; `read_file` / `list_dir` -> **read** (repo-relative, never a change); anything else (search, subagent, MCP) by name only. **Fires for every tool that ran** -- a shell command that exited non-zero and a `read_file` of a missing file both arrive here (observed) -- so it is never a success signal, and git supplies the file evidence |
   | `PostToolUseFailure` | `PostToolUseFailure` | the same tool record, `failed` (a failed check -> `verification.status = failed`, `agent_reported`). Documented for a tool that failed to dispatch or an MCP error; **not provoked** in the real run |
   | `PermissionDenied` | `PermissionDenied` | an `approval.denied` Event, `agent_reported`, `failed`, naming the **tool only** (`capture.permission_denied_count`); never work, never opens a Shard, never an approval receipt |
   | `Stop`, `reason: end_turn` | `Stop` | completed turn; fold |
@@ -665,9 +761,10 @@ Shard.
   (2) End-of-session hooks are best-effort: Grok gives queued turn-end hooks
   about half a second and `SessionEnd` about 1.5 s at teardown, and a session
   whose `grok` process is killed leaves no `SessionEnd` -- the idle sweep then
-  closes it (`session_end_not_observed`). (3) Grok exposes no exit code we are
-  willing to read, so a `pytest` run is "attempted, outcome not observed" --
-  never passed or failed. (4) Subagent activity is not attributed to the
+  closes it (`session_end_not_observed`). (3) A `pytest` run's outcome is
+  Grok's own `toolResult.exit_code` (Verification v2) -- `agent_reported`,
+  never OpenShard-observed; a truncated result leaves it "attempted, outcome
+  not observed". (4) Subagent activity is not attributed to the
   parent (its own events are dropped); only its `spawn_subagent` call and the
   files git sees are.
 * **Commands**: `openshard setup` (when `grok` is on PATH),
@@ -688,7 +785,7 @@ Shard.
 | Changed files | git plus hook-reported | git plus hook-reported | git plus hook-reported | git only (`git_observed`) |
 | Permission / approval | none | none | `ApprovalRequest` / `ApprovalDecision` with the choice | `PermissionDenied` -> `approval.denied` (tool name only; no grant or request) |
 | Subagents | none | none | counted, linked by child session | own sessions ignored; parent's `spawn_subagent` call recorded |
-| Verification | check command observed; failure from failure event | from `error` | check command observed; failure from `status` | check command observed, outcome unknown (`exit_code` deliberately unread) |
+| Verification (v2, all `agent_reported`) | foreground `PostToolUse` = passed; `Exit code N` = failed | failure from non-empty `error`; success unknown | failure from `status: error` | `toolResult.exit_code` |
 | Turn completion | `Stop` | `Stop` (not when errored / not idle) | `on_session_end` `completed` | `Stop` with `reason: end_turn` (not `StopFailure` / `StopCancelled`) |
 | Session end | `SessionEnd` | none (idle sweep) | `on_session_finalize` | `SessionEnd` (best-effort at teardown) |
 | Transport / scope | HTTP hooks, per repository | command hook, per repository | command hook, user-global, per-repository opt-in | command hook, per repository (folder trust) |

@@ -23,6 +23,7 @@ from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
 from openshard.history.verification import (
     REASON_OUTCOME_NOT_OBSERVED,
+    SOURCE_AGENT_REPORTED,
     STATUS_FAILED,
     STATUS_NOT_RUN,
     STATUS_PARTIAL,
@@ -623,7 +624,11 @@ _WEAK_VERIFICATION_STATUSES: frozenset[str] = frozenset(
 
 
 def _verification_display(ev: VerificationEvidence) -> tuple[str, str]:
-    """(checks_display, status) for structured evidence, in the receipt's existing vocabulary."""
+    """(checks_display, status) for structured evidence, in the receipt's existing vocabulary.
+
+    The string is part of the synced receipt projection, so it stays
+    source-free; renderers add the source label (``checks_label``).
+    """
     attempted = ev.checks_attempted
     if ev.status == STATUS_PASSED:
         return (f"{ev.checks_passed}/{attempted} passed" if attempted else "Passed"), "Passed"
@@ -636,6 +641,17 @@ def _verification_display(ev: VerificationEvidence) -> tuple[str, str]:
     if attempted or ev.checks or REASON_OUTCOME_NOT_OBSERVED in ev.incomplete_reasons:
         return "Attempted (unverified)", "Checks attempted, result not verified"
     return "Not recorded", "Not recorded"
+
+
+def checks_label(receipt: ShardReceipt) -> str:
+    """``checks_display`` for rendering, with ``(agent-reported)`` when the agent -- not
+    OpenShard -- supplied the outcome, so a reported pass never reads like an observed one."""
+    block = receipt.verification if isinstance(receipt.verification, dict) else {}
+    if block.get("source") == SOURCE_AGENT_REPORTED and block.get("status") in (
+        STATUS_PASSED, STATUS_FAILED, STATUS_PARTIAL,
+    ):
+        return f"{receipt.checks_display} (agent-reported)"
+    return receipt.checks_display
 
 
 def _make_shard_id(timestamp: str, index: int | None) -> str:
@@ -1558,7 +1574,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         for tool, count in _activity:
             lines.append(f"{_INDENT}  {tool} × {count}")
     lines += [
-        _row("Checks", receipt.checks_display),
+        _row("Checks", checks_label(receipt)),
         _row("Integrity", receipt.integrity),
         _row("Risk", receipt.risk),
         _row("Sandbox", receipt.sandbox),
@@ -1847,7 +1863,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         if not _has_risk_ev and receipt.risk and receipt.risk not in ("Not recorded", "-", ""):
             lines.append(f"{_INDENT}  {_chk} risk classified: {receipt.risk}")
         if not _has_checks_ev and receipt.checks_display and receipt.checks_display != "Not run":
-            lines.append(f"{_INDENT}  {_chk} checks: {receipt.checks_display}")
+            lines.append(f"{_INDENT}  {_chk} checks: {checks_label(receipt)}")
         # receipt_saved always last
         if _receipt_ev:
             _sym = _chk if _receipt_ev.get("status", "completed") != "failed" else _fail
@@ -1990,7 +2006,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
             _cr = cr if detail == "full" else _truncate_compact(cr, 90)
             lines.append(f"{_INDENT}  {_cr}")
     else:
-        lines.append(f"{_INDENT}{receipt.checks_display}")
+        lines.append(f"{_INDENT}{checks_label(receipt)}")
     lines.append("")
 
     lines.append(f"{_INDENT}POLICY")

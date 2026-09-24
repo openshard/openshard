@@ -108,6 +108,11 @@ REASON_INCONSISTENT = "status_inconsistent_with_counts"
 REASON_OUTCOME_NOT_OBSERVED = "outcome_not_observed"
 REASON_CAPTURE_LOSS = "capture_events_lost"
 REASON_CHECKS_TRUNCATED = "checks_truncated"
+# Verification v2 (``openshard verify``): the working tree was not a clean
+# commit, so the result is not bound to an artifact SHA; a check was not run
+# to completion (timed out / could not start), so it has no exit code.
+REASON_ARTIFACT_NOT_BOUND = "artifact_not_bound"
+REASON_CHECK_NOT_COMPLETED = "check_not_completed"
 
 MAX_CHECKS = 20
 MAX_NAME = 120
@@ -613,16 +618,21 @@ def _hook_check_events(entry: dict) -> list[dict]:
     return out
 
 
-def hook_verification_source(status: str) -> str:
+def hook_verification_source(status: str, *, outcome_reported: bool = False) -> str:
     """The evidence source of a hook-observed verification block with *status*.
 
     OpenShard receives the agent's hook events itself, so an observed check
     invocation -- and the absence of one -- is ``directly_observed``, with
-    status ``unknown`` while its outcome was not seen. A ``failed`` outcome
-    rests on the agent's own "tool failed" signal, which OpenShard did not
-    independently observe (no exit code), so that is ``agent_reported``.
+    status ``unknown`` while its outcome was not seen. Any *outcome* a hook
+    carries -- the agent's "tool failed" signal, or (verification v2) an exit
+    code or error field the agent reports for the command -- is the agent's
+    account of a command OpenShard did not run, so it is ``agent_reported``
+    however precise it is. Only ``openshard verify`` (OpenShard runs the
+    check and reads its exit code) yields a ``directly_observed`` outcome.
     """
-    return SOURCE_AGENT_REPORTED if status == STATUS_FAILED else SOURCE_DIRECTLY_OBSERVED
+    if outcome_reported or status in (STATUS_FAILED, STATUS_PASSED, STATUS_PARTIAL):
+        return SOURCE_AGENT_REPORTED
+    return SOURCE_DIRECTLY_OBSERVED
 
 
 def _from_hook_record(entry: dict, capture: dict, attempted: bool) -> VerificationEvidence:
