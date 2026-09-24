@@ -7121,9 +7121,8 @@ def roster_list() -> None:
     if roster_models:
         click.echo("")
         for mid in roster_models:
-            lc = lifecycle_for(mid) or (
-                catalog.get(mid).lifecycle if is_known_model(mid) else None
-            )
+            entry = catalog.get(mid)
+            lc = lifecycle_for(mid) or (entry.lifecycle if entry is not None else None)
             status = f"[{lc}]" if lc else "[unknown]"
             click.echo(f"  {mid:<55} {status}")
     else:
