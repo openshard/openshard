@@ -561,7 +561,10 @@ class TestVerifyCommand:
         (repo / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
         (repo / "test_bad.py").write_text("def test_bad():\n    assert False\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-q", "-m", "tests"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "tests"],
+            cwd=repo, check=True, capture_output=True,
+        )
         return repo
 
     def _config(self, repo: Path, *commands: list[str]) -> None:
