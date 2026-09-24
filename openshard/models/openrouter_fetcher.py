@@ -10,11 +10,26 @@ from pathlib import Path
 
 from openshard.util.home import openshard_home
 
-OPENROUTER_MODELS_URL = "https://api.openrouter.ai/api/v1/models"
-# Resolved once at import (``OPENSHARD_HOME`` honoured); tests repoint it.
-_DEFAULT_CACHE_PATH = Path(openshard_home()) / "openrouter-models.json"
+# ``openrouter.ai`` serves the public model list; ``api.openrouter.ai`` does
+# not resolve, so every sync against it failed with a network error.
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+_CACHE_FILENAME = "openrouter-models.json"
+# Resolved once at import for display and back-compat; tests repoint it.
+_DEFAULT_CACHE_PATH = Path(openshard_home()) / _CACHE_FILENAME
+_IMPORT_TIME_CACHE_PATH = _DEFAULT_CACHE_PATH
 SCHEMA_VERSION = "1"
 _FETCH_TIMEOUT = 15
+
+
+def default_cache_path() -> Path:
+    """Return the cache path, honouring a repointed ``_DEFAULT_CACHE_PATH``.
+
+    When the module constant is untouched, ``OPENSHARD_HOME`` is re-read on
+    every call so a home override set after import still takes effect.
+    """
+    if _DEFAULT_CACHE_PATH != _IMPORT_TIME_CACHE_PATH:
+        return _DEFAULT_CACHE_PATH
+    return Path(openshard_home()) / _CACHE_FILENAME
 
 
 class OpenRouterFetchError(Exception):
@@ -109,7 +124,7 @@ def load_openrouter_cache(path: Path | None = None) -> dict | None:
     Returns None if the file does not exist.
     Raises OpenRouterCacheError if the file exists but contains invalid JSON.
     """
-    cache_path = path if path is not None else _DEFAULT_CACHE_PATH
+    cache_path = path if path is not None else default_cache_path()
     if not cache_path.exists():
         return None
     try:
@@ -120,12 +135,15 @@ def load_openrouter_cache(path: Path | None = None) -> dict | None:
         ) from exc
 
 
-def save_openrouter_cache(models: list[dict], path: Path | None = None) -> None:
+def save_openrouter_cache(
+    models: list[dict], path: Path | None = None, *, synced_at: str | None = None
+) -> None:
     """Write normalized models to the cache file atomically."""
-    cache_path = path if path is not None else _DEFAULT_CACHE_PATH
+    cache_path = path if path is not None else default_cache_path()
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-    synced_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if synced_at is None:
+        synced_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     payload = {
         "schema_version": SCHEMA_VERSION,
         "synced_at": synced_at,

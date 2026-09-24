@@ -5,6 +5,13 @@ live lookups against the model registry. Falls back to the original
 hardcoded IDs when no eligible registry candidate is found, so the
 system degrades gracefully if the registry is empty or malformed.
 
+Roles cheap/main/escalate/visual are backed by routing classes
+(``openshard.routing.routing_classes``): the class declares the capability
+requirement, and the model is selected from the curated catalog. strong and
+complex keep their legacy role queries. Import-time resolution uses the
+curated-only catalog (no disk or network), so it is identical online and
+offline; discovery-only models never become defaults here.
+
 Module-level constants (MODEL_CHEAP, MODEL_MAIN, …) are evaluated once
 at import time and cached. The registry is static at startup, so the
 values are stable for the lifetime of the process.
@@ -20,10 +27,12 @@ Usage in engine.py and anywhere else that needs routing model IDs::
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
 
 from openshard.routing.provider_availability import RoutablePool
+from openshard.routing.routing_classes import ROLE_TO_CLASS, ROUTING_CLASSES
 
 # ---------------------------------------------------------------------------
 # Hardcoded fallbacks — exact IDs that were previously in engine.py.
@@ -50,37 +59,31 @@ _FALLBACKS: dict[str, str] = {
 #   roles_hint   — preferred role names used for tie-breaking (not hard filter)
 # ---------------------------------------------------------------------------
 
+def _class_query(class_name: str) -> dict:
+    cls = ROUTING_CLASSES[class_name]
+    lifecycles = sorted(cls.lifecycles)
+    return {
+        "lifecycle":     lifecycles[0],
+        "cost_classes":  set(cls.cost_classes),
+        "tiers":         set(cls.tiers),
+        "roles_hint":    cls.roles_hint,
+        "required_tags": frozenset(cls.required_tags),
+        "preferred_tags": frozenset(cls.preferred_tags),
+        "routing_class": class_name,
+    }
+
+
 _ROLE_QUERY: dict[str, dict] = {
-    "cheap": {
-        "lifecycle":    "active_default",
-        "cost_classes": {"cheap", "tiny", "free"},
-        "tiers":        {"cheap", "tiny"},
-        "roles_hint":   ("cheap_control", "boilerplate"),
-    },
-    "main": {
-        "lifecycle":    "active_default",
-        "cost_classes": {"cheap", "mid"},
-        "tiers":        {"mid", "value_worker"},
-        "roles_hint":   ("routine_engineering", "standard_coding"),
-    },
+    "cheap":    _class_query(ROLE_TO_CLASS["cheap"]),
+    "main":     _class_query(ROLE_TO_CLASS["main"]),
     "strong": {
         "lifecycle":    "active_default",
         "cost_classes": set(),          # no cost ceiling for strong
         "tiers":        {"strong"},
         "roles_hint":   ("planner", "reviewer"),
     },
-    "escalate": {
-        "lifecycle":    "active_specialist",  # escalation lives here by design
-        "cost_classes": set(),
-        "tiers":        {"frontier"},
-        "roles_hint":   ("escalation",),
-    },
-    "visual": {
-        "lifecycle":    "active_specialist",  # visual specialist
-        "cost_classes": set(),
-        "tiers":        set(),
-        "roles_hint":   ("visual", "multimodal"),
-    },
+    "escalate": _class_query(ROLE_TO_CLASS["escalate"]),
+    "visual":   _class_query(ROLE_TO_CLASS["visual"]),
     "complex": {
         "lifecycle":    "active_specialist",  # complex/long-horizon specialist
         "cost_classes": set(),
@@ -88,6 +91,12 @@ _ROLE_QUERY: dict[str, dict] = {
         "roles_hint":   ("complex", "long_context"),
     },
 }
+
+
+def _entry_tags(entry) -> frozenset[str]:
+    from openshard.models.catalog import capability_tags_for_model_entry
+
+    return frozenset(capability_tags_for_model_entry(entry))
 
 
 @cache
@@ -105,6 +114,25 @@ def resolve_routing_model(role: str) -> str:
     """
     if role not in _ROLE_QUERY:
         return _FALLBACKS.get(role, _FALLBACKS["main"])
+
+    class_name = ROLE_TO_CLASS.get(role)
+    if class_name is not None:
+        try:
+            from openshard.models.catalog import build_catalog
+            from openshard.models.registry import models_by_lifecycle as _by_lifecycle
+            from openshard.routing.routing_classes import select_for_class
+
+            # Curated entries only, fetched per class lifecycle so the registry
+            # seam (models_by_lifecycle) stays the single source.
+            curated = [
+                m
+                for lc in sorted(ROUTING_CLASSES[class_name].lifecycles)
+                for m in _by_lifecycle(lc)
+            ]
+            selected = select_for_class(class_name, build_catalog(curated)).model
+        except Exception:
+            selected = None
+        return selected or _FALLBACKS[role]
 
     try:
         from openshard.models.registry import models_by_lifecycle as _by_lifecycle
@@ -198,7 +226,7 @@ class ProviderAwareResolution:
 
     model: str | None
     role: str
-    source: str              # "routable_pool" | "no_eligible_model"
+    source: str              # "routable_pool" | "class_pin" | "no_eligible_model"
     enforcement_applied: bool
     rejected_model: str | None   # unconstrained choice, when it differs from model
     selected_model: str | None   # alias for model; explicit in metadata
@@ -208,6 +236,8 @@ class ProviderAwareResolution:
 def resolve_routing_model_for_context(
     role: str,
     pool: RoutablePool,
+    *,
+    class_pins: Mapping[str, str] | None = None,
 ) -> ProviderAwareResolution:
     """Context-aware resolver: select from pool-eligible entries only.
 
@@ -222,6 +252,10 @@ def resolve_routing_model_for_context(
        entries (specialist roles whose lifecycle is absent from the pool).
     3. If pool is completely empty: return ``model=None`` with
        ``source="no_eligible_model"``.
+
+    A routing-class pin (``class_pins``, canonical ids from
+    ``models.routing_classes`` config) for the role's class wins over steps
+    1-2 when the pinned model is in the routable pool; ``source="class_pin"``.
 
     Never raises.
     """
@@ -251,6 +285,10 @@ def resolve_routing_model_for_context(
             routable_pool_size=0,
         )
 
+    pinned = (class_pins or {}).get(ROLE_TO_CLASS.get(role, ""))
+    if pinned and any(m.id == pinned for m in pool.routable):
+        return _make(pinned, "class_pin")
+
     spec = _ROLE_QUERY.get(role)
     if spec is None:
         # Unknown role: pick any routable model alphabetically.
@@ -265,9 +303,13 @@ def resolve_routing_model_for_context(
     def _hint_score(m) -> int:
         return sum(1 for h in roles_hint if h in m.roles)
 
+    required_tags: frozenset = spec.get("required_tags", frozenset())
+
     def _apply_filters(entries):
         result = []
         for m in entries:
+            if required_tags and not required_tags <= _entry_tags(m):
+                continue
             if cost_classes and m.cost_class not in cost_classes:
                 continue
             if tiers and m.tier not in tiers:
@@ -281,7 +323,10 @@ def resolve_routing_model_for_context(
 
     # Step 2a: relax cost/tier for active_default roles.
     if not filtered and lifecycle == "active_default":
-        filtered = lc_candidates
+        filtered = [
+            m for m in lc_candidates
+            if not required_tags or required_tags <= _entry_tags(m)
+        ] or lc_candidates
 
     # Step 2b: specialist roles (visual, complex, escalate) have lifecycle
     # active_specialist, which is excluded from the default-routable pool.
@@ -303,6 +348,9 @@ def resolve_routing_model_for_context(
     if not filtered:
         filtered = list(pool.routable)
 
-    filtered.sort(key=lambda m: (-_hint_score(m), m.id))
+    preferred_tags: frozenset = spec.get("preferred_tags", frozenset())
+    filtered.sort(
+        key=lambda m: (-_hint_score(m), -len(preferred_tags & _entry_tags(m)), m.id)
+    )
     chosen = filtered[0].id
     return _make(chosen, "routable_pool")

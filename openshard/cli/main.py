@@ -953,7 +953,16 @@ def models_show(model_id: str):
 
     entry = get_model(model_id)
     if entry is None:
-        raise click.ClickException(f"Model not found: {model_id}")
+        from openshard.models.catalog import load_catalog
+
+        cat_entry = load_catalog(refresh="never").get(model_id)
+        if cat_entry is None:
+            raise click.ClickException(
+                f"Model not found: {model_id}. "
+                "Run 'openshard models sync-openrouter' to discover newly released models."
+            )
+        _print_catalog_entry(cat_entry)
+        return
     w = 12
     roles_str = ", ".join(entry.roles) if entry.roles else "-"
     ctx_str = str(entry.context_length) if entry.context_length is not None else "-"
@@ -1131,8 +1140,8 @@ def models_mode(mode: str) -> None:
 def models_sync_openrouter() -> None:
     """Fetch and cache OpenRouter model metadata locally."""
     from openshard.models.openrouter_fetcher import (
-        _DEFAULT_CACHE_PATH,
         OpenRouterFetchError,
+        default_cache_path,
         fetch_openrouter_models,
         normalize_model,
         save_openrouter_cache,
@@ -1156,7 +1165,7 @@ def models_sync_openrouter() -> None:
     synced_at = cache.get("synced_at", "") if cache else ""
 
     click.echo(f"Synced {synced_count} models")
-    click.echo(f"  Cache:     {_DEFAULT_CACHE_PATH}")
+    click.echo(f"  Cache:     {default_cache_path()}")
     click.echo(f"  Synced at: {synced_at}")
     if example_ids:
         click.echo("  Example IDs:")
@@ -1168,8 +1177,8 @@ def models_sync_openrouter() -> None:
 def models_openrouter_cache() -> None:
     """Inspect the local OpenRouter model metadata cache."""
     from openshard.models.openrouter_fetcher import (
-        _DEFAULT_CACHE_PATH,
         OpenRouterCacheError,
+        default_cache_path,
         load_openrouter_cache,
     )
 
@@ -1189,7 +1198,7 @@ def models_openrouter_cache() -> None:
 
     click.echo("OpenRouter model cache")
     click.echo("  Status:    present")
-    click.echo(f"  Cache:     {_DEFAULT_CACHE_PATH}")
+    click.echo(f"  Cache:     {default_cache_path()}")
     click.echo(f"  Synced at: {synced_at}")
     click.echo(f"  Models:    {model_count}")
     if top_ids:
@@ -6925,6 +6934,147 @@ def config_show(as_json: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+def _print_catalog_entry(e) -> None:
+    """Detail view for a catalog entry (used for discovery-only models)."""
+    w = 14
+
+    def _flag(v):
+        return "unknown" if v is None else ("yes" if v else "no")
+
+    p = e.pricing
+    if p.input_per_mtok is not None or p.output_per_mtok is not None:
+        price = f"${p.input_per_mtok} in / ${p.output_per_mtok} out per Mtok ({p.source}"
+        price += f", {p.as_of})" if p.as_of else ")"
+    else:
+        price = "unknown"
+    click.echo(f"  {'Model':<{w}}  {e.display_name}")
+    click.echo(f"  {'ID':<{w}}  {e.id}")
+    click.echo(f"  {'Provider':<{w}}  {e.provider}")
+    click.echo(f"  {'Family':<{w}}  {e.family}")
+    click.echo(f"  {'Aliases':<{w}}  {', '.join(e.aliases) or '-'}")
+    click.echo(f"  {'Status':<{w}}  {e.status}")
+    click.echo(f"  {'Released':<{w}}  {e.release_date or '-'}")
+    click.echo(f"  {'Context':<{w}}  {e.context_length or '-'}")
+    click.echo(f"  {'Modalities':<{w}}  {'+'.join(e.input_modalities)} -> {'+'.join(e.output_modalities)}")
+    click.echo(f"  {'Tools':<{w}}  {_flag(e.supports_tools)}")
+    click.echo(f"  {'Reasoning':<{w}}  {_flag(e.supports_reasoning)}")
+    click.echo(f"  {'Pricing':<{w}}  {price}")
+    click.echo(f"  {'Tags':<{w}}  {', '.join(e.capability_tags) or '-'}")
+    click.echo(f"  {'Source':<{w}}  {e.discovery_source}")
+    click.echo(f"  {'Lifecycle':<{w}}  {e.lifecycle}")
+    click.echo(f"  {'Routing':<{w}}  {e.routing_eligibility}")
+    if not e.curated:
+        click.echo(
+            "\n  Discovered, not evaluated by OpenShard: never routed by default. "
+            "Select it explicitly (openshard roster add, or models.routing_classes)."
+        )
+
+
+def _catalog_refresh_mode(refresh: bool, offline: bool) -> str:
+    if refresh and offline:
+        raise click.UsageError("--refresh and --offline are mutually exclusive.")
+    return "force" if refresh else ("never" if offline else "auto")
+
+
+def _print_catalog_status(catalog) -> None:
+    snap = catalog.snapshot
+    stale = " (stale)" if snap.stale else ""
+    click.echo(f"Catalog source : {snap.origin}{stale}")
+    click.echo(f"Synced at      : {snap.synced_at or '-'}")
+    click.echo(f"Fingerprint    : {snap.fingerprint}")
+    if snap.error:
+        click.echo(f"Refresh failed : {snap.error} (using {snap.origin})")
+
+
+@models.command("catalog")
+@click.option("--refresh", is_flag=True, default=False, help="Force a refresh from OpenRouter.")
+@click.option("--offline", is_flag=True, default=False, help="Never touch the network.")
+@click.option("--discovered", is_flag=True, default=False, help="Only models OpenShard has not curated.")
+@click.option("--family", default=None, help="Only models in this family (e.g. deepseek-flash).")
+@click.option("--limit", default=40, show_default=True, type=click.IntRange(min=1))
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit JSON.")
+def models_catalog(refresh: bool, offline: bool, discovered: bool, family: str | None, limit: int, as_json: bool) -> None:
+    """Show the model catalog: curated models plus provider-discovered ones.
+
+    Refreshes from OpenRouter when the local cache is missing or older than
+    24h (unless --offline); a failed refresh falls back to the cached copy.
+    Discovered models are recognised and selectable but never routed by
+    default.
+    """
+    from openshard.models.catalog import catalog_entry_to_dict, load_catalog
+
+    catalog = load_catalog(refresh=_catalog_refresh_mode(refresh, offline))
+    entries = list(catalog.entries)
+    if discovered:
+        entries = [e for e in entries if not e.curated]
+    if family:
+        entries = [e for e in entries if e.family == family.lower()]
+    # Newest first; undated (curated-only) last; id breaks ties.
+    entries.sort(key=lambda e: (e.release_date or "", e.id), reverse=True)
+
+    if as_json:
+        snap = catalog.snapshot
+        click.echo(json.dumps({
+            "snapshot": {
+                "origin": snap.origin, "synced_at": snap.synced_at,
+                "stale": snap.stale, "error": snap.error,
+                "fingerprint": snap.fingerprint,
+                "discovered_count": snap.discovered_count,
+            },
+            "models": [catalog_entry_to_dict(e) for e in entries[:limit]],
+        }, indent=2))
+        return
+
+    _print_catalog_status(catalog)
+    curated_n = sum(1 for e in catalog.entries if e.curated)
+    click.echo(f"Models         : {len(catalog.entries)} ({curated_n} curated, {len(catalog.entries) - curated_n} discovered)")
+    click.echo("")
+    click.echo(f"  {'ID':<46}  {'Released':<10}  {'Status':<14}  {'Routing':<12}  Out $/Mtok")
+    for e in entries[:limit]:
+        out = e.pricing.output_per_mtok
+        out_s = "-" if out is None else f"{out:g}"
+        mid = e.id if len(e.id) <= 46 else e.id[:45] + "..."
+        click.echo(
+            f"  {mid:<46}  {e.release_date or '-':<10}  {e.status:<14}  "
+            f"{e.routing_eligibility:<12}  {out_s}"
+        )
+    if len(entries) > limit:
+        click.echo(f"  ... {len(entries) - limit} more (use --limit)")
+
+
+@models.command("classes")
+@click.option("--refresh", is_flag=True, default=False, help="Force a refresh from OpenRouter.")
+@click.option("--offline", is_flag=True, default=False, help="Never touch the network.")
+def models_classes(refresh: bool, offline: bool) -> None:
+    """Show routing classes, their current model, and promotion candidates.
+
+    Promotion candidates are newer same-family models that meet the class but
+    are not promoted; they are never selected until curated or pinned.
+    """
+    from openshard.models.catalog import load_catalog
+    from openshard.routing.model_policy import model_policy_from_config
+    from openshard.routing.routing_classes import ROUTING_CLASSES, select_all_classes
+
+    catalog = load_catalog(refresh=_catalog_refresh_mode(refresh, offline))
+    pins: dict[str, str] = {}
+    config, valid, _ = load_config_safe()
+    if valid:
+        try:
+            pins = model_policy_from_config(config).class_pin_map
+        except ValueError as exc:
+            click.echo(f"[WARN] models config ignored: {exc}")
+
+    _print_catalog_status(catalog)
+    for name, sel in select_all_classes(catalog, pins=pins).items():
+        click.echo("")
+        click.echo(f"{name}  -  {ROUTING_CLASSES[name].description}")
+        click.echo(f"  Selected   : {sel.model or '(none)'}  [{sel.source}]")
+        if sel.rejected_pin:
+            click.echo(f"  Pin ignored: {sel.rejected_pin} ({sel.rejected_pin_reason})")
+        if sel.promotion_candidates:
+            click.echo(f"  Candidates : {', '.join(sel.promotion_candidates)}  (not promoted; evaluate, then curate or pin)")
+
+
 # roster command group
 # ---------------------------------------------------------------------------
 
@@ -6945,12 +7095,15 @@ def _roster_models_section(config: dict) -> dict:
 @roster_cmd.command("list")
 def roster_list() -> None:
     """Show current roster name, models, mode status, and valid/invalid counts."""
-    from openshard.models.registry import is_known_model, lifecycle_for
+    from openshard.models.catalog import load_catalog
+    from openshard.models.registry import lifecycle_for
 
     config, valid, _ = load_config_safe()
     if not valid:
         raise click.ClickException("Config file is malformed — fix or delete it first.")
 
+    catalog = load_catalog(refresh="never")
+    is_known_model = catalog.is_recognised
     models_cfg = config.get("models", {})
     mode = models_cfg.get("mode", "auto")
     roster_cfg = models_cfg.get("custom_roster", {})
@@ -6963,12 +7116,14 @@ def roster_list() -> None:
 
     click.echo(f"Roster name : {roster_name}")
     click.echo(f"Mode        : {mode}{'  (active)' if active else ''}")
-    click.echo(f"Models      : {len(roster_models)}  ({len(valid_ids)} known to registry, {len(invalid_ids)} unknown)")
+    click.echo(f"Models      : {len(roster_models)}  ({len(valid_ids)} known to catalog, {len(invalid_ids)} unknown)")
 
     if roster_models:
         click.echo("")
         for mid in roster_models:
-            lc = lifecycle_for(mid) if is_known_model(mid) else None
+            lc = lifecycle_for(mid) or (
+                catalog.get(mid).lifecycle if is_known_model(mid) else None
+            )
             status = f"[{lc}]" if lc else "[unknown]"
             click.echo(f"  {mid:<55} {status}")
     else:
@@ -6995,12 +7150,24 @@ def roster_show() -> None:
 def roster_add(model_id: str) -> None:
     """Add MODEL_ID to the custom roster after validating it against the registry."""
     from openshard.config.settings import config_search_path
-    from openshard.models.registry import is_known_model
+    from openshard.models.catalog import load_catalog
 
-    if not is_known_model(model_id):
+    entry = load_catalog(refresh="never").get(model_id)
+    if entry is None:
         raise click.ClickException(
-            f"Unknown model ID: {model_id!r}. Run 'openshard models list' to see available models."
+            f"Unknown model ID: {model_id!r}. Run 'openshard models list' to see curated models, "
+            "or 'openshard models sync-openrouter' to discover newly released ones."
         )
+    if entry.id != model_id:
+        click.echo(f"Resolved alias {model_id} -> {entry.id}")
+        model_id = entry.id
+    if not entry.curated:
+        click.echo(
+            f"Note: {model_id} is discovered but not evaluated by OpenShard. "
+            "It is used only because you selected it explicitly."
+        )
+    if entry.status == "deprecated":
+        click.echo(f"Warning: {model_id} is deprecated by its provider.")
 
     config, valid, path = load_config_safe()
     if not valid:
@@ -7073,12 +7240,13 @@ def roster_validate() -> None:
     Exits with code 1 if any IDs are not known to the registry.
     Does not call external APIs — validation is registry-only.
     """
-    from openshard.models.registry import is_known_model, lifecycle_for
+    from openshard.models.catalog import load_catalog
 
     config, valid, _ = load_config_safe()
     if not valid:
         raise click.ClickException("Config file is malformed — fix or delete it first.")
 
+    catalog = load_catalog(refresh="never")
     roster_cfg = config.get("models", {}).get("custom_roster", {})
     roster_models: list[str] = roster_cfg.get("models") or []
 
@@ -7090,21 +7258,25 @@ def roster_validate() -> None:
     warned: list[tuple[str, str]] = []
 
     for mid in roster_models:
-        if not is_known_model(mid):
+        entry = catalog.get(mid)
+        if entry is None:
             unknown.append(mid)
-        else:
-            lc = lifecycle_for(mid) or "active_default"
-            if lc != "active_default":
-                warned.append((mid, lc))
+        elif entry.status == "deprecated":
+            warned.append((mid, "deprecated"))
+        elif entry.lifecycle != "active_default":
+            warned.append((mid, entry.lifecycle))
 
     for mid, lc in warned:
-        click.echo(f"[WARN] {mid}  lifecycle={lc} — known to registry but not routing-default")
+        if lc == "discovered":
+            click.echo(f"[WARN] {mid}  lifecycle=discovered — not evaluated by OpenShard; explicit selection only")
+        else:
+            click.echo(f"[WARN] {mid}  lifecycle={lc} — known but not routing-default")
 
     for mid in unknown:
-        click.echo(f"[INVALID] {mid}  — not known to registry")
+        click.echo(f"[INVALID] {mid}  — not known to registry or model catalog")
 
     valid_count = len(roster_models) - len(unknown)
-    click.echo(f"\n{valid_count}/{len(roster_models)} model(s) known to registry.")
+    click.echo(f"\n{valid_count}/{len(roster_models)} model(s) known to registry or catalog.")
 
     if unknown:
         raise SystemExit(1)

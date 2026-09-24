@@ -112,6 +112,59 @@ def filter_deprecated(
     return result
 
 
+def filter_unpromoted(
+    entries: list[InventoryEntry],
+    *,
+    allow: frozenset[str] = frozenset(),
+    registry_fn: Callable[[str], str | None] | None = None,
+) -> list[InventoryEntry]:
+    """Drop uncurated models from an inventory that contains curated ones.
+
+    Provider inventories list every model the provider serves, including ones
+    released yesterday. Scored selection must not promote those on its own:
+    the shortlist keeps the highest version per family, so an uncurated
+    ``deepseek-v4.1-flash`` would otherwise silently displace the curated
+    DeepSeek models. A model enters scored routing only once it is curated in
+    the registry, or when the user named it (roster / class pin).
+
+    Curated means a registry id, or (without *registry_fn*) an alias the
+    curated catalog resolves, so direct-provider ids such as
+    ``claude-sonnet-4-6`` count as ``anthropic/claude-sonnet-4.6``.
+    Like ``build_shortlist``, an inventory with no curated (or allowed) entry
+    at all is returned unchanged rather than emptied.
+
+    Args:
+        entries: provider inventory entries
+        allow: explicitly selected ids that pass regardless of curation
+        registry_fn: optional override for ``lifecycle_for`` (injectable for tests)
+    """
+    try:
+        from openshard.models.registry import lifecycle_for as _default_lc_fn
+    except Exception:
+        return list(entries)
+
+    _lc_fn = registry_fn if registry_fn is not None else _default_lc_fn
+    resolve: Callable[[str], str | None] | None = None
+    if registry_fn is None:
+        try:
+            from openshard.models.catalog import curated_catalog
+
+            resolve = curated_catalog().resolve
+        except Exception:
+            resolve = None
+
+    def _curated(mid: str) -> bool:
+        try:
+            if _lc_fn(mid) is not None:
+                return True
+        except Exception:
+            pass
+        return resolve is not None and resolve(mid) is not None
+
+    kept = [e for e in entries if e.model.id in allow or _curated(e.model.id)]
+    return kept if kept else list(entries)
+
+
 def prefilter_coding(entries: list[InventoryEntry]) -> list[InventoryEntry]:
     """Drop models that are clearly non-coding (embeddings, TTS, image gen, etc.)."""
     result = []

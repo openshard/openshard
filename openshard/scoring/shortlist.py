@@ -4,14 +4,17 @@ import re
 
 from openshard.providers.manager import InventoryEntry
 
+# Family substrings, deliberately version-free where possible: which models
+# may be *routed* is decided by curation (scoring.filter.filter_unpromoted
+# gates the inventory to curated/explicit ids), not by pinning a version here.
 TRUSTED_FAMILIES = [
     "claude-opus",
     "claude-sonnet",
     "claude-haiku",
     "gpt-5",
-    "grok-4",
+    "grok",
     "gemini-3.1",
-    "glm-5.1",
+    "glm",
     "kimi-k2",
     "minimax",
     "deepseek",

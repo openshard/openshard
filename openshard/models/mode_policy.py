@@ -12,9 +12,16 @@ class ModeModelPolicy:
     advisory_only: bool = True
 
 
+def _cheap_coding_default() -> str:
+    """Ask Mode follows the cheap_coding routing class, not a pinned version."""
+    from openshard.routing.model_resolver import MODEL_CHEAP
+
+    return MODEL_CHEAP
+
+
 _ASK_POLICY = ModeModelPolicy(
     mode="ask",
-    default_model_id="deepseek/deepseek-v4-flash",
+    default_model_id=_cheap_coding_default(),
     fallback_model_ids=(
         "openai/gpt-5-nano",
         "google/gemini-3.1-flash-lite",

@@ -51,10 +51,10 @@ CATEGORY_PREFERRED: dict[str, list[str]] = {
 # a candidate's slug (model ID with provider prefix stripped) when no
 # exact preferred ID is present in the inventory.
 CATEGORY_PREFERRED_FAMILIES: dict[str, list[str]] = {
-    "standard":    ["claude-sonnet", "deepseek", "gpt-5.4", "glm-5.1"],
+    "standard":    ["claude-sonnet", "deepseek", "gpt-5.4", "glm"],
     "complex":     ["gpt-5.5", "claude-opus", "gpt-5.4", "claude-sonnet"],
     "security":    ["gpt-5.5", "claude-opus", "gpt-5.4", "claude-sonnet"],
-    "boilerplate": ["deepseek", "gpt-5.4", "glm-5.1", "minimax"],
+    "boilerplate": ["deepseek", "gpt-5.4", "glm", "minimax"],
     "visual":      ["gemini-3.1", "qwen3.6", "kimi-k2"],
 }
 
