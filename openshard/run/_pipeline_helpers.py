@@ -523,6 +523,14 @@ def _log_run(
                 entry["model_resolution"] = "unknown"
         except Exception:
             pass
+        _adaptive = getattr(routing_decision, "adaptive", None)
+        if _adaptive is not None:
+            try:
+                entry["routing_provenance"] = _adaptive.to_provenance(
+                    executed_model=entry["execution_model"]
+                )
+            except Exception:
+                pass
     if _scored is not None:
         entry["routing_category"] = _scored.category
         entry["routing_candidate_count"] = _scored.candidate_count

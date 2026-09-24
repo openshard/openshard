@@ -919,6 +919,25 @@ class RunPipeline:
             experimental_deepagents_run=self._experimental_deepagents_run,
         )
 
+        # Adaptive routing (shadow): what the adaptive baseline decides from
+        # the same pre-execution facts. Recorded in the Receipt next to the
+        # executed model; it does not change the model. Never raises.
+        if routing_decision is not None:
+            from openshard.routing.adaptive import shadow_decision_for_run
+            routing_decision.adaptive = shadow_decision_for_run(
+                task_category=routing_decision.category,
+                read_only=_readonly_task,
+                write_requested=write,
+                risk=_form_factor_decision.risk_level,
+                repo_facts=_repo_facts,
+                verification_available=bool(
+                    _verification_plan is not None and _verification_plan.has_commands
+                ),
+                verification_requested=verify,
+                harness=effective_executor,
+                model_policy=_model_policy,
+            )
+
         _cfg_approval = _cfg.get("approval_mode", "smart").strip().lower()
         if _cfg_approval not in VALID_APPROVAL_MODES:
             raise click.ClickException(
