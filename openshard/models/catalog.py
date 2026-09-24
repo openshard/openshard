@@ -242,7 +242,8 @@ def derive_family(model_id: str) -> str:
         if tok == "latest" or not tok:
             continue
         if any(ch.isdigit() for ch in tok):
-            prefix = re.match(r"[a-z]*", tok).group(0)
+            match = re.match(r"[a-z]*", tok)
+            prefix = match.group(0) if match is not None else ""
             if len(prefix) >= 3:
                 kept.append(prefix)
             continue
@@ -493,7 +494,7 @@ def build_catalog(
 
     for mid in sorted(set(curated_by_id) | set(raw_by_id)):
         cur = curated_by_id.get(mid)
-        raw = raw_by_id.get(mid)
+        raw: dict | None = raw_by_id.get(mid)
         facts = _discovered_facts(raw, synced_at) if raw is not None else None
         lifecycle = cur.lifecycle if cur is not None else DISCOVERED_LIFECYCLE
         status = _derive_status(
