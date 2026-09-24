@@ -36,6 +36,8 @@ from openshard.ingest.model import (
 )
 from openshard.ingest.parsers.base import (
     ParseError,
+    as_dict,
+    as_str,
     claimed_commit_shas,
     git_commit_shas,
     head_records,
@@ -86,7 +88,9 @@ def _content_text(content: object) -> str | None:
 
 
 def _is_prompt(text: str | None) -> bool:
-    return bool(text and text.strip()) and not text.lstrip().startswith(_NON_PROMPT_PREFIXES)
+    if not text or not text.strip():
+        return False
+    return not text.lstrip().startswith(_NON_PROMPT_PREFIXES)
 
 
 class ClaudeCodeParser:
@@ -160,14 +164,14 @@ class ClaudeCodeParser:
             elif rtype == "user":
                 self._user(rec, lineno, s, calls)
             elif rtype == "assistant":
-                msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+                msg = as_dict(rec.get("message"))
                 model = msg.get("model")
                 if isinstance(model, str) and model and not model.startswith("<"):
                     if model not in s.models:
                         s.models.append(model)
                     model_first_line = model_first_line or lineno
                 usage = msg.get("usage")
-                mid = msg.get("id") if isinstance(msg.get("id"), str) else f"line{lineno}"
+                mid = as_str(msg.get("id")) or f"line{lineno}"
                 if isinstance(usage, dict):
                     usage_by_msg[mid] = usage
                     usage_lines.append(lineno)
@@ -190,10 +194,10 @@ class ClaudeCodeParser:
         yield s
 
     def _user(self, rec: dict, lineno: int, s: ParsedSession, calls: dict[str, ToolCall]) -> None:
-        msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+        msg = as_dict(rec.get("message"))
         content = msg.get("content")
         if isinstance(content, list) and any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content):
-            tur = rec.get("toolUseResult") if isinstance(rec.get("toolUseResult"), dict) else {}
+            tur = as_dict(rec.get("toolUseResult"))
             for item in content:
                 if not isinstance(item, dict) or item.get("type") != "tool_result":
                     continue
@@ -243,8 +247,8 @@ class ClaudeCodeParser:
                 name = item.get("name")
                 if not isinstance(name, str) or not name:
                     continue
-                tool_input = item.get("input") if isinstance(item.get("input"), dict) else {}
-                call = ToolCall(call_id=item.get("id") if isinstance(item.get("id"), str) else None,
+                tool_input = as_dict(item.get("input"))
+                call = ToolCall(call_id=as_str(item.get("id")),
                                 name=name, ref=ref(lineno) or "", at=stamp, cwd=rec.get("cwd"))
                 if name in _SHELL_TOOLS:
                     call.command = text_str(tool_input.get("command"), 4_000)

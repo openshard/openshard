@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Iterator
-from typing import BinaryIO, Protocol, runtime_checkable
+from typing import Any, BinaryIO, Protocol, runtime_checkable
 
 from openshard.ingest.model import ParsedSession, SourceObject
 
@@ -108,6 +108,16 @@ def head_records(head: bytes, limit: int = 40) -> list[dict]:
         if isinstance(rec, dict):
             out.append(rec)
     return out
+
+
+def as_dict(value: object) -> dict[str, Any]:
+    """*value* when it is a JSON object, else an empty dict (never guesses)."""
+    return value if isinstance(value, dict) else {}
+
+
+def as_str(value: object) -> str | None:
+    """*value* when it is a non-empty string, else ``None``."""
+    return value if isinstance(value, str) and value else None
 
 
 def text_str(value: object, cap: int = 200_000) -> str | None:

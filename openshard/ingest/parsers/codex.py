@@ -37,6 +37,8 @@ from openshard.ingest.model import (
 )
 from openshard.ingest.parsers.base import (
     ParseError,
+    as_dict,
+    as_str,
     claimed_commit_shas,
     git_commit_shas,
     head_records,
@@ -121,7 +123,7 @@ class CodexParser:
 
         for lineno, rec in iter_json_lines(stream, s, checkpoint=checkpoint):
             rtype = rec.get("type")
-            payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+            payload = as_dict(rec.get("payload"))
             if rtype not in _TOP_TYPES:
                 s.add_loss(LOSS_UNKNOWN_RECORD_TYPE)
                 continue
@@ -180,7 +182,7 @@ class CodexParser:
             s.agent_version = p["cli_version"]
         if isinstance(p.get("model_provider"), str) and p["model_provider"]:
             s.provider, s.provider_ref = p["model_provider"], ref(lineno)
-        git = p.get("git") if isinstance(p.get("git"), dict) else {}
+        git = as_dict(p.get("git"))
         if is_sha(git.get("commit_hash")):
             s.head_at_start, s.head_ref = git["commit_hash"].lower(), ref(lineno)
         if isinstance(git.get("branch"), str) and git["branch"]:
@@ -204,8 +206,8 @@ class CodexParser:
         elif ptype == "task_complete":
             self._final(p.get("last_agent_message"), lineno, s)
         elif ptype == "token_count":
-            info = p.get("info") if isinstance(p.get("info"), dict) else {}
-            total = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else None
+            info = as_dict(p.get("info"))
+            total = as_dict(info.get("total_token_usage"))
             if total:
                 tokens = {}
                 for src, dst in (("input_tokens", "input"), ("output_tokens", "output"),
@@ -234,7 +236,7 @@ class CodexParser:
                 call.commit_shas = git_commit_shas(p.get("aggregated_output") or p.get("stdout"))
         elif ptype == "patch_apply_end":
             call = calls.get(str(p.get("call_id")))
-            changes = p.get("changes") if isinstance(p.get("changes"), dict) else {}
+            changes = as_dict(p.get("changes"))
             if call is None:
                 call = ToolCall(call_id=str(p.get("call_id")), name="apply_patch", ref=ref(lineno) or "", at=stamp)
                 calls[call.call_id or f"line{lineno}"] = call
@@ -255,10 +257,10 @@ class CodexParser:
             s.add_loss(LOSS_UNKNOWN_RECORD_TYPE)
             return
         if ptype in ("function_call", "custom_tool_call", "local_shell_call"):
-            name = p.get("name") if isinstance(p.get("name"), str) else ("local_shell" if ptype == "local_shell_call" else None)
+            name = as_str(p.get("name")) or ("local_shell" if ptype == "local_shell_call" else None)
             if not name:
                 return
-            call_id = p.get("call_id") if isinstance(p.get("call_id"), str) else f"line{lineno}"
+            call_id = as_str(p.get("call_id")) or f"line{lineno}"
             call = calls.get(call_id) or ToolCall(call_id=call_id, name=name, ref=ref(lineno) or "", at=stamp)
             call.name, call.ref, call.at = name, ref(lineno) or "", stamp
             args: dict = {}
@@ -272,15 +274,15 @@ class CodexParser:
                 args = p["action"]
             if name in _SHELL_FUNCTIONS:
                 call.command = call.command or _command_text(args.get("command") or args.get("cmd"))
-                call.cwd = args.get("workdir") if isinstance(args.get("workdir"), str) else call.cwd
+                call.cwd = as_str(args.get("workdir")) or call.cwd
             elif name in _PATCH_TOOLS and not call.paths:
-                patch = p.get("input") if isinstance(p.get("input"), str) else args.get("input")
+                patch = as_str(p.get("input")) or as_str(args.get("input"))
                 if isinstance(patch, str):
                     call.paths = [(m.group(2).strip(), _PATCH_KIND[m.group(1)]) for m in _PATCH_HEADER_RE.finditer(patch)]
             calls[call_id] = call
         elif ptype in ("function_call_output", "custom_tool_call_output"):
-            call = calls.get(str(p.get("call_id")))
-            if call is None:
+            result_call = calls.get(str(p.get("call_id")))
+            if result_call is None:
                 s.add_loss(LOSS_UNMATCHED_TOOL_RESULT)
                 return
             output = p.get("output")
@@ -291,14 +293,14 @@ class CodexParser:
                 except ValueError:
                     loaded = None
                 if isinstance(loaded, dict):
-                    meta = loaded.get("metadata") if isinstance(loaded.get("metadata"), dict) else {}
+                    meta = as_dict(loaded.get("metadata"))
                     code = meta.get("exit_code")
-                    if call.exit_code is None and isinstance(code, int) and not isinstance(code, bool):
-                        call.exit_code, call.outcome_ref = code, ref(lineno)
-                        call.outcome = OUTCOME_PASSED if code == 0 else OUTCOME_FAILED
+                    if result_call.exit_code is None and isinstance(code, int) and not isinstance(code, bool):
+                        result_call.exit_code, result_call.outcome_ref = code, ref(lineno)
+                        result_call.outcome = OUTCOME_PASSED if code == 0 else OUTCOME_FAILED
                     output = loaded.get("output")
-            if call.command and "commit" in call.command and not call.commit_shas:
-                call.commit_shas = git_commit_shas(text_str(output))
+            if result_call.command and "commit" in result_call.command and not result_call.commit_shas:
+                result_call.commit_shas = git_commit_shas(text_str(output))
 
     def _final(self, text: object, lineno: int, s: ParsedSession) -> None:
         if isinstance(text, str) and text.strip():
