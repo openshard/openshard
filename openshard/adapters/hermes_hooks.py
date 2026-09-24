@@ -47,12 +47,18 @@ Events subscribed (the neutral event each becomes):
 * ``post_tool_call`` (``tool_name``, ``tool_input``, ``extra.status``,
   ``extra.duration_ms``, ``extra.tool_call_id``, ``extra.turn_id``) ->
   ``PostToolUse`` / ``PostToolUseFailure``. Hermes derives ``status`` itself:
-  ``ok``, ``error`` (the tool returned an error, including a command that
-  exited non-zero) or ``blocked`` (a policy hook stopped it, so it never
-  ran). ``ok`` is the one positive success signal and the only thing that
-  lets a file tool's paths into the hook-reported list; ``error`` and
-  ``blocked`` are failures; an absent or unrecognised ``status`` proves
-  nothing. Tool classification uses Hermes' own tool names::
+  ``ok`` ("Tool completed normally"), ``error`` (the tool returned an error,
+  including a command that exited non-zero), ``blocked`` (a policy hook
+  stopped it, so it never ran) or ``cancelled`` ("cancelled before normal
+  completion"). ``ok`` is the one positive success signal and the only thing
+  that lets a file tool's paths into the hook-reported list; ``error``,
+  ``blocked`` and ``cancelled`` are failed tool calls; an absent or
+  unrecognised ``status`` proves nothing. For a ``terminal`` check command
+  (verification v2) ``error`` is the agent's report that it failed;
+  ``blocked`` / ``cancelled`` mean it has no result (outcome ``unknown``, never
+  a failed check); ``ok`` is not read as "exited 0" -- the docs do not say
+  that, and the exit code lives only in the ``result`` text, which is never
+  read. Tool classification uses Hermes' own tool names::
 
       command  terminal                      tool_input.command
       write    write_file                    tool_input.path
@@ -125,6 +131,7 @@ from openshard.adapters.claude_hooks import (
     EVENT_SUBAGENT_START,
     EVENT_SUBAGENT_STOP,
     EVENT_USER_PROMPT_SUBMIT,
+    OUTCOME_NOT_COMPLETED,
     TOOL_KIND_COMMAND,
     TOOL_KIND_FILE,
     TOOL_KIND_OTHER,
@@ -284,10 +291,15 @@ def _tool_payload(payload: HookPayload, data: Mapping[str, Any], extra: Mapping[
     args = args if isinstance(args, Mapping) else {}
     status = _str_attr(extra, "status")
     payload.attrs = _tool_attrs(extra)
-    if status in ("error", "blocked"):
+    if status in ("error", "blocked", "cancelled"):
         payload.event = EVENT_POST_TOOL_USE_FAILURE
     if kind == TOOL_KIND_COMMAND:
         payload.command = _str_or_none(args.get("command"))
+        # A blocked or cancelled command never produced a result: a failed
+        # tool call, but never a failed *check*. ``ok`` stays no outcome --
+        # Hermes documents it as "Tool completed normally", not "exited 0".
+        if status in ("blocked", "cancelled"):
+            payload.command_outcome = OUTCOME_NOT_COMPLETED
     elif kind == TOOL_KIND_FILE:
         if (tool_name or "").lower() == "patch" and args.get("mode") == "patch":
             payload.file_paths = _v4a_paths(args.get("patch"))

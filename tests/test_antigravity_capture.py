@@ -234,11 +234,17 @@ class TestTranslator:
         assert post("write_to_file", {"TargetFile": "a.py"}, error="  ").event == "PostToolUse"
 
     def test_malformed_tool_shapes_under_report(self, repo):
-        for call in (None, "run_command", [], {"name": 42}, {"name": "run_command", "args": "ls"},
+        for call in ({"name": "run_command", "args": "ls"},
                      {"name": "run_command", "args": {"CommandLine": ["ls"]}},
                      {"name": "write_to_file", "args": {"TargetFile": 7}}):
             p = ag.extract_antigravity_payload(_doc(repo, toolCall=call), event_override="PostToolUse")
             assert p is not None and p.command is None and p.file_path is None, call
+
+    def test_post_tool_use_without_a_tool_name_is_not_a_tool_step(self, repo):
+        # CLI builds before 1.1.9 fired PostToolUse on non-tool steps (user input,
+        # model responses); a document with no toolCall.name is never a tool record.
+        for call in (None, "run_command", [], {"name": 42}, {"args": {"CommandLine": "ls"}}):
+            assert ag.extract_antigravity_payload(_doc(repo, toolCall=call), event_override="PostToolUse") is None
 
     def test_never_reads_transcript_artifacts_contents_or_results(self, repo):
         for event, doc in (
@@ -418,8 +424,8 @@ class TestCanonicalRecord:
         entry = _lines(repo)[0]
         assert entry["execution_model"] == "unknown" and entry["capture"]["model_source"] == "not_captured"
         assert entry["capture"]["models_seen"] == []
-        tool = next(e for e in entry["events"] if e["event_type"] == "tool.invoked")
-        assert tool["metadata"]["tool"] == "unknown" and tool["status"] == "unknown"
+        # A PostToolUse with no toolCall is not a tool step: nothing is invented for it.
+        assert not [e for e in entry["events"] if e["event_type"] == "tool.invoked"]
         assert not [e for e in entry["events"]
                     if e["event_type"] == "session.activity" and e["metadata"].get("hook") == "ModelInvocation"]
 

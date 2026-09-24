@@ -29,6 +29,46 @@ All notable changes to OpenShard are documented here.
   with a warning). `openshard roster add`, `models.custom_roster`,
   `allowed_models` and `blocked_models` accept catalog-discovered ids and
   aliases, and `openshard models show` displays discovered models.
+- **Capture Verification v2.** Each integration now records the strongest
+  check outcome its current official documentation supports, and never
+  overstates it. See "Verification evidence (v2)" in `docs/agent-capture.md`
+  for the per-agent audit.
+  - **Claude Code:** a foreground Bash/PowerShell `PostToolUse`, which is
+    documented as success-only, is recorded as `passed`. `PostToolUseFailure`
+    with an `Exit code N` first line is `failed`, and N is kept.
+  - **Cursor:** `Shell` `tool_output.exitCode` is read.
+  - **Grok Build:** `toolResult.exit_code` is read, unless the result is
+    truncated.
+  - All of these outcomes are `agent_reported`. OpenShard did not run the
+    commands.
+  - Interrupted, timed-out, denied, cancelled and backgrounded commands are
+    `unknown`, never failed checks.
+  - Receipts label reported outcomes on screen (`1/1 passed (agent-reported)`).
+    The synced `checks` string is unchanged.
+- **`openshard verify`: post-session verification.** OpenShard re-runs the
+  repository's verification contract (`verification_commands`), else its
+  detected test command, plus with `--from-observed` the agent's own
+  observed checks.
+  - Commands are classified by the native safety rules: blocked commands
+    never run, and needs-approval commands run only with `--approve`.
+  - OpenShard reads each exit code itself and appends a `directly_observed`
+    / `openshard_executed` attestation to `.openshard/verifications.jsonl`.
+  - The result is bound to the commit SHA only on a clean tree. Timeouts are
+    `unknown`, never failed.
+  - Receipts are never rewritten. `openshard last` shows `Re-verified: ...`
+    and `last --json` carries `post_session_verification`.
+  - This is evidence only: it exits 0 whatever the checks' outcome.
+
+### Changed
+
+- **Google Antigravity 2.0:** re-audited against the unified hooks reference.
+  - A non-empty `error` stays a reported failure.
+  - An empty `error` on `run_command` is not treated as a pass, because
+    commands can continue in the background after `WaitMsBeforeAsync`.
+  - A `PostToolUse` with no `toolCall.name` (pre-1.1.9 non-tool steps) is now
+    ignored.
+- **Hermes Agent:** `status: cancelled` is now a failed tool call. A blocked or
+  cancelled check command has no result (`unknown`).
 
 ### Fixed
 

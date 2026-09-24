@@ -53,9 +53,13 @@ Read here, all confirmed in real payloads:
   edit tool -- Claude's ``Edit`` / ``Write`` / ``MultiEdit`` all alias to it);
   ``target_file`` for ``read_file``; ``target_directory`` for ``list_dir``.
 
-**Never read:** ``toolResult`` / ``tool_response`` (so a command's
-``exit_code`` is deliberately ignored: outcomes stay unknown rather than
-inferred), ``toolInput`` content other than the one path or the command line
+* (verification v2) on ``PostToolUse`` for ``run_terminal_command`` only: the
+  one integer ``toolResult.exit_code`` (``tool_response`` alias), unless
+  ``toolResultTruncated`` is true. It is Grok's report of the command's exit
+  status -> the check outcome is ``agent_reported`` (see ``_terminal_exit_code``).
+
+**Never read:** the rest of ``toolResult`` / ``tool_response`` (command
+output, ``output_for_prompt``), ``toolInput`` content other than the one path or the command line
 (``old_string`` / ``new_string``, ``description``, queries), ``transcriptPath``
 and Grok's session files, ``lastAssistantMessage``, ``workspaceRoot``, and
 every unknown key. An agent label in the payload is never read: the agent is
@@ -68,7 +72,8 @@ Real-payload behaviours the mapping depends on
   observed); ``PostToolUseFailure`` is reserved for a tool that failed to
   dispatch or an MCP error. So ``PostToolUse`` is never a success signal:
   file tools are recorded ``unknown`` with no hook-reported path, and git
-  supplies the file evidence.
+  supplies the file evidence. A shell command's outcome comes only from its
+  ``exit_code`` (above), never from the event itself.
 * ``Stop`` fires **twice** for a normal one-turn session: ``reason:
   "end_turn"`` with a ``promptId`` when the turn ends, and again *after*
   ``SessionEnd`` with ``reason: "shutdown"``. Only ``end_turn`` is a completed
@@ -203,6 +208,29 @@ def _first_str(args: Mapping[str, Any], keys: tuple[str, ...], limit: int) -> st
     return None
 
 
+def _terminal_exit_code(data: Mapping[str, Any]) -> int | None:
+    """``toolResult.exit_code`` of a ``run_terminal_command`` (verification v2), or None.
+
+    Grok's hooks reference: "the ``PostToolUse`` tool output is
+    ``toolResult``" (``tool_response`` is a copy), shaped like ``{"type":
+    "Bash", "command": ..., "exit_code": 0, "output_for_prompt": ...}``, and
+    "Check ``toolResultTruncated`` first: an oversized payload reaches the hook
+    as a plain string". Only that one integer is read -- the output never is;
+    a truncated or non-object result yields no exit code.
+    """
+    if data.get("toolResultTruncated") is True:
+        return None
+    result = data.get("toolResult")
+    if result is None:
+        result = data.get("tool_response")
+    if not isinstance(result, Mapping):
+        return None
+    code = result.get("exit_code")
+    if isinstance(code, bool) or not isinstance(code, int):
+        return None
+    return code
+
+
 def extract_grok_build_payload(
     data: Mapping[str, Any], *, event_override: str | None = None
 ) -> HookPayload | None:
@@ -210,7 +238,8 @@ def extract_grok_build_payload(
 
     Returns ``None`` for an event OpenShard does not subscribe to. Unknown
     keys are ignored and malformed shapes under-report (a tool record with
-    no path or command), never raise. Never attaches a success signal.
+    no path or command), never raise. Never attaches a tool success signal;
+    a shell command carries only the exit code Grok reported for it.
     """
     name = resolve_event_name(data, event_override)
     if name not in GROK_BUILD_EVENT_MAP:
@@ -252,6 +281,8 @@ def extract_grok_build_payload(
             tool_input = {}
         if kind == TOOL_KIND_COMMAND:
             payload.command = _first_str(tool_input, ("command",), 4_000)
+            if name == "PostToolUse":
+                payload.command_exit_code = _terminal_exit_code(data)
         elif kind == TOOL_KIND_FILE:
             path = _first_str(tool_input, _WRITE_PATH_KEYS, 2_000)
             if path:
