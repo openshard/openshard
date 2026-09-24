@@ -240,12 +240,20 @@ def build_routable_pool(
     ``build_available_pool()`` before policy runs and cannot be re-admitted
     by policy.
     """
-    from openshard.routing.model_policy import apply_model_policy, eligible_lifecycles
+    from openshard.routing.model_policy import (
+        apply_model_policy,
+        eligible_lifecycles,
+        explicit_selection_ids,
+    )
 
     constraint = EXECUTOR_CONSTRAINTS.get(executor) if executor else None
     eligible = eligible_lifecycles(policy)
+    explicit = explicit_selection_ids(policy)
 
-    available = build_available_pool(avail, registry=registry)
+    entries = list(all_models() if registry is None else registry)
+    entries += _explicit_discovered_entries(explicit, {e.id for e in entries})
+
+    available = build_available_pool(avail, registry=entries)
     if policy is not None:
         available = apply_model_policy(available, policy)
 
@@ -257,7 +265,7 @@ def build_routable_pool(
         if not ma.available:
             excluded.append((entry.id, ma.reason or REASON_NO_API_KEY))
             continue
-        if entry.lifecycle not in eligible:
+        if entry.lifecycle not in eligible and entry.id not in explicit:
             excluded.append((entry.id, f"{REASON_LIFECYCLE_PREFIX}{entry.lifecycle}"))
             continue
         if constraint is not None and not set(ma.via) & constraint.allowed_providers:
@@ -275,6 +283,31 @@ def build_routable_pool(
         executor=executor,
         blocked_model_ids=blocked_model_ids,
     )
+
+
+def _explicit_discovered_entries(
+    explicit: frozenset[str], known: set[str]
+) -> list[ModelEntry]:
+    """Pool entries for explicitly selected discovery-only models.
+
+    Looked up in the cached catalog only (no network). A model the cache no
+    longer lists is skipped; the run then routes without it.
+    """
+    missing = sorted(explicit - known)
+    if not missing:
+        return []
+    try:
+        from openshard.models.catalog import load_catalog
+
+        catalog = load_catalog(refresh="never")
+    except Exception:
+        return []
+    out: list[ModelEntry] = []
+    for mid in missing:
+        entry = catalog.get(mid)
+        if entry is not None:
+            out.append(entry.to_model_entry())
+    return out
 
 
 def routing_constraints_metadata(pool: RoutablePool) -> dict:

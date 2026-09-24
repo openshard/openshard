@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from openshard.models.registry import all_models
@@ -106,6 +107,31 @@ class ModelPolicyConfig:
     allow_openrouter_wide: bool = True
     custom_roster_models: frozenset[str] = field(default_factory=frozenset)
     custom_roster_name: str = "default"
+    # Routing-class pins from ``models.routing_classes`` as sorted
+    # (class_name, canonical_model_id) pairs. A pin is explicit selection: it
+    # may name a discovery-only model and bypasses the lifecycle gate.
+    class_pins: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def class_pin_map(self) -> dict[str, str]:
+        return dict(self.class_pins)
+
+
+def explicit_selection_ids(policy: ModelPolicyConfig | None) -> frozenset[str]:
+    """Model ids the user named explicitly, which bypass the lifecycle gate.
+
+    Class pins always count. Custom-roster ids count only when they are
+    discovery-only (not in the curated registry): curated roster models keep
+    their lifecycle gates (``allow_*`` flags) exactly as before, while a
+    discovered model has no other way in. Access restrictions still apply.
+    """
+    if policy is None:
+        return frozenset()
+    ids = {mid for _, mid in policy.class_pins}
+    if policy.mode == "custom_roster":
+        known = {e.id for e in all_models()}
+        ids |= {m for m in policy.custom_roster_models if m not in known}
+    return frozenset(ids)
 
 
 # ---------------------------------------------------------------------------
@@ -176,20 +202,45 @@ def model_policy_from_config(config: dict) -> ModelPolicyConfig:
         raw = {}
 
     known_ids: frozenset[str] = frozenset(e.id for e in all_models())
+    catalog_box: list = []
+
+    def _canonical(model_id: str) -> str | None:
+        """Registry id as-is; else resolve id/alias via the cached catalog.
+
+        The catalog is read from the local cache only (never the network) and
+        only when an id is not a curated registry id.
+        """
+        if model_id in known_ids:
+            return model_id
+        if not catalog_box:
+            from openshard.models.catalog import load_catalog
+
+            catalog_box.append(load_catalog(refresh="never"))
+        return catalog_box[0].resolve(model_id)
+
+    def _canonicalize(ids: Iterable[str], key: str) -> frozenset[str]:
+        resolved: set[str] = set()
+        unknown: list[str] = []
+        for mid in ids:
+            canonical = _canonical(mid)
+            if canonical is None:
+                unknown.append(mid)
+            else:
+                resolved.add(canonical)
+        if unknown:
+            sample = sorted(unknown)[:3]
+            raise ValueError(
+                f"models.{key} contains unknown model ID(s): {sample}. "
+                "Check openshard models list (or openshard models catalog "
+                "after openshard models sync-openrouter) for valid IDs."
+            )
+        return frozenset(resolved)
 
     def _parse_model_set(key: str) -> frozenset[str]:
         val = raw.get(key) or []
         if not isinstance(val, (list, tuple)):
             val = list(val)
-        ids = frozenset(str(v) for v in val if v)
-        unknown = ids - known_ids
-        if unknown:
-            sample = sorted(unknown)[:3]
-            raise ValueError(
-                f"models.{key} contains unknown model ID(s): {sample}. "
-                "Check openshard models list for valid IDs."
-            )
-        return ids
+        return _canonicalize((str(v) for v in val if v), key)
 
     def _parse_provider_set(key: str) -> frozenset[str]:
         val = raw.get(key) or []
@@ -232,14 +283,11 @@ def model_policy_from_config(config: dict) -> ModelPolicyConfig:
     roster_models_raw = roster_raw.get("models") or []
     if not isinstance(roster_models_raw, (list, tuple)):
         roster_models_raw = []
-    roster_models: frozenset[str] = frozenset(str(m) for m in roster_models_raw if m)
-    unknown_roster = roster_models - known_ids
-    if unknown_roster:
-        sample = sorted(unknown_roster)[:3]
-        raise ValueError(
-            f"models.custom_roster.models contains unknown model ID(s): {sample}. "
-            "Check openshard models list for valid IDs."
-        )
+    roster_models = _canonicalize(
+        (str(m) for m in roster_models_raw if m), "custom_roster.models"
+    )
+
+    class_pins = _parse_class_pins(raw.get("routing_classes"), _canonical)
 
     return ModelPolicyConfig(
         mode=mode,
@@ -257,7 +305,62 @@ def model_policy_from_config(config: dict) -> ModelPolicyConfig:
         allow_openrouter_wide=bool(raw.get("allow_openrouter_wide", True)),
         custom_roster_models=roster_models,
         custom_roster_name=str(roster_raw.get("name", "default")),
+        class_pins=class_pins,
     )
+
+
+def _parse_class_pins(raw_pins, canonical) -> tuple[tuple[str, str], ...]:
+    """Parse ``models.routing_classes: {class_name: model_id}``.
+
+    Unknown class names, unrecognised ids and ids lacking the class's required
+    capabilities are config errors (ValueError). A pin to a model that is now
+    deprecated is dropped with a warning instead: expiry can happen after the
+    config was written and must not break runs; routing falls back to the
+    class's normal selection.
+    """
+    from openshard.models.catalog import curated_catalog, load_catalog
+    from openshard.routing.routing_classes import ROUTING_CLASSES, pin_rejection_reason
+
+    if not raw_pins:
+        return ()
+    if not isinstance(raw_pins, dict):
+        raise ValueError("models.routing_classes must be a mapping of class name to model ID.")
+    pins: list[tuple[str, str]] = []
+    discovered_catalog = None
+    for class_name, model_id in sorted(raw_pins.items()):
+        if not model_id:
+            continue
+        cls = ROUTING_CLASSES.get(str(class_name))
+        if cls is None:
+            raise ValueError(
+                f"models.routing_classes has unknown class '{class_name}'. "
+                f"Choose from: {sorted(ROUTING_CLASSES)}"
+            )
+        mid = canonical(str(model_id))
+        if mid is None:
+            raise ValueError(
+                f"models.routing_classes.{class_name} names unknown model ID "
+                f"'{model_id}'. Run openshard models sync-openrouter to discover new models."
+            )
+        entry = curated_catalog().get(mid)
+        if entry is None:
+            if discovered_catalog is None:
+                discovered_catalog = load_catalog(refresh="never")
+            entry = discovered_catalog.get(mid)
+        reason = pin_rejection_reason(cls, entry)
+        if reason == "deprecated_or_blocked":
+            warnings.warn(
+                f"models.routing_classes.{class_name}: {mid} is deprecated or blocked; "
+                "ignoring the pin and using the class default.",
+                stacklevel=2,
+            )
+            continue
+        if reason is not None:
+            raise ValueError(
+                f"models.routing_classes.{class_name}: {mid} cannot serve this class ({reason})."
+            )
+        pins.append((str(class_name), mid))
+    return tuple(pins)
 
 
 # ---------------------------------------------------------------------------
@@ -368,4 +471,5 @@ def policy_summary(policy: ModelPolicyConfig) -> dict:
         "custom_roster_name": (
             policy.custom_roster_name if policy.mode == "custom_roster" else None
         ),
+        "class_pins_count": len(policy.class_pins),
     }

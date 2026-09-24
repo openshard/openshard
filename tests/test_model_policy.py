@@ -588,7 +588,7 @@ class TestPolicySummary:
             "blocked_providers_count", "allowed_providers_count",
             "max_cost_class", "allow_specialist", "allow_experimental",
             "allow_watchlist", "allow_deprecated", "allow_open_weight",
-            "allow_fallback", "custom_roster_name",
+            "allow_fallback", "custom_roster_name", "class_pins_count",
         }
         assert set(s.keys()) == expected_keys
 

@@ -2,6 +2,44 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Added
+
+- **Dynamic model catalog** (`openshard/models/catalog.py`). OpenShard now
+  merges the curated registry with OpenRouter's model list (cached in
+  `~/.openshard/openrouter-models.json`, refreshed when older than 24h,
+  with the stale cache or curated-only list used as offline fallback) into
+  one normalized entry per model: provider, canonical id, display name,
+  aliases, family, status, release date, context, modalities, tool support,
+  pricing with source and timestamp, capability tags, discovery source and
+  routing eligibility. A newly released model is recognised, shown and
+  explicitly selectable without an OpenShard release, but is never routed
+  by default until it is curated.
+- **Routing classes** (`cheap_coding`, `balanced_coding`,
+  `frontier_reasoning`, `fast`, `vision`). The cheap/main/escalate/visual
+  routing roles now select by class from curated models instead of by a
+  fixed model version. Selections are unchanged today.
+- `openshard models catalog` (`--refresh`, `--offline`, `--discovered`,
+  `--family`, `--json`) and `openshard models classes`, which show each
+  class's current model and newer same-family **promotion candidates**
+  (e.g. DeepSeek V4.1 Flash for `cheap_coding`) without selecting them.
+- `models.routing_classes` config pins a class to a model (an explicit
+  choice, so a discovered model is allowed; deprecated pins are ignored
+  with a warning). `openshard roster add`, `models.custom_roster`,
+  `allowed_models` and `blocked_models` accept catalog-discovered ids and
+  aliases, and `openshard models show` displays discovered models.
+
+### Fixed
+
+- `openshard models sync-openrouter` fetched from `api.openrouter.ai`,
+  which does not resolve; it now uses `openrouter.ai/api/v1/models`.
+- Scored model selection could silently promote a brand-new model from the
+  provider inventory (the shortlist keeps the highest version per family,
+  so an uncurated `deepseek-v4.1-flash` would displace curated DeepSeek
+  models). Scored routing now only considers curated or explicitly
+  selected models.
+
 ## 0.4.7 - 2026-09-23
 
 Four more capture surfaces: Google Antigravity, Hermes Agent and Grok Build

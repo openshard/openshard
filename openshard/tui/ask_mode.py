@@ -166,6 +166,8 @@ def _answer_model_roster() -> str:
     lines += ["", "Low-cost / control examples:"]
     for mid in _ROSTER_CHEAP:
         lines.append(f"  {display_name_for(mid)}")
+    lines += ["", "Current routing-class defaults:"]
+    lines += _routing_class_default_lines()
     lines += [
         "",
         "Use:",
@@ -173,8 +175,23 @@ def _answer_model_roster() -> str:
         "  /ask reasoning models",
         "  /ask experimental models",
         "  openshard models list",
+        "  openshard models classes",
     ]
     return "\n".join(lines)
+
+
+def _routing_class_default_lines() -> list[str]:
+    try:
+        from openshard.models.catalog import curated_catalog
+        from openshard.routing.routing_classes import select_all_classes
+
+        selections = select_all_classes(curated_catalog())
+    except Exception:
+        return ["  (unavailable)"]
+    return [
+        f"  {name:<20}{display_name_for(sel.model) if sel.model else '-'}"
+        for name, sel in selections.items()
+    ]
 
 
 def _answer_cheap_control() -> str:

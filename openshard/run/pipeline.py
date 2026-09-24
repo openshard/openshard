@@ -90,6 +90,7 @@ from openshard.routing.engine import (
 )
 from openshard.routing.form_factor_policy import ExecutionFormFactorDecision, select_form_factor
 from openshard.routing.model_policy import (
+    explicit_selection_ids,
     model_policy_from_config,
 )
 from openshard.routing.model_policy import (
@@ -134,6 +135,7 @@ from openshard.run._pipeline_helpers import (
 )
 from openshard.run.timeline import RunTimelineEvent, make_timeline_event
 from openshard.run.validator_policy import ValidatorPolicyDecision, should_run_validator
+from openshard.scoring.filter import filter_unpromoted
 from openshard.scoring.requirements import requirements_from_category
 from openshard.scoring.scorer import ScoredRoutingResult, select_with_info
 from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
@@ -603,7 +605,9 @@ class RunPipeline:
                 )
             _role = _CATEGORY_TO_ROLE.get(routing_decision.category, "main")
             _provider_enforcement_result = resolve_routing_model_for_context(
-                _role, _routable_pool_cache
+                _role,
+                _routable_pool_cache,
+                class_pins=(_model_policy.class_pin_map if _model_policy is not None else None),
             )
             if _provider_enforcement_result.model is None:
                 _providers_str = ", ".join(_pa_detected)
@@ -661,12 +665,21 @@ class RunPipeline:
         _failure_receipt: dict | None = None
 
         # Attempt scored model selection; fall back silently to keyword routing.
-        if not opencode_mode and routing_decision is not None:
+        # An explicit routing-class pin is the user's choice: scoring never
+        # overrides it.
+        _class_pinned = (
+            _provider_enforcement_result is not None
+            and _provider_enforcement_result.source == "class_pin"
+        )
+        if not opencode_mode and routing_decision is not None and not _class_pinned:
             try:
                 _mgr = ProviderManager()
                 _inv = _mgr.get_inventory()
                 _reqs = requirements_from_category(routing_decision.category)
-                _entries = [e for e in _inv.models if e.provider == _provider_name]
+                _entries = filter_unpromoted(
+                    [e for e in _inv.models if e.provider == _provider_name],
+                    allow=explicit_selection_ids(_model_policy),
+                )
                 _hist_adjustments: dict[str, float] | None = None
                 _hist_reasons: dict[str, str] = {}
                 if _use_history_scoring:
