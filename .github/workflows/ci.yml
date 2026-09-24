@@ -1,220 +1,234 @@
-name: CI
+name: Fast PR Gate
+
+# The PR feedback loop. Proves enough to merge safely, as fast as the runners
+# allow; the exhaustive OS x Python matrix runs after merge in
+# main.yml ("Full Main Validation") and again before publishing in
+# release.yml. See docs/ci.md for the tiers and the expected timings.
+#
+# Shape of a run:
+#
+#   Plan ─┬─ Lint + types
+#         ├─ Tests (shard 1/N .. N/N)       parallel-safe files, pytest-xdist
+#         ├─ Tests (capture services 1/2 ..)  serial within each job, never on Windows
+#         └─ Tests (Windows smoke)           curated slice, only when relevant
+#                                  └──────── Fast PR Gate (the one required check)
+#
+# scripts/ci/select_tests.py decides, from the changed files, which of those
+# jobs run and with which test files. Docs-only PRs run nothing but Plan and
+# the Gate; anything evidence-critical (receipts/history, capture adapters,
+# verification, security, sync ...) or anything the selector cannot classify
+# runs the full PR suite regardless of the size of the diff.
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
-# A new push to the same PR supersedes the previous one -- cancel whatever
-# of it is still running instead of burning runner time on a commit nobody
-# will look at. A push to main is different: it's what drives the full
-# compatibility matrix below, and a second merge landing while the first
-# one's validation is still running must never silently cancel it. Each
-# push-to-main run gets its own group (keyed by the commit SHA, which is
-# unique per push), so it never collides with -- and is never cancelled
-# by -- another push; cancel-in-progress is also explicitly off for push
-# events as a second guard against that.
+# A new push to the same PR supersedes the previous run.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: pr-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
-  # The tests across these 8 files spin up a real background HTTP
-  # capture service (threads, an OS-assigned socket, in one case a spawned
-  # Node subprocess) and poll with real timeouts. They're correct under
-  # pytest-xdist (each test gets its own tmp OPENSHARD_HOME and its own
-  # free port -- see tests/conftest.py::_isolate_capture_service), but
-  # running many of them at once multiplies thread/socket/process
-  # contention, which is exactly where the observed Windows flakes have
-  # come from. Keep them out of parallel runs and out of the Windows PR
-  # gate; they still run -- serially -- in the fast Ubuntu gate on every
-  # PR, and unrestricted on every OS/Python combination once code lands
-  # on main (see test-full-matrix below).
-  SERVICE_TEST_FILES: >-
-    tests/test_antigravity_capture.py
-    tests/test_claude_capture_service.py
-    tests/test_cross_agent_capture.py
-    tests/test_codex_capture.py
-    tests/test_cursor_capture.py
-    tests/test_hermes_capture.py
-    tests/test_opencode_capture.py
-    tests/test_v044_capture_auth.py
-    tests/test_v044_evidence_loss.py
-  # A small, curated slice that exercises the code paths most likely to
-  # regress specifically on Windows (util/home.py + util/git.py's
-  # CREATE_NO_WINDOW handling, jsonl_store's atomic replace, claude_hooks'
-  # path/CRLF handling, sandbox diff/apply, repo_map's git subprocess
-  # calls, CLI entrypoints) without paying for the full suite on the
-  # slowest, flakiest runner on every PR. None of these use the real
-  # capture service.
-  WINDOWS_SMOKE_TEST_FILES: >-
-    tests/test_util_home_git.py
-    tests/test_jsonl_store.py
-    tests/test_claude_hooks.py
-    tests/test_cli_claude_hooks.py
-    tests/test_cli_doctor.py
-    tests/test_cli_entrypoint.py
-    tests/test_cli_repo_map.py
-    tests/test_first_run_ux.py
-    tests/test_repo_map.py
-    tests/test_sandbox.py
-    tests/test_sandbox_apply.py
-    tests/test_sandbox_apply_receipts.py
-    tests/test_sandbox_diff.py
-    tests/test_adapters_wrap_exec.py
+  PYTHON_VERSION: "3.12"
+  PYTHONUNBUFFERED: "1"
+  # `uv pip install` targets the interpreter actions/setup-python put on PATH
+  # instead of looking for a virtualenv.
+  UV_SYSTEM_PYTHON: "1"
 
 jobs:
-  # Docs/README-only changes skip every heavy job below. A job that is
-  # skipped via `if:` still reports (as "skipped"), which GitHub treats as
-  # a passing required check, so branch protection keeps working -- this
-  # is not a paths-ignore trigger, which would leave a required check
-  # permanently pending on those PRs.
-  changes:
+  plan:
+    name: Plan
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      code: ${{ steps.filter.outputs.code }}
+      tier: ${{ steps.plan.outputs.tier }}
+      run_code: ${{ steps.plan.outputs.run_code }}
+      run_shards: ${{ steps.plan.outputs.run_shards }}
+      run_service: ${{ steps.plan.outputs.run_service }}
+      windows: ${{ steps.plan.outputs.windows }}
+      service_matrix: ${{ steps.plan.outputs.service_matrix }}
+      windows_files: ${{ steps.plan.outputs.windows_files }}
+      shard_matrix: ${{ steps.plan.outputs.shard_matrix }}
     steps:
       - uses: actions/checkout@v7
         with:
+          # The selector diffs base...head with merge-base semantics, so it
+          # needs the base branch's history, not just the merge commit.
           fetch-depth: 0
 
-      - name: Detect whether this change is docs/README-only
-        id: filter
+      - name: Select tests from the changed files
+        id: plan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
-          else
-            base="${{ github.event.before }}"
+          if [ -z "$BASE_SHA" ]; then
+            # workflow_dispatch: compare against where this ref left main.
+            git fetch --no-tags origin main
+            BASE_SHA="$(git merge-base origin/main "$HEAD_SHA")"
           fi
-          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
-             || ! git cat-file -e "$base" 2>/dev/null; then
-            echo "no usable base commit -- treating as a code change"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed="$(git diff --name-only "$base" "${{ github.sha }}")"
-          echo "changed files:"
-          echo "$changed"
-          # Anything that is not one of these doc-ish patterns makes it a
-          # code change. .github/workflows/** deliberately never matches,
-          # so a workflow edit always gets the full run.
-          if echo "$changed" | grep -qvE '^(README\.md|CHANGELOG\.md|CONTRIBUTING\.md|SECURITY\.md|NOTICE|LICENSE|docs/.*|.*\.md)$'; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          fi
+          # Stock python3 on the runner; the script is stdlib-only on purpose
+          # so no dependency install sits on the critical path here.
+          python3 scripts/ci/select_tests.py plan \
+            --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --github-output "$GITHUB_OUTPUT" | tee plan.txt
+          {
+            echo "### Plan"
+            echo '```'
+            cat plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   lint:
-    name: Lint + type check
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
+    name: Lint + types
+    needs: plan
+    if: needs.plan.outputs.run_code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: pyproject.toml
-
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
-
-      - name: Lint
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@v10.2.0  # no v10 major alias is published yet
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install
+        run: uv pip install -e ".[dev]"
+      - name: Ruff
         run: python -m ruff check .
-
-      - name: Type check
+      - name: mypy
         run: python -m mypy openshard/ --ignore-missing-imports
+      - name: Test-selection lists still resolve
+        run: python scripts/ci/select_tests.py check
 
-  # The primary PR gate: the full suite, once, on the fastest/most stable
-  # combination (Ubuntu + 3.12). The 8639 tests with no real service
-  # dependency run under pytest-xdist; the 224 capture/timing tests run
-  # straight after, serially, so this gate still covers every test on
-  # every PR -- it just doesn't parallelise the ones that aren't safe to.
-  test-fast:
-    name: Test (fast gate, ubuntu, py3.12)
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
+  test:
+    name: Tests (shard ${{ matrix.id }}/${{ matrix.of }})
+    needs: plan
+    if: needs.plan.outputs.run_shards == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.shard_matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@v10.2.0  # no v10 major alias is published yet
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install
+        run: uv pip install -e ".[dev]"
+      - name: Test (parallel-safe files, pytest-xdist)
+        env:
+          FILES: ${{ matrix.files }}
+        # shellcheck disable=SC2086 -- FILES is a deliberate word list.
+        run: python -m pytest -n auto --durations=15 $FILES
+
+  # The capture/service tests spin up a real background HTTP capture service
+  # (threads, an OS-assigned socket, in one case a spawned Node subprocess)
+  # and poll with real timeouts. They are correct under xdist but contention
+  # between many of them at once on one machine is exactly where the observed
+  # Windows flakes came from, so each job runs its files strictly serially in
+  # a single pytest process. The files are spread over (at most) two jobs:
+  # separate runners are separate VMs, so nothing is shared between them.
+  test-service:
+    name: Tests (capture services, serial ${{ matrix.id }}/${{ matrix.of }})
+    needs: plan
+    if: needs.plan.outputs.run_service == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.service_matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@v10.2.0  # no v10 major alias is published yet
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install
+        run: uv pip install -e ".[dev]"
+      - name: Test (serial, one pytest process)
+        env:
+          FILES: ${{ matrix.files }}
+        # shellcheck disable=SC2086
+        run: python -m pytest --durations=15 $FILES
+
+  # A curated slice of the code paths that actually differ by platform
+  # (util/home.py + util/git.py, jsonl_store's atomic replace, claude_hooks'
+  # path/CRLF handling, sandbox diff/apply, repo_map's git calls, CLI
+  # entrypoints). None of these use the real capture service. Runs when the
+  # plan says the change can reach them; the full suite runs on Windows
+  # after merge.
+  test-windows:
+    name: Tests (Windows smoke)
+    needs: plan
+    if: needs.plan.outputs.windows == 'true'
+    runs-on: windows-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: pyproject.toml
-
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
-
-      - name: Test (parallel-safe subset)
-        run: |
-          ignore_args=""
-          for f in $SERVICE_TEST_FILES; do ignore_args="$ignore_args --ignore=$f"; done
-          python -m pytest -n auto $ignore_args
-
-      - name: Test (capture/timing services, serial)
-        run: python -m pytest $SERVICE_TEST_FILES
-
-  # A small, fast, curated Windows run that blocks every PR -- catches
-  # Windows-specific regressions in the code paths that actually differ by
-  # platform, without paying for (or trusting) the full suite on the
-  # slowest and historically flakiest runner on every PR.
-  test-windows-smoke:
-    name: Test (Windows 3.12 smoke)
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@v10.2.0  # no v10 major alias is published yet
         with:
-          python-version: "3.12"
-          cache: "pip"
-          cache-dependency-path: pyproject.toml
-
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
-
-      - name: Test (Windows smoke subset)
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install
+        run: uv pip install -e ".[dev]"
+      - name: Test (Windows smoke slice)
         shell: bash
-        run: python -m pytest -n auto $WINDOWS_SMOKE_TEST_FILES
+        env:
+          FILES: ${{ needs.plan.outputs.windows_files }}
+        # shellcheck disable=SC2086
+        run: python -m pytest -n auto --durations=15 $FILES
 
-  # Exhaustive compatibility: every test, every OS x Python combination,
-  # unmodified and serial -- exactly what the matrix did before this
-  # change. Runs after code lands on main instead of on every PR, so a
-  # contributor is never blocked by it, but nothing ships to a release
-  # without having passed here first (release.yml runs the same matrix
-  # again before publishing).
-  test-full-matrix:
-    name: Test (full matrix, ${{ matrix.os }}, py${{ matrix.python-version }})
-    needs: changes
-    if: needs.changes.outputs.code == 'true' && github.event_name == 'push'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11", "3.12"]
+  # The single check to require in branch protection. Skipped jobs are fine
+  # (that is the plan doing its job); anything that failed or was cancelled
+  # fails the gate.
+  gate:
+    name: Fast PR Gate
+    needs: [plan, lint, test, test-service, test-windows]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: "pip"
-          cache-dependency-path: pyproject.toml
-
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
-
-      - name: Test
-        run: python -m pytest
+      - name: Every job passed or was intentionally skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          TIER: ${{ needs.plan.outputs.tier }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+        run: |
+          echo "$RESULTS"
+          {
+            echo "### Fast PR Gate"
+            echo
+            echo "| job | result |"
+            echo "|-----|--------|"
+            echo "$RESULTS" | python3 -c '
+          import json, sys
+          for name, job in json.load(sys.stdin).items():
+              print("| " + name + " | " + job["result"] + " |")
+          '
+            echo
+            echo "tier: **${TIER:-unknown}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "::error::the plan job did not succeed"; exit 1
+          fi
+          if echo "$RESULTS" | grep -Eq '"result": *"(failure|cancelled)"'; then
+            echo "::error::a gate job failed"; exit 1
+          fi
+          echo "ok: gate green (tier: $TIER)"

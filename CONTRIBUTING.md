@@ -22,7 +22,11 @@ python -m mypy openshard/ --ignore-missing-imports
 python -m pytest
 ```
 
-That is exactly what CI runs (Linux and Windows, Python 3.11 and 3.12).
+That is exactly what CI runs after merge (Linux and Windows, Python 3.11
+and 3.12). Pull requests get a faster gate that selects tests from the
+changed files and always runs the evidence invariants; see
+[docs/ci.md](docs/ci.md) for the tiers and how to preview what your change
+will run (`python scripts/ci/select_tests.py explain <paths>`).
 The suite isolates itself from any real capture service on your machine
 (`tests/conftest.py`); never make a test depend on one being up or down.
 

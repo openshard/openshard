@@ -1,0 +1,89 @@
+name: Full Main Validation
+
+# Exhaustive validation of what has landed on main: every test, every
+# OS x Python combination, unmodified and serial -- nothing is selected,
+# sharded or parallelised here. PRs are gated by ci.yml ("Fast PR Gate"),
+# which runs a subset chosen from the changed files; this workflow is what
+# catches anything that subset could not, before a release is ever cut.
+# release.yml runs this same matrix again from the tagged commit.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Every push to main gets its own group keyed by SHA so a second merge landing
+# while the first one's validation is still running never cancels it.
+concurrency:
+  group: main-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  UV_SYSTEM_PYTHON: "1"
+
+jobs:
+  lint:
+    name: Lint + types
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.2.0  # no v10 major alias is published yet
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install
+        run: uv pip install -e ".[dev]"
+      - name: Ruff
+        run: python -m ruff check .
+      - name: mypy
+        run: python -m mypy openshard/ --ignore-missing-imports
+      - name: Test-selection lists still resolve
+        run: python scripts/ci/select_tests.py check
+
+  test-full-matrix:
+    name: Tests (full, ${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v10.2.0  # no v10 major alias is published yet
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install
+        run: uv pip install -e ".[dev]"
+      - name: Test (everything, serial)
+        run: python -m pytest --durations=25
+
+  summary:
+    name: Full Main Validation
+    needs: [lint, test-full-matrix]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          if echo "$RESULTS" | grep -Eq '"result": *"(failure|cancelled|skipped)"'; then
+            echo "::error::a validation job did not pass"; exit 1
+          fi
+          echo "ok: main fully validated"
