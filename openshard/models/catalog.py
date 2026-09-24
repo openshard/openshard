@@ -482,10 +482,10 @@ def build_catalog(
     static_prices = static_prices or {}
     curated_by_id = {e.id: e for e in curated}
     raw_by_id: dict[str, dict] = {}
-    for raw in discovered:
-        mid = raw.get("id") if isinstance(raw, dict) else None
+    for raw_item in discovered:
+        mid = raw_item.get("id") if isinstance(raw_item, dict) else None
         if isinstance(mid, str) and mid and mid not in raw_by_id:
-            raw_by_id[mid] = raw
+            raw_by_id[mid] = raw_item
 
     ref = _ref_date(synced_at)
     restricted = _restricted_ids()
