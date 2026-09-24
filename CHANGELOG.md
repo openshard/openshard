@@ -6,6 +6,21 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- **Adaptive routing foundation** (`openshard/routing/adaptive/`). Routing is
+  now expressed as catalog -> eligibility -> `RoutingContext` ->
+  `CandidateSet` -> `RoutingPolicy` -> `RoutingDecision` -> verification ->
+  `RoutingOutcome`. The deterministic baseline policy picks a routing class
+  from known task facts (category, risk, read-only, capability needs) and
+  selects within it using the routing classes below; it computes no scores
+  and does not learn. Explicit models are never substituted, discovered
+  models are candidates only when named, and recovery (cheap attempt ->
+  verification -> escalate) is bounded and escalates only on an observed
+  failure. Each run records the decision in shadow mode as a new
+  `routing_provenance` Receipt block (candidates considered, selected
+  model, reasons, policy and version, requested/resolved class, pin or
+  explicit selection, fingerprints) next to the model that actually ran;
+  the executed model is unchanged. Outcomes are derived from Receipts at
+  read time, so existing Receipts work without migration.
 - **Dynamic model catalog** (`openshard/models/catalog.py`). OpenShard now
   merges the curated registry with OpenRouter's model list (cached in
   `~/.openshard/openrouter-models.json`, refreshed when older than 24h,

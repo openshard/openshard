@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Models — resolved from the registry; hardcoded IDs are fallback only.
@@ -35,6 +36,9 @@ class RoutingDecision:
     model: str
     category: str   # boilerplate | standard | security | visual | complex
     rationale: str  # shown in --more output
+    # Shadow adaptive-routing decision (routing.adaptive.RoutingDecision) for
+    # the same run; recorded in the Receipt, never used to pick the model.
+    adaptive: Any = field(default=None, compare=False, repr=False)
 
 
 # ---------------------------------------------------------------------------
