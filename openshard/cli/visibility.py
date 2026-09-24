@@ -27,6 +27,7 @@ from openshard.history.shard import (
     CAPTURE_FULL,
     CAPTURE_PARTIAL,
     ORIGIN_EXTERNAL_OBSERVED,
+    ORIGIN_HISTORICAL_IMPORT,
     ORIGIN_OPENSHARD_ROUTED,
 )
 from openshard.history.shard_contract import _EM, _UNICODE_OK, ShardReceipt, _format_token_count
@@ -44,6 +45,7 @@ _TIMES = "×" if _UNICODE_OK else "x"
 _ORIGIN_TEXT: dict[str, str] = {
     ORIGIN_OPENSHARD_ROUTED: "OpenShard ran it",
     ORIGIN_EXTERNAL_OBSERVED: "observed externally, not executed by OpenShard",
+    ORIGIN_HISTORICAL_IMPORT: "reconstructed from imported history, not observed live",
 }
 _CAPTURE_TEXT: dict[str, str] = {
     CAPTURE_FULL: "full capture",
@@ -366,6 +368,7 @@ _CAPTURE_LABELS = {CAPTURE_FULL: "full", CAPTURE_PARTIAL: "partial", "unknown": 
 _ORIGIN_LABELS = {
     ORIGIN_OPENSHARD_ROUTED: "run by OpenShard",
     ORIGIN_EXTERNAL_OBSERVED: "observed externally",
+    ORIGIN_HISTORICAL_IMPORT: "imported history",
     "unknown": "origin unknown",
 }
 

@@ -29,6 +29,20 @@ openshard grok-bot skill                           # Print the self-report skill
 openshard grok-bot report -                        # Record a Bot self-report (JSON on stdin) as an agent_reported Shard
 ```
 
+Import past Claude Code / Codex history (see
+[architecture/historical-ingestion.md](architecture/historical-ingestion.md)).
+Receipts are labelled "Reconstructed from history", are never marked as
+observed live, and stay local (not synced) for now:
+
+```bash
+openshard ingest sources                           # Detect local history: sessions found, how many belong to this repo
+openshard ingest scan claude-code --since 2026-06-01  # Dry run: what would be imported, duplicates, evidence coverage
+openshard ingest run                               # Import into new sealed receipts; safe to re-run; Ctrl-C pauses
+openshard ingest status                            # Latest job: counts, quarantined items (no content)
+openshard ingest resume ijob_...                   # Resume a paused/interrupted job; nothing is written twice
+openshard ingest cancel ijob_...                   # Stop a job at its next checkpoint
+```
+
 Most developers who want the interactive experience should start with the TUI:
 
 ```bash

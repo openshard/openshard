@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from openshard.history.receipt_identity import stored_receipt_id
+from openshard.history.shard import HISTORICAL_IMPORT_EXECUTORS, ORIGIN_HISTORICAL_IMPORT
 from openshard.history.shard_contract import build_shard_receipt
 from openshard.history.shard_schema import SHARD_SCHEMA_VERSION
 from openshard.history.views import receipt_to_dict
@@ -43,6 +44,10 @@ REASON_SESSION_IN_PROGRESS = "session_in_progress"
 REASON_SESSION_ENDED = "session_ended"
 REASON_SESSION_QUIESCENT = "session_quiescent"
 REASON_RECORD_COMPLETE = "record_complete"
+# Historical Ingestion v1: imported receipts stay local until the sync
+# contract gains ``origin``/``import``/``facts`` (docs/architecture/
+# historical-ingestion.md §9). Their locator fields must not leave the machine.
+REASON_HISTORICAL_IMPORT_DEFERRED = "historical_import_sync_deferred"
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,8 @@ def eligibility(entry: dict, *, now: datetime | None = None) -> Eligibility:
     """Whether *entry* may be synced right now, and why (not). Never raises."""
     if stored_receipt_id(entry) is None:
         return Eligibility(False, REASON_NO_RECEIPT_ID)
+    if entry.get("origin") == ORIGIN_HISTORICAL_IMPORT or entry.get("executor") in HISTORICAL_IMPORT_EXECUTORS:
+        return Eligibility(False, REASON_HISTORICAL_IMPORT_DEFERRED)
     capture = entry.get("capture")
     if not isinstance(capture, dict) or "session_end_observed" not in capture:
         return Eligibility(True, REASON_RECORD_COMPLETE)

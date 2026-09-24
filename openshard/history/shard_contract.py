@@ -14,6 +14,7 @@ from openshard.history.capture_completeness import (
 from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.shard import (
     ORIGIN_EXTERNAL_OBSERVED,
+    ORIGIN_HISTORICAL_IMPORT,
     Shard,
     build_shard,
     derive_shard_identity,
@@ -1461,6 +1462,8 @@ _EVIDENCE_DISPLAY: dict[str, str] = {
     "agent_reported": "Agent reported",
     "git_observed": "Git observed",
     "independently_verified": "Independently verified",
+    "git_verified": "Git verified",
+    "imported_transcript": "Imported transcript",
 }
 
 
@@ -1478,7 +1481,10 @@ def _evidence_summary(receipt: ShardReceipt) -> list[str]:
     observer, the label says who observed it.
     """
     seen = {getattr(ev, "evidence", None) for ev in receipt.events}
-    order = ["independently_verified", "directly_observed", "git_observed", "agent_reported"]
+    order = [
+        "independently_verified", "directly_observed", "git_verified", "git_observed",
+        "imported_transcript", "agent_reported",
+    ]
     out = [_EVIDENCE_DISPLAY[k] for k in order if k in seen]
     observers = {
         (getattr(ev, "metadata", None) or {}).get("observer")
@@ -1513,10 +1519,16 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
             f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
         ))
         rows.append(_row("Gaps", gaps_display(block)))
+    elif receipt.shard is not None and receipt.shard.origin == ORIGIN_HISTORICAL_IMPORT:
+        rows.append(_row("Capture", _HISTORICAL_CAPTURE_TEXT))
+        rows.append(_row("Gaps", gaps_display(block)))
     elif status == COMPLETENESS_INCOMPLETE:
         rows.append(_row("Gaps", gaps_display(block)))
     return rows
 
+
+# Historical Ingestion v1: the "Reconstructed from history" badge.
+_HISTORICAL_CAPTURE_TEXT = "Reconstructed from history; OpenShard did not observe this session live"
 
 _CAPTURE_COL = 15  # the CAPTURE section's labels are longer than the receipt's default gutter
 
@@ -1525,8 +1537,13 @@ def _capture_rows_full(receipt: ShardReceipt) -> list[str]:
     """The full receipt's CAPTURE section: depth, completeness and known gaps as three facts."""
     block = receipt.capture_completeness or {}
     depth = str(block.get("depth") or (receipt.shard.capture_depth if receipt.shard else "unknown"))
-    external = receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED
-    depth_text = f"{depth} {_EM} OpenShard did not execute or verify this run" if external else depth
+    origin = receipt.shard.origin if receipt.shard is not None else None
+    if origin == ORIGIN_EXTERNAL_OBSERVED:
+        depth_text = f"{depth} {_EM} OpenShard did not execute or verify this run"
+    elif origin == ORIGIN_HISTORICAL_IMPORT:
+        depth_text = f"{depth} {_EM} {_HISTORICAL_CAPTURE_TEXT}"
+    else:
+        depth_text = depth
     return [
         f"{_INDENT}CAPTURE",
         _row("Capture depth", depth_text, width=_CAPTURE_COL),

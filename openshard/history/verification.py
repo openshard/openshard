@@ -86,6 +86,9 @@ MODE_CI_REPORT = "ci_report"  # an independent CI system reported the result
 MODE_NOT_OBSERVABLE = "not_observable"  # this capture path cannot see checks (import/wrap)
 MODE_LEGACY_BOOLEAN = "legacy_boolean"  # only the pre-v1 booleans were stored
 MODE_NONE = "none"  # nothing about verification was recorded
+# Historical Ingestion v1: read later from the agent's own history. Any outcome
+# found there is ``agent_reported``; never ``directly_observed``.
+MODE_IMPORTED_TRANSCRIPT = "imported_transcript"
 OBSERVATION_MODES: frozenset[str] = frozenset(
     {
         MODE_OPENSHARD_EXECUTED,
@@ -95,6 +98,7 @@ OBSERVATION_MODES: frozenset[str] = frozenset(
         MODE_NOT_OBSERVABLE,
         MODE_LEGACY_BOOLEAN,
         MODE_NONE,
+        MODE_IMPORTED_TRANSCRIPT,
     }
 )
 
