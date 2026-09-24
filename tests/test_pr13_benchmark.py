@@ -473,9 +473,9 @@ class TestBenchmarkPipeline:
         evidence = burn["openshard"]["expected_evidence"]
         assert evidence["present"] is True, evidence["checks"]
         shard = burn["openshard"]["history"]["shards"][0]
-        # The hook stream saw the agent run a check command but never its exit
-        # code: "attempted, outcome unknown" -- never passed/failed, never null.
-        assert shard["agent"] == "Claude Code (external)" and shard["verification_status"] == "unknown"
+        # Claude Code's PostToolUse is a documented successful completion signal,
+        # so Verification v2 records the foreground check as agent-reported passed.
+        assert shard["agent"] == "Claude Code (external)" and shard["verification_status"] == "passed"
         assert "relay/_schema.py" in shard["files"] and "schema/jobs.json" not in shard["files"]
         assert "priority" in shard["task_short"].lower()
         assert bench["burn_in"]["retrievable"] is True
