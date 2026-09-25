@@ -59,15 +59,28 @@ class ModelActionProvider:
 
     def __call__(self, ctx: LoopContext) -> list[FileWriteAction]:
         model = self.model_for(ctx.attempt)
+        prompt = build_prompt(ctx, self.repo_root, self.context_files)
+        content = self._ask(ctx.attempt, model, prompt)
+        try:
+            return parse_writes(content)
+        except ModelResponseError as exc:
+            # One bounded re-ask for a malformed reply (same attempt, same
+            # model); its spend is recorded like any other call.
+            repair = (
+                f"{prompt}\n\nYour previous reply was rejected: {exc}. "
+                "Reply with ONLY the JSON object described in the instructions."
+            )
+            return parse_writes(self._ask(ctx.attempt, model, repair))
+
+    def _ask(self, attempt: int, model: str, prompt: str) -> str:
         resp = self.provider.execute(
-            model, build_prompt(ctx, self.repo_root, self.context_files),
-            system=SYSTEM_PROMPT, max_tokens=self.max_tokens,
+            model, prompt, system=SYSTEM_PROMPT, max_tokens=self.max_tokens,
         )
         u = resp.usage
         self.usage.append(AttemptUsage(
-            ctx.attempt, resp.model or model, u.prompt_tokens, u.completion_tokens, u.estimated_cost,
+            attempt, resp.model or model, u.prompt_tokens, u.completion_tokens, u.estimated_cost,
         ))
-        return parse_writes(resp.content)
+        return resp.content
 
     @property
     def total_cost_usd(self) -> float | None:

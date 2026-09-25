@@ -129,8 +129,8 @@ def build_osn_run_entry(
     }
     if retry and usage:
         entry["fixer_model"] = final_model if final_model != first_model else None
-        first_cost = _sum_costs(usage[:1])
-        retry_cost = _sum_costs(usage[1:])
+        first_cost = _sum_costs([u for u in usage if u.attempt == 1])
+        retry_cost = _sum_costs([u for u in usage if u.attempt > 1])
         entry["estimated_cost"] = first_cost
         entry["retry_estimated_cost"] = retry_cost
     else:

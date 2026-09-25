@@ -222,3 +222,21 @@ def test_split_command_windows_quoting():
 
     argv = _split_command(r'"C:\Program Files\Python\python.exe" -m pytest -q')
     assert argv[0].endswith("python.exe") and argv[1:] == ["-m", "pytest", "-q"]
+
+
+def test_malformed_reply_gets_one_bounded_reask_and_spend_is_recorded(repo):
+    fp = FakeProvider(["Sure! here you go", _writes("out.txt", "ok")])
+    ap = ModelActionProvider(fp, ["m"], repo)
+    receipt = run_bounded_loop(repo, "t", ap, CHECK)
+    assert receipt.status == "verified"
+    assert len(fp.calls) == 2 and "rejected" in fp.calls[1][1]
+    assert len(ap.usage) == 2  # both calls' spend is recorded
+    entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
+    assert entry["estimated_cost"] == pytest.approx(0.002)
+    assert entry["retry_triggered"] is False  # a re-ask is not a verification retry
+
+
+def test_two_malformed_replies_is_an_error_not_a_pass(repo):
+    fp = FakeProvider(["nope", "still nope"])
+    receipt = run_bounded_loop(repo, "t", ModelActionProvider(fp, ["m"], repo), CHECK)
+    assert receipt.status == "error" and len(fp.calls) == 2
