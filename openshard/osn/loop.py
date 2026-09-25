@@ -116,7 +116,7 @@ class LoopReceipt:
                     "proposed": [_display_path(p) for p in a.proposed],
                     "applied": a.applied,
                     "blocked": [_display_path(p) for p in a.blocked],
-                    "policy": a.policy,
+                    "policy": _stored_policy(a.policy),
                     "verification": _stored_verification(a.verification),
                 }
                 for a in self.attempts
@@ -136,6 +136,14 @@ def _display_path(p: str) -> str:
     if norm.startswith("/") or ":" in norm or ".." in norm.split("/") or norm.startswith("~"):
         return "<unsafe-path>"
     return p
+
+
+def _stored_policy(policy: dict) -> dict:
+    """The gate summary lists raw proposed paths; mask unsafe ones like the rest."""
+    return {
+        k: [_display_path(x) if isinstance(x, str) else x for x in v] if isinstance(v, list) else v
+        for k, v in policy.items()
+    }
 
 
 def _stored_verification(v: VerificationResult | None) -> dict | None:

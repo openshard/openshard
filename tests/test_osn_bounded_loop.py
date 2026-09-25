@@ -171,3 +171,12 @@ def test_isolated_copy_excludes_local_secrets_and_agent_state(tmp_path):
     copy = create_isolated_copy(r)
     names = {p.name for p in copy.rglob("*")}
     assert "keep.py" in names and ".env" not in names and "settings.json" not in names
+
+
+def test_policy_summary_masks_unsafe_paths_on_every_platform(repo):
+    import json
+
+    # "C:/x" is rejected as absolute on Windows but reaches the policy gate on
+    # POSIX; either way the stored receipt must not carry the raw path.
+    rec = run_bounded_loop(repo, "t", lambda c: [FileWriteAction("C:/Windows/evil.txt", "x")], CHECK)
+    assert "Windows" not in json.dumps(rec.to_dict())
