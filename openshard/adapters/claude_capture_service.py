@@ -71,6 +71,15 @@ authorises anything. Nothing is ever *returned* beyond ``{}``, that health
 document (no paths), and shutdown acknowledgement. Queue lines hold only
 the reduced payload (scrubbed excerpt, repo-relative path, summarized
 command), never raw prompts, transcripts or absolute paths.
+
+Declared task context
+---------------------
+A hook POST may carry the launch context (``OPENSHARD_TASK_ID``) in
+``X-OpenShard-Task-Id``. It is validated (exactly one well-formed task id,
+else ignored), honoured only for an authorized request, and travels as one
+field of the reduced payload -- the agent's own JSON body is never a source
+of task context. The fold binds the first valid id per session; see
+``claude_hooks._bind_task_context``.
 """
 
 from __future__ import annotations
@@ -110,6 +119,7 @@ from openshard.adapters.claude_hooks import (
     sessions_dir,
 )
 from openshard.history.capture_completeness import REASON_CORRUPT_QUEUED_EVENT
+from openshard.history.task_identity import is_task_id
 
 # PR12: receiver path -> agent key. One service, one queue format, one
 # fold; only the translator run on the blocking path differs.
@@ -482,6 +492,7 @@ class CaptureRecorder:
         event_override: str | None = None,
         agent: str = AGENT_CLAUDE_CODE,
         authorize: Callable[[Path], bool] | None = None,
+        task_id: str | None = None,
     ) -> tuple[str, str]:
         """Validate, reduce and durably queue one hook payload. Returns ``(action, detail)``.
 
@@ -493,7 +504,11 @@ class CaptureRecorder:
         yield a usage observation (``StatusPayload``), which is queued
         exactly like a status ping. *authorize* (v0.4.4) is consulted with
         the resolved repository root before anything is written; a refusal
-        records nothing and returns ``rejected``.
+        records nothing and returns ``rejected``. *task_id* is the declared
+        launch context from the dedicated capture header (never from *data*):
+        it is looked at only after authorization, a malformed value is
+        dropped (the event is still recorded, unbound), and it rides on the
+        reduced payload into the queue line.
         """
         t0 = time.perf_counter()
         self._bump("received")
@@ -520,6 +535,7 @@ class CaptureRecorder:
             self.timings.add(time.perf_counter() - t0)
             self.enqueue(root, key)
             return "queued", "status"
+        payload.task_id = task_id if is_task_id(task_id) else None
         reduced = reduce_hook_payload(payload, root)
         if reduced is None:
             self._bump("ignored")
@@ -1045,6 +1061,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         project_dir = self.headers.get(client.PROJECT_DIR_HEADER)
         project_dir = project_dir.strip() if isinstance(project_dir, str) and project_dir.strip() else None
+        task_id = self._declared_task_id()
 
         # The agent a capability must be scoped to is the one this event will
         # be *recorded as* -- the receiver path picks the translator and the
@@ -1060,7 +1077,7 @@ class _Handler(BaseHTTPRequestHandler):
                 event_override = params.get("event") or None
                 action, _detail = self.server.recorder.record_hook(
                     data, project_dir=project_dir, event_override=event_override, agent=_HOOK_PATH_AGENTS[path],
-                    authorize=authorize,
+                    authorize=authorize, task_id=task_id,
                 )
             else:
                 action, _detail = self.server.recorder.record_status(
@@ -1075,6 +1092,21 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(401, b'{"error":"unauthenticated"}')
             return
         self._send(200, b"{}")
+
+    def _declared_task_id(self) -> str | None:
+        """The declared task id on this request's ``TASK_ID_HEADER``, or None.
+
+        Exactly one well-formed header value counts. Absent, empty (Claude
+        Code's interpolation of an unset ``$OPENSHARD_TASK_ID``), repeated,
+        padded, malformed or literal-``$VAR`` values all read as "no
+        declaration" -- nothing is repaired, and nothing is ever guessed.
+        Only consulted for hook POSTs, and only handed on after
+        authorization (see ``CaptureRecorder.record_hook``).
+        """
+        values = self.headers.get_all(client.TASK_ID_HEADER) or []
+        if len(values) != 1:
+            return None
+        return values[0] if is_task_id(values[0]) else None
 
     def _reject(self, path: str, reason: str, *, counted: bool = False) -> None:
         """Count a refused request and log why (path and reason only; never the credential).

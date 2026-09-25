@@ -594,8 +594,14 @@ class TestHookConfigShape(unittest.TestCase):
             else:
                 self.assertEqual(hooks[0]["type"], "http")
                 self.assertEqual(hooks[0]["url"], f"http://127.0.0.1:{DEFAULT_PORT}/hooks/claude")
-                self.assertEqual(hooks[0]["allowedEnvVars"], ["CLAUDE_PROJECT_DIR"])
-                self.assertEqual(hooks[0]["headers"], {"X-OpenShard-Project-Dir": "$CLAUDE_PROJECT_DIR"})
+                self.assertEqual(hooks[0]["allowedEnvVars"], ["CLAUDE_PROJECT_DIR", "OPENSHARD_TASK_ID"])
+                self.assertEqual(
+                    hooks[0]["headers"],
+                    {
+                        "X-OpenShard-Project-Dir": "$CLAUDE_PROJECT_DIR",
+                        "X-OpenShard-Task-Id": "$OPENSHARD_TASK_ID",
+                    },
+                )
 
     def test_port_is_honoured(self):
         config = build_hook_config(port=50123)

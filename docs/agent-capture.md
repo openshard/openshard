@@ -169,7 +169,9 @@ unchanged and remains the grouping key for attempts. `task_id`
 (`history/task_identity.py`) is a third, additive identity: one explicitly
 declared engineering task across attempts, agents and potentially
 repositories. It is minted only by `openshard task new` and attached with
-`--task-id`; it is never inferred from prompt similarity, timing, or
+`--task-id` -- or, for an externally launched agent, declared in the launch
+environment (see [Declared task context](#declared-task-context-launch-environment)).
+It is never inferred from prompt similarity, timing, or
 `shard_id`, and old records without one remain fully valid. Owner /
 Requested by / Approved by are not recorded locally and are never inferred
 from git config or the OS user; only the executing agent is known.
@@ -181,6 +183,71 @@ existing fold serve several producers: a static agent-profile table, one
 translator and one installer per agent, and per-agent readiness in
 `setup`/`doctor`. Cursor's translator is documented in
 `adapters/cursor_hooks.py`.
+
+## Declared task context (launch environment)
+
+Several agent sessions can belong to one engineering task -- a Claude Code
+session that starts it, a Codex session that reviews it, a second Claude
+session the next day. OpenShard only knows that when **you say so at launch**:
+
+```bash
+TASK=$(openshard task new --json | python -c "import json,sys; print(json.load(sys.stdin)['task_id'])")
+OPENSHARD_TASK_ID=$TASK claude      # or: OPENSHARD_TASK_ID=$TASK codex
+openshard task attempts $TASK       # every receipt that declared it
+```
+
+`OPENSHARD_TASK_ID` must be a well-formed `task_` + UUIDv7 id. Unset, empty
+or malformed simply means "no declaration": nothing is repaired, guessed or
+reported as an error, and the session is captured exactly as before.
+
+**How it travels.** The command-hook clients (`openshard hooks <agent>`)
+validate the variable and forward it on a dedicated header,
+`X-OpenShard-Task-Id`, next to the capture credential -- never inside the
+agent's own JSON, which is not a source of task context (a `task_id` field
+in a hook payload is ignored). Claude Code's HTTP hooks get the same header
+from the installer (`X-OpenShard-Task-Id: $OPENSHARD_TASK_ID`, with
+`OPENSHARD_TASK_ID` added to `allowedEnvVars`; re-run `openshard setup` once
+to upgrade an existing install). The capture service accepts one well-formed
+id, only on an authorized request, and carries it on the reduced payload
+through the queue and into the session buffer. Status-line pings and the
+OpenCode plugin do not forward it (an OpenCode session is captured, just
+without the declaration). Historical ingestion never reads it.
+
+**What is recorded.** On a session that declared a task, the receipt gets
+the existing top-level `task_id` (so `history`, `task attempts`, MCP
+`get_receipts_by_task` and Platform sync see it with no new field) plus a
+concise provenance block:
+
+```json
+"capture": { "task_context": {
+  "source": "launch_environment", "variable": "OPENSHARD_TASK_ID",
+  "evidence": "declared", "bound_at": "2026-09-25T10:00:00Z", "bound_by": "SessionStart"
+} }
+```
+
+`evidence: declared` says who vouches for the relationship: the person who
+launched the agent -- not a hook, not the agent, not OpenShard. Every hook,
+tool and session fact on the same receipt keeps the evidence level it always
+had (`directly_observed`, `agent_reported`, `git_observed`); no Event is
+ever labelled `declared`. The provenance block stays in the local record;
+the sync projection is unchanged apart from the `task_id` it already carries.
+
+**Rules.**
+
+* **One receipt per agent session.** Sessions sharing a `task_id` are
+  correlated, never merged: each keeps its own `receipt_id`, `shard_id`,
+  executor and evidence, even when two agents hand over the same session id.
+* **First valid declaration wins, immutably.** It binds while the session's
+  receipt does not exist yet (up to and including the first prompt). A later
+  id that disagrees -- or one that first appears after the receipt was
+  written without one -- is refused, so a receipt's task is never reassigned
+  or attached after the fact; it is only counted in
+  `capture.task_context_conflicts`.
+* **Observational, never enforcement.** Nothing is blocked, rewritten or
+  rejected because of a task id (a conflicting or malformed one still gets
+  the usual empty `200`); capture reports, it does not gate the agent.
+* **Legacy is byte-for-byte legacy.** Without a declaration a record has no
+  `task_id`, no `task_context`, and queue lines keep their old shape.
 
 ## Agent identity (never inferred from the model)
 
@@ -861,6 +928,15 @@ and the OpenCode counterpart guard the server-side p50 < 25 ms / p95 <
 
 ## Tests
 
+* `tests/test_task_context_capture.py` — declared task context: launch-env
+  validation, command-client header forwarding for every agent receiver and
+  the in-process fallback, Claude HTTP hook installer/upgrade, the service
+  flow (authorized-only, malformed/repeated/body-borne ids never bind, 200
+  on conflict), reduced-payload decode/replay idempotency, buffer binding
+  and conflict/late/after-end behaviour, one task across sessions and agents
+  staying separate receipts, evidence labels, privacy, sync projection
+  (plus the unchanged historical-ingestion case in
+  `tests/test_historical_ingestion.py`).
 * `tests/test_codex_capture.py` — translator (headers-only patch parsing,
   documented vs tolerated `apply_patch` keys, argv commands, internal tool
   names recorded by name only, malformed/unknown shapes under-reporting,

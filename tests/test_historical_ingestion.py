@@ -451,6 +451,24 @@ class TestPrivacy:
         verdict = eligibility(rec)
         assert not verdict.eligible and verdict.reason == REASON_HISTORICAL_IMPORT_DEFERRED
 
+    def test_launch_task_declaration_never_reaches_imported_receipts(self, homes, hist_repo, monkeypatch):
+        """``OPENSHARD_TASK_ID`` is launch context for *live* capture only: an import
+        run never reads it, so a historical receipt is never given a task after the fact."""
+        from openshard.history.task_identity import new_task_id
+
+        declared = new_task_id()
+        monkeypatch.setenv("OPENSHARD_TASK_ID", declared)
+        write_claude(homes, hist_repo)
+        write_codex(homes, hist_repo)
+        repo = hist_repo["repo"]
+        assert _run(repo).state == "completed"
+        recs = _records(repo)
+        assert len(recs) == 2
+        for rec in recs:
+            assert "task_id" not in rec
+            assert declared not in json.dumps(rec)
+            assert "task_context" not in json.dumps(rec)
+
 
 # ---------------------------------------------------------------------------
 # Git evidence

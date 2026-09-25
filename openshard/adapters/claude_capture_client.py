@@ -70,6 +70,7 @@ import sys
 import time
 
 from openshard.adapters import capture_auth as _auth
+from openshard.history.task_identity import launch_task_id
 from openshard.util.home import openshard_home
 
 DEFAULT_PORT = 47811
@@ -126,6 +127,11 @@ HERMES_EMPTY_RESPONSE = "{}"
 HEALTH_PATH = "/health"
 SHUTDOWN_PATH = "/shutdown"
 PROJECT_DIR_HEADER = "X-OpenShard-Project-Dir"
+# Declared launch context (``OPENSHARD_TASK_ID``), forwarded on its own header
+# -- never inside the agent's payload, which is untrusted for this. Claude
+# Code's HTTP hooks fill it from ``$OPENSHARD_TASK_ID`` (allowedEnvVars); the
+# command clients validate the environment value and send it themselves.
+TASK_ID_HEADER = "X-OpenShard-Task-Id"
 
 _CONNECT_TIMEOUT = 0.25  # loopback connect; refused/absent is instant, a hang must not stall a hook
 _REQUEST_TIMEOUT = 5.0
@@ -279,18 +285,24 @@ def post_hook(
     event_override: str | None = None,
     hook_path: str = HOOK_PATH,
     env: dict | os._Environ | None = None,
+    task_id: str | None = None,
 ) -> bool:
     """POST one raw hook payload. True when the service accepted (durably queued) it.
 
     *hook_path* selects the agent receiver (``HOOK_PATH`` for Claude Code,
     ``CODEX_HOOK_PATH`` / ``OPENCODE_HOOK_PATH`` for the others). The capture
     token is presented automatically (v0.4.4); *env* says where it lives.
+    *task_id*, when given, must already be a validated declared task id; it
+    travels in ``TASK_ID_HEADER``, never in the body.
     """
     path = hook_path
     if event_override:
         safe = "".join(ch for ch in event_override if ch.isalnum())
         path = f"{hook_path}?event={safe}"
-    result = _request("POST", port, path, raw, _auth_headers(env, project_dir))
+    headers = _auth_headers(env, project_dir)
+    if task_id:
+        headers[TASK_ID_HEADER] = task_id
+    result = _request("POST", port, path, raw, headers)
     return result is not None and result[0] == 200
 
 
@@ -604,14 +616,15 @@ def _project_dir(env: dict | os._Environ) -> str | None:
 
 
 def _inline_hook(
-    raw: bytes, env: dict | os._Environ, event_override: str | None, agent: str = "claude_code"
+    raw: bytes, env: dict | os._Environ, event_override: str | None, agent: str = "claude_code",
+    task_id: str | None = None,
 ) -> str:
     from openshard.adapters.claude_hooks import handle_hook, parse_hook_payload
 
     data = parse_hook_payload(raw)
     if data is None:
         return "ignored"
-    outcome = handle_hook(data, env=env, event_override=event_override, agent=agent)
+    outcome = handle_hook(data, env=env, event_override=event_override, agent=agent, task_id=task_id)
     if outcome.action == "error" or env.get("OPENSHARD_HOOK_DEBUG"):
         try:
             sys.stderr.write(f"[openshard hooks] {outcome.event or '?'}: {outcome.action} ({outcome.detail})\n")
@@ -657,23 +670,27 @@ def _run_hook_raw(
     hook_path = AGENT_HOOK_PATHS.get(agent, HOOK_PATH)
     if agent == "claude_code" and _is_claude_session_start(raw, event_override):
         _heal_claude_hook_auth(raw, env)
+    # Declared launch context: validated here from the launch environment (an
+    # unset/malformed value is simply "no declaration") and forwarded on its
+    # own header, or handed to the in-process fold -- never read from ``raw``.
+    task_id = launch_task_id(env)
     try:
         if not disabled(env):
             project_dir = _project_dir(env)
             port = resolve_port(env)
             if post_hook(port, raw, project_dir=project_dir, event_override=event_override,
-                         hook_path=hook_path, env=env):
+                         hook_path=hook_path, env=env, task_id=task_id):
                 return "forwarded"
             if spawn:
                 port_after, _state = ensure_service(env)
                 if port_after is not None and post_hook(
                     port_after, raw, project_dir=project_dir, event_override=event_override,
-                    hook_path=hook_path, env=env,
+                    hook_path=hook_path, env=env, task_id=task_id,
                 ):
                     return "forwarded"
     except Exception:
         pass
-    return _inline_hook(raw, env, event_override, agent)
+    return _inline_hook(raw, env, event_override, agent, task_id)
 
 
 def _is_claude_session_start(raw: bytes, event_override: str | None) -> bool:
