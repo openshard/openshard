@@ -4071,7 +4071,9 @@ def stats_failures(as_json: bool, limit: int) -> None:
 @click.option("--exclude", "exclude_files", multiple=True, help="Exclude this relative file path. Can be used multiple times.")
 @click.option("--candidate", "candidate_index", default=None, type=click.IntRange(min=1),
               help="Apply files from a specific candidate (1-based index).")
-def apply_last(dry_run: bool, include_files: tuple[str, ...], exclude_files: tuple[str, ...], candidate_index: int | None) -> None:
+@click.option("--yes", "assume_yes", is_flag=True, default=False,
+              help="Approve policy 'ask' paths (e.g. CI/config files) without prompting.")
+def apply_last(dry_run: bool, include_files: tuple[str, ...], exclude_files: tuple[str, ...], candidate_index: int | None, assume_yes: bool) -> None:
     """Promote files from the most recent sandbox run into the real repo."""
     from openshard.native.sandbox_apply import (
         apply_sandbox_changes,
@@ -4149,7 +4151,18 @@ def apply_last(dry_run: bool, include_files: tuple[str, ...], exclude_files: tup
         click.echo(f"  - {f}")
     click.echo("")
 
-    result = apply_sandbox_changes(Path.cwd(), sandbox_path, include=include, exclude=exclude)
+    def _approver(rel: str, _decision) -> tuple[bool, str]:
+        if assume_yes:
+            return True, "flag_yes"
+        try:
+            granted = click.confirm(f"Policy requires approval to write {rel}. Apply?", default=False)
+        except click.Abort:
+            granted = False
+        return granted, "interactive_prompt"
+
+    result = apply_sandbox_changes(
+        Path.cwd(), sandbox_path, include=include, exclude=exclude, approver=_approver,
+    )
 
     log_sandbox_apply_receipt(SandboxApplyReceipt(
         source_run_id=entry.get("timestamp", ""),
@@ -4159,8 +4172,11 @@ def apply_last(dry_run: bool, include_files: tuple[str, ...], exclude_files: tup
         files_skipped=list(result.files_skipped),
         dry_run=False,
         reason=result.reason,
+        policy=dict(result.policy_summary),
     ))
 
+    if result.files_denied and not result.files_applied:
+        raise click.ClickException("Blocked by policy: " + ", ".join(result.files_denied))
     if result.reason and not result.files_applied:
         raise click.ClickException(result.reason)
 
