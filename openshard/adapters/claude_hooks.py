@@ -110,6 +110,20 @@ queue replayed after a crash still records the right timestamps.
 ``handle_claude_hook`` / ``handle_claude_status`` remain the synchronous
 in-process path and are used as the fallback when no service is reachable.
 
+Declared task context (``OPENSHARD_TASK_ID``)
+---------------------------------------------
+A session launched with ``OPENSHARD_TASK_ID=<task_id>`` in its environment
+carries that explicit declaration into its receipt: top-level ``task_id``
+(the existing field) plus ``capture.task_context`` -- source
+``launch_environment``, ``evidence: declared`` -- so the *relationship* is
+machine-readable as launch context while every hook/tool/session fact keeps
+its own evidence level. The id never comes from the agent's payload: the
+client/service hands it to ``HookPayload.task_id`` -> ``ReducedHookPayload``
+from the environment or a dedicated capture header, and the buffer binds
+the first valid one immutably (``_bind_task_context``). Sessions sharing an
+id stay separate receipts per agent session; nothing is merged, inferred or
+enforced. No declaration = the legacy record, byte for byte.
+
 Codex and OpenCode (PR12)
 -------------------------
 The fold logic in this module is agent-neutral: Codex hooks
@@ -167,6 +181,15 @@ from openshard.history.capture_completeness import (
     REASON_SESSION_END_NOT_OBSERVED,
     build_completeness,
     make_reason,
+)
+from openshard.history.task_identity import (
+    EVIDENCE_DECLARED,
+    TASK_CONTEXT_SOURCE_LAUNCH_ENV,
+    TASK_ID_ENV,
+    ensure_task_id,
+    is_task_id,
+    launch_task_id,
+    stored_task_id,
 )
 from openshard.history.task_title import derive_task_title
 from openshard.util.git import run_git
@@ -403,6 +426,11 @@ class HookPayload:
     # ``agent_reported``.
     command_outcome: str | None = None
     command_exit_code: int | None = None
+    # Declared launch context (``OPENSHARD_TASK_ID``): set only by the capture
+    # client / service from the launch environment or the dedicated capture
+    # header -- never by a translator, never read out of the agent's own
+    # payload (which is untrusted for this). See ``_bind_task_context``.
+    task_id: str | None = None
 
 
 OUTCOME_PASSED = "passed"
@@ -896,6 +924,7 @@ class ReducedHookPayload:
     baseline: dict | None = None
     command_outcome: str | None = None  # see HookPayload.command_outcome
     command_exit_code: int | None = None
+    task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {
@@ -927,6 +956,9 @@ class ReducedHookPayload:
             data["command_outcome"] = self.command_outcome
         if self.command_exit_code is not None:
             data["command_exit_code"] = self.command_exit_code
+        # Only when declared, so queue lines of an undeclared session keep their shape.
+        if self.task_id is not None:
+            data["task_id"] = self.task_id
         return data
 
     @classmethod
@@ -983,6 +1015,7 @@ class ReducedHookPayload:
             baseline=_valid_baseline(data.get("baseline")),
             command_outcome=_command_outcome_or_none(data.get("command_outcome")),
             command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
+            task_id=stored_task_id(data),
         )
 
 
@@ -1033,6 +1066,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         provider_id=_str_or_none(payload.provider_id, 80),
         tool_success=payload.tool_success if isinstance(payload.tool_success, bool) else None,
         attrs=_clean_attrs(payload.attrs),
+        task_id=payload.task_id if is_task_id(payload.task_id) else None,
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
@@ -1177,6 +1211,12 @@ def _new_buffer(
         # keeps counting past the bound. See _hook_verification.
         "checks": [],
         "checks_total": 0,
+        # Declared launch context (see _bind_task_context): the first valid
+        # ``OPENSHARD_TASK_ID`` declaration this session received, bound once
+        # and never reassigned; and how many later declarations were
+        # refused because they disagreed with it (or arrived too late).
+        "task_context": None,
+        "task_context_conflicts": 0,
     }
     _append_event(
         buf,
@@ -1376,7 +1416,34 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         **_stored_checks(entry),
         "capture_losses": _stored_losses(capture),
         "baseline": _stored_baseline(entry, capture),
+        "task_context": _stored_task_context(entry, capture),
+        "task_context_conflicts": _stored_count(capture.get("task_context_conflicts")),
     }
+
+
+def _stored_count(raw: object) -> int:
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 0
+
+
+def _stored_task_context(entry: dict, capture: dict) -> dict | None:
+    """The declared task context a persisted record carries, or None.
+
+    Rebuilt so a later fold keeps (never drops or re-binds) the declaration
+    the record was created with. Only the top-level ``task_id`` is
+    authoritative; the provenance keys are copied when present and never
+    invented for a record that lacks them.
+    """
+    task_id = stored_task_id(entry)
+    if task_id is None:
+        return None
+    stored = capture.get("task_context")
+    stored = stored if isinstance(stored, dict) else {}
+    context: dict = {"task_id": task_id}
+    for key in ("source", "variable", "evidence", "bound_at", "bound_by"):
+        value = stored.get(key)
+        if isinstance(value, str) and value:
+            context[key] = value[:80]
+    return context
 
 
 def _stored_counts(raw: object, names: tuple[str, ...]) -> dict:
@@ -2031,6 +2098,64 @@ def _task_status(buf: dict, ended: dict | None) -> str:
     return "in_progress"
 
 
+_TASK_CONTEXT_KEYS = ("source", "variable", "evidence", "bound_at", "bound_by")
+
+
+def _bind_task_context(buf: dict, payload: ReducedHookPayload, *, now: str) -> None:
+    """Bind the session's declared task, once, from an explicit declaration.
+
+    *payload.task_id* is set only by the capture client / service from the
+    launch environment (``OPENSHARD_TASK_ID``) or the dedicated capture
+    header, and re-validated on decode; nothing here reads the agent's own
+    payload, a prompt, timing or the repository. The first valid declaration
+    wins and is immutable. A later one is never applied: it either disagrees
+    with the bound id, or arrives after the receipt already exists without
+    one (attaching it would change a persisted receipt's identity after the
+    fact -- see ``history/task_identity.py``). Both are only counted
+    (``capture.task_context_conflicts``); the receipt is never reassigned and
+    sessions are never merged. Idempotent under replay because
+    ``apply_reduced_hook`` skips an already-applied event id before it gets here.
+    """
+    declared = payload.task_id
+    if not is_task_id(declared):
+        return
+    bound = stored_task_id(buf.get("task_context"))
+    if bound is None and not buf.get("record"):
+        buf["task_context"] = {
+            "task_id": declared,
+            "source": TASK_CONTEXT_SOURCE_LAUNCH_ENV,
+            "variable": TASK_ID_ENV,
+            "evidence": EVIDENCE_DECLARED,
+            "bound_at": now,
+            "bound_by": payload.event,
+        }
+        return
+    if bound != declared:
+        buf["task_context_conflicts"] = _stored_count(buf.get("task_context_conflicts")) + 1
+
+
+def _stamp_task_context(entry: dict, buf: dict) -> None:
+    """Persist the bound task and its declared-context provenance on *entry*.
+
+    ``task_id`` goes at the record's top level (where every receipt/query/
+    sync path already reads it); how it got there goes under ``capture`` as
+    ``task_context`` with ``evidence: declared`` -- the relationship is
+    stated by the launcher, while every hook/tool/session fact on the record
+    keeps its own observed/agent-reported evidence. Absent, never null, for
+    a session with no declaration (legacy shape).
+    """
+    context = buf.get("task_context")
+    declared = stored_task_id(context)
+    if declared is not None and isinstance(context, dict):
+        ensure_task_id(entry, declared)
+        provenance = {k: context[k] for k in _TASK_CONTEXT_KEYS if k in context}
+        if provenance:
+            entry["capture"]["task_context"] = provenance
+    conflicts = _stored_count(buf.get("task_context_conflicts"))
+    if conflicts:
+        entry["capture"]["task_context_conflicts"] = conflicts
+
+
 def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     """Build the coerced runs.jsonl record for a session's current state.
 
@@ -2255,6 +2380,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # v0.4.4 global identity -- present on every record created by this
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
+    _stamp_task_context(entry, buf)
     invocation_count = int(buf.get("invocation_count") or 0)
     if invocation_count:
         # Model invocations observed (Antigravity PreInvocation); absent for
@@ -2418,6 +2544,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     buf["last_activity_at"] = now
     event = payload.event
     profile = _buffer_profile(buf)
+    _bind_task_context(buf, payload, now=now)
     if payload.model_id:
         # The agent's own hook stream names the model (Codex: every payload;
         # OpenCode: the user message's selected model). Recorded as observed.
@@ -2978,13 +3105,16 @@ def handle_hook(
     env: Mapping[str, str] | None = None,
     event_override: str | None = None,
     agent: str = AGENT_CLAUDE_CODE,
+    task_id: str | None = None,
 ) -> HookOutcome:
     """Process one decoded hook payload from *agent* synchronously. Never raises.
 
     Safe to call repeatedly: a repeated identical payload only bumps counts
     (tool/prompt/turn) -- it can never create a second record for the same
     session, because the record is upserted by ``capture.session_id`` and
-    the agent's executor.
+    the agent's executor. *task_id* is the declared launch context
+    (``OPENSHARD_TASK_ID``) the caller validated from its own environment --
+    the in-process twin of the capture header; a malformed value never binds.
     """
     try:
         payload = extract_agent_payload(data, agent=agent, event_override=event_override)
@@ -3004,6 +3134,7 @@ def handle_hook(
             return HookOutcome(event="status", action="buffered" if recorded else "ignored",
                                session_id=payload.session_id, repo_root=repo_root,
                                detail="usage recorded" if recorded else "no session buffer yet")
+        payload.task_id = task_id if is_task_id(task_id) else None
         reduced = reduce_hook_payload(payload, repo_root)
         if reduced is None:
             return HookOutcome(event=payload.event, action="ignored", detail="missing or invalid session_id")
@@ -3020,7 +3151,13 @@ def handle_claude_hook(
     event_override: str | None = None,
 ) -> HookOutcome:
     """Process one decoded Claude Code hook payload synchronously. Never raises."""
-    return handle_hook(data, env=env, event_override=event_override, agent=AGENT_CLAUDE_CODE)
+    return handle_hook(
+        data,
+        env=env,
+        event_override=event_override,
+        agent=AGENT_CLAUDE_CODE,
+        task_id=launch_task_id(env),
+    )
 
 
 def run_hook_from_stream(

@@ -39,6 +39,18 @@ Records written before ``task_id`` existed simply have no ``task_id``
 field. They remain fully valid; nothing back-fills or assigns them a task
 after the fact.
 
+Declared launch context (external-agent capture)
+-------------------------------------------------
+An external agent session (Claude Code, Codex, ...) may be launched with
+``OPENSHARD_TASK_ID=<task id>`` in its environment. That is an explicit
+*declaration by the person launching the agent* -- never an inference -- and
+it is the only way a hook-captured session acquires a ``task_id``. Several
+sessions (of one agent or of different agents) may declare the same id;
+they stay separate Receipts, one per agent session. The declaration is
+recorded as ``EVIDENCE_DECLARED`` launch context; what the hooks then
+observe stays what it always was. See :func:`launch_task_id` and
+``adapters/claude_hooks._bind_task_context``.
+
 No retroactive assignment (v0.5.0 Platform/Sync constraint)
 -------------------------------------------------------------
 ``task_id`` must be established before or at the creation of the work that
@@ -54,11 +66,23 @@ that already synced the Receipt's original content.
 
 from __future__ import annotations
 
+import os
 import re
 import uuid
+from collections.abc import Mapping
 
 TASK_ID_FIELD = "task_id"
 TASK_ID_PREFIX = "task_"
+
+# Declared launch context for external-agent capture. The environment
+# variable is the only place a launcher declares the task; the capture
+# header is how it reaches the capture service, separately from (and never
+# read out of) the agent's own payload.
+TASK_ID_ENV = "OPENSHARD_TASK_ID"
+TASK_CONTEXT_SOURCE_LAUNCH_ENV = "launch_environment"
+# Evidence label of the declaration itself: stated by the launcher, neither
+# observed by a hook nor reported by the agent nor verified by OpenShard.
+EVIDENCE_DECLARED = "declared"
 
 # Canonical UUID string form: 8-4-4-4-12 lowercase hex. Version nibble (the
 # first hex digit of the 3rd group) must be "7"; variant nibble (the first
@@ -84,7 +108,6 @@ def _uuid7() -> str:
     48-bit big-endian millisecond Unix timestamp, then 74 random bits with
     the version (7) and variant (RFC 9562, ``10``) bits set in place.
     """
-    import os
     import time
 
     unix_ms = int(time.time() * 1000) & 0xFFFFFFFFFFFF
@@ -92,7 +115,7 @@ def _uuid7() -> str:
 
     # 128 bits total: 48 (timestamp) + 4 (version) + 12 (rand_a) + 2 (variant) + 62 (rand_b)
     rand_a = (rand >> 62) & 0xFFF
-    rand_b = rand & 0x3FFFFFFFFFFFFFF
+    rand_b = rand & 0x3FFFFFFFFFFFFFFF
 
     value = unix_ms << 80
     value |= 0x7 << 76
@@ -123,6 +146,21 @@ def stored_task_id(entry: object) -> str | None:
     if not isinstance(entry, dict):
         return None
     value = entry.get(TASK_ID_FIELD)
+    return value if is_task_id(value) else None
+
+
+def launch_task_id(env: Mapping[str, str] | None = None) -> str | None:
+    """The well-formed task id declared in *env*'s ``OPENSHARD_TASK_ID``, or None.
+
+    Unset, empty and malformed values all read as "no declaration": nothing
+    is guessed, repaired or normalised (a padded or re-cased id is
+    malformed). Never raises.
+    """
+    source = os.environ if env is None else env
+    try:
+        value = source.get(TASK_ID_ENV)
+    except Exception:
+        return None
     return value if is_task_id(value) else None
 
 

@@ -9,6 +9,7 @@ records without a ``task_id`` remain fully valid.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import patch
 
 import pytest
 
@@ -33,6 +34,11 @@ class TestTaskIdFormat:
             parsed = uuid.UUID(tid[len("task_"):])
             assert parsed.version == 7
             assert parsed.variant == uuid.RFC_4122
+
+    def test_uuid7_preserves_all_62_rand_b_bits(self):
+        with patch("openshard.history.task_identity.os.urandom", return_value=b"\xff" * 10):
+            parsed = uuid.UUID(new_task_id()[len("task_"):])
+        assert parsed.int & ((1 << 62) - 1) == (1 << 62) - 1
 
     def test_validator_rejects_garbage(self):
         for bad in (
