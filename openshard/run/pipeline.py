@@ -2060,7 +2060,8 @@ class RunPipeline:
                         break
                     retry_triggered = True
                     _, verify_output = _run_verification_plan(
-                        _verification_plan, workspace, gate=None, capture=True
+                        _verification_plan, workspace, gate=None, capture=True,
+                        pre_approved_by="same_run_prior_approval",
                     )
                     retry_prompt = _build_retry_prompt(task, _last_attempt, verify_output)
                     if detail == "full":
@@ -2098,6 +2099,7 @@ class RunPipeline:
                     code = _run_verification_plan(
                         _verification_plan, workspace, gate=None,
                         label=f"[retry/{_esc_label}]", detail=detail,
+                        pre_approved_by="same_run_prior_approval",
                     )
             verification_passed = code == 0
             if code != 0:

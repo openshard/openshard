@@ -345,7 +345,29 @@ def _exec_run_verification(
         )
 
     t0 = time.monotonic()
-    exit_code, raw_output = run_verification_plan(plan, repo_root, capture=True)  # type: ignore[misc]  # capture=True always returns tuple; return type is int | tuple
+    _sink: list = []
+    exit_code, raw_output = run_verification_plan(  # type: ignore[misc]  # capture=True always returns tuple; return type is int | tuple
+        plan, repo_root, capture=True,
+        pre_approved_by="native_tool_approved_flag" if approved else None,
+        outcome_sink=_sink,
+    )
+    if _sink and not _sink[0].permitted:
+        # Refused by command policy: not a failed test run.
+        return NativeToolResult(
+            tool_name="run_verification",
+            ok=False,
+            error=f"Verification not run: {_sink[0].decision.reason}",
+            metadata={
+                "attempted": False,
+                "command_count": len(plan.commands),
+                "classification": _sink[0].decision.decision,
+                "decision_reason": _sink[0].decision.reason,
+                "exit_code": None,
+                "duration_ms": 0,
+                "output_chars": 0,
+                "raw_content_stored": False,
+            },
+        )
     duration_ms = int((time.monotonic() - t0) * 1000)
 
     output = compact_tool_result(raw_output, limit)

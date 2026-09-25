@@ -91,7 +91,8 @@ def run_eval_task(
                 {"verification_command": task.verification_command}, None
             )
             returncode, output = run_verification_plan(  # type: ignore[misc]  # capture=True always returns tuple; return type is int | tuple
-                plan, cwd=workspace_root, gate=None, capture=True
+                plan, cwd=workspace_root, gate=None, capture=True,
+                pre_approved_by="eval_task_config",
             )
             verification_returncode = returncode
             verification_output = output

@@ -212,7 +212,8 @@ class TestNeedsApprovalCommand(unittest.TestCase):
             _run_verification_plan(_needs_approval_plan(), Path("/tmp"), gate=_gate("smart"))
         mock_confirm.assert_called_once()
 
-    def test_no_gate_executes_without_prompt(self):
+    def test_no_gate_fails_closed_without_prompt(self):
+        # Command policy v1: ask with no approver available must not execute.
         with (
             patch("subprocess.run", return_value=_proc()) as mock_run,
             patch("click.echo"),
@@ -220,8 +221,8 @@ class TestNeedsApprovalCommand(unittest.TestCase):
         ):
             result = _run_verification_plan(_needs_approval_plan(), Path("/tmp"), gate=None)
         mock_confirm.assert_not_called()
-        mock_run.assert_called_once()
-        self.assertEqual(result, 0)
+        mock_run.assert_not_called()
+        self.assertEqual(result, 1)
 
     def test_needs_approval_argv_passed_to_subprocess(self):
         with (
@@ -260,7 +261,8 @@ class TestCommandNotFound(unittest.TestCase):
             patch("click.echo"),
         ):
             _, output = _run_verification_plan(
-                _safe_plan(["/usr/local/bin/pytest"]), Path("/tmp"), capture=True
+                _safe_plan(["/usr/local/bin/pytest"]), Path("/tmp"), capture=True,
+                pre_approved_by="test",
             )
         self.assertNotIn("/usr/local/bin/pytest", output)
         self.assertIn("not found", output)
