@@ -192,7 +192,7 @@ session the next day. OpenShard only knows that when **you say so at launch**:
 
 ```bash
 TASK=$(openshard task new --json | python -c "import json,sys; print(json.load(sys.stdin)['task_id'])")
-OPENSHARD_TASK_ID=$TASK claude      # or: OPENSHARD_TASK_ID=$TASK codex
+OPENSHARD_TASK_ID=$TASK claude
 openshard task attempts $TASK       # every receipt that declared it
 ```
 
@@ -200,8 +200,8 @@ openshard task attempts $TASK       # every receipt that declared it
 or malformed simply means "no declaration": nothing is repaired, guessed or
 reported as an error, and the session is captured exactly as before.
 
-**How it travels.** The command-hook clients (`openshard hooks <agent>`)
-validate the variable and forward it on a dedicated header,
+**How it travels.** A command-hook client (`openshard hooks <agent>`) that
+receives the variable validates it and forwards it on a dedicated header,
 `X-OpenShard-Task-Id`, next to the capture credential -- never inside the
 agent's own JSON, which is not a source of task context (a `task_id` field
 in a hook payload is ignored). Claude Code's HTTP hooks get the same header
@@ -210,8 +210,12 @@ from the installer (`X-OpenShard-Task-Id: $OPENSHARD_TASK_ID`, with
 to upgrade an existing install). The capture service accepts one well-formed
 id, only on an authorized request, and carries it on the reduced payload
 through the queue and into the session buffer. Status-line pings and the
-OpenCode plugin do not forward it (an OpenCode session is captured, just
-without the declaration). Historical ingestion never reads it.
+OpenCode plugin do not forward it. Codex CLI 0.154.0 also does not expose an
+arbitrary inherited `OPENSHARD_TASK_ID` to project hook commands, so its
+session is captured without the declaration; the command-client transport is
+ready for runtimes that do pass the variable, but OpenShard does not claim a
+Codex task relationship it could not receive. Historical ingestion never
+reads it.
 
 **What is recorded.** On a session that declared a task, the receipt gets
 the existing top-level `task_id` (so `history`, `task attempts`, MCP
