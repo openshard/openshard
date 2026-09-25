@@ -158,3 +158,16 @@ def test_sandbox_must_be_separate_from_repo(repo):
 def test_receipt_object_does_not_retain_task_text(repo):
     rec = run_bounded_loop(repo, "secret task text", lambda c: [], CHECK)
     assert "secret task text" not in repr(rec)
+
+
+def test_isolated_copy_excludes_local_secrets_and_agent_state(tmp_path):
+    from openshard.osn.loop import create_isolated_copy
+
+    r = tmp_path / "r"
+    (r / ".claude").mkdir(parents=True)
+    (r / ".claude" / "settings.json").write_text("{}")
+    (r / ".env").write_text("K=v")
+    (r / "keep.py").write_text("x")
+    copy = create_isolated_copy(r)
+    names = {p.name for p in copy.rglob("*")}
+    assert "keep.py" in names and ".env" not in names and "settings.json" not in names

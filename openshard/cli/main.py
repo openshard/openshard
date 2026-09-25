@@ -7454,8 +7454,10 @@ def roster_reset() -> None:
 
 # Historical Ingestion v1 (``openshard ingest``); defined in its own module.
 from openshard.cli.ingest import ingest_group  # noqa: E402
+from openshard.cli.osn_cmd import osn_group  # noqa: E402
 
 cli.add_command(ingest_group)
+cli.add_command(osn_group)
 
 
 if __name__ == "__main__":
