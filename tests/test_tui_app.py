@@ -232,12 +232,17 @@ async def test_empty_input_does_not_set_status(tmp_path):
 @pytest.mark.asyncio
 async def test_enter_clears_input(tmp_path):
     app = _make_app(tmp_path)
-    async with app.run_test(size=_SIZE) as pilot:
-        ta = app.query_one("#task-input", TaskInput)
-        ta.focus()
-        ta.load_text("some task")
-        await pilot.press("enter")
-        assert ta.text == ""
+    # This test only verifies composer clearing. Stub the background CLI worker
+    # so it cannot outlive the test app and race with screen teardown on slower
+    # Windows runners.
+    with patch.object(app, "_run_cli_async") as mock_run:
+        async with app.run_test(size=_SIZE) as pilot:
+            ta = app.query_one("#task-input", TaskInput)
+            ta.focus()
+            ta.load_text("some task")
+            await pilot.press("enter")
+            assert ta.text == ""
+        mock_run.assert_called_once()
 
 
 # ── Output panel ───────────────────────────────────────────────────────────
