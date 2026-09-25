@@ -4014,7 +4014,7 @@ def stats_routing(as_json: bool, limit: int | None) -> None:
     for g in report["groups"]:
         rate = g["verified_success_rate"]
         rate_s = "n/a" if rate is None else f"{rate:.0%} ({g['verified_successes']}/{g['verification_known']})"
-        click.echo(f"  {g['routing_class']:<20}{g['model']:<36}runs={g['runs']:<4}"
+        click.echo(f"  {g['routing_class']:<20}{g['model']:<44} runs={g['runs']:<4}"
                    f"verified={rate_s}  retries={g['retries_observed']}  escalations={g['escalations']}")
     for note in report["notes"]:
         click.echo(f"  note: {note}")
