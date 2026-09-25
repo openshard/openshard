@@ -20,6 +20,7 @@ Only observed values are populated. In particular:
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,7 +62,8 @@ class RoutingOutcome:
 def _float(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    f = float(value)
+    return f if math.isfinite(f) else None  # NaN/Inf are not observations
 
 
 def _dict(value: object) -> dict:

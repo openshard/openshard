@@ -3978,6 +3978,48 @@ def stats_completeness(as_json: bool, limit: int) -> None:
             click.echo(f"    - {rec}")
 
 
+@stats_group.command("routing")
+@click.option("--json", "as_json", is_flag=True, default=False,
+              help="Machine-readable output (valid JSON only).")
+@click.option("--limit", default=None, type=click.IntRange(min=1),
+              help="Use only the most recent N runs (default: all).")
+def stats_routing(as_json: bool, limit: int | None) -> None:
+    """Descriptive routing outcomes per (class, model) from recorded runs.
+
+    Local and read-only: derives outcomes from existing receipts and reports
+    verified-success rate, retries, escalations, cost and latency with
+    explicit coverage counts. Not a ranking and not a learned router.
+    """
+    from openshard.routing.adaptive.report import build_routing_report
+
+    entries = _load_run_entries(_locate_history().runs_path)
+    if limit is not None:
+        entries = entries[-limit:]
+    if not entries:
+        if as_json:
+            click.echo(json.dumps(_machine_envelope("stats routing", "not_found", runs=0, groups=[]), indent=2))
+        else:
+            click.echo("No run history found. Run 'openshard run' to get started.")
+        return
+
+    report = build_routing_report(entries)
+    if as_json:
+        click.echo(json.dumps(_machine_envelope("stats routing", "ok", **report), indent=2))
+        return
+
+    ov = report["overall"]
+    click.echo("\nRouting outcomes (descriptive)")
+    click.echo(f"  runs: {report['runs']}   verified known: {ov['verification_known']}"
+               f"   shadow comparable: {ov['shadow_comparable']}")
+    for g in report["groups"]:
+        rate = g["verified_success_rate"]
+        rate_s = "n/a" if rate is None else f"{rate:.0%} ({g['verified_successes']}/{g['verification_known']})"
+        click.echo(f"  {g['routing_class']:<20}{g['model']:<36}runs={g['runs']:<4}"
+                   f"verified={rate_s}  retries={g['retries_observed']}  escalations={g['escalations']}")
+    for note in report["notes"]:
+        click.echo(f"  note: {note}")
+
+
 @stats_group.command("failures")
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Machine-readable output (valid JSON only).")
