@@ -30,6 +30,7 @@ class SandboxApplyReceipt:
     dry_run: bool = False
     reason: str = ""
     raw_content_stored: bool = False
+    policy: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.raw_content_stored = False
@@ -51,6 +52,7 @@ def _receipt_to_dict(receipt: SandboxApplyReceipt) -> dict:
         "skipped_count": receipt.skipped_count,
         "dry_run": receipt.dry_run,
         "reason": receipt.reason,
+        "policy": dict(receipt.policy),
         "raw_content_stored": False,
     }
 
@@ -67,6 +69,7 @@ def _dict_to_receipt(d: dict) -> SandboxApplyReceipt:
         files_skipped=list(d.get("files_skipped") or []),
         dry_run=bool(d.get("dry_run", False)),
         reason=d.get("reason", ""),
+        policy=dict(d.get("policy") or {}),
         raw_content_stored=False,
     )
 

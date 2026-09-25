@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from openshard.policy.file_mutation import Approver, FileMutationGate
 from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
 
 _WALK_EXCLUDES = {".git", ".openshard", "__pycache__", ".pytest_cache"}
@@ -18,6 +19,8 @@ class SandboxApplyResult:
     files_skipped: list[str] = field(default_factory=list)
     reason: str = ""
     raw_content_stored: bool = False
+    files_denied: list[str] = field(default_factory=list)
+    policy_summary: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.raw_content_stored = False
@@ -159,8 +162,13 @@ def apply_sandbox_changes(
     *,
     include: list[str] | None = None,
     exclude: list[str] | None = None,
+    approver: Approver | None = None,
 ) -> SandboxApplyResult:
-    """Copy changed sandbox files into repo_root. No deletions in v0."""
+    """Copy changed sandbox files into repo_root, gated by file-mutation policy.
+
+    Denied files (and ask-files without a granting approver) are never written.
+    No deletions in v0.
+    """
     files = filter_sandbox_changed_files(
         list_sandbox_changed_files(repo_root, sandbox_path),
         include=include,
@@ -175,11 +183,17 @@ def apply_sandbox_changes(
         return SandboxApplyResult(sandbox_path=str(sandbox_path), reason=reason)
 
     result = SandboxApplyResult(sandbox_path=str(sandbox_path))
+    gate = FileMutationGate(approver=approver)
     for rel in files:
         try:
             dest = resolve_safe_repo_path(repo_root, rel)
         except UnsafePathError as exc:
             result.files_skipped.append(f"{rel} (unsafe: {exc})")
+            continue
+
+        if not gate.authorize(rel):
+            result.files_denied.append(rel)
+            result.files_skipped.append(f"{rel} (blocked by policy)")
             continue
 
         src = sandbox_path / rel
@@ -190,6 +204,8 @@ def apply_sandbox_changes(
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(src.read_bytes())
         result.files_applied.append(rel)
+        gate.mark_executed(rel)
 
+    result.policy_summary = gate.summary()
     result.applied = bool(result.files_applied)
     return result
