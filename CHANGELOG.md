@@ -73,6 +73,47 @@ All notable changes to OpenShard are documented here.
   - Receipts are never rewritten. `openshard last` shows `Re-verified: ...`
     and `last --json` carries `post_session_verification`.
   - This is evidence only: it exits 0 whatever the checks' outcome.
+- **Task correlation across agent sessions.** Claude sessions can carry an
+  explicit OpenShard task ID, kept through capture and storage, so several
+  sessions on one task are grouped together in history and receipts.
+  OpenShard never guesses that sessions belong together. Codex CLI does not
+  yet pass the task ID through its project hooks (see `docs/agent-capture.md`).
+- **File-mutation policy enforcement.** Files applied from a sandbox to the
+  repository are checked against policy first: `allow`, `ask` (needs
+  approval) or `deny` (never written, cannot be overridden). Secrets,
+  `.env*`, `.git/` and `.openshard/` are denied; CI/Docker config,
+  `pyproject.toml` and `package.json` need approval. `apply-last` asks when
+  needed and `--yes` records the approval source. Receipts record the
+  decision, approval and whether the change was applied; applying is never
+  treated as verification.
+- **Command policy before verification.** OpenShard-controlled command
+  execution, including verification commands, goes through the same
+  `allow` / `ask` / `deny` gate. `deny` never runs and `ask` runs only with
+  granted approval. Receipts record the decision, approval, whether the
+  command ran and its exit code; `executed` is never `verified`.
+- **Bounded OSN execution loop.** OSN can run inspect -> plan -> policy ->
+  isolated changes -> verification -> bounded retry -> receipt. Changes are
+  applied only in an isolated copy, OpenShard runs the verifier itself,
+  retries are capped at 5 and stop when there is no progress, and policy
+  blocks are not retried. Isolation protects repository files, not the host
+  process.
+- **`openshard osn run`.** Runs a real coding task with a model provider
+  (`openshard osn run TASK --verify-cmd ...`). Model output is treated as
+  untrusted and passes policy before it is applied in the isolated copy.
+  Verified changes can optionally be promoted into the repository through
+  the policy gate. The receipt records verification (`not_run` when the
+  verifier could not run), model, retries, reported cost and shadow routing.
+  Adaptive routing does not select the model.
+- **Outcome classification.** Each attempt records what happened, what
+  caused it when that can be shown, and whether it may be used as evidence
+  about a model. Environment, provider, rate-limit, timeout, policy,
+  approval and unknown-cause outcomes never count against a model's coding
+  quality, and a non-zero verifier exit alone does not blame the model.
+  Existing records stay compatible and are not rewritten.
+- **`openshard stats routing`** (`--json`). A read-only, descriptive report
+  of routing outcomes grouped by class and model: runs, verified outcomes,
+  retries, escalations, cost, latency and coverage. Unknown verification is
+  never counted as failure. It does not rank models or change routing.
 
 ### Changed
 
@@ -84,6 +125,9 @@ All notable changes to OpenShard are documented here.
     ignored.
 - **Hermes Agent:** `status: cancelled` is now a failed tool call. A blocked or
   cancelled check command has no result (`unknown`).
+- Command classification is stricter for dangerous Git, Terraform and
+  Kubernetes commands and for executable aliases on Windows. Callers that
+  pass explicit approval must now record where it came from.
 
 ### Fixed
 
