@@ -312,6 +312,24 @@ class TestCommandClientForwarding:
         entry = _entry(repo, SID1)
         assert "task_id" not in entry and "task_context" not in entry["capture"]
 
+    @pytest.mark.parametrize("entrypoint", ["handle", "stream"])
+    @pytest.mark.parametrize(
+        ("declared", "expected"),
+        [(TASK_A, TASK_A), ("task_bogus", None), (None, None)],
+    )
+    def test_legacy_synchronous_entrypoints_read_launch_context(self, repo, entrypoint, declared, expected):
+        env = {"CLAUDE_PROJECT_DIR": str(repo)}
+        if declared is not None:
+            env[TASK_ID_ENV] = declared
+        for doc in _claude_docs(repo, SID1):
+            if entrypoint == "handle":
+                ch.handle_claude_hook(doc, env=env)
+            else:
+                ch.run_hook_from_stream(io.BytesIO(json.dumps(doc).encode()), env=env)
+        entry = _entry(repo, SID1)
+        assert entry.get("task_id") == expected
+        assert ("task_context" in entry["capture"]) is (expected is not None)
+
 
 # ---------------------------------------------------------------------------
 # Claude HTTP hook installation
@@ -681,6 +699,21 @@ class TestBufferAndFold:
         for doc in docs[1:]:
             handle_hook(doc, env=_claude_env(repo), task_id=TASK_A)
         assert _entry(repo, SID1)["task_id"] == TASK_A
+
+    def test_existing_task_id_without_provenance_stays_without_provenance(self, repo):
+        docs = _claude_docs(repo, SID1)
+        _drive_claude(repo, docs, None)
+        runs_path = repo / ".openshard" / "runs.jsonl"
+        entry = _entry(repo, SID1)
+        entry["task_id"] = TASK_A
+        entry["capture"].pop("task_context", None)
+        entry.pop("content_hash", None)
+        runs_path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+        ch.handle_hook(docs[2], env=_claude_env(repo))
+        rebuilt = _entry(repo, SID1)
+        assert rebuilt["task_id"] == TASK_A
+        assert "task_context" not in rebuilt["capture"]
 
     def test_undeclared_and_declared_records_differ_only_by_the_declaration(self, repo, tmp_path):
         other = _make_repo(tmp_path / "second repo")

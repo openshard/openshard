@@ -115,7 +115,7 @@ def _uuid7() -> str:
 
     # 128 bits total: 48 (timestamp) + 4 (version) + 12 (rand_a) + 2 (variant) + 62 (rand_b)
     rand_a = (rand >> 62) & 0xFFF
-    rand_b = rand & 0x3FFFFFFFFFFFFFF
+    rand_b = rand & 0x3FFFFFFFFFFFFFFF
 
     value = unix_ms << 80
     value |= 0x7 << 76

@@ -188,6 +188,7 @@ from openshard.history.task_identity import (
     TASK_ID_ENV,
     ensure_task_id,
     is_task_id,
+    launch_task_id,
     stored_task_id,
 )
 from openshard.history.task_title import derive_task_title
@@ -2147,7 +2148,9 @@ def _stamp_task_context(entry: dict, buf: dict) -> None:
     declared = stored_task_id(context)
     if declared is not None and isinstance(context, dict):
         ensure_task_id(entry, declared)
-        entry["capture"]["task_context"] = {k: context[k] for k in _TASK_CONTEXT_KEYS if k in context}
+        provenance = {k: context[k] for k in _TASK_CONTEXT_KEYS if k in context}
+        if provenance:
+            entry["capture"]["task_context"] = provenance
     conflicts = _stored_count(buf.get("task_context_conflicts"))
     if conflicts:
         entry["capture"]["task_context_conflicts"] = conflicts
@@ -3148,7 +3151,13 @@ def handle_claude_hook(
     event_override: str | None = None,
 ) -> HookOutcome:
     """Process one decoded Claude Code hook payload synchronously. Never raises."""
-    return handle_hook(data, env=env, event_override=event_override, agent=AGENT_CLAUDE_CODE)
+    return handle_hook(
+        data,
+        env=env,
+        event_override=event_override,
+        agent=AGENT_CLAUDE_CODE,
+        task_id=launch_task_id(env),
+    )
 
 
 def run_hook_from_stream(
