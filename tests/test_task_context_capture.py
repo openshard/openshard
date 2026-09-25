@@ -80,7 +80,7 @@ MALFORMED_IDS = [
     f"{TASK_A} ",
     f"{TASK_A}\n",
     TASK_A[len("task_"):],  # no prefix
-    f"task_{uuid.uuid4()}",  # UUIDv4, not v7
+    "task_00000000-0000-4000-8000-000000000000",  # fixed UUIDv4, not v7
 ]
 
 # What can still arrive as a *header value*: the HTTP layer itself trims a leading
@@ -92,7 +92,7 @@ HTTP_MALFORMED_IDS = [
     "task_not-a-task-id",
     TASK_A.upper(),
     TASK_A[len("task_"):],
-    f"task_{uuid.uuid4()}",
+    "task_00000000-0000-4000-8000-000000000000",
 ]
 
 CLAUDE_EXECUTOR = "claude_code_hooks"
