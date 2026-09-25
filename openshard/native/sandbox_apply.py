@@ -163,14 +163,22 @@ def apply_sandbox_changes(
     include: list[str] | None = None,
     exclude: list[str] | None = None,
     approver: Approver | None = None,
+    explicit_files: list[str] | None = None,
 ) -> SandboxApplyResult:
     """Copy changed sandbox files into repo_root, gated by file-mutation policy.
 
     Denied files (and ask-files without a granting approver) are never written.
     No deletions in v0.
     """
+    # explicit_files: the caller already knows exactly what changed (e.g. the
+    # OSN loop's own record), so skip git-based discovery, which is unreliable
+    # for a plain copy that lives inside another git checkout.
+    discovered = (
+        list(explicit_files) if explicit_files is not None
+        else list_sandbox_changed_files(repo_root, sandbox_path)
+    )
     files = filter_sandbox_changed_files(
-        list_sandbox_changed_files(repo_root, sandbox_path),
+        discovered,
         include=include,
         exclude=exclude,
     )
@@ -197,6 +205,9 @@ def apply_sandbox_changes(
             continue
 
         src = sandbox_path / rel
+        if src.is_symlink() or (src.exists() and not src.resolve().is_relative_to(sandbox_path.resolve())):
+            result.files_skipped.append(f"{rel} (unsafe source: symlink or outside sandbox)")
+            continue
         if not src.exists() or src.is_dir():
             result.files_skipped.append(f"{rel} (not found in sandbox)")
             continue

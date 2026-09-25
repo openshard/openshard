@@ -27,6 +27,9 @@ from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
 SCHEMA_VERSION = 1
 _COPY_IGNORE = shutil.ignore_patterns(
     ".git", ".openshard", "__pycache__", ".pytest_cache", ".venv", "venv", "node_modules",
+    # Local secrets/agent state never belong in the isolated working copy.
+    ".env", ".env.*", ".claude", ".codex", ".opencode", ".codegraph", "*.pem", "*.key",
+    ".mypy_cache", ".ruff_cache", "dist", ".tmp",
 )
 
 
@@ -61,7 +64,9 @@ class VerificationResult:
     output_sha256: str
     output_bytes: int
     timed_out: bool = False
-    observed: bool = True  # run by OpenShard itself
+    tainted: bool = False  # the verifier modified the files it was verifying
+    ran: bool = True  # False: the command could not be started; no outcome observed
+    observed: bool = True  # run by OpenShard itself (equals ran)
 
 
 @dataclass
@@ -84,6 +89,9 @@ class LoopReceipt:
     sandbox_path: str
     schema_version: int = SCHEMA_VERSION
     receipt_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # sha256 of each changed file as verified; in memory only, used to refuse
+    # promoting bytes that differ from what was verified.
+    verified_file_hashes: dict[str, str] = field(default_factory=dict)
 
     @property
     def verification_state(self) -> str:
@@ -105,11 +113,11 @@ class LoopReceipt:
             "attempts": [
                 {
                     "n": a.n,
-                    "proposed": a.proposed,
+                    "proposed": [_display_path(p) for p in a.proposed],
                     "applied": a.applied,
-                    "blocked": a.blocked,
-                    "policy": a.policy,
-                    "verification": None if a.verification is None else vars(a.verification),
+                    "blocked": [_display_path(p) for p in a.blocked],
+                    "policy": _stored_policy(a.policy),
+                    "verification": _stored_verification(a.verification),
                 }
                 for a in self.attempts
             ],
@@ -120,6 +128,43 @@ class LoopReceipt:
                 "task_text_stored": False,
             },
         }
+
+
+def _display_path(p: str) -> str:
+    """Model-supplied paths that are absolute or escaping are masked in receipts."""
+    norm = p.replace("\\", "/")
+    if norm.startswith("/") or ":" in norm or ".." in norm.split("/") or norm.startswith("~"):
+        return "<unsafe-path>"
+    return p
+
+
+def _stored_policy(policy: dict) -> dict:
+    """The gate summary lists raw proposed paths; mask unsafe ones like the rest."""
+    return {
+        k: [_display_path(x) if isinstance(x, str) else x for x in v] if isinstance(v, list) else v
+        for k, v in policy.items()
+    }
+
+
+def _stored_verification(v: VerificationResult | None) -> dict | None:
+    if v is None:
+        return None
+    d = dict(vars(v))
+    # Keep only the executable's name: full argv can carry secrets or local paths.
+    exe = v.command[0] if v.command else ""
+    d["command"] = [exe.replace("\\", "/").rsplit("/", 1)[-1]] if exe else []
+    return d
+
+
+def _hash_files(root: Path, rels: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for rel in rels:
+        p = root / rel
+        try:
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "<missing>"
+        except OSError:
+            out[rel] = "<unreadable>"
+    return out
 
 
 def create_isolated_copy(repo_root: Path) -> Path:
@@ -148,11 +193,12 @@ def _run_verification(command: list[str], cwd: Path, timeout: float) -> tuple[Ve
         out = (proc.stdout or "") + (proc.stderr or "")
         code: int | None = proc.returncode
         timed_out = False
+        ran = True
     except subprocess.TimeoutExpired as exc:
         out = "".join(_as_text(x) for x in (exc.stdout, exc.stderr))
-        code, timed_out = None, True
+        code, timed_out, ran = None, True, True
     except OSError as exc:
-        out, code, timed_out = f"could not run: {exc}", None, False
+        out, code, timed_out, ran = f"could not run: {exc}", None, False, False
     result = VerificationResult(
         command=list(command),
         exit_code=code,
@@ -160,6 +206,8 @@ def _run_verification(command: list[str], cwd: Path, timeout: float) -> tuple[Ve
         output_sha256=hashlib.sha256(out.encode("utf-8", "replace")).hexdigest(),
         output_bytes=len(out.encode("utf-8", "replace")),
         timed_out=timed_out,
+        ran=ran,
+        observed=ran,
     )
     return result, out
 
@@ -238,14 +286,27 @@ def run_bounded_loop(
             # proposal would be blocked again and a human decision is needed.
             return _receipt("blocked", "policy_or_path_block")
 
+        before = _hash_files(sandbox, changed)
         result, output = _run_verification(verify_command, sandbox, verify_timeout)
         rec.verification = result
+        after = _hash_files(sandbox, changed)
+        if after != before:
+            # A pass on files the verifier itself rewrote proves nothing about
+            # the proposed change, and those bytes must never be promoted.
+            result.passed = False
+            result.tainted = True
+            return _receipt("failed", "verifier_modified_files")
         if result.passed:
-            return _receipt("verified", "verification_passed")
+            receipt = _receipt("verified", "verification_passed")
+            receipt.verified_file_hashes = after
+            return receipt
 
         fingerprint = result.output_sha256
         if fingerprint == prev_fingerprint:
             return _receipt("failed", "no_progress_identical_failure")
-        prev_fingerprint, prev_failure = fingerprint, output[-2000:]
+        status_line = "timed out" if result.timed_out else f"exit code {result.exit_code}"
+        prev_fingerprint = fingerprint
+        # Always non-empty, even when the verifier prints nothing.
+        prev_failure = f"verify command failed ({status_line})\n{output[-2000:]}"
 
     return _receipt("failed", "max_attempts_exhausted")
