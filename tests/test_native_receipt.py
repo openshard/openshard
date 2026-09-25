@@ -1358,10 +1358,22 @@ class TestShardIdConsistency(unittest.TestCase):
     def test_log_run_stores_shard_id_in_entry(self):
         """_log_run must write shard_id into the serialised JSONL entry."""
         import json
+        import os
+        import tempfile
         import time
         from unittest.mock import MagicMock, patch
 
         from openshard.run.pipeline import _log_run
+
+        # Hermetic cwd: the history lock file is opened for real, so the
+        # ".openshard" directory must exist even though Path.mkdir is patched
+        # below. Without this the test only passed when an earlier test in the
+        # same process had already created it in the repository directory.
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(_td.name)
+        os.makedirs(".openshard", exist_ok=True)
 
         captured: list[str] = []
 
