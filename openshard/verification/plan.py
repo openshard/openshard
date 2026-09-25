@@ -96,6 +96,44 @@ _TEST_KINDS: list[tuple[str, ...]] = [
 ]
 
 
+# Flags that make an otherwise read-only "safe" tool run other programs or write files.
+_UNSAFE_FLAGS_BY_TOOL: dict[str, frozenset[str]] = {
+    "rg": frozenset({"--pre", "--pre-glob"}),
+    "git": frozenset({"--output", "--ext-diff", "--textconv", "--no-index"}),
+    "go": frozenset({"-exec", "-toolexec"}),
+    "cargo": frozenset({"--config"}),
+    "pytest": frozenset({"--basetemp"}),
+}
+
+# Tools whose blocked subcommand may follow global options we cannot enumerate
+# (`terraform -chdir=x apply`, `kubectl -n p delete`). For these, a blocked
+# subcommand word anywhere before `--` is treated as blocked (over-blocks safely).
+_SUBCOMMAND_SCAN_TOOLS = frozenset({"git", "terraform", "kubectl", "helm", "npm", "docker"})
+
+_EXE_SUFFIXES = (".exe", ".com", ".bat", ".cmd")
+
+# git global options that take a value in the next token.
+_GIT_VALUE_OPTS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"})
+
+
+def _strip_exe_suffix(name: str) -> str:
+    name = name.rstrip(" .")  # Win32 normalises "x.bat." and "x.bat " to "x.bat"
+    for suf in _EXE_SUFFIXES:
+        if name.endswith(suf):
+            return name[: -len(suf)]
+    return name
+
+
+def _skip_git_global_opts(argv_lower: list[str]) -> list[str]:
+    """Return argv with git's global options removed so the subcommand is at index 1."""
+    if not argv_lower or _strip_exe_suffix(argv_lower[0].split("/")[-1].split("\\")[-1]) != "git":
+        return argv_lower
+    i = 1
+    while i < len(argv_lower) and argv_lower[i].startswith("-"):
+        i += 2 if argv_lower[i] in _GIT_VALUE_OPTS else 1
+    return ["git", *argv_lower[i:]]
+
+
 class VerificationSource(str, Enum):
     config = "config"
     detected = "detected"
@@ -154,22 +192,50 @@ def classify_command_safety(
 
     # Step 3: single-token blocked executables.
     executable = argv[0].lower()
-    base = executable.split("/")[-1].split("\\")[-1]
+    base = _strip_exe_suffix(executable.split("/")[-1].split("\\")[-1])
     if base in _BLOCKED_COMMANDS or executable in _BLOCKED_COMMANDS:
         return CommandSafety.blocked, f"blocked executable: {argv[0]!r}"
 
     # Step 4: multi-token blocked argv prefix.
     argv_lower = [t.lower() for t in argv]
+    # Blocked-prefix matching sees through `git -C dir push` and `terraform.exe apply`.
+    match_argv = _skip_git_global_opts(argv_lower)
+    if match_argv:
+        match_argv = [_strip_exe_suffix(match_argv[0].split("/")[-1].split("\\")[-1]), *match_argv[1:]]
+    for prefix in _BLOCKED_ARGV_PREFIXES:
+        if len(match_argv) >= len(prefix) and tuple(match_argv[: len(prefix)]) == prefix:
+            return CommandSafety.blocked, f"blocked command: {' '.join(prefix)}"
     for prefix in _BLOCKED_ARGV_PREFIXES:
         if len(argv_lower) >= len(prefix) and tuple(argv_lower[: len(prefix)]) == prefix:
             return CommandSafety.blocked, f"blocked command: {' '.join(prefix)}"
 
+    if match_argv and match_argv[0] in _SUBCOMMAND_SCAN_TOOLS:
+        head = argv_lower[1:argv_lower.index("--")] if "--" in argv_lower else argv_lower[1:]
+        for prefix in _BLOCKED_ARGV_PREFIXES:
+            if len(prefix) == 2 and prefix[0] == match_argv[0] and prefix[1] in head:
+                return CommandSafety.blocked, f"blocked command: {' '.join(prefix)}"
+
     # Step 5: git reset with destructive flags.
-    if len(argv_lower) >= 2 and argv_lower[0] == "git" and argv_lower[1] == "reset":
+    if len(match_argv) >= 2 and match_argv[0] == "git" and match_argv[1] == "reset":
         flags_present = frozenset(t.lower() for t in argv[2:]) & _BLOCKED_GIT_RESET_FLAGS
         if flags_present:
             flag = next(iter(flags_present))
             return CommandSafety.blocked, f"destructive git reset flag: {flag}"
+
+    # Step 5b: a safe-listed tool with a flag that executes/writes is not safe.
+    tool = match_argv[0] if match_argv else ""
+    unsafe = set(_UNSAFE_FLAGS_BY_TOOL.get(tool, frozenset()))
+    if tool == "pytest" or argv_lower[1:3] == ["-m", "pytest"]:
+        unsafe |= _UNSAFE_FLAGS_BY_TOOL["pytest"]
+        for i, tok in enumerate(argv_lower):
+            nxt = argv_lower[i + 1] if i + 1 < len(argv_lower) else ""
+            if (tok == "-p" and not nxt.startswith("no:")) or (
+                tok.startswith("-p") and len(tok) > 2 and not tok.startswith(("-pno:", "--"))
+            ):
+                return CommandSafety.needs_approval, "pytest -p loads an arbitrary plugin module"
+    for tok in argv_lower[1:]:
+        if tok.split("=", 1)[0] in unsafe:
+            return CommandSafety.needs_approval, f"flag can execute or write outside read-only use: {tok.split('=', 1)[0]}"
 
     # Step 6: safe prefixes — checked before approval to protect e.g. npm run test.
     for prefix in _SAFE_PREFIXES:

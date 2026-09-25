@@ -2390,7 +2390,7 @@ class TestNativeVerificationLoop(unittest.TestCase):
         # Verification sequence: initial fails (1), capture returns (1, ""), retry passes (0)
         verify_calls = [1, 1, "", 0]
 
-        def _fake_verify_plan(plan, workspace, gate=None, capture=False, label="[verify]", detail="default"):
+        def _fake_verify_plan(plan, workspace, gate=None, capture=False, label="[verify]", detail="default", **_kw):
             if capture:
                 return verify_calls.pop(0), verify_calls.pop(0)
             return verify_calls.pop(0)
