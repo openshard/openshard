@@ -23,7 +23,6 @@ import copy
 import io
 import json
 import socket
-import uuid
 from pathlib import Path
 
 import pytest
