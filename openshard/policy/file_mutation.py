@@ -39,7 +39,9 @@ Approver = Callable[[str, PolicyDecision], tuple[bool, str]]
 
 def _matches(rel: str, patterns: tuple[str, ...]) -> bool:
     # Case-fold: Windows/macOS filesystems are case-insensitive (.ENV == .env).
-    p = PurePosixPath(rel.replace("\\", "/").lower())
+    # Strip trailing dots/spaces per component: Win32 normalises ".env " to ".env".
+    parts = [c.rstrip(" .") for c in rel.replace("\\", "/").lower().split("/")]
+    p = PurePosixPath("/".join(parts))
     text = str(p)
     return any(
         fnmatch.fnmatchcase(text, pat.lower()) or fnmatch.fnmatchcase(p.name, pat.lower())
@@ -49,6 +51,11 @@ def _matches(rel: str, patterns: tuple[str, ...]) -> bool:
 
 def evaluate_file_write(rel: str) -> PolicyDecision:
     """Evaluate a proposed write to *rel* (repo-relative). Pure; no I/O."""
+    if ":" in rel:  # NTFS alternate data streams / drive-relative forms
+        return make_deny(
+            ACTION_FILE_WRITE, rel, "path contains ':' (alternate stream or drive form)",
+            source=SOURCE, severity="high",
+        )
     if _matches(rel, _DENY_PATTERNS):
         return make_deny(
             ACTION_FILE_WRITE, rel, "protected path (secrets/VCS/OpenShard state)",
