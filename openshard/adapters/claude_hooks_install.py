@@ -53,7 +53,9 @@ from openshard.adapters.claude_capture_client import (
     DEFAULT_PORT,
     HOOK_PATH,
     PROJECT_DIR_HEADER,
+    TASK_ID_HEADER,
 )
+from openshard.history.task_identity import TASK_ID_ENV
 
 HOOK_COMMAND = "openshard hooks claude"
 STATUS_COMMAND = "openshard hooks claude-status"
@@ -121,12 +123,18 @@ def _hook_entry(spec: HookSpec, port: int = DEFAULT_PORT, capability: str | None
             # events for this repository only -- not another agent's
             # receiver, not another repository, never shutdown.
             headers[_auth.TOKEN_HEADER] = capability
+        # Declared launch context: Claude Code fills this from its own
+        # environment (``OPENSHARD_TASK_ID`` is the only variable besides the
+        # project dir it may interpolate). Unset -> empty header -> the
+        # service reads "no declaration"; it is validated there and never
+        # taken from the payload.
+        headers[TASK_ID_HEADER] = f"${TASK_ID_ENV}"
         entry: dict = {
             "type": "http",
             "url": hook_url(port),
             "timeout": spec.timeout,
             "headers": headers,
-            "allowedEnvVars": ["CLAUDE_PROJECT_DIR"],
+            "allowedEnvVars": ["CLAUDE_PROJECT_DIR", TASK_ID_ENV],
         }
         return entry
     entry = {"type": "command", "command": HOOK_COMMAND, "timeout": spec.timeout}
