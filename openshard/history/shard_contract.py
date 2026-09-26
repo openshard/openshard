@@ -895,12 +895,23 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     fu = entry.get("files_updated") or 0
     fd = entry.get("files_deleted") or 0
     files_changed = fc + fu + fd
+    # Files whose type could not be established are listed with the neutral
+    # "changed" type and are in none of the three counts above.
+    _detail = entry.get("files_detail")
+    _detail = _detail if isinstance(_detail, list) else []
+    files_changed += sum(
+        1 for f in _detail if isinstance(f, dict) and f.get("path") and f.get("change_type") == "changed"
+    )
     if files_changed == 0:
         fr = entry.get("final_report") or {}
         diff = entry.get("diff_review") or {}
         diff_files = fr.get("diff_files") or diff.get("changed_files") or []
         if diff_files:
             files_changed = len(diff_files)
+        else:
+            # Records that list files but wrote zero counts (older OSN runs) still
+            # changed the files they list.
+            files_changed = sum(1 for f in _detail if isinstance(f, dict) and f.get("path"))
 
     v_attempted = entry.get("verification_attempted")
     v_passed = entry.get("verification_passed")

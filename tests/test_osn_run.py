@@ -9,7 +9,10 @@ import pytest
 from click.testing import CliRunner
 
 from openshard.cli.main import cli
+from openshard.history.run_cost import run_total_cost
+from openshard.history.shard_contract import build_shard_receipt
 from openshard.history.verification import derive_verification
+from openshard.history.views import receipt_to_dict
 from openshard.osn.loop import FileWriteAction, LoopContext, run_bounded_loop
 from openshard.osn.model_provider import (
     ModelActionProvider,
@@ -240,3 +243,95 @@ def test_two_malformed_replies_is_an_error_not_a_pass(repo):
     fp = FakeProvider(["nope", "still nope"])
     receipt = run_bounded_loop(repo, "t", ModelActionProvider(fp, ["m"], repo), CHECK)
     assert receipt.status == "error" and len(fp.calls) == 2
+
+
+def _two_writes(*pairs):
+    return json.dumps({"writes": [{"path": p, "content": c} for p, c in pairs]})
+
+
+class TestFileEffects:
+    """The receipt's file counts and change types come from what OpenShard applied."""
+
+    def _entry(self, repo, replies, models=("m",), **kw):
+        fp = FakeProvider(replies)
+        ap = ModelActionProvider(fp, list(models), repo)
+        receipt = run_bounded_loop(repo, "t", ap, CHECK, max_attempts=3)
+        entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo, **kw)
+        return entry, receipt
+
+    def test_a_file_that_already_exists_is_an_update_and_is_counted(self, repo):
+        entry, _ = self._entry(repo, [_writes("out.txt", "ok")])
+        assert entry["files_detail"] == [{"path": "out.txt", "change_type": "update"}]
+        assert (entry["files_updated"], entry["files_created"]) == (1, 0)
+        r = build_shard_receipt(entry, index=0)
+        assert r.files_changed == 1  # was 0 while the file was listed
+
+    def test_a_new_file_is_a_create(self, repo):
+        entry, _ = self._entry(repo, [_two_writes(("out.txt", "ok"), ("fresh.txt", "x"))])
+        kinds = {f["path"]: f["change_type"] for f in entry["files_detail"]}
+        assert kinds == {"out.txt": "update", "fresh.txt": "create"}
+        assert (entry["files_updated"], entry["files_created"]) == (1, 1)
+        assert build_shard_receipt(entry, index=0).files_changed == 2
+
+    def test_type_is_neutral_when_the_repository_cannot_say(self, repo, tmp_path):
+        entry, receipt = self._entry(repo, [_writes("out.txt", "ok")])
+        # Build the same entry against a repo path that does not exist: no state to read.
+        gone = tmp_path / "missing-repo"
+        neutral = build_osn_run_entry(receipt, task="t", usage=[], duration_seconds=0.1, repo_path=gone)
+        assert neutral["files_detail"] == [{"path": "out.txt", "change_type": "changed"}]
+        assert (neutral["files_created"], neutral["files_updated"]) == (0, 0)
+        assert build_shard_receipt(neutral, index=0).files_changed == 1  # neutral files still count
+
+    def test_a_directory_or_unreadable_repo_is_not_guessed(self, repo, tmp_path):
+        from openshard.osn.run_entry import _file_effects
+
+        (repo / "d").mkdir()
+        detail, created, updated = _file_effects(["d", "out.txt", "new.txt"], repo)
+        assert [f["change_type"] for f in detail] == ["changed", "update", "create"]
+        assert (created, updated) == (1, 1)  # the directory is in neither count
+        detail, created, updated = _file_effects(["out.txt"], tmp_path / "missing")
+        assert detail == [{"path": "out.txt", "change_type": "changed"}] and (created, updated) == (0, 0)
+
+    def test_older_record_that_listed_files_with_zero_counts_reports_them(self):
+        old = {"executor": "osn_loop", "files_created": 0, "files_updated": 0, "files_deleted": 0,
+               "files_detail": [{"path": "calc.py", "change_type": "update"}],
+               "receipt_id": "rcpt_" + "b2" * 16, "timestamp": "2026-09-26T13:31:47Z", "shard_id": "shard-20260926-0002"}
+        assert build_shard_receipt(old, index=0).files_changed == 1
+
+    def test_a_record_with_no_files_still_reports_zero(self):
+        empty = {"executor": "osn_loop", "files_created": 0, "files_updated": 0, "files_deleted": 0,
+                 "files_detail": [], "receipt_id": "rcpt_" + "b3" * 16, "timestamp": "2026-09-26T13:31:47Z",
+                 "shard_id": "shard-20260926-0003"}
+        assert build_shard_receipt(empty, index=0).files_changed == 0
+
+
+class TestOsnRetryAttempts:
+    def test_each_retry_attempt_is_recorded_with_its_model_and_cost(self, repo):
+        fp = FakeProvider([_writes("out.txt", "nope"), _writes("out.txt", "still no"), _writes("out.txt", "ok")])
+        ap = ModelActionProvider(fp, ["cheap/m", "mid/m", "strong/m"], repo)
+        # Prints the file so each failure differs; identical output would stop the loop early.
+        echo = [PY, "-c", "import sys; t=open('out.txt').read(); print(t); sys.exit(0 if t=='ok' else 1)"]
+        receipt = run_bounded_loop(repo, "t", ap, echo, max_attempts=3)
+        entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
+        assert [a["model"] for a in entry["retry_attempts"]] == ["mid/m", "strong/m"]
+        assert all(a["estimated_cost"] == pytest.approx(0.001) for a in entry["retry_attempts"])
+        assert entry["retry_estimated_cost"] == pytest.approx(0.002)
+        total, complete = run_total_cost(entry)
+        assert complete is True and total == pytest.approx(0.003)  # first attempt + both retries
+        r = receipt_to_dict(build_shard_receipt(entry, index=0), extended=True)
+        assert r["cost_usd"] == pytest.approx(0.003) and r["retry"]["cost_included"] is True
+
+    def test_unknown_retry_cost_is_not_summed(self, repo):
+        fp = FakeProvider([_writes("out.txt", "nope"), _writes("out.txt", "ok")], cost=None)
+        ap = ModelActionProvider(fp, ["a/m", "b/m"], repo)
+        receipt = run_bounded_loop(repo, "t", ap, CHECK, max_attempts=2)
+        entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
+        assert entry["retry_attempts"][0]["estimated_cost"] is None
+        assert run_total_cost(entry)[1] is False
+
+    def test_a_single_attempt_run_records_no_retry_attempts(self, repo):
+        fp = FakeProvider([_writes("out.txt", "ok")])
+        ap = ModelActionProvider(fp, ["m"], repo)
+        receipt = run_bounded_loop(repo, "t", ap, CHECK)
+        entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
+        assert "retry_attempts" not in entry
