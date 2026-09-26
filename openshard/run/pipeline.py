@@ -152,6 +152,11 @@ from openshard.verification.plan import (
     build_verification_plan,
     safe_check_label,
 )
+from openshard.verification.setup_failure import (
+    detect_setup_failure,
+    setup_failure_metadata,
+    setup_failure_reason,
+)
 
 
 def _build_explicit_file_context(task: str, *, root: Path | None = None) -> str:
@@ -2054,6 +2059,9 @@ class RunPipeline:
             # One record per escalation actually made. Usage is summed over all of
             # them (it used to be overwritten, so only the last attempt survived).
             _retry_attempts: list[dict] = []
+            # Set when the verifier could not run at all (missing module, command not
+            # found). That is an environment problem, not a verdict on the model's work.
+            _setup_failure: str | None = None
             _can_escalate = (
                 _verification_plan.has_commands
                 and _verification_plan.commands[0].safety != CommandSafety.blocked
@@ -2062,11 +2070,19 @@ class RunPipeline:
                 for _esc_model in _escalation:
                     if code == 0:
                         break
-                    retry_triggered = True
-                    _, verify_output = _run_verification_plan(
+                    _cap_code, verify_output = _run_verification_plan(
                         _verification_plan, workspace, gate=None, capture=True,
                         pre_approved_by="same_run_prior_approval",
                     )
+                    _setup_failure = detect_setup_failure(
+                        _cap_code if isinstance(_cap_code, int) else code, verify_output
+                    )
+                    if _setup_failure:
+                        # Another model cannot fix a missing tool: stop before spending on one.
+                        click.echo(f"  [verify] {setup_failure_reason(_setup_failure)}; "
+                                   "not escalating to another model.")
+                        break
+                    retry_triggered = True
                     retry_prompt = _build_retry_prompt(task, _last_attempt, verify_output)
                     if detail == "full":
                         snippet = retry_prompt[:300] + ("..." if len(retry_prompt) > 300 else "")
@@ -2135,13 +2151,20 @@ class RunPipeline:
                         if _vf_extra is None:
                             _vf_extra = {}
                         _vf_extra.update(_findings_extra)
+                    if _setup_failure:
+                        # The verifier never ran: record an unknown, incomplete verification and
+                        # attribute the outcome to the environment (not to the model).
+                        if _vf_extra is None:
+                            _vf_extra = {}
+                        _vf_extra.update(setup_failure_metadata(_setup_failure, code, model=_routed_model))
                     if effective_executor == "native" and hasattr(generator, "native_meta"):
                         if _vf_extra is None:
                             _vf_extra = {}
                         _vf_extra["executor"] = generator.native_meta.executor
                         _vf_extra["tool_trace"] = generator.native_meta.tool_trace
                     _log_run(start, _task_display, generator, retry_triggered, final_files,
-                             verification_attempted=True, verification_passed=False,
+                             verification_attempted=True,
+                             verification_passed=None if _setup_failure else False,
                              workspace=workspace, usage=usage, retry_usage=retry_usage, model=_routed_model,
                              summary=_clean_summary, notes=exec_result.notes,
                              stage_runs=stage_runs, routing_decision=routing_decision,

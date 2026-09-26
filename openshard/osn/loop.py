@@ -23,6 +23,7 @@ from pathlib import Path
 
 from openshard.policy.file_mutation import Approver, FileMutationGate
 from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
+from openshard.verification.setup_failure import detect_setup_failure
 
 SCHEMA_VERSION = 1
 _COPY_IGNORE = shutil.ignore_patterns(
@@ -67,6 +68,9 @@ class VerificationResult:
     tainted: bool = False  # the verifier modified the files it was verifying
     ran: bool = True  # False: the command could not be started; no outcome observed
     observed: bool = True  # run by OpenShard itself (equals ran)
+    # Set when the output shows the verifier itself could not run (missing module,
+    # command not found): an environment problem, no verdict on the change.
+    setup_failure: str | None = None
 
 
 @dataclass
@@ -300,6 +304,16 @@ def run_bounded_loop(
             receipt = _receipt("verified", "verification_passed")
             receipt.verified_file_hashes = after
             return receipt
+
+        kind = detect_setup_failure(result.exit_code, output)
+        if kind is not None:
+            # A missing tool is not something another model call can fix. No outcome was
+            # observed for the proposed change, so this is not a failed verification.
+            result.setup_failure = kind
+            result.ran = False
+            result.observed = False
+            result.passed = False
+            return _receipt("error", "verifier_setup_failed")
 
         fingerprint = result.output_sha256
         if fingerprint == prev_fingerprint:

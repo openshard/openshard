@@ -34,6 +34,7 @@ def _verification_block(receipt: LoopReceipt) -> dict[str, Any]:
         return build_verification(
             source=None, observation_mode=MODE_NONE, status="not_run",
             reason=f"verification did not run ({receipt.stop_reason})",
+            incomplete_reasons=["verifier_setup_failed"] if getattr(last, "setup_failure", None) else None,
         )
     status = "passed" if last.passed else "failed"
     return build_verification(
@@ -190,6 +191,19 @@ def build_osn_run_entry(
         entry["estimated_cost"] = _sum_costs(usage)
     entry["prompt_tokens"] = sum(u.prompt_tokens for u in usage)
     entry["completion_tokens"] = sum(u.completion_tokens for u in usage)
+
+    setup_kind = next(
+        (a.verification.setup_failure for a in reversed(receipt.attempts)
+         if a.verification is not None and a.verification.setup_failure),
+        None,
+    )
+    if setup_kind:
+        from openshard.verification.setup_failure import setup_failure_metadata
+
+        # Attribute the outcome to the environment; keep the not_run verification block above.
+        entry["outcome_classification"] = setup_failure_metadata(
+            setup_kind, None, model=final_model, attempt=len(receipt.attempts),
+        )["outcome_classification"]
 
     prov = _shadow_provenance(safe_task, final_model, verification_available=True)
     if prov is not None:

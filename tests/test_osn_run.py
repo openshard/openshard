@@ -335,3 +335,42 @@ class TestOsnRetryAttempts:
         receipt = run_bounded_loop(repo, "t", ap, CHECK)
         entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
         assert "retry_attempts" not in entry
+
+
+class TestOsnSetupFailure:
+    """A verifier that cannot run is an environment problem: no retry, no model blame."""
+
+    MISSING = [PY, "-c", "import sys; print('C:/py/python.exe: No module named pytest', file=sys.stderr); sys.exit(1)"]
+
+    def _run(self, repo, verifier, replies):
+        fp = FakeProvider(replies)
+        ap = ModelActionProvider(fp, ["cheap/m", "strong/m"], repo)
+        receipt = run_bounded_loop(repo, "t", ap, verifier, max_attempts=3)
+        return fp, ap, receipt
+
+    def test_the_loop_stops_after_the_first_attempt_without_another_model_call(self, repo):
+        fp, _, receipt = self._run(repo, self.MISSING, [_writes("out.txt", "ok")])  # one reply: a second call would fail
+        assert len(fp.calls) == 1 and len(receipt.attempts) == 1
+        assert (receipt.status, receipt.stop_reason) == ("error", "verifier_setup_failed")
+        assert receipt.verification_state != "passed"
+        v = receipt.attempts[0].verification
+        assert v.setup_failure == "missing_module" and v.ran is False and v.observed is False and v.passed is False
+
+    def test_the_record_says_not_run_and_blames_the_environment(self, repo):
+        _, ap, receipt = self._run(repo, self.MISSING, [_writes("out.txt", "ok")])
+        entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
+        ev = derive_verification(entry)
+        assert ev.status == "not_run" and ev.source is None
+        assert "verifier_setup_failed" in entry["verification"]["incomplete_reasons"]
+        c = entry["outcome_classification"]
+        assert (c["outcome"], c["cause"]) == ("verification_infra_error", "harness")
+        assert c["model"] == "cheap/m" and c["routing_use"] == "harness"  # never coding or format evidence
+        assert entry["retry_triggered"] is False
+        assert "No module named" not in json.dumps(entry)  # no verifier output is stored
+
+    def test_a_real_failure_still_retries_and_carries_no_classification(self, repo):
+        echo = [PY, "-c", "import sys; t=open('out.txt').read(); print(t); sys.exit(0 if t=='ok' else 1)"]
+        fp, ap, receipt = self._run(repo, echo, [_writes("out.txt", "nope"), _writes("out.txt", "ok")])
+        assert receipt.status == "verified" and len(fp.calls) == 2
+        entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
+        assert "outcome_classification" not in entry
