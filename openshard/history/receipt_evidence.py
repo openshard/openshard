@@ -22,6 +22,8 @@ import math
 import re
 from typing import Any
 
+from openshard.history.run_cost import run_total_cost, stored_retry_attempts
+
 MAX_TEXT = 300
 MAX_POLICY_DECISIONS = 20
 MAX_LOOP_ATTEMPTS = 10
@@ -260,9 +262,31 @@ def routing_block(entry: dict) -> dict[str, Any] | None:
 
 
 def retry_block(entry: dict) -> dict[str, Any] | None:
+    """The retry pass. ``attempts`` and ``cost_included`` come only from a record that
+    stored every escalation (``retry_attempts``); older records leave both ``None``
+    and keep exactly what they recorded, never completed by guessing.
+
+    ``cost_included`` says whether the receipt's ``cost_usd`` is the true run total
+    (first attempt plus every escalation): True only when every attempt's cost is
+    stored, False when attempts are recorded but one cost is unknown.
+    """
+    stored = stored_retry_attempts(entry)
+    attempts = (
+        [
+            {"model": _text(a["model"], 256), "total_tokens": a["total_tokens"], "cost_usd": a["estimated_cost"]}
+            for a in stored
+        ]
+        if stored
+        else None
+    )
+    cost_included: bool | None = None
+    if stored and entry.get("retry_triggered") is True:
+        cost_included = run_total_cost(entry)[1]
     block = {
         "triggered": _bool(entry.get("retry_triggered")),
         "fixer_model": _text(entry.get("fixer_model"), 256),
+        "attempts": attempts,
+        "cost_included": cost_included,
         "total_tokens": _count(entry.get("retry_total_tokens")),
         "cost_usd": _number(entry.get("retry_estimated_cost")),
     }

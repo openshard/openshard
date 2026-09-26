@@ -143,3 +143,8 @@ def run_total_from_usage(
     if not attempts or first is None or retry_cost is None:
         return first, False
     return first + retry_cost, True
+
+
+def run_cost_usd(entry: dict) -> float | None:
+    """The run's cost for summaries: the true total when complete, else the recorded first attempt."""
+    return run_total_cost(entry)[0]

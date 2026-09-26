@@ -67,6 +67,7 @@ from openshard.config.settings import (
 )
 from openshard.evals.registry import load_eval_tasks
 from openshard.evals.runner import append_eval_result, run_eval_task
+from openshard.history.run_cost import run_cost_usd
 from openshard.history.sandbox_apply_receipts import (
     SandboxApplyReceipt,
     log_sandbox_apply_receipt,
@@ -1398,7 +1399,7 @@ def report():
     retry_count   = sum(1 for e in entries if e.get("retry_triggered") is True)
     avg_duration  = sum(e.get("duration_seconds", 0) for e in entries) / total
     total_tokens  = sum(e.get("total_tokens", 0) for e in entries)
-    costs = [e["estimated_cost"] for e in entries if e.get("estimated_cost") is not None]
+    costs = [c for c in (run_cost_usd(e) for e in entries) if c is not None]
     total_cost    = sum(costs) if costs else None
     avg_cost      = total_cost / len(costs) if costs else None
 
@@ -1453,7 +1454,7 @@ def report():
 def _compute_metrics(entries: list[dict]) -> dict:
     from collections import Counter
 
-    costs = [e["estimated_cost"] for e in entries if e.get("estimated_cost") is not None]
+    costs = [c for c in (run_cost_usd(e) for e in entries) if c is not None]
     total_cost = sum(costs) if costs else None
     avg_cost = total_cost / len(costs) if costs else None  # type: ignore[operator]  # total_cost is float when costs is non-empty; guarded by same condition
 
@@ -1880,7 +1881,7 @@ def _render_log_entry(entry: dict, detail: str, index: int | None = None) -> Non
             click.echo(f"\nValidator: skipped — {_vpol.get('reason', '')}")
 
     duration = entry.get("duration_seconds", 0)
-    cost = entry.get("estimated_cost")
+    cost = run_cost_usd(entry)
     cost_str = f"${cost:.4f}" if cost is not None else "-"
 
     # Compact RECEIPT — default view only, appears before Time/Cost footer
@@ -5007,7 +5008,7 @@ def _export_run_entry(entry: dict, include_notes: bool = False, include_timeline
         "verification_passed":       entry.get("verification_passed"),
         "verification":              _export_verification_block(receipt),
         "duration_seconds":          entry.get("duration_seconds"),
-        "total_cost_usd":            entry.get("estimated_cost"),
+        "total_cost_usd":            run_cost_usd(entry),
         "prompt_tokens":             entry.get("prompt_tokens"),
         "completion_tokens":         entry.get("completion_tokens"),
         "total_tokens":              entry.get("total_tokens"),

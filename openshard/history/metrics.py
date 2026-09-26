@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
+from openshard.history.run_cost import run_cost_usd
+
 _LOG_PATH = Path(".openshard") / "runs.jsonl"
 
 ALL_PROFILES = ("native_light", "native_deep", "native_swarm")
@@ -43,7 +45,7 @@ def compute_model_stats(runs: list[dict]) -> dict[str, dict]:
         s = accum[model]
         s["runs_count"] += 1
 
-        cost = run.get("estimated_cost")
+        cost = run_cost_usd(run)
         if cost is not None:
             s["total_cost"] += cost
             s["cost_count"] += 1
@@ -110,7 +112,7 @@ def compute_skill_stats(runs: list[dict]) -> dict[str, dict]:
             s = accum[slug]
             s["runs_count"] += 1
 
-            cost = run.get("estimated_cost")
+            cost = run_cost_usd(run)
             if cost is not None:
                 s["total_cost"] += cost
                 s["cost_count"] += 1
@@ -160,7 +162,7 @@ def compute_profile_stats(runs: list[dict]) -> dict[str, dict]:
         s = accum[profile]
         s["runs_count"] += 1
 
-        cost = run.get("estimated_cost")
+        cost = run_cost_usd(run)
         if cost is not None:
             s["total_cost"] += cost
             s["cost_count"] += 1

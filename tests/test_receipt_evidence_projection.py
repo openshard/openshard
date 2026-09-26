@@ -268,12 +268,15 @@ class TestRetry:
     def test_shape(self):
         d = _ext(_entry(retry_triggered=True, fixer_model="anthropic/claude-sonnet-4.6",
                         retry_total_tokens=1234, retry_estimated_cost=0.0123))["retry"]
+        # A record without stored attempts (older Core) leaves attempts/cost_included None.
         assert d == {"triggered": True, "fixer_model": "anthropic/claude-sonnet-4.6",
+                     "attempts": None, "cost_included": None,
                      "total_tokens": 1234, "cost_usd": 0.0123}
 
     def test_malformed_dropped_and_none_is_null(self):
         d = ev.retry_block({"retry_triggered": False, "retry_total_tokens": -5, "retry_estimated_cost": float("nan")})
-        assert d == {"triggered": False, "fixer_model": None, "total_tokens": None, "cost_usd": None}
+        assert d == {"triggered": False, "fixer_model": None, "attempts": None, "cost_included": None,
+                     "total_tokens": None, "cost_usd": None}
         assert ev.retry_block({"retry_triggered": "yes", "retry_estimated_cost": True}) is None
         assert ev.retry_block({}) is None
 
@@ -361,7 +364,8 @@ class TestPrivacyGuard:
         assert d["approval_detail"]["granted"] is True and d["approval_detail"]["requires_approval"] is True
         assert d["sandbox_detail"]["enabled"] is True
         assert d["execution_loop"]["attempts"] == [{"n": 1, "proposed_count": 0, "applied_count": 0, "blocked_count": 0}]
-        assert d["retry"] == {"triggered": True, "fixer_model": None, "total_tokens": None, "cost_usd": None}
+        assert d["retry"] == {"triggered": True, "fixer_model": None, "attempts": None, "cost_included": None,
+                              "total_tokens": None, "cost_usd": None}
 
     def test_no_forbidden_key_names_in_new_blocks(self):
         forbidden = {"prompt", "output", "env", "environment", "secret", "password", "diff", "patch", "timeline",

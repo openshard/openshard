@@ -13,6 +13,7 @@ from openshard.history.capture_completeness import (
 )
 from openshard.history.receipt_evidence import project_entry_evidence
 from openshard.history.receipt_identity import stored_receipt_id
+from openshard.history.run_cost import run_total_cost
 from openshard.history.shard import (
     ORIGIN_EXTERNAL_OBSERVED,
     ORIGIN_HISTORICAL_IMPORT,
@@ -981,6 +982,13 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
     _approval_reason: str = approval_receipt_raw.get("reason", "") if approval_receipt_raw else ""
 
     cost_raw = entry.get("estimated_cost")
+    # A retried run's headline cost is the true total, but only when the record stored
+    # every escalation's cost. Otherwise it stays exactly what was recorded (the first
+    # attempt); nothing is added on a guess.
+    if entry.get("retry_triggered") is True:
+        _run_total, _run_total_complete = run_total_cost(entry)
+        if _run_total_complete and _run_total is not None:
+            cost_raw = _run_total
     cost_provenance = entry.get("cost_provenance") if isinstance(entry.get("cost_provenance"), str) else None
     if cost_raw is None:
         _sr_costs = [
