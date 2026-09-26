@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from openshard.history.query import RecoveryObservation, RelevantAttempt, RelevantMatch, SearchHit
+from openshard.history.receipt_evidence import policy_decisions_block
 from openshard.history.shard import Shard
 from openshard.history.shard_contract import ShardFinding, ShardReceipt
 from openshard.history.verification import parse_verification_block
@@ -135,7 +136,7 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         "origin": shard.origin if shard else None,
         "capture_depth": shard.capture_depth if shard else None,
         "model": receipt.model_display,
-        "model_stages": [{"stage": s, "model": m} for s, m in receipt.model_stages],
+        "model_stages": _model_stages_to_list(receipt, extended=extended),
         "strategy": receipt.strategy,
         "risk": receipt.risk,
         "sandbox": receipt.sandbox,
@@ -178,7 +179,52 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
             # Structured verification evidence (history/verification.py).
             "verification": verification_to_dict(receipt.verification),
         })
+        d.update(_recorded_evidence_to_dict(receipt))
     return d
+
+
+def _model_stages_to_list(receipt: ShardReceipt, *, extended: bool) -> list[dict[str, Any]]:
+    """``[{stage, model}]``, plus per-stage ``duration_seconds`` / ``cost_usd`` when recorded.
+
+    The extra keys are extended-projection only (the default MCP shape is
+    frozen), appear only for stages built from ``stage_runs`` and only when
+    that stage recorded a usable number, so records without them keep the
+    previous shape exactly.
+    """
+    evidence = receipt.recorded_evidence or {}
+    metrics = evidence.get("model_stage_metrics") or []
+    aligned = extended and len(metrics) == len(receipt.model_stages)
+    out: list[dict[str, Any]] = []
+    for i, (stage, model) in enumerate(receipt.model_stages):
+        item: dict[str, Any] = {"stage": stage, "model": model}
+        if aligned:
+            for key in ("duration_seconds", "cost_usd"):
+                value = metrics[i].get(key)
+                if value is not None:
+                    item[key] = value
+        out.append(item)
+    return out
+
+
+def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
+    """Control / proof / cost evidence Core already stored (history/receipt_evidence.py).
+
+    Extended projection only. Every key is present and ``None`` when the
+    record carries nothing for it; nothing is derived beyond re-validating
+    what was recorded.
+    """
+    evidence = receipt.recorded_evidence or {}
+    return {
+        "policy_decisions": policy_decisions_block(receipt.policy_decisions),
+        "approval_detail": evidence.get("approval_detail"),
+        "sandbox_detail": evidence.get("sandbox_detail"),
+        "execution_loop": evidence.get("execution_loop"),
+        "base_commit": evidence.get("base_commit"),
+        "content_hash": evidence.get("content_hash"),
+        "session": evidence.get("session"),
+        "routing": evidence.get("routing"),
+        "retry": evidence.get("retry"),
+    }
 
 
 def verification_to_dict(block: dict | None) -> dict[str, Any] | None:
