@@ -191,6 +191,21 @@ def _build_osn_verification_contract_with_loop(native_meta: Any, *, is_write_tas
     )
 
 
+def _git_source_path(workspace: Path | None, extra_metadata: dict | None) -> Path:
+    """The path whose repository name, branch and commit describe the run.
+
+    A sandboxed run works in a throwaway worktree or temp directory (``.../wt``,
+    on a temporary ``osn/run-...`` branch); that is where the model wrote, not
+    the repository the run belongs to. The sandbox is created from the
+    directory the command was run in, so that is the source. Anything else
+    (no sandbox, or an explicit workspace) keeps describing the workspace.
+    """
+    sandbox = (extra_metadata or {}).get("sandbox")
+    if isinstance(sandbox, dict) and sandbox.get("sandbox_enabled") and workspace is not None:
+        return Path.cwd()
+    return workspace if workspace is not None else Path.cwd()
+
+
 def _promote_sandbox_git_metadata(extra_metadata: dict | None) -> None:
     """Promote git_base_branch and git_base_commit_hash from sandbox sub-dict to top-level."""
     if extra_metadata is None:
@@ -479,7 +494,7 @@ def _log_run(
         "verification_attempted": verification_attempted,
         "verification_passed": verification_passed,
         "workspace_path": str(workspace) if workspace else None,
-        **_safe_git_info(workspace if workspace is not None else Path.cwd()),
+        **_safe_git_info(_git_source_path(workspace, extra_metadata)),
         "summary": summary,
         "files_detail": [
             {"path": f.path, "change_type": f.change_type, "summary": f.summary or ""}
