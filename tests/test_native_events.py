@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -252,22 +254,35 @@ def _run_log_run(*, effective_executor, extra_metadata, captured: list[str]):
     gen_mock.model = "mock-model"
     gen_mock.fixer_model = "mock-fixer"
 
-    with patch("pathlib.Path.open", _fake_path_open), \
-         patch("pathlib.Path.mkdir"), \
-         patch("openshard.history.jsonl_store.os.fsync", lambda fd: None):
-        _log_run(
-            start=time.time(),
-            task="implement a helper",
-            generator=gen_mock,
-            retry_triggered=False,
-            files=[ChangedFile(path="src/x.py", change_type="update", content="", summary="")],
-            verification_attempted=True,
-            verification_passed=True,
-            workspace=None,
-            run_index=1,
-            effective_executor=effective_executor,
-            extra_metadata=extra_metadata,
-        )
+    # Hermetic cwd: Path.mkdir is patched below, but the history lock file is
+    # opened for real, so ".openshard" must already exist. Without this the
+    # tests only passed when an earlier test in the same process had created
+    # it in the repository directory, so they failed when run alone or
+    # whenever the test selection / shard split changed. Runs in a throwaway
+    # directory and restores the original cwd.
+    original_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        os.chdir(tmp)
+        try:
+            os.makedirs(".openshard", exist_ok=True)
+            with patch("pathlib.Path.open", _fake_path_open), \
+                 patch("pathlib.Path.mkdir"), \
+                 patch("openshard.history.jsonl_store.os.fsync", lambda fd: None):
+                _log_run(
+                    start=time.time(),
+                    task="implement a helper",
+                    generator=gen_mock,
+                    retry_triggered=False,
+                    files=[ChangedFile(path="src/x.py", change_type="update", content="", summary="")],
+                    verification_attempted=True,
+                    verification_passed=True,
+                    workspace=None,
+                    run_index=1,
+                    effective_executor=effective_executor,
+                    extra_metadata=extra_metadata,
+                )
+        finally:
+            os.chdir(original_cwd)
 
 
 class TestLogRunEmbedsNativeEvents(unittest.TestCase):

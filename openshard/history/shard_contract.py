@@ -11,6 +11,7 @@ from openshard.history.capture_completeness import (
     derive_capture_completeness,
     gaps_display,
 )
+from openshard.history.receipt_evidence import project_entry_evidence
 from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.shard import (
     ORIGIN_EXTERNAL_OBSERVED,
@@ -572,6 +573,11 @@ class ShardReceipt:
     # other-session changes git also showed, kept for provenance only.
     changes: dict | None = None
     files_excluded: list[dict] = field(default_factory=list)
+    # Bounded control/proof/cost evidence already stored on the record
+    # (history/receipt_evidence.py): approval_detail, sandbox_detail,
+    # execution_loop, base_commit, content_hash, session, routing, retry and
+    # model_stage_metrics. Read-only projections; None for hand-built receipts.
+    recorded_evidence: dict | None = None
 
 
 def _verification_from_osn_contract(
@@ -1372,6 +1378,7 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         integrity=_integrity_val,
         changes=_changes_summary(_changes_block),
         files_excluded=_files_excluded,
+        recorded_evidence=project_entry_evidence(entry),
         shard=build_shard(
             entry,
             shard_id=_shard_id_val,

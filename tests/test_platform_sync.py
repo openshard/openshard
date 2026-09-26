@@ -46,6 +46,9 @@ CONTRACT_RECEIPT_KEYS = frozenset({
     "git_state", "duration_seconds", "context_quality", "findings", "task_completion", "cost_usd",
     "cost_provenance", "cost_is_estimate", "tokens_input", "tokens_output", "tokens_cache_read",
     "tokens_cache_creation", "tokens_provenance", "task_title", "verification",
+    # P1 additive optional keys (null when the record carries nothing):
+    "policy_decisions", "approval_detail", "sandbox_detail", "execution_loop", "base_commit",
+    "content_hash", "session", "routing", "retry",
 })
 FORBIDDEN_KEYS = {"prompt", "transcript", "stdout", "stderr", "diff", "patch", "agent_notes", "run_timeline",
                   "timeline", "env", "environment", "api_key", "password"}
