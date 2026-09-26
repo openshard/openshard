@@ -64,6 +64,7 @@ from openshard.history.run_checkpoints import (
 from openshard.history.run_checkpoints import (
     log_run_checkpoint_event as _log_run_checkpoint,
 )
+from openshard.history.run_cost import aggregate_retry_usage, retry_attempt_record
 from openshard.native.context import (
     NativeCandidateSummary,
     NativeEditLoopSummary,
@@ -2050,6 +2051,9 @@ class RunPipeline:
             # OpenCode mode uses a single fixer-model retry (no chain).
             _escalation = ESCALATION_CHAIN if not opencode_mode else [generator.fixer_model]
             _last_attempt = exec_result
+            # One record per escalation actually made. Usage is summed over all of
+            # them (it used to be overwritten, so only the last attempt survived).
+            _retry_attempts: list[dict] = []
             _can_escalate = (
                 _verification_plan.has_commands
                 and _verification_plan.commands[0].safety != CommandSafety.blocked
@@ -2090,7 +2094,8 @@ class RunPipeline:
                         raise click.ClickException(f"API error: {exc}")
                     finally:
                         spinner.stop()
-                    retry_usage = _last_attempt.usage
+                    _retry_attempts.append(retry_attempt_record(_esc_model, _last_attempt.usage))
+                    retry_usage = aggregate_retry_usage(_retry_attempts)
                     final_files = _last_attempt.files
                     if not opencode_mode:
                         _write_files(_last_attempt.files, workspace)

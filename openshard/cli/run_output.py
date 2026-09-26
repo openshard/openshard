@@ -12,6 +12,7 @@ import click
 from openshard.analysis.repo import RepoFacts
 from openshard.execution.generator import ChangedFile, ExecutionGenerator
 from openshard.execution.stages import StageRun
+from openshard.history.run_cost import run_total_from_usage
 from openshard.routing.engine import MODEL_STRONG, RoutingDecision
 from openshard.run.timeline import normalize_timeline, timeline_symbol
 
@@ -94,11 +95,12 @@ def _print_summary(
     stage_runs: list[StageRun] | None = None,
 ) -> None:
     elapsed = time.time() - start
-    cost_str = (
-        f"${usage.estimated_cost:.4f}"
-        if usage is not None and usage.estimated_cost is not None
-        else "-"
-    )
+    # The run's cost, including every escalation when they are all accounted for;
+    # otherwise the first attempt only, and the line says so.
+    total_cost, cost_complete = run_total_from_usage(usage, retry_usage, retry_triggered)
+    cost_str = f"${total_cost:.4f}" if total_cost is not None else "-"
+    if total_cost is not None and retry_triggered:
+        cost_str += " (incl. retries)" if cost_complete else " (first attempt only)"
 
     if detail == "default":
         click.echo(f"\nTime: {elapsed:.1f}s")
@@ -106,7 +108,11 @@ def _print_summary(
 
     # more and full
     if retry_triggered:
-        click.echo(f"Fixer model: {_model_label(generator.fixer_model)}")
+        _attempts = getattr(retry_usage, "attempts", None) or []
+        if _attempts:
+            click.echo("Escalated: " + " -> ".join(_model_label(a["model"]) for a in _attempts))
+        else:
+            click.echo(f"Fixer model: {_model_label(generator.fixer_model)}")
         click.echo("Retried: yes")
     if usage is not None:
         click.echo(

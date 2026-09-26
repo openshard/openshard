@@ -545,8 +545,11 @@ def _log_run(
             entry["routing_scores_raw"] = _scored.scores_raw
         if _scored.history_adjustments:
             entry["routing_adjustments"] = _scored.history_adjustments
+    _retry_attempts = getattr(retry_usage, "attempts", None) or None
     if retry_triggered:
-        entry["fixer_model"] = generator.fixer_model
+        # The model that produced the final attempt when the escalations are known;
+        # older callers only know the configured fixer.
+        entry["fixer_model"] = _retry_attempts[-1]["model"] if _retry_attempts else generator.fixer_model
     if usage is not None:
         entry["prompt_tokens"] = usage.prompt_tokens
         entry["completion_tokens"] = usage.completion_tokens
@@ -557,6 +560,10 @@ def _log_run(
         entry["retry_completion_tokens"] = retry_usage.completion_tokens
         entry["retry_total_tokens"] = retry_usage.total_tokens
         entry["retry_estimated_cost"] = retry_usage.estimated_cost
+        if _retry_attempts:
+            # Every escalation actually made, in order. The retry_* totals above are
+            # sums over these; records without this field keep last-attempt-only values.
+            entry["retry_attempts"] = [dict(a) for a in _retry_attempts]
     if repo_facts is not None:
         entry["repo_facts"] = {
             "languages": repo_facts.languages,
