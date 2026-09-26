@@ -191,6 +191,21 @@ def _build_osn_verification_contract_with_loop(native_meta: Any, *, is_write_tas
     )
 
 
+def _git_source_path(workspace: Path | None, extra_metadata: dict | None) -> Path:
+    """The path whose repository name, branch and commit describe the run.
+
+    A sandboxed run works in a throwaway worktree or temp directory (``.../wt``,
+    on a temporary ``osn/run-...`` branch); that is where the model wrote, not
+    the repository the run belongs to. The sandbox is created from the
+    directory the command was run in, so that is the source. Anything else
+    (no sandbox, or an explicit workspace) keeps describing the workspace.
+    """
+    sandbox = (extra_metadata or {}).get("sandbox")
+    if isinstance(sandbox, dict) and sandbox.get("sandbox_enabled") and workspace is not None:
+        return Path.cwd()
+    return workspace if workspace is not None else Path.cwd()
+
+
 def _promote_sandbox_git_metadata(extra_metadata: dict | None) -> None:
     """Promote git_base_branch and git_base_commit_hash from sandbox sub-dict to top-level."""
     if extra_metadata is None:
@@ -479,7 +494,7 @@ def _log_run(
         "verification_attempted": verification_attempted,
         "verification_passed": verification_passed,
         "workspace_path": str(workspace) if workspace else None,
-        **_safe_git_info(workspace if workspace is not None else Path.cwd()),
+        **_safe_git_info(_git_source_path(workspace, extra_metadata)),
         "summary": summary,
         "files_detail": [
             {"path": f.path, "change_type": f.change_type, "summary": f.summary or ""}
@@ -545,8 +560,11 @@ def _log_run(
             entry["routing_scores_raw"] = _scored.scores_raw
         if _scored.history_adjustments:
             entry["routing_adjustments"] = _scored.history_adjustments
+    _retry_attempts = getattr(retry_usage, "attempts", None) or None
     if retry_triggered:
-        entry["fixer_model"] = generator.fixer_model
+        # The model that produced the final attempt when the escalations are known;
+        # older callers only know the configured fixer.
+        entry["fixer_model"] = _retry_attempts[-1]["model"] if _retry_attempts else generator.fixer_model
     if usage is not None:
         entry["prompt_tokens"] = usage.prompt_tokens
         entry["completion_tokens"] = usage.completion_tokens
@@ -557,6 +575,10 @@ def _log_run(
         entry["retry_completion_tokens"] = retry_usage.completion_tokens
         entry["retry_total_tokens"] = retry_usage.total_tokens
         entry["retry_estimated_cost"] = retry_usage.estimated_cost
+        if _retry_attempts:
+            # Every escalation actually made, in order. The retry_* totals above are
+            # sums over these; records without this field keep last-attempt-only values.
+            entry["retry_attempts"] = [dict(a) for a in _retry_attempts]
     if repo_facts is not None:
         entry["repo_facts"] = {
             "languages": repo_facts.languages,
