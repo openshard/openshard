@@ -128,6 +128,16 @@ def _try_fast_path(argv: list[str]) -> bool:
         run_hook_via_service(sys.stdin, env=os.environ, event_override=event_override)  # type: ignore[arg-type]
         return True
 
+    if sub == "claude-watchdog":
+        if rest:
+            return False
+        import os
+
+        from openshard.adapters.claude_capture_client import run_claude_watchdog
+
+        run_claude_watchdog(sys.stdin, env=os.environ)
+        return True
+
     if sub == "claude-status":
         if rest:
             return False
