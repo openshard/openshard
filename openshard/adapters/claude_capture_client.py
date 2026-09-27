@@ -705,7 +705,11 @@ def _is_claude_session_start(raw: bytes, event_override: str | None) -> bool:
 def _claude_repo_root(raw: bytes, env: dict | os._Environ):
     """Resolve the repository for one Claude hook payload. Internal, never raises."""
     try:
-        from openshard.adapters.claude_hooks import HookPayload, parse_hook_payload, resolve_repo_root
+        from openshard.adapters.claude_hooks import (
+            HookPayload,
+            parse_hook_payload,
+            resolve_repo_root,
+        )
 
         data = parse_hook_payload(raw)
         cwd = data.get("cwd") if isinstance(data, dict) else None
