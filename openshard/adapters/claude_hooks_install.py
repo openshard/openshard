@@ -83,9 +83,10 @@ class HookSpec:
     # and the blocking cost is a loopback round trip. Only ``SessionStart``
     # stays a command hook: Claude Code does not deliver HTTP hooks for that
     # event, and it is precisely the hook that starts the service when it is
-    # not running. All hooks are synchronous now -- a warm service answers in
-    # milliseconds, and synchronous delivery keeps events strictly ordered
-    # (an async Stop could otherwise overtake the tool hooks before it).
+    # not running. Primary delivery stays synchronous so a warm service keeps
+    # events strictly ordered. HTTP events also get an async command watchdog;
+    # it normally exits after a health check and only records when the direct
+    # HTTP path cannot be trusted.
     transport: str
     run_async: bool = False
 
