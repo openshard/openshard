@@ -404,6 +404,54 @@ agent-reported outcomes on screen (`Checks  1/1 passed (agent-reported)`);
 the synced `checks` string is unchanged, and `verification.source` carries
 the distinction across sync.
 
+### One interpretation for every surface
+
+`history/verification_truth.py` is the single reader of this evidence. The
+receipt's `Verified` row, `openshard last` / `last --json`
+(`verification_truth`), `proof last`, `trust last`, the Home screen's
+`Verify` column, the quality summary and the CI policy check all call it,
+so they cannot disagree. It states three things:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `authority` | `directly_observed`, `git_verified`, `independently_verified`, `agent_reported`, `none` | who vouches for the *current* outcome |
+| `state` | `verified_passed` / `verified_failed` / `verified_partial`, `agent_reported_passed` / `_failed` / `_partial`, `attempted_unverified`, `manual_review`, `skipped`, `not_run`, `not_observed` | the strongest claim the evidence supports |
+| `effective_status` | `passed`, `failed`, `partial`, `skipped`, `manual_review`, `not_run`, `unknown` | the flat token older consumers use |
+
+Rules, in order:
+
+1. The latest `openshard verify` attestation for the receipt, when it ran at
+   least one check, describes the current state (`basis: post_session`). The
+   session's own claim stays visible as `claim_status` / `claim_source`
+   ("the agent had reported passed"). An attestation that ran nothing
+   overrides nothing; a sidecar block that is not OpenShard-executed is never
+   promoted.
+2. An observed outcome (`directly_observed`, `git_verified`,
+   `independently_verified`) is reported as it is.
+3. An **agent-reported pass is `unknown`**: shown as
+   `Not verified by OpenShard (agent reported 1/1 passed)`, weak proof
+   (`partial`, detail `agent_reported_passed`) in the proof contract, and the
+   `verification_unverified` penalty in the trust score. It is never
+   "Verification passed". An agent-reported *failure* stays `failed`: a
+   claimed failure can lower confidence, never raise it.
+4. `integrity` is the record's checksum state. A `mismatch` is an unsafe proof
+   finding (`content_hash_mismatch`, proof `unsafe`, exit 1) and zeroes the
+   trust score, because none of an edited record's signals can be trusted.
+   The receipt row reads `Checksum matches` / `Checksum mismatch (record
+   edited after it was written)`: the hash is an unkeyed SHA-256, so it
+   detects edits and says nothing about who wrote the record. A record whose
+   hash is recomputed after an edit reads as matching again; that is the
+   limit of an unkeyed checksum, and the wording never claims more.
+
+Activity failures are kept apart from verification. A shell command the
+agent reports as exited non-zero -- whichever hook carried it -- counts in
+`capture.command_failure_count`, is listed under the receipt's `Activity`
+(`Shell × 2 (1 failed)`, then the scrubbed command with its exit code and
+the class the existing safety classifier gives it, e.g. `policy class:
+blocked` for `rm -rf /`), and appears in the summary sentence. It is never a
+verification check, and `tool_failure_count` (the agent's own tool-failure
+events, also what telemetry reports) is unchanged.
+
 ### Integration audit (latest official docs, 2026-09)
 
 | Agent | Check invocation | Check result | Exit / error | Transcript | Model / provider | Now recorded |
@@ -436,7 +484,7 @@ a real outcome for Antigravity (or Codex, OpenCode, Hermes, Grok Bot), run
 
 ```
 external agent completes
-  -> openshard verify [--receipt ID] [--from-observed] [--approve] [--dry-run] [--json]
+  -> openshard verify [--receipt ID] [--from-observed] [--approve] [--dry-run] [--json] [--strict]
   -> checks: verification_commands in .openshard/config.yml (a list; the older
      single verification_command also works), else the detected test command;
      with --from-observed, also the check commands the agent ran
@@ -457,7 +505,16 @@ external agent completes
   sidecar and names the receipt (`receipt_id`, else `run_id`).
   `openshard last` shows `Re-verified: 1/1 passed @ <sha> (OpenShard re-run)`
   and `last --json` carries `post_session_verification`. The receipt's own
-  session evidence is left as it was.
+  session evidence is left as it was, and every surface reads the
+  attestation through the shared interpretation above, so a failed re-run
+  shows as failed in the `Verified` row, `proof last`, `trust last` and Home.
+* **Exit code.** By default `verify` records evidence and exits 0 whatever
+  the outcome. `--strict` makes the exit code carry the result for scripts
+  and CI: `1` when an executed check failed, `2` when a planned check could
+  not run (blocked, needing approval without `--approve`, executable not
+  found, timed out) or nothing was planned, `0` otherwise. The attestation is
+  recorded in every case. A future release may make strict the default
+  behind a deprecation notice; until then the default stays evidence-only.
 * **Observed commands** are re-run only on request, only when the stored
   summary is complete (not redacted, not at the 100-character cap where it
   may be truncated), and only when classified safe. Shell chaining is

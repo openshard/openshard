@@ -115,8 +115,70 @@ All notable changes to OpenShard are documented here.
   retries, escalations, cost, latency and coverage. Unknown verification is
   never counted as failure. It does not rank models or change routing.
 
+- **One verification interpretation for every surface**
+  (`openshard/history/verification_truth.py`). The receipt's new `Verified`
+  row, `openshard last` / `last --json` (`verification_truth`),
+  `proof last`, `trust last`, the Home screen's `Verify` column, the quality
+  summary and the CI policy check now read the same interpretation of the
+  recorded evidence: who vouches for the outcome (`authority`), the
+  strongest claim it supports (`state`) and the flat token (`effective_status`).
+  The latest `openshard verify` attestation takes precedence over the
+  session's own claim, which stays visible as history; the stored Receipt is
+  never rewritten.
+- `openshard verify --strict`: exit 1 when an executed check failed, 2 when a
+  planned check could not run or nothing was planned. The default exit
+  behaviour (evidence only, exit 0) is unchanged.
+- **Failed commands are activity evidence.** A shell command the agent
+  reports as exited non-zero -- even through the success hook -- is counted
+  in `capture.command_failure_count`, listed under the receipt's `Activity`
+  with its exit code and the class the existing safety classifier gives it
+  (`policy class: blocked` for `rm -rf /`), and mentioned in the summary.
+  It is never a verification check; `tool_failure_count` and telemetry are
+  unchanged.
+- Prompt excerpts and captured command text now also redact e-mail
+  addresses, JWTs and PEM private-key blocks (`security/redaction.py`);
+  the file secret scanner is unchanged.
+
 ### Changed
 
+- **Agent-reported verification is no longer presented as verified.** An
+  agent's own `exitCode: 0` (Cursor, Grok Build, Claude Code) was stored as
+  `agent_reported` but read by `proof last`, `trust last`, the quality
+  summary and the CI policy check as `passed`. It is now `unknown` for
+  those consumers (`verification_state: agent_reported_passed`), rendered
+  as `Verified  Not verified by OpenShard (agent reported 1/1 passed)`,
+  weak proof (`partial`) in the proof contract, and the new
+  `verification_unverified` trust penalty (same 20 points as
+  `verification_not_run`). An agent-reported failure stays `failed`.
+  `Checks  1/1 passed (agent-reported)` still shows the claim.
+- **Integrity affects proof and trust.** A Receipt whose content no longer
+  matches its stored checksum is an unsafe proof finding
+  (`content_hash_mismatch`; `proof last` reports `unsafe` and exits 1) and
+  scores 0 (`unsafe`) in `trust last` with the reason spelled out. Receipt
+  wording changed from `Matches (content hash)` / `Mismatch (content hash)`
+  to `Checksum matches` / `Checksum mismatch (record edited after it was
+  written)`, with a note that the unkeyed checksum detects edits and does
+  not prove authorship. `ShardReceipt` gains `integrity_status`
+  (`valid` / `mismatch` / `missing`) and `post_session_verification`.
+- `trust last` and `proof last` now locate history the same way as `last`
+  (nearest `.openshard/runs.jsonl` from any subdirectory) instead of the
+  current directory only.
+- **First run.** The Home screen no longer says `Mode: Configured` /
+  `Model: Claude Sonnet 4.6` in a repository with no OpenShard config: the
+  bundled defaults are not the person's configuration, so it says
+  `Not configured` and agrees with `doctor` and `setup --agent`.
+- `NO_COLOR` is no longer treated as an agent environment anywhere
+  (`is_agent_environment`, `openshard env`, `output_mode` inference). It is
+  a colour preference; a person who sets it gets plain human output, not
+  agent JSON. Onboarding already ignored it.
+- Capture-profile `import_note` text no longer says verification is "never
+  recorded" (verification v2 records agent-reported outcomes); new records
+  say the outcome is the agent's own report until `openshard verify` re-runs it.
+- `openshard demo shard` copy: "Trust is a heuristic over the recorded proof
+  signals, not a safety guarantee" (was "whether the run is safe to rely on"),
+  and its verification line names the source.
+- `~/.openshard/claude-capture.json` and `~/.openshard/telemetry.json` are
+  written owner-only (0600) on POSIX.
 - **Google Antigravity 2.0:** re-audited against the unified hooks reference.
   - A non-empty `error` stays a reported failure.
   - An empty `error` on `run_command` is not treated as a pass, because
@@ -131,6 +193,14 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- `proof last` coerced the record with the write-path default and so stamped a
+  fresh content hash on a historical Receipt that never stored one; the proof
+  contract now reads the record as-is, so integrity stays "Not recorded" and
+  reading never manufactures integrity evidence.
+- `openshard setup` printed the Antigravity row twice.
+- Older native records that stored `verification_passed` without
+  `verification_attempted` read as "not recorded"; an outcome now implies an
+  attempt.
 - `openshard models sync-openrouter` fetched from `api.openrouter.ai`,
   which does not resolve; it now uses `openrouter.ai/api/v1/models`.
 - Scored model selection could silently promote a brand-new model from the
