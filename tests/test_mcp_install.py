@@ -27,6 +27,7 @@ from openshard.adapters.claude_hooks_install import (
     STATUS_COMMAND,
     SYNC_EVENTS,
     TOOL_MATCHER,
+    WATCHDOG_COMMAND,
     build_hook_config,
     ensure_local_settings_ignored,
     install_claude_hooks,
@@ -586,12 +587,13 @@ class TestHookConfigShape(unittest.TestCase):
         for event, groups in config.items():
             self.assertEqual(len(groups), 1, event)
             hooks = groups[0]["hooks"]
-            self.assertEqual(len(hooks), 1)
             self.assertIsInstance(hooks[0]["timeout"], int)
             if event == "SessionStart":
+                self.assertEqual(len(hooks), 1)
                 self.assertEqual(hooks[0]["type"], "command")
                 self.assertEqual(hooks[0]["command"], HOOK_COMMAND)
             else:
+                self.assertEqual(len(hooks), 2)
                 self.assertEqual(hooks[0]["type"], "http")
                 self.assertEqual(hooks[0]["url"], f"http://127.0.0.1:{DEFAULT_PORT}/hooks/claude")
                 self.assertEqual(hooks[0]["allowedEnvVars"], ["CLAUDE_PROJECT_DIR", "OPENSHARD_TASK_ID"])
@@ -600,6 +602,15 @@ class TestHookConfigShape(unittest.TestCase):
                     {
                         "X-OpenShard-Project-Dir": "$CLAUDE_PROJECT_DIR",
                         "X-OpenShard-Task-Id": "$OPENSHARD_TASK_ID",
+                    },
+                )
+                self.assertEqual(
+                    hooks[1],
+                    {
+                        "type": "command",
+                        "command": WATCHDOG_COMMAND,
+                        "timeout": 5,
+                        "async": True,
                     },
                 )
 
@@ -618,14 +629,16 @@ class TestHookConfigShape(unittest.TestCase):
         for event in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"):
             self.assertNotIn("matcher", config[event][0])
 
-    def test_every_hook_is_synchronous(self):
-        # A warm service answers in milliseconds, and synchronous delivery
-        # keeps events strictly ordered (an async Stop could overtake the
-        # tool hooks before it). Nothing is marked async any more.
+    def test_primary_hooks_are_synchronous_and_watchdogs_are_async(self):
+        # The direct HTTP path remains synchronous/ordered. The command
+        # fallback is explicitly async so recovery never joins Claude's
+        # blocking tool path.
         config = build_hook_config()
         self.assertEqual(SYNC_EVENTS, set(HOOK_EVENTS))
         for event in HOOK_EVENTS:
             self.assertNotIn("async", config[event][0]["hooks"][0], event)
+            if event in HTTP_EVENTS:
+                self.assertTrue(config[event][0]["hooks"][1]["async"], event)
 
     def test_command_contains_no_machine_specific_path(self):
         blob = json.dumps(build_hook_config())
@@ -637,6 +650,7 @@ class TestHookConfigShape(unittest.TestCase):
     def test_is_openshard_hook(self):
         self.assertTrue(is_openshard_hook({"type": "command", "command": HOOK_COMMAND}))
         self.assertTrue(is_openshard_hook({"type": "command", "command": HOOK_COMMAND + " --event Stop"}))
+        self.assertTrue(is_openshard_hook({"type": "command", "command": WATCHDOG_COMMAND}))
         self.assertTrue(is_openshard_hook({"type": "http", "url": f"http://127.0.0.1:{DEFAULT_PORT}/hooks/claude"}))
         self.assertTrue(is_openshard_hook({"type": "http", "url": "http://localhost:47815/hooks/claude/"}))
         self.assertFalse(is_openshard_hook({"type": "http", "url": "http://127.0.0.1:47811/other"}))
@@ -714,7 +728,7 @@ class TestMergeOpenshardHooks(unittest.TestCase):
             ours = [
                 h for g in once["hooks"][event] for h in g["hooks"] if is_openshard_hook(h)
             ]
-            self.assertEqual(len(ours), 1, event)
+            self.assertEqual(len(ours), 2 if event in HTTP_EVENTS else 1, event)
 
     def test_stale_openshard_hook_updated_in_place(self):
         stale = {"hooks": {"PostToolUse": [{"matcher": "Edit", "hooks": [

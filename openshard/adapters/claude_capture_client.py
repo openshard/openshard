@@ -668,8 +668,7 @@ def _run_hook_raw(
     if not raw.strip():
         return "ignored"
     hook_path = AGENT_HOOK_PATHS.get(agent, HOOK_PATH)
-    if agent == "claude_code" and _is_claude_session_start(raw, event_override):
-        _heal_claude_hook_auth(raw, env)
+    claude_session_start = agent == "claude_code" and _is_claude_session_start(raw, event_override)
     # Declared launch context: validated here from the launch environment (an
     # unset/malformed value is simply "no declaration") and forwarded on its
     # own header, or handed to the in-process fold -- never read from ``raw``.
@@ -680,6 +679,8 @@ def _run_hook_raw(
             port = resolve_port(env)
             if post_hook(port, raw, project_dir=project_dir, event_override=event_override,
                          hook_path=hook_path, env=env, task_id=task_id):
+                if claude_session_start:
+                    _heal_claude_hook_config(raw, env, desired_port=port)
                 return "forwarded"
             if spawn:
                 port_after, _state = ensure_service(env)
@@ -687,6 +688,8 @@ def _run_hook_raw(
                     port_after, raw, project_dir=project_dir, event_override=event_override,
                     hook_path=hook_path, env=env, task_id=task_id,
                 ):
+                    if claude_session_start:
+                        _heal_claude_hook_config(raw, env, desired_port=port_after)
                     return "forwarded"
     except Exception:
         pass
@@ -699,42 +702,127 @@ def _is_claude_session_start(raw: bytes, event_override: str | None) -> bool:
     return b'"SessionStart"' in raw
 
 
-def _heal_claude_hook_auth(raw: bytes, env: dict | os._Environ) -> None:
-    """Upgrade this repository's Claude Code hook entries to carry the
-    repository capability when they still lack it (v0.4.4 migration).
-
-    Runs only on ``SessionStart`` (a command hook, once per session). Claude
-    Code snapshots its hooks per session, so the fix applies from the next
-    session; the current one falls back to the in-process fold. Never raises,
-    never prints.
-    """
+def _claude_repo_root(raw: bytes, env: dict | os._Environ):
+    """Resolve the repository for one Claude hook payload. Internal, never raises."""
     try:
         from openshard.adapters.claude_hooks import (
             HookPayload,
             parse_hook_payload,
             resolve_repo_root,
         )
+
+        data = parse_hook_payload(raw)
+        cwd = data.get("cwd") if isinstance(data, dict) else None
+        probe = HookPayload(event="SessionStart", session_id=None, cwd=cwd if isinstance(cwd, str) else None)
+        return resolve_repo_root(probe, env)
+    except Exception:
+        return None
+
+
+def _heal_claude_hook_config(
+    raw: bytes,
+    env: dict | os._Environ,
+    *,
+    desired_port: int | None = None,
+) -> None:
+    """Repair stale Claude HTTP capture configuration for the next session.
+
+    Claude snapshots hook configuration when a session starts, so a repair
+    cannot change the already-running session. It still matters immediately
+    for the next one. Both stale credentials and stale service ports are
+    repaired; the latter is important when the capture service had to move
+    within its fallback port range.
+    """
+    try:
         from openshard.adapters.claude_hooks_install import (
-            capability_state,
             install_claude_hooks,
             installed_hook_port,
             load_settings,
         )
 
-        data = parse_hook_payload(raw)
-        cwd = data.get("cwd") if isinstance(data, dict) else None
-        probe = HookPayload(event="SessionStart", session_id=None, cwd=cwd if isinstance(cwd, str) else None)
-        root = resolve_repo_root(probe, env)
+        root = _claude_repo_root(raw, env)
         if root is None:
             return
         settings, err = load_settings(root)
-        if err or settings is None or installed_hook_port(settings) is None:
+        installed_port = installed_hook_port(settings) if err is None and settings is not None else None
+        if installed_port is None:
             return  # hooks not installed here (or unreadable): nothing to heal
-        if capability_state(settings, root, env=env) == "ok":
-            return
-        install_claude_hooks(repo_root=root, env=env)
+        target_port = desired_port if isinstance(desired_port, int) else resolve_port(env)
+        # Always run the idempotent installer at SessionStart/recovery. Port
+        # and capability may already be correct while this version's async
+        # watchdog entry is still missing from an older settings snapshot.
+        install_claude_hooks(repo_root=root, port=target_port, env=env)
     except Exception:
         pass
+
+
+def _claude_http_path_ready(raw: bytes, env: dict | os._Environ, service_port: int) -> bool:
+    """Whether the current Claude session's direct HTTP configuration is trustworthy."""
+    try:
+        from openshard.adapters.claude_hooks_install import (
+            capability_state,
+            installed_hook_port,
+            load_settings,
+        )
+
+        root = _claude_repo_root(raw, env)
+        if root is None:
+            return False
+        settings, err = load_settings(root)
+        if err or settings is None:
+            return False
+        return (
+            installed_hook_port(settings) == service_port
+            and capability_state(settings, root, env=env) == "ok"
+        )
+    except Exception:
+        return False
+
+
+def run_claude_watchdog(
+    stream: object,
+    *,
+    env: dict | os._Environ | None = None,
+) -> str:
+    """Async safety net for Claude's direct HTTP hooks.
+
+    Healthy case: do a bounded service/config check and exit without recording
+    anything, so the direct HTTP hook remains the single source of the event.
+
+    Recovery case: if the service is down, the configured port moved, or the
+    HTTP capability is stale, forward this same event through the command
+    client. That path can restart the service and, if startup still fails,
+    falls back to the in-process fold. The installed HTTP config is then
+    repaired for the next Claude session.
+
+    This command is installed as ``async: true``; it is reliability work,
+    never part of Claude's blocking tool path.
+    """
+    env = os.environ if env is None else env
+    raw = _read_all(stream)
+    if not raw.strip():
+        return "ignored"
+    try:
+        port = resolve_port(env)
+        if health(port) is not None and _claude_http_path_ready(raw, env, port):
+            return "healthy"
+    except Exception:
+        pass
+
+    label = _run_hook_raw(raw, env, event_override=None, agent="claude_code", spawn=True)
+    if label == "forwarded":
+        try:
+            port = resolve_port(env)
+            if health(port) is not None:
+                _heal_claude_hook_config(raw, env, desired_port=port)
+        except Exception:
+            pass
+    return label
+
+
+# Backwards-compatible internal name used by older tests/dev branches.
+def _heal_claude_hook_auth(raw: bytes, env: dict | os._Environ) -> None:
+    _heal_claude_hook_config(raw, env)
 
 
 def cursor_hook_response(raw: bytes, event_override: str | None = None) -> str:

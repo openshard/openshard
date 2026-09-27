@@ -58,6 +58,7 @@ from openshard.adapters.claude_capture_client import (
 from openshard.history.task_identity import TASK_ID_ENV
 
 HOOK_COMMAND = "openshard hooks claude"
+WATCHDOG_COMMAND = "openshard hooks claude-watchdog"
 STATUS_COMMAND = "openshard hooks claude-status"
 SETTINGS_RELPATH = Path(".claude") / "settings.local.json"
 _GIT_TIMEOUT_SECONDS = 5.0
@@ -82,9 +83,10 @@ class HookSpec:
     # and the blocking cost is a loopback round trip. Only ``SessionStart``
     # stays a command hook: Claude Code does not deliver HTTP hooks for that
     # event, and it is precisely the hook that starts the service when it is
-    # not running. All hooks are synchronous now -- a warm service answers in
-    # milliseconds, and synchronous delivery keeps events strictly ordered
-    # (an async Stop could otherwise overtake the tool hooks before it).
+    # not running. Primary delivery stays synchronous so a warm service keeps
+    # events strictly ordered. HTTP events also get an async command watchdog;
+    # it normally exits after a health check and only records when the direct
+    # HTTP path cannot be trusted.
     transport: str
     run_async: bool = False
 
@@ -143,11 +145,40 @@ def _hook_entry(spec: HookSpec, port: int = DEFAULT_PORT, capability: str | None
     return entry
 
 
+def _watchdog_entry(spec: HookSpec) -> dict:
+    """Async command fallback for Claude HTTP hooks.
+
+    The direct HTTP hook remains the primary, low-latency path. This command
+    runs in the background and normally exits after a health/config check.
+    When the HTTP path cannot be trusted (service down, stale port, stale
+    capability), it forwards the same event through the command client, which
+    can restart the service or fall back to the in-process fold.
+    """
+    return {
+        "type": "command",
+        "command": WATCHDOG_COMMAND,
+        "timeout": max(5, spec.timeout),
+        "async": True,
+    }
+
+
+def _desired_hook_entries(
+    spec: HookSpec,
+    port: int,
+    build_entry: Callable[[HookSpec, int], dict] | None = None,
+) -> list[dict]:
+    build = build_entry or _hook_entry
+    entries = [build(spec, port)]
+    if spec.transport == TRANSPORT_HTTP:
+        entries.append(_watchdog_entry(spec))
+    return entries
+
+
 def _group_entry(spec: HookSpec, port: int = DEFAULT_PORT, build_entry: Callable[[HookSpec, int], dict] | None = None) -> dict:
     group: dict = {}
     if spec.matcher:
         group["matcher"] = spec.matcher
-    group["hooks"] = [(build_entry or _hook_entry)(spec, port)]
+    group["hooks"] = _desired_hook_entries(spec, port, build_entry)
     return group
 
 
@@ -246,7 +277,11 @@ def is_openshard_hook(hook: object) -> bool:
     if not isinstance(command, str):
         return False
     stripped = command.strip()
-    return stripped == HOOK_COMMAND or stripped.startswith(HOOK_COMMAND + " ")
+    return (
+        stripped == HOOK_COMMAND
+        or stripped.startswith(HOOK_COMMAND + " ")
+        or stripped == WATCHDOG_COMMAND
+    )
 
 
 def installed_hook_port(settings: object) -> int | None:
@@ -309,7 +344,7 @@ def merge_openshard_hooks(
         if not isinstance(groups, list):
             raise ValueError(f"'hooks.{spec.event}' is not a JSON array")
 
-        desired_hook = build(spec, port)
+        desired_hooks = _desired_hook_entries(spec, port, build)
         kept = False
         changed = False
         for group in groups:
@@ -333,9 +368,9 @@ def merge_openshard_hooks(
                 changed = True
                 continue
             kept = True
-            if len(ours) > 1 or ours[0] != desired_hook or not matcher_ok:
+            if ours != desired_hooks or not matcher_ok:
                 changed = True
-                group["hooks"] = others + [desired_hook]
+                group["hooks"] = others + desired_hooks
                 if spec.matcher:
                     group["matcher"] = spec.matcher
                 else:
