@@ -45,10 +45,11 @@ class TestIsAgentEnvironment(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             self.assertTrue(is_agent_environment())
 
-    def test_is_agent_environment_true_for_no_color(self):
+    def test_is_agent_environment_false_for_no_color(self):
+        """NO_COLOR is a colour preference (no-color.org), never an agent signal."""
         env = {**_clean_env(), "NO_COLOR": "1"}
         with patch.dict(os.environ, env, clear=True):
-            self.assertTrue(is_agent_environment())
+            self.assertFalse(is_agent_environment())
 
     def test_is_agent_environment_never_raises(self):
         """Must not raise under any circumstances."""

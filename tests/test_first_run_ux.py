@@ -216,9 +216,10 @@ class TestIsAgentEnvironment(unittest.TestCase):
         with patch.dict(os.environ, {**_NO_KEYS, "OPENSHARD_AGENT": "1"}, clear=True):
             self.assertTrue(is_agent_environment())
 
-    def test_true_for_no_color(self):
+    def test_false_for_no_color(self):
+        """NO_COLOR is a colour preference, not an agent environment (audit fix)."""
         with patch.dict(os.environ, {**_NO_KEYS, "NO_COLOR": "1"}, clear=True):
-            self.assertTrue(is_agent_environment())
+            self.assertFalse(is_agent_environment())
 
     def test_never_raises(self):
         with patch.dict(os.environ, _NO_KEYS, clear=True):
