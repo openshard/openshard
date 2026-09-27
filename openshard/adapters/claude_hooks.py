@@ -439,6 +439,37 @@ OUTCOME_NOT_COMPLETED = "not_completed"
 _COMMAND_OUTCOMES = frozenset({OUTCOME_PASSED, OUTCOME_FAILED, OUTCOME_NOT_COMPLETED})
 
 
+_COMMAND_SAFETIES = frozenset({"safe", "needs_approval", "blocked"})
+
+
+def _command_safety_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value in _COMMAND_SAFETIES else None
+
+
+def classify_command_text(command: str | None) -> str | None:
+    """The policy class of a raw shell command, from the existing safety classifier.
+
+    Reuses ``verification/plan.classify_command_safety`` (the rules native
+    runs and ``openshard verify`` apply) so a captured ``rm -rf /`` is
+    labelled ``blocked`` without any new classifier and without executing
+    anything. Only the class token is returned; the classifier's reason
+    (which may echo a token of the command) is discarded. Never raises.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return None
+    try:
+        from openshard.verification.plan import (
+            VerificationSource,
+            classify_command_safety,
+            parse_command_to_argv,
+        )
+
+        safety, _reason = classify_command_safety(parse_command_to_argv(command.strip()), VerificationSource.user)
+        return _command_safety_or_none(safety.value)
+    except Exception:
+        return None
+
+
 def _command_outcome_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value in _COMMAND_OUTCOMES else None
 
@@ -876,8 +907,11 @@ def summarize_command(command: str | None, label: str = "Bash") -> tuple[str, st
 
     if not isinstance(command, str) or not command.strip():
         return f"{label} command", None, "other"
+    from openshard.security.redaction import redact_sensitive_text
+
     kind = "test" if _TEST_COMMAND_RE.search(command) else ("lint" if _LINT_COMMAND_RE.search(command) else "other")
     scrubbed, _ = scrub_text_for_secrets(command[:1_000], source_label="<hook-command>")
+    scrubbed, _kinds = redact_sensitive_text(scrubbed)
     collapsed = " ".join(scrubbed.split())
     safe = sanitize_text(collapsed, _COMMAND_CAP)
     first = collapsed.split(" ", 1)[0] if collapsed else ""
@@ -922,6 +956,11 @@ class ReducedHookPayload:
     # so a replay that lags behind the agent's first edits still anchors
     # attribution at session start. Absent on every other line.
     baseline: dict | None = None
+    # The policy class ``verification/plan.classify_command_safety`` gives the
+    # raw command (``safe`` | ``needs_approval`` | ``blocked``), computed at
+    # reduce time from the command text that is never stored. Metadata only:
+    # it labels a captured command, it never gates or executes anything.
+    command_safety: str | None = None
     command_outcome: str | None = None  # see HookPayload.command_outcome
     command_exit_code: int | None = None
     task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
@@ -951,6 +990,8 @@ class ReducedHookPayload:
             data["attrs"] = dict(self.attrs)
         if self.baseline is not None:
             data["baseline"] = self.baseline
+        if self.command_safety is not None:
+            data["command_safety"] = self.command_safety
         # Only when reported, so queue lines of every other event keep their shape.
         if self.command_outcome is not None:
             data["command_outcome"] = self.command_outcome
@@ -1013,6 +1054,7 @@ class ReducedHookPayload:
             tool_success=tool_success,
             attrs=_clean_attrs(data.get("attrs")),
             baseline=_valid_baseline(data.get("baseline")),
+            command_safety=_command_safety_or_none(data.get("command_safety")),
             command_outcome=_command_outcome_or_none(data.get("command_outcome")),
             command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
             task_id=stored_task_id(data),
@@ -1092,6 +1134,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
             reduced.command_action, reduced.command_target, reduced.command_kind = action, target, ckind
             reduced.command_outcome = _command_outcome_or_none(payload.command_outcome)
             reduced.command_exit_code = _exit_code_or_none(payload.command_exit_code)
+            reduced.command_safety = classify_command_text(payload.command)
         elif kind == TOOL_KIND_READ:
             reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
             reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
@@ -1166,6 +1209,7 @@ def _new_buffer(
         "prompt_count": 0,
         "tool_call_count": 0,
         "tool_failure_count": 0,
+        "command_failure_count": 0,
         "turn_count": 0,
         "hook_files": {},  # repo-relative path -> "create" | "update"
         "events": [],  # canonical Event dicts (run/shard ids stamped at fold)
@@ -1360,6 +1404,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "prompt_count": int(capture.get("prompt_count") or 0),
         "tool_call_count": int(capture.get("tool_call_count") or 0),
         "tool_failure_count": int(capture.get("tool_failure_count") or 0),
+        "command_failure_count": int(capture.get("command_failure_count") or 0),
         "turn_count": int(capture.get("turn_count") or 0),
         "hook_files": hook_files,
         "events": hook_events[:_MAX_BUFFERED_EVENTS],
@@ -2238,9 +2283,13 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
            if changes_block["other_session_excluded"] else "")
         + "."
     )
+    command_failures = int(buf.get("command_failure_count") or 0)
+    # Its own sentence so the receipt's Result line (the first sentence) stays
+    # short; the compact receipt lists the failed commands under Activity.
+    _failed_text = f" {command_failures} command(s) exited non-zero." if command_failures else ""
     summary = (
         f"{profile.label} session: {len(changed_files)} file(s) changed, {tool_calls} tool call(s)."
-        f"{_attr_text} {prompt_count} prompt(s), {_task_status_text}, observed via hooks.{end_text}"
+        f"{_failed_text}{_attr_text} {prompt_count} prompt(s), {_task_status_text}, observed via hooks.{end_text}"
     )
 
     task = buf.get("task") if isinstance(buf.get("task"), str) and buf.get("task") else None
@@ -2345,6 +2394,11 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "turn_count": turn_count,
             "tool_call_count": tool_calls,
             "tool_failure_count": int(buf.get("tool_failure_count") or 0),
+            # Activity failures: shell commands whose reported outcome was a
+            # non-zero exit, whichever hook carried it. Distinct from
+            # ``tool_failure_count`` (the agent's own tool-failure events) and
+            # from verification checks (``verification`` above).
+            "command_failure_count": int(buf.get("command_failure_count") or 0),
             "task_source": "first_user_prompt_excerpt" if task else "not_captured",
             "hook_events_dropped": int(buf.get("dropped_events") or 0),
             # v0.4.4: what this capture knows it is missing. Hook capture is
@@ -2716,6 +2770,13 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
                 metadata["not_completed"] = True
             if outcome != "unknown":
                 metadata["outcome_source"] = "agent_reported"
+            if payload.command_safety is not None:
+                metadata["command_safety"] = payload.command_safety
+            if outcome == "failed":
+                # A command the agent reports as exited non-zero is failed
+                # activity evidence even when it arrived through the success
+                # hook (Cursor/Grok/Hermes report exit codes on postToolUse).
+                buf["command_failure_count"] = int(buf.get("command_failure_count") or 0) + 1
             if payload.command_kind in ("test", "lint"):
                 # A check-shaped command was directly observed running --
                 # enough to say "attempted" honestly. Its outcome is only what
