@@ -735,7 +735,6 @@ def _heal_claude_hook_config(
     """
     try:
         from openshard.adapters.claude_hooks_install import (
-            capability_state,
             install_claude_hooks,
             installed_hook_port,
             load_settings,
@@ -749,8 +748,9 @@ def _heal_claude_hook_config(
         if installed_port is None:
             return  # hooks not installed here (or unreadable): nothing to heal
         target_port = desired_port if isinstance(desired_port, int) else resolve_port(env)
-        if capability_state(settings, root, env=env) == "ok" and installed_port == target_port:
-            return
+        # Always run the idempotent installer at SessionStart/recovery. Port
+        # and capability may already be correct while this version's async
+        # watchdog entry is still missing from an older settings snapshot.
         install_claude_hooks(repo_root=root, port=target_port, env=env)
     except Exception:
         pass
