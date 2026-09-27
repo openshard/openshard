@@ -22,31 +22,23 @@ _VERIFICATION_TOKENS: frozenset[str] = frozenset(
 
 
 def verification_status_from_receipt(receipt: ShardReceipt) -> str:
-    """Map a receipt's status into a verification enum.
+    """Map a receipt's evidence into a verification enum.
 
     Returns one of: ``passed`` | ``failed`` | ``partial`` | ``skipped`` |
     ``manual_review`` | ``not_run`` | ``unknown``.
 
-    When the receipt carries a canonical ``verification_status`` (from its
-    structured ``verification`` evidence or an OSN verification contract), that
-    token is authoritative. Otherwise this falls back to the display-string
-    logic for hand-built receipts.
+    This is the ``effective_status`` of ``history.verification_truth``: the
+    latest ``openshard verify`` re-run carried on the receipt wins, an
+    observed outcome is reported as-is, and an agent-reported *pass* is
+    ``unknown`` (recorded, but not something OpenShard verified). Every
+    consumer of the flat token -- proof contract, trust score, CI policy
+    check, completeness, quality summary -- therefore agrees.
     """
     try:
-        canonical = (getattr(receipt, "verification_status", "") or "").strip()
-        if canonical in _VERIFICATION_TOKENS:
-            return canonical
-        status = (receipt.status or "").strip()
-        if status.startswith("Checks:"):
-            # Review-style checks: failed if any sub-check failed, else passed.
-            display = (receipt.checks_display or "").lower()
-            return "failed" if "failed" in display else "passed"
-        return {
-            "Passed": "passed",
-            "Failed": "failed",
-            "No checks run": "not_run",
-            "Not recorded": "unknown",
-        }.get(status, "unknown")
+        from openshard.history.verification_truth import interpret_receipt
+
+        token = interpret_receipt(receipt).effective_status
+        return token if token in _VERIFICATION_TOKENS else "unknown"
     except Exception:
         return "unknown"
 

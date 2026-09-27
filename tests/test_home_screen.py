@@ -166,7 +166,7 @@ class TestHomeScreen(unittest.TestCase):
     def test_unconfigured_shows_not_configured(self):
         runner = CliRunner()
         with runner.isolated_filesystem():
-            with patch("openshard.cli.ui.home.load_config", return_value={}):
+            with patch("openshard.cli.ui.home.load_config_safe", return_value=({}, True, None)):
                 result = runner.invoke(cli, [])
             self.assertEqual(result.exit_code, 0)
             self.assertIn("Not configured", result.output)
@@ -256,8 +256,8 @@ class TestFriendlyModelDisplay(unittest.TestCase):
         runner = CliRunner()
         with runner.isolated_filesystem():
             with patch(
-                "openshard.cli.ui.home.load_config",
-                return_value={"execution_model": "anthropic/claude-sonnet-4.6"},
+                "openshard.cli.ui.home.load_config_safe",
+                return_value=({"execution_model": "anthropic/claude-sonnet-4.6"}, True, Path(".openshard/config.yml")),
             ):
                 result = runner.invoke(cli, [])
         self.assertEqual(result.exit_code, 0)

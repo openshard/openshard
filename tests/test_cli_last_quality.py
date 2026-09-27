@@ -64,6 +64,9 @@ _QUALITY_KEYS = {
     "recommended_gaps_count",
     "unsafe_findings_count",
     "verification",
+    "verification_state",
+    "verification_authority",
+    "integrity",
     "raw_output_stored",
     "summary",
 }

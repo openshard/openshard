@@ -341,7 +341,7 @@ class TestOldReceipts:
         envelope.receipt_payload(entry, 0)
         assert json.dumps(entry, sort_keys=True) == before
         assert "verification" not in entry
-        assert r.integrity.startswith("Matches")
+        assert r.integrity == "Checksum matches"
 
 
 # ---------------------------------------------------------------------------

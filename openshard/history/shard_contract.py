@@ -36,6 +36,12 @@ from openshard.history.verification import (
     status_token,
     summary_reason,
 )
+from openshard.history.verification_truth import (
+    INTEGRITY_NOTE,
+    integrity_label,
+    interpret_receipt,
+    verification_label,
+)
 from openshard.run.timeline import normalize_timeline
 
 _PROFILE_TO_STRATEGY: dict[str, str] = {
@@ -567,6 +573,15 @@ class ShardReceipt:
     # content hash is tamper-evidence for the stored record only; it never
     # proves who wrote it, and the wording never says "signed".
     integrity: str = "Not recorded"
+    # The checksum state as a token ("valid" | "mismatch" | "missing") so
+    # consumers never parse the display string above.
+    integrity_status: str = "missing"
+    # Verification v2: the latest ``openshard verify`` attestation for this
+    # Receipt (``verification/post_session.summarize_attestation``), joined
+    # by the caller at read time. None when never re-verified. The stored
+    # record is never modified; ``history/verification_truth`` gives this
+    # precedence over the session's own block when it carries an outcome.
+    post_session_verification: dict | None = None
     # v0.4.4 change provenance (adapters/claude_hooks._classify_changed_files):
     # counts per attribution plus the session-start baseline summary. None for
     # records written before attribution existed. ``files_detail`` holds the
@@ -653,13 +668,22 @@ def _verification_display(ev: VerificationEvidence) -> tuple[str, str]:
 
 def checks_label(receipt: ShardReceipt) -> str:
     """``checks_display`` for rendering, with ``(agent-reported)`` when the agent -- not
-    OpenShard -- supplied the outcome, so a reported pass never reads like an observed one."""
+    OpenShard -- supplied the outcome, so a reported pass never reads like an observed one.
+
+    This is the *session's* record. The current evidence state, including a
+    later ``openshard verify`` re-run, is the ``Verified`` row (``verified_label``).
+    """
     block = receipt.verification if isinstance(receipt.verification, dict) else {}
     if block.get("source") == SOURCE_AGENT_REPORTED and block.get("status") in (
         STATUS_PASSED, STATUS_FAILED, STATUS_PARTIAL,
     ):
         return f"{receipt.checks_display} (agent-reported)"
     return receipt.checks_display
+
+
+def verified_label(receipt: ShardReceipt) -> str:
+    """The one sentence every surface uses for "was this verified, and by whom?"."""
+    return verification_label(interpret_receipt(receipt))
 
 
 def _make_shard_id(timestamp: str, index: int | None) -> str:
@@ -781,23 +805,24 @@ def _changes_summary(block: dict | None) -> dict | None:
     return summary
 
 
+def integrity_status(entry: dict) -> str:
+    """``valid`` / ``mismatch`` / ``missing`` from ``shard_hash.verify_shard_hash``. Never raises."""
+    try:
+        status = verify_shard_hash(entry).get("status")
+    except Exception:
+        return "missing"
+    return status if status in ("valid", "mismatch") else "missing"
+
+
 def integrity_display(entry: dict) -> str:
-    """``Matches (content hash)`` / ``Mismatch (content hash)`` / ``Not recorded``.
+    """``Checksum matches`` / ``Checksum mismatch (...)`` / ``Not recorded``.
 
     Technically precise on purpose: the hash is an unkeyed SHA-256 over the
-    stored record (``shard_hash``). "Matches" means the record's content is
-    what it was when the hash was written; it says nothing about authorship.
+    stored record (``shard_hash``). A match means the record's content is
+    what it was when the hash was written; it says nothing about authorship
+    (see ``verification_truth.integrity_label``).
     """
-    try:
-        result = verify_shard_hash(entry)
-    except Exception:
-        return "Not recorded"
-    status = result.get("status")
-    if status == "valid":
-        return "Matches (content hash)"
-    if status == "mismatch":
-        return "Mismatch (content hash)"
-    return "Not recorded"
+    return integrity_label(integrity_status(entry))
 
 
 def changed_files_display(receipt: ShardReceipt) -> str:
@@ -845,8 +870,16 @@ def _file_line(fd: dict) -> str | None:
     return f"{_INDENT}  {letter} {path}" + (f"  {_EM} {tag}" if tag else "")
 
 
-def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
-    """Convert a raw run-history entry dict into a ShardReceipt. Never raises."""
+def build_shard_receipt(
+    entry: dict, index: int | None = None, *, post_session_verification: dict | None = None,
+) -> ShardReceipt:
+    """Convert a raw run-history entry dict into a ShardReceipt. Never raises.
+
+    *post_session_verification* is the latest ``openshard verify`` attestation
+    summary for this record (resolved by the caller from
+    ``.openshard/verifications.jsonl``); it is carried on the receipt so
+    every consumer interprets the same evidence (``verification_truth``).
+    """
     timestamp = entry.get("timestamp") or ""
     task = entry.get("task") or ""
 
@@ -1293,7 +1326,8 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         if isinstance(_task_status_raw, str)
         else None
     )
-    _integrity_val = integrity_display(entry)
+    _integrity_status_val = integrity_status(entry)
+    _integrity_val = integrity_label(_integrity_status_val)
 
     # Token usage -- only ever surfaced on the receipt when a producer stamped
     # an explicit provenance token alongside the counts (see build_hook_entry).
@@ -1395,6 +1429,10 @@ def build_shard_receipt(entry: dict, index: int | None = None) -> ShardReceipt:
         task_id=_task_id_val,
         capture_completeness=_capture_completeness_val,
         integrity=_integrity_val,
+        integrity_status=_integrity_status_val,
+        post_session_verification=(
+            post_session_verification if isinstance(post_session_verification, dict) else None
+        ),
         changes=_changes_summary(_changes_block),
         files_excluded=_files_excluded,
         recorded_evidence=project_entry_evidence(entry),
@@ -1481,6 +1519,60 @@ def _tool_activity_counts(receipt: ShardReceipt) -> list[tuple[str, int]]:
             continue
         counts[tool] = counts.get(tool, 0) + 1
     return list(counts.items())
+
+
+def _tool_failure_counts(receipt: ShardReceipt) -> dict[str, int]:
+    """Per-tool count of ``tool.invoked`` events whose recorded status is ``failed``."""
+    from openshard.history.event import tool_identity
+
+    counts: dict[str, int] = {}
+    for ev in receipt.events:
+        tool = tool_identity(ev)
+        if tool is None or getattr(ev, "status", None) != "failed":
+            continue
+        counts[tool] = counts.get(tool, 0) + 1
+    return counts
+
+
+_MAX_FAILED_ACTIVITY_ROWS = 5
+_COMMAND_SAFETY_TAGS: dict[str, str] = {
+    "blocked": "policy class: blocked",
+    "needs_approval": "policy class: needs approval",
+}
+
+
+def failed_activity_rows(receipt: ShardReceipt) -> list[str]:
+    """Human rows for failed tool calls: what ran, how it ended, and its policy class.
+
+    The action text is the scrubbed, capped label the capture stored (never
+    raw output); the exit code and the policy class come from the event's
+    metadata. Activity failures are not verification: a failed ``rm`` is
+    listed here, never counted as a check.
+    """
+    from openshard.history.event import tool_identity
+
+    rows: list[str] = []
+    failed = [
+        ev for ev in receipt.events
+        if tool_identity(ev) is not None and getattr(ev, "status", None) == "failed"
+    ]
+    for ev in failed[:_MAX_FAILED_ACTIVITY_ROWS]:
+        meta = getattr(ev, "metadata", None) or {}
+        parts: list[str] = []
+        code = meta.get("exit_code")
+        if isinstance(code, int) and not isinstance(code, bool):
+            parts.append(f"exit {code}")
+        source = meta.get("outcome_source") or getattr(ev, "evidence", None)
+        if isinstance(source, str) and source:
+            parts.append(source.replace("_", "-"))
+        tag = _COMMAND_SAFETY_TAGS.get(str(meta.get("command_safety") or ""))
+        if tag:
+            parts.append(tag)
+        action = getattr(ev, "action", None) or tool_identity(ev) or "tool call"
+        rows.append(f"{_INDENT}  {action}" + (f"  ({'; '.join(parts)})" if parts else ""))
+    if len(failed) > _MAX_FAILED_ACTIVITY_ROWS:
+        rows.append(f"{_INDENT}  +{len(failed) - _MAX_FAILED_ACTIVITY_ROWS} more")
+    return rows
 
 
 _EVIDENCE_DISPLAY: dict[str, str] = {
@@ -1613,11 +1705,18 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
             lines.append(f"{_INDENT}  +{len(receipt.files_detail) - 10} more")
     _activity = _tool_activity_counts(receipt)
     if _activity:
+        _failed_by_tool = _tool_failure_counts(receipt)
         lines.append(f"{_INDENT}Activity")
         for tool, count in _activity:
-            lines.append(f"{_INDENT}  {tool} × {count}")
+            _nf = _failed_by_tool.get(tool, 0)
+            lines.append(f"{_INDENT}  {tool} × {count}" + (f" ({_nf} failed)" if _nf else ""))
+        _failed_rows = failed_activity_rows(receipt)
+        if _failed_rows:
+            lines.append(f"{_INDENT}Failed")
+            lines.extend(_failed_rows)
     lines += [
         _row("Checks", checks_label(receipt)),
+        _row("Verified", verified_label(receipt)),
         _row("Integrity", receipt.integrity),
         _row("Risk", receipt.risk),
         _row("Sandbox", receipt.sandbox),
@@ -2050,6 +2149,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
             lines.append(f"{_INDENT}  {_cr}")
     else:
         lines.append(f"{_INDENT}{checks_label(receipt)}")
+    lines.append(_row("Verified", verified_label(receipt)))
     lines.append("")
 
     lines.append(f"{_INDENT}POLICY")
@@ -2185,6 +2285,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     lines.append(_row("Shard ID", receipt.shard_id))
     lines.append(_row("Created", _fmt_timestamp(receipt.created_at)))
     lines.append(_row("Integrity", receipt.integrity))
+    if receipt.integrity_status != "missing":
+        lines.append(_row("", INTEGRITY_NOTE))
     lines.append(_row("Result", receipt.result))
     lines.append(_SEP)
 

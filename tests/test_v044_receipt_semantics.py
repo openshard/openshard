@@ -74,9 +74,9 @@ class TestIntegrityWording:
         entry = _hooks_entry()
         entry["content_hash"] = compute_shard_hash(entry)
         receipt = build_shard_receipt(entry)
-        assert receipt.integrity == "Matches (content hash)"
+        assert receipt.integrity == "Checksum matches"
         for out in (render_compact_shard_receipt(receipt), render_full_shard_receipt(receipt)):
-            assert "Integrity" in out and "Matches (content hash)" in out
+            assert "Integrity" in out and "Checksum matches" in out
             assert "sign" not in out.lower()  # no "signed" / "signature" claim anywhere
 
     def test_edited_record_reports_mismatch(self):
@@ -84,8 +84,8 @@ class TestIntegrityWording:
         entry["content_hash"] = compute_shard_hash(entry)
         entry["task"] = "edited after the fact"
         receipt = build_shard_receipt(entry)
-        assert receipt.integrity == "Mismatch (content hash)"
-        assert "Mismatch (content hash)" in render_compact_shard_receipt(receipt)
+        assert receipt.integrity.startswith("Checksum mismatch")
+        assert "Checksum mismatch" in render_compact_shard_receipt(receipt)
 
     def test_legacy_record_without_hash_is_not_recorded(self):
         receipt = build_shard_receipt({"task": "old", "timestamp": "2026-01-01T00:00:00Z"})

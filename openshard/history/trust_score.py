@@ -69,6 +69,8 @@ PENALTY_EXECUTION_ERROR = 15
 PENALTY_UNSAFE_INTERACTION = 25
 PENALTY_DIRTY_REPO = 5
 PENALTY_NO_TIMELINE = 5
+# An edited record: none of its signals can be trusted, so the score is 0.
+PENALTY_INTEGRITY_MISMATCH = 100
 
 # Completeness band edges (percent).
 COMPLETENESS_LOW_EDGE = 50
@@ -96,6 +98,11 @@ BANDS: tuple[tuple[int, str], ...] = (
 REASONS: dict[str, str] = {
     "verification_failed": "Verification failed.",
     "verification_not_run": "Verification was not run for a changed run.",
+    "verification_unverified": (
+        "Verification was not independently observed for a changed run "
+        "(agent-reported or outcome not seen)."
+    ),
+    "integrity_mismatch": "The stored record no longer matches its checksum (edited after it was written).",
     "policy_denied": "A policy or approval gate denied the run.",
     "manual_review_required": "Manual review was required.",
     "secret_scan_finding": "Secret-scan finding(s) were detected (redacted).",
@@ -180,6 +187,15 @@ def evaluate_trust_score(
         warnings.append("Receipt completeness could not be scored.")
 
     verification = sig.get("verification", "unknown")
+    try:
+        from openshard.history.verification_truth import interpret_receipt
+
+        truth = interpret_receipt(receipt)
+        verification_state = truth.state
+        verification_authority = truth.authority
+        integrity = truth.integrity
+    except Exception:
+        verification_state, verification_authority, integrity = "not_observed", "none", "missing"
     policy_denied = bool(sig.get("policy_denied"))
     manual_review = bool(sig.get("manual_review_required"))
     secret_findings = int(sig.get("secret_scan_findings") or 0)
@@ -197,12 +213,21 @@ def evaluate_trust_score(
     def _add(code: str, points: int) -> None:
         penalties.append(TrustPenalty(code=code, points=points, reason=REASONS[code]))
 
+    # 0. Integrity. An edited record cannot vouch for anything below.
+    if integrity == "mismatch":
+        _add("integrity_mismatch", PENALTY_INTEGRITY_MISMATCH)
+
     # 1. Verification. skipped is a weak signal like not_run, not a failure.
     # manual_review is handled below as part of the policy / review group.
+    # An agent-reported pass is ``unknown`` here (verification_truth): it is
+    # penalised like an unverified run, under its own reason.
     if verification == "failed":
         _add("verification_failed", PENALTY_VERIFICATION_FAILED)
     elif verification in {"not_run", "unknown", "skipped", "partial"} and changes:
-        _add("verification_not_run", PENALTY_VERIFICATION_NOT_RUN)
+        if verification_state in {"agent_reported_passed", "agent_reported_partial", "attempted_unverified"}:
+            _add("verification_unverified", PENALTY_VERIFICATION_NOT_RUN)
+        else:
+            _add("verification_not_run", PENALTY_VERIFICATION_NOT_RUN)
 
     # 2. Policy / approval group — at most one, strongest first (no double count).
     if policy_denied:
@@ -250,6 +275,9 @@ def evaluate_trust_score(
 
     signals = {
         "verification": verification,
+        "verification_state": verification_state,
+        "verification_authority": verification_authority,
+        "integrity": integrity,
         "manual_review_required": manual_review,
         "policy_denied": policy_denied,
         "secret_scan_findings": secret_findings,
@@ -312,11 +340,29 @@ def _summary_reasons(ts: RunTrustScore) -> list[str]:
     sig = ts.signals
     reasons: list[str] = []
 
+    if sig.get("integrity") == "mismatch":
+        reasons.append("Record edited after it was written: the stored record no longer matches its checksum")
+
     verification = sig.get("verification")
-    if verification == "passed":
-        reasons.append("Verification passed")
+    state = sig.get("verification_state")
+    authority = sig.get("verification_authority")
+    who = {
+        "directly_observed": "OpenShard-observed",
+        "independently_verified": "independently verified",
+        "git_verified": "git-verified",
+    }.get(str(authority), None)
+    if state == "agent_reported_passed":
+        reasons.append("Verification not independently observed (the agent reported a pass; OpenShard did not run it)")
+    elif state == "agent_reported_partial":
+        reasons.append("Verification not independently observed (the agent reported a partial result)")
+    elif state == "agent_reported_failed":
+        reasons.append("Verification failed per the agent's own report (OpenShard did not run it)")
+    elif state == "attempted_unverified":
+        reasons.append("Verification attempted; outcome not observed")
+    elif verification == "passed":
+        reasons.append(f"Verification passed ({who})" if who else "Verification passed")
     elif verification == "failed":
-        reasons.append("Verification failed")
+        reasons.append(f"Verification failed ({who})" if who else "Verification failed")
     elif verification == "not_run":
         reasons.append("Verification was not run")
     elif verification == "skipped":
