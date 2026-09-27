@@ -116,3 +116,47 @@ def test_session_start_heals_stale_port_for_next_session(service, capture_env, r
         assert hooks[0]["type"] == "http"
         assert hooks[1]["command"] == WATCHDOG_COMMAND
         assert hooks[1]["async"] is True
+
+
+def test_session_start_upgrades_healthy_legacy_http_layout(service, capture_env, repo):
+    """A user upgrading from the HTTP-only layout gets the watchdog next session."""
+    env = {**capture_env, "CLAUDE_PROJECT_DIR": str(repo)}
+    path = _write_claude_settings(repo, service.port, env)
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    for event in HTTP_EVENTS:
+        settings["hooks"][event][0]["hooks"] = settings["hooks"][event][0]["hooks"][:1]
+    path.write_text(json.dumps(settings), encoding="utf-8")
+
+    client._heal_claude_hook_config(
+        _payload("SessionStart", repo, source="startup"),
+        env,
+        desired_port=service.port,
+    )
+
+    healed = json.loads(path.read_text(encoding="utf-8"))
+    assert installed_hook_port(healed) == service.port
+    assert capability_state(healed, repo, env=env) == "ok"
+    for event in HTTP_EVENTS:
+        hooks = healed["hooks"][event][0]["hooks"]
+        assert len(hooks) == 2
+        assert hooks[1]["command"] == WATCHDOG_COMMAND
+        assert hooks[1]["async"] is True
+
+
+def test_watchdog_command_has_a_fast_entrypoint(monkeypatch):
+    """The async safety net must not import the full CLI on every event."""
+    import sys
+
+    from openshard.cli import entrypoint
+
+    called = []
+
+    def fake_watchdog(stream, *, env=None):
+        called.append(stream)
+        return "healthy"
+
+    monkeypatch.setattr(client, "run_claude_watchdog", fake_watchdog)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+
+    assert entrypoint._try_fast_path(["hooks", "claude-watchdog"]) is True
+    assert len(called) == 1
