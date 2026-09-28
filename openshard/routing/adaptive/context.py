@@ -1,11 +1,16 @@
 """RoutingContext: the facts a routing decision is allowed to depend on.
 
-A context carries only what OpenShard actually knows before execution. Every
-field that can be unknown is ``None`` (or empty) when it is unknown; nothing
-here is guessed to fill a slot. The deterministic baseline reads these facts;
-future policies (historical Receipt performance, learned or agent-as-a-router
-routing) read the same object, so a new policy never needs new plumbing
+A context carries only what OpenShard actually knows at the decision boundary.
+Every field that can be unknown is ``None`` (or empty) when it is unknown;
+nothing here is guessed to fill a slot. The deterministic policies read these
+facts; future policies (a small learned router over the same structured
+features) read the same object, so a new policy never needs new plumbing
 through execution.
+
+Version 2 adds the trajectory: which step of the run this is, what was tried,
+what OpenShard observed of the last attempt's verification, what has been
+spent and what may be spent, and whether dogfood candidates may compete. A
+version-1 context (no step fields) is still valid and routes as before.
 
 The context is deliberately separate from policy *configuration*
 (``ModelPolicyConfig``), which constrains the candidate set, and from provider
@@ -18,7 +23,9 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-ROUTING_CONTEXT_VERSION = 1
+from openshard.routing.adaptive.step_types import FAILURE_CLASSES, STEP_TYPES
+
+ROUTING_CONTEXT_VERSION = 2
 
 # Legacy keyword-classifier categories (routing/engine.py ``route``).
 TASK_CATEGORIES = frozenset({"boilerplate", "standard", "security", "visual", "complex"})
@@ -28,11 +35,12 @@ COST_SENSITIVITIES = frozenset({"low", "normal", "high"})
 
 # Bound what a context may carry into a Receipt.
 MAX_LANGUAGES = 5
+MAX_MODELS_TRIED = 8
 
 
 @dataclass(frozen=True)
 class RoutingContext:
-    """Pre-execution routing facts. ``None`` means unknown, never "no"."""
+    """Routing facts at one decision boundary. ``None`` means unknown, never "no"."""
 
     # What the task is. ``task_category`` comes from the keyword classifier
     # (``category_source`` says so) - a heuristic, recorded as one.
@@ -70,9 +78,31 @@ class RoutingContext:
 
     # Explicit choices. An explicit model is the user's decision; routing
     # never substitutes a different one for it. ``requested_class`` lets a
-    # caller ask for a routing class directly.
+    # caller ask for a routing class (legacy or requirement name) directly.
     explicit_model: str | None = None
     requested_class: str | None = None
+
+    # ---- Trajectory (version 2) ------------------------------------------
+    # Which step of the run is being routed (step_types.STEP_TYPES).
+    step_type: str | None = None
+    # 1-based attempt number within the run, when the harness counts attempts.
+    attempt: int | None = None
+    # Requested model ids already used in this run, oldest first.
+    models_tried: tuple[str, ...] = ()
+    # What OpenShard knows of the previous attempt's verification: the
+    # status token and who vouches for it (history.verification). Unknown
+    # stays None and is never treated as success.
+    last_verification_status: str | None = None
+    last_verification_source: str | None = None
+    # Classification of the previous failure (step_types.FAILURE_CLASSES).
+    previous_failure_class: str | None = None
+    # Estimated spend so far and the cap the run must stay under, in USD.
+    # ``accumulated_cost_usd`` is None when any attempt's cost was not reported.
+    accumulated_cost_usd: float | None = None
+    cost_budget_usd: float | None = None
+    # Whether dogfood candidates may compete in this run (the capability gate
+    # the caller already checked). False for public runs.
+    dogfood_enabled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Bounded, JSON-safe projection. Contains no task text."""
@@ -94,6 +124,15 @@ class RoutingContext:
             "harness": self.harness,
             "explicit_model": self.explicit_model,
             "requested_class": self.requested_class,
+            "step_type": self.step_type,
+            "attempt": self.attempt,
+            "models_tried": list(self.models_tried[:MAX_MODELS_TRIED]),
+            "last_verification_status": self.last_verification_status,
+            "last_verification_source": self.last_verification_source,
+            "previous_failure_class": self.previous_failure_class,
+            "accumulated_cost_usd": self.accumulated_cost_usd,
+            "cost_budget_usd": self.cost_budget_usd,
+            "dogfood_enabled": self.dogfood_enabled,
         }
 
     @property
@@ -105,6 +144,13 @@ class RoutingContext:
 
 def _known(value: object, allowed: frozenset[str]) -> str | None:
     return value if isinstance(value, str) and value in allowed else None
+
+
+def _cost(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    return f if f == f and f not in (float("inf"), float("-inf")) and f >= 0 else None
 
 
 def routing_context_for_run(
@@ -119,6 +165,16 @@ def routing_context_for_run(
     harness: str | None = None,
     required_capabilities: frozenset[str] = frozenset(),
     explicit_model: str | None = None,
+    step_type: str | None = None,
+    attempt: int | None = None,
+    models_tried: tuple[str, ...] = (),
+    last_verification_status: str | None = None,
+    last_verification_source: str | None = None,
+    previous_failure_class: str | None = None,
+    accumulated_cost_usd: float | None = None,
+    cost_budget_usd: float | None = None,
+    cost_sensitivity: str | None = None,
+    dogfood_enabled: bool = False,
 ) -> RoutingContext:
     """Build a context from the signals the run pipeline already computes.
 
@@ -145,6 +201,16 @@ def routing_context_for_run(
         verification_requested=verification_requested,
         languages=languages,
         framework=framework,
+        cost_sensitivity=_known(cost_sensitivity, COST_SENSITIVITIES),
         harness=harness or None,
         explicit_model=explicit_model or None,
+        step_type=_known(step_type, STEP_TYPES),
+        attempt=int(attempt) if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 1 else None,
+        models_tried=tuple(str(m) for m in models_tried if m)[:MAX_MODELS_TRIED],
+        last_verification_status=last_verification_status or None,
+        last_verification_source=last_verification_source or None,
+        previous_failure_class=_known(previous_failure_class, FAILURE_CLASSES),
+        accumulated_cost_usd=_cost(accumulated_cost_usd),
+        cost_budget_usd=_cost(cost_budget_usd),
+        dogfood_enabled=bool(dogfood_enabled),
     )

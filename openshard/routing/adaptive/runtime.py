@@ -11,7 +11,7 @@ Offline and cheap: the catalog is read from the local cache only
 """
 from __future__ import annotations
 
-from openshard.routing.adaptive.candidates import build_candidate_set
+from openshard.routing.adaptive.candidates import CandidateSet, build_candidate_set
 from openshard.routing.adaptive.context import RoutingContext, routing_context_for_run
 from openshard.routing.adaptive.decision import RoutingDecision
 from openshard.routing.adaptive.policy import RoutingPolicy, decide_route
@@ -24,8 +24,30 @@ def plan_route(
     policy: RoutingPolicy | None = None,
     catalog=None,
     availability=None,
+    dogfood_ids=(),
 ) -> RoutingDecision:
-    """Catalog -> eligibility -> candidate set -> policy -> decision."""
+    """Catalog -> eligibility -> candidate set -> policy -> decision.
+
+    *dogfood_ids* are admitted to the candidate set as dogfood candidates; the
+    caller passes them only when the dogfood capability applies.
+    """
+    return plan_route_with_candidates(
+        context, model_policy=model_policy, policy=policy, catalog=catalog,
+        availability=availability, dogfood_ids=dogfood_ids,
+    )[0]
+
+
+def plan_route_with_candidates(
+    context: RoutingContext,
+    *,
+    model_policy=None,
+    policy: RoutingPolicy | None = None,
+    catalog=None,
+    availability=None,
+    dogfood_ids=(),
+) -> tuple[RoutingDecision, CandidateSet]:
+    """As :func:`plan_route`, also returning the candidate set so a later step
+    of the same run (a repair re-route) can decide over the same pool."""
     if catalog is None:
         from openshard.models.catalog import load_catalog
 
@@ -42,9 +64,10 @@ def plan_route(
         required_capabilities=context.required_capabilities,
         min_context_tokens=context.min_context_tokens,
         explicit_model=context.explicit_model,
+        dogfood_ids=dogfood_ids,
     )
     pins = model_policy.class_pin_map if model_policy is not None else None
-    return decide_route(context, candidates, policy=policy, class_pins=pins)
+    return decide_route(context, candidates, policy=policy, class_pins=pins), candidates
 
 
 def shadow_decision_for_run(

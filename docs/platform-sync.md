@@ -129,7 +129,7 @@ Authorization: Bearer osk_...
 
 The Platform answers only with the capabilities that are *on* for that organisation, and a key can
 read no other organisation's list. Core keeps the key set in `<OPENSHARD_HOME>/capabilities.json`
-(mode 0600 on POSIX) for ten minutes so a run makes at most one request. The cache answers only
+(mode 0600 on POSIX) for ten minutes so a command makes at most one request; an `osn run` reads once at its start regardless of the cache and keeps that answer for the run. The cache answers only
 for the link that wrote it: endpoint, organisation and key prefix must match and the entry is
 signed (HMAC) with the API key itself, so an entry written under another key or edited by hand is
 ignored; the key is never stored in it. A failed read is remembered for one minute so an offline

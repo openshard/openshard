@@ -24,8 +24,17 @@ Record modes:
   attempt actually called that model; if the run ends first, the record says
   so.
 
-Historical performance is not consulted. Every input is something this run
-observed.
+With Routing V2 applied, the supervisor also carries a ``reroute`` hook: once
+the recovery policy has said *escalate* (so the attempt cap, the spend cap
+and the observed-failure rule all held), the ``repair`` step is re-decided
+over the run's own candidate pool from what the run observed (models tried,
+the observed failure, spend so far). The re-route may pick a different model
+than the fixed plan or say nothing is eligible, which stops the run; it can
+never widen what the plan allowed, because the envelope ran first. The
+decision's reason, policy and whether it changed the model are recorded.
+
+Historical performance reaches routing only through the V2 policy's
+evidence gate. Every other input is something this run observed.
 """
 
 from __future__ import annotations
@@ -50,6 +59,8 @@ ACTION_SWITCH = "escalate"
 ACTION_HALT = "stop"
 
 SOURCE_OBSERVED = "directly_observed"
+REASON_TRAJECTORY_REROUTE = "trajectory_reroute"
+MAX_REROUTE_CONSIDERED = 4
 NOT_ACTED_SHADOW = "shadow_mode"
 NOT_ACTED_USER_LADDER = "user_ladder"
 NOT_ACTED_ROUTING_NOT_APPLIED = "adaptive_routing_not_applied"
@@ -67,6 +78,8 @@ STOP_REASON_PREFIX = "supervisor_stop:"
 
 UsageLookup = Callable[[int], tuple[str | None, float | None]]
 LadderLookup = Callable[[int], str | None]
+# (attempt, models tried, last status, last source, accumulated cost) -> decision | None
+RerouteFn = Callable[..., Any]
 
 
 @dataclass
@@ -103,6 +116,7 @@ class RecoverySupervisor:
     first_model: str | None = None
     first_class: str | None = None
     ladder_model_for: LadderLookup | None = None  # what the ladder would run at attempt n
+    reroute: RerouteFn | None = None  # Routing V2 repair-step re-route (applied path only)
     results: list[AttemptResult] = field(default_factory=list)
     decisions: list[SupervisorDecision] = field(default_factory=list)
 
@@ -167,6 +181,30 @@ class RecoverySupervisor:
         else:
             kind, model_id = ACTION_HALT, None
         reason = REASON_PLAN_ATTEMPTS if action.reason == STOP_ATTEMPTS_EXHAUSTED else action.reason
+        if kind == ACTION_SWITCH and self.reroute is not None:
+            # The envelope allowed an escalation; let the step be re-decided on
+            # what this run observed. It may narrow (stop), never widen.
+            costs = [r.cost_usd for r in self.results]
+            rerouted = self._reroute(n, costs)
+            if rerouted is not None:
+                evidence["reroute"] = {
+                    "policy": {"name": rerouted.policy_name, "version": rerouted.policy_version},
+                    "step_type": rerouted.step_type,
+                    "requested_class": rerouted.requested_class,
+                    "resolved_class": rerouted.resolved_class,
+                    "selected_model": rerouted.selected_model,
+                    "promotion_state": rerouted.selected_promotion_state,
+                    "reasons": list(rerouted.reasons)[:8],
+                    "considered": list(rerouted.considered[:MAX_REROUTE_CONSIDERED]),
+                    "history_used": bool((rerouted.history_evidence or {}).get("used")),
+                    "changed_from_plan": (rerouted.selected_model or None) != model_id,
+                }
+                if rerouted.selected_model and rerouted.selected_model not in {r.model_id for r in self.results}:
+                    model_id = rerouted.selected_model
+                    reason = REASON_TRAJECTORY_REROUTE
+                else:
+                    kind, model_id = ACTION_HALT, None
+                    reason = rerouted.reasons[-1] if rerouted.reasons else "no_eligible_candidate"
         evidence["changed_next_model"] = (
             (model_id != ladder_next) if kind == ACTION_SWITCH and ladder_next is not None else None
         )
@@ -188,6 +226,22 @@ class RecoverySupervisor:
         self.decisions.append(decision)
         return decision
 
+    def _reroute(self, n: int, costs: list[float | None]):
+        if self.reroute is None:
+            return None
+        try:
+            return self.reroute(
+                attempt=n + 1,
+                models_tried=[r.model_id for r in self.results],
+                last_verification_status="failed",
+                last_verification_source=self.results[-1].verification_source if self.results else None,
+                accumulated_cost_usd=(
+                    round(sum(c for c in costs if c is not None), 6) if all(c is not None for c in costs) else None
+                ),
+            )
+        except Exception:
+            return None
+
     def mark_acted(self) -> None:
         """The next attempt ran with the recommended model."""
         if self.decisions and self.decisions[-1].acted_on is None:
@@ -208,7 +262,7 @@ class RecoverySupervisor:
             "boundary": "observed_verification_failure_before_retry",
             "decisions": [d.to_record() for d in self.decisions],
             "evidence": {"verification": "openshard_observed", "spend": "provider_usage_estimate",
-                         "history": "not_used"},
+                         "history": "via_routing_v2_evidence_gate" if self.reroute is not None else "not_used"},
         }
 
 
@@ -216,6 +270,7 @@ __all__ = [
     "ACTION_HALT",
     "ACTION_SWITCH",
     "CAPABILITY",
+    "REASON_TRAJECTORY_REROUTE",
     "NOT_ACTED_PROVIDER",
     "NOT_ACTED_ROUTING_NOT_APPLIED",
     "NOT_ACTED_RUN_ENDED",

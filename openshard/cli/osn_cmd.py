@@ -95,14 +95,18 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
 
     from openshard.sync.capabilities import LazyCapabilities
 
-    capabilities = LazyCapabilities()
+    # One fresh capability read at run start (when a feature asks), frozen for
+    # the whole run: a dashboard toggle applies to the next new run, and never
+    # to a run already in progress.
+    capabilities = LazyCapabilities(refresh=True)
     explicit_model = model  # the user's --model, if any; never re-evaluated by routing or a supervisor
     budget, budget_record = _resolve_budget(repo_root, capabilities)
     attempts_allowed = max_attempts
     if budget is not None and budget.limits.max_attempts is not None:
         attempts_allowed = min(attempts_allowed, budget.limits.max_attempts)
     routing = _resolve_routing(task, repo_root, explicit_model=model, escalate=list(escalate),
-                               capabilities=capabilities, max_attempts=attempts_allowed)
+                               capabilities=capabilities, max_attempts=attempts_allowed,
+                               cost_budget_usd=budget.limits.max_spend_usd if budget is not None else None)
     provider_name, provider_obj = _resolve_provider(provider, routing.first_model)
     if routing.applied and routing.decision is not None \
             and provider_name not in tuple(routing.decision.selected_via or ()):
@@ -141,11 +145,14 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         routing_decision=routing.decision, routing_record_mode=routing.record_mode,
         routing_record=routing.record, explicit_model=routing.first_model if routing.decision is None else None,
         supervisor_record=supervisor.to_record() if supervisor is not None else None,
+        capability_snapshot=capabilities.to_record(),
     )
-    # Only present when a budget was configured / a capability is on: the
-    # machine output is otherwise byte-for-byte what it was before.
+    # Only present when a budget was configured / a capability was looked up:
+    # the machine output is otherwise byte-for-byte what it was before.
     budget_output = {
-        k: entry[k] for k in ("agent_budgets", "adaptive_routing", "supervisor_routing") if k in entry
+        k: entry[k]
+        for k in ("agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot")
+        if k in entry
     }
     store = repo_root / ".openshard"
     store.mkdir(parents=True, exist_ok=True)
@@ -194,11 +201,12 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
 
 
 def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, escalate: list[str],
-                     capabilities: LazyCapabilities, max_attempts: int | None = None) -> OsnRouting:
-    """First model and escalation ladder: the user's choice, else adaptive routing when
+                     capabilities: LazyCapabilities, max_attempts: int | None = None,
+                     cost_budget_usd: float | None = None) -> OsnRouting:
+    """First model and escalation ladder: the user's choice, else Routing V2 when
     the ``adaptive_routing`` capability is on, else the keyword router as before."""
     from openshard.osn.routing import CAPABILITY as ROUTING_CAPABILITY
-    from openshard.osn.routing import resolve_osn_routing
+    from openshard.osn.routing import HARNESS, resolve_osn_routing
     from openshard.routing.engine import route
 
     def model_policy_loader():
@@ -208,6 +216,11 @@ def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, 
         config, _valid, _path = load_config_safe(cwd=repo_root)
         return model_policy_from_config(config if isinstance(config, dict) else {})
 
+    def history_loader():
+        from openshard.routing.adaptive.history_evidence import load_history_evidence
+
+        return load_history_evidence(repo_root / ".openshard" / "runs.jsonl", harness=HARNESS)
+
     return resolve_osn_routing(
         task,
         explicit_model=explicit_model,
@@ -216,6 +229,8 @@ def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, 
         legacy_model=lambda t: route(t).model,
         model_policy_loader=model_policy_loader,
         max_attempts=max_attempts,
+        cost_budget_usd=cost_budget_usd,
+        history_loader=history_loader,
     )
 
 
@@ -260,6 +275,8 @@ def _resolve_supervisor(routing: OsnRouting, budget: BudgetLedger | None, action
         first_model=routing.first_model,
         first_class=decision.resolved_class,
         ladder_model_for=action_provider.model_for,
+        # Routing V2 re-decides the repair step only when it chose the first one.
+        reroute=routing.reroute if not_acted is None else None,
     )
 
 

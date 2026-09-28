@@ -274,6 +274,10 @@ def adaptive_routing_block(entry: dict) -> dict[str, Any] | None:
         return block
     ladder_raw = raw.get("escalation_ladder")
     ladder = [_text(m, 256) for m in ladder_raw if isinstance(m, str)] if isinstance(ladder_raw, list) else []
+    shadow_raw = raw.get("shadow_candidates")
+    shadow = [_text(m, 256) for m in shadow_raw if isinstance(m, str)] if isinstance(shadow_raw, list) else []
+    policy = _dict(raw.get("policy"))
+    history = _dict(raw.get("history"))
     block.update({
         "selected_model": _text(raw.get("selected_model"), 256),
         "selection_mode": _text(raw.get("selection_mode"), 32),
@@ -282,8 +286,35 @@ def adaptive_routing_block(entry: dict) -> dict[str, Any] | None:
         "ladder_source": _text(raw.get("ladder_source"), 32),
         "recovery_enabled": _bool(raw.get("recovery_enabled")),
         "decision_fingerprint": _text(raw.get("decision_fingerprint"), 32),
+        # Routing V2 fields; None on V1 records.
+        "policy": (
+            {"name": _text(policy.get("name"), 64), "version": _text(policy.get("version"), 16)}
+            if policy else None
+        ),
+        "step_type": _text(raw.get("step_type"), 16),
+        "promotion_state": _text(raw.get("promotion_state"), 32),
+        "shadow_candidates": [m for m in shadow if m][:3] or None,
+        "history": (
+            {"used": _bool(history.get("used")), "reason": _text(history.get("reason"), 64),
+             "candidates_with_evidence": _count(history.get("candidates_with_evidence"))}
+            if history else None
+        ),
     })
     return block
+
+
+def capability_snapshot_block(entry: dict) -> dict[str, Any] | None:
+    """Which Platform capabilities governed an OSN run, read once at its start."""
+    raw = _dict(entry.get("capability_snapshot"))
+    if not raw:
+        return None
+    enabled = _dict(raw.get("enabled"))
+    return {
+        "source": _text(raw.get("source"), 16),
+        "reason": _text(raw.get("reason"), 64),
+        "refreshed_at_run_start": _bool(raw.get("refreshed_at_run_start")),
+        "enabled": {str(k)[:64]: bool(v) for k, v in list(enabled.items())[:16] if isinstance(v, bool)},
+    }
 
 
 MAX_SUPERVISOR_DECISIONS = 8
@@ -307,6 +338,7 @@ def supervisor_routing_block(entry: dict) -> dict[str, Any] | None:
         if d.get("action") not in _SUPERVISOR_ACTIONS:
             continue
         ev = _dict(d.get("evidence"))
+        rr = _dict(ev.get("reroute"))
         decisions.append({
             "attempt": _count(d.get("attempt")),
             "action": d["action"],
@@ -323,6 +355,14 @@ def supervisor_routing_block(entry: dict) -> dict[str, Any] | None:
                 "cost_budget_usd": _number(ev.get("cost_budget_usd")),
                 "ladder_model": _text(ev.get("ladder_model"), 256),
                 "changed_next_model": _bool(ev.get("changed_next_model")),
+                # Routing V2 repair-step re-route; None when the fixed plan was followed.
+                "reroute": (
+                    {"resolved_class": _text(rr.get("resolved_class"), 64),
+                     "selected_model": _text(rr.get("selected_model"), 256),
+                     "changed_from_plan": _bool(rr.get("changed_from_plan")),
+                     "history_used": _bool(rr.get("history_used"))}
+                    if rr else None
+                ),
             },
         })
     return {
@@ -457,6 +497,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "agent_budgets": agent_budgets_block,
         "adaptive_routing": adaptive_routing_block,
         "supervisor_routing": supervisor_routing_block,
+        "capability_snapshot": capability_snapshot_block,
         "base_commit": base_commit_value,
         "content_hash": content_hash_value,
         "session": session_block,

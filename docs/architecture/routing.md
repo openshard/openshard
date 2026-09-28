@@ -157,6 +157,115 @@ first nor alone: requirements, evidence, promotion and supersession all come
 before it, and the target metric is **cost per independently verified
 successful task**, not token price.
 
+## Routing V2: trajectory-aware, deterministic (`routing/adaptive/policy_v2.py`)
+
+Behind the `adaptive_routing` capability, `openshard osn run` no longer picks
+one tier for the whole run. `TrajectoryPolicyV2` implements the existing
+`RoutingPolicy` interface and decides at each **step boundary** OpenShard can
+honestly observe (`routing/adaptive/step_types.py`):
+
+| Step | When | What the context carries |
+|---|---|---|
+| `execute` | attempt 1 | task category, capability needs, harness, spend cap, dogfood allowed |
+| `repair` | attempt n>1, after OpenShard itself observed the previous attempt fail verification and the loop decided to retry | everything above plus attempt number, models tried, last verification status and source, accumulated spend |
+
+Inspection and verification are OpenShard's own work, not model calls, and are
+not routed. Planning and review stages exist in `openshard run`, which still
+runs legacy routing and records only a shadow decision, so those step names
+are not claimed yet.
+
+The policy, in order:
+
+1. an explicit model is honoured exactly or nothing is selected;
+2. the budget: a `repair` step with spend at or over the cap, or with unknown
+   spend under a cap, selects nothing (`cost_budget_exhausted`,
+   `spend_unknown_under_cap`);
+3. a `repair` step needs an **observed** failure (`directly_observed` or
+   stronger). Unknown, `not_run`, or agent-reported outcomes are not success
+   and not a reason to escalate: nothing is selected
+   (`failure_not_directly_observed`);
+4. the requirement class from the context (`V2_CLASS_RULES`), escalated once
+   per failed attempt along `ESCALATION_TARGET`, with every tried model
+   excluded (`already_tried`);
+5. a valid pin wins inside the class;
+6. otherwise the requirement ranking above, with dogfood candidates competing
+   because the capability is on, and observed history only when the evidence
+   gate opens (next section);
+7. an empty class falls back to its escalation target, recorded;
+8. shadow candidates are reported, never selected.
+
+The decision fixes a recovery plan (each escalation target resolved now, then
+one different model in the top class) that becomes the escalation ladder. At
+each observed failure the supervisor first runs the recovery envelope that
+already existed (`next_recovery_action`: attempt cap, spend cap, observed
+failure, no model twice); only if it says *escalate* is the `repair` step
+re-decided over the run's own candidate pool (`OsnRouting.reroute`). The
+re-route may pick a different model than the fixed plan or say nothing is
+eligible, which stops the run. It can never widen what the envelope allowed.
+The supervisor record shows the re-route's policy, class, model, reasons and
+whether it changed the plan.
+
+### Observed history: gated, never invented
+
+`routing/adaptive/history_evidence.py` derives per-model evidence from
+Receipts (`RoutingOutcome`), counting only outcomes whose verification
+OpenShard or an independent system observed. Evidence for a model is
+*meaningful* only with at least 5 verified outcomes for the same harness, and
+the policy uses history only when at least 2 eligible candidates have
+meaningful evidence. Cost per verified success is reported only when every
+verified outcome in the sample has a known cost. Otherwise the decision
+records `history_evidence.used: false` with the reason
+(`no_history`, `insufficient_observed_data`,
+`too_few_candidates_with_evidence`). Today this is almost always the case,
+and the Receipt says so.
+
+### What the Receipt answers
+
+`adaptive_routing` (the entry block) and `routing_provenance` together say:
+what step and requirement class were routed; how many models were eligible
+and how many were rejected per reason; the selected model, its promotion
+state, and the ranking components of the models it was compared with; which
+policy and version decided; whether the decision was shadow or applied and
+what executed; which discovered models would have qualified
+(`shadow_candidates`); whether history was used and why not; the ladder and
+whether recovery was enabled. `supervisor_routing` says whether the route
+changed later, on what evidence, and whether it was acted on. The
+`verification` block says pass / fail / not run / unknown, and
+`estimated_cost` what it cost. `capability_snapshot` says which capabilities
+governed the run and that they were read at its start. All of it is bounded
+(at most 8 considered ids, 5 ranking rows, 3 shadow candidates) and carries
+no task text.
+
+### Run-level capability snapshot
+
+`LazyCapabilities(refresh=True)` (`sync/capabilities.py`) reads the
+organisation's enabled capabilities once, at the start of a new OSN run,
+bypassing the positive cache so a dashboard toggle applies to the next run
+immediately. The answer is frozen for the run: budgets, routing and the
+supervisor all read the same snapshot, and a toggle flipped mid-run changes
+nothing until the next run. Nothing is read until a feature asks (an explicit
+`--model` run still makes no request), the negative cache still spares a
+Platform that just failed, and offline or unconfirmed still means every
+capability is off.
+
+### Toward a learned router
+
+A learned router is a third `RoutingPolicy` over the same structured inputs:
+`RoutingContext` (step, class, attempt, tried models, observed failure,
+spend) and per-candidate facts and evidence. It replaces the ordering in
+`rank_for_requirement`; everything around it (eligibility, explicit choices,
+budget and evidence rules, the "only from the eligible set" contract that
+`decide_route` enforces, the Receipt) stays. It is not trained yet because
+the data is not there: history has hundreds of runs but few with
+independently observed verification, and none yet with V2 decisions recorded
+beside outcomes. The data needed first, all of which V2 now records: per
+step, the context, the eligible set and rejections, the ranking components,
+the chosen model and promotion state, the observed verification result and
+source, the cost, and whether a re-route or escalation followed. Once
+`openshard stats routing` shows meaningful coverage per (class, model,
+harness), the policy can be evaluated offline against those records before
+it is allowed to choose.
+
 ## What remains for compatibility
 
 * `MODEL_CHEAP` / `MODEL_MAIN` / `MODEL_STRONG` / `MODEL_ESCALATE` /

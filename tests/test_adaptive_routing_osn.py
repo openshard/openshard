@@ -1,9 +1,9 @@
-"""Adaptive routing dogfood V1 for ``openshard osn run`` (``openshard.osn.routing``).
+"""Adaptive routing for ``openshard osn run`` (``openshard.osn.routing``).
 
 Proves: the capability off (or unconfirmed) leaves model choice exactly as
-it was; with it on and no ``--model``, the adaptive decision picks the first
-model and its recovery plan supplies the ladder; an explicit ``--model`` or
-``--escalate-model`` always wins; no candidate falls back to the keyword
+it was; with it on and no ``--model``, the Routing V2 decision picks the
+first model and its recovery plan supplies the ladder; an explicit ``--model``
+or ``--escalate-model`` always wins; no candidate falls back to the keyword
 router; the Receipt records what was decided and why.
 """
 
@@ -51,6 +51,10 @@ CURATED = [
     _m("zeta/mid-2"),
     _m("acme/frontier-1", tier="frontier", cost_class="expensive", supports_reasoning=True,
        roles=("escalation",), lifecycle="active_specialist"),
+    # A second reasoning model so the repair step has somewhere to go after
+    # the first escalation (V2 never retries a tried model).
+    _m("zeta/frontier-2", tier="frontier", cost_class="expensive", supports_reasoning=True,
+       roles=("escalation",), lifecycle="active_specialist"),
 ]
 CATALOG = build_catalog(CURATED, [], synced_at="2026-09-24T00:00:00Z")
 TASK = "write ok into out.txt"  # no router keywords: standard -> balanced_coding
@@ -87,14 +91,18 @@ class TestResolve:
 
     def test_capability_on_applies_the_decision_and_its_recovery_ladder(self, catalog):
         r, lookups = _resolve()
-        assert r.first_model == "acme/mid-1" and r.ladder == ["acme/frontier-1"]
-        assert r.models == ["acme/mid-1", "acme/frontier-1"]
+        assert r.first_model == "acme/mid-1" and r.ladder == ["acme/frontier-1", "zeta/frontier-2"]
+        assert r.models == ["acme/mid-1", "acme/frontier-1", "zeta/frontier-2"]
         assert r.record_mode == "applied" and lookups == 1
         rec = r.record
         assert rec["applied"] is True and rec["reason"] == "applied"
-        assert rec["selected_model"] == "acme/mid-1" and rec["routing_class"] == "balanced_coding"
-        assert rec["escalation_ladder"] == ["acme/frontier-1"] and rec["ladder_source"] == "recovery_plan"
+        assert rec["selected_model"] == "acme/mid-1" and rec["routing_class"] == "routine_coding"
+        assert rec["policy"] == {"name": "deterministic_trajectory_v2", "version": "1"}
+        assert rec["step_type"] == "execute" and rec["promotion_state"] == "stable"
+        assert rec["escalation_ladder"] == ["acme/frontier-1", "zeta/frontier-2"]
+        assert rec["ladder_source"] == "recovery_plan"
         assert rec["history_evidence"] == "not_used_insufficient_observed_data"
+        assert rec["history"]["used"] is False
         assert rec["recovery_enabled"] is True and rec["decision_fingerprint"]
 
     def test_explicit_model_always_wins_and_is_never_looked_up(self, catalog):
@@ -125,7 +133,8 @@ class TestResolve:
         assert r.record["eligible_count"] == 0
 
     def test_decision_failure_falls_back_and_says_so(self):
-        with patch("openshard.routing.adaptive.runtime.plan_route", side_effect=RuntimeError("boom")):
+        with patch("openshard.routing.adaptive.runtime.plan_route_with_candidates",
+                   side_effect=RuntimeError("boom")):
             r, _ = _resolve()
         assert r.first_model == route(TASK).model and r.decision is None
         assert r.record["applied"] is False and r.record["reason"] == "decision_unavailable"
@@ -139,7 +148,8 @@ class TestResolve:
             return blocked
 
         r, _ = _resolve(policy_loader=loader)
-        assert r.first_model == "zeta/mid-2" and loads["n"] == 1  # the blocked model is skipped
+        assert r.first_model != "acme/mid-1" and loads["n"] == 1  # the blocked model is skipped
+        assert r.record["rejected_counts"].get("policy:blocked_model") == 1
         r_off, _ = _resolve(enabled=False, policy_loader=loader)
         assert r_off.first_model == route(TASK).model and loads["n"] == 1  # never consulted when off
 
@@ -154,12 +164,12 @@ class TestResolve:
         assert r.decision is not None  # the shadow decision is still recorded
 
     def test_the_ladder_is_cut_to_what_max_attempts_can_run(self, catalog):
-        task = "add a simple helper"  # boilerplate -> cheap_coding -> two rungs: balanced, frontier
+        task = "add a simple helper"  # boilerplate -> routine_coding -> two rungs in deep_reasoning
         full, _ = _resolve(task, max_attempts=3)
-        assert full.first_model == "acme/cheap-1" and full.ladder == ["acme/mid-1", "acme/frontier-1"]
+        assert full.first_model == "acme/mid-1" and full.ladder == ["acme/frontier-1", "zeta/frontier-2"]
         assert full.record["recovery_enabled"] is True and full.record["max_attempts"] == 3
         one, _ = _resolve(task, max_attempts=2)
-        assert one.ladder == ["acme/mid-1"] and one.models == ["acme/cheap-1", "acme/mid-1"]
+        assert one.ladder == ["acme/frontier-1"] and one.models == ["acme/mid-1", "acme/frontier-1"]
         none, _ = _resolve(task, max_attempts=1)
         assert none.ladder == [] and none.record["ladder_source"] == "none"
         assert none.record["recovery_enabled"] is False and none.record["applied"] is True
@@ -179,9 +189,12 @@ class TestResolve:
             "capability", "record_mode", "history_evidence", "applied", "reason", "selected_model",
             "selection_mode", "selected_via", "routing_class", "requested_class", "policy", "considered",
             "escalation_ladder", "ladder_source", "recovery_enabled", "max_attempts", "decision_fingerprint",
+            "step_type", "promotion_state", "ranking", "eligible_count", "rejected_counts",
+            "shadow_candidates", "history", "reasons",
         }
         assert set(r.record) == allowed
         assert len(r.record["considered"]) <= 8 and all("/" in m for m in r.record["considered"])
+        assert len(r.record["ranking"]) <= 3 and len(r.record["shadow_candidates"]) <= 3
         assert TASK not in json.dumps(r.record)  # no task text
 
 
@@ -297,6 +310,8 @@ class TestCli:
         assert body["status"] == "verified" and body["models"] == ["acme/mid-1", "acme/frontier-1"]
         assert [m for m, _ in fp.calls] == ["acme/mid-1", "acme/frontier-1"]  # escalated after an observed failure
         assert body["adaptive_routing"]["applied"] is True
+        assert body["capability_snapshot"]["enabled"]["adaptive_routing"] is True
+        assert body["capability_snapshot"]["refreshed_at_run_start"] is True
         entry = _last_run(repo)
         prov = entry["routing_provenance"]
         assert prov["record_mode"] == "applied" and prov["selected_model"] == "acme/mid-1"
@@ -389,8 +404,8 @@ class TestCli:
         assert outcome.escalation_model == "acme/frontier-1" and outcome.verified_success is True
         report = build_routing_report([entry])
         groups = {(g["routing_class"], g["model"]): g for g in report["groups"]}
-        assert ("balanced_coding", "acme/mid-1") in groups  # credited to the decision, not the rung
-        assert groups[("balanced_coding", "acme/mid-1")]["escalations"] == 1
+        assert ("routine_coding", "acme/mid-1") in groups  # credited to the decision, not the rung
+        assert groups[("routine_coding", "acme/mid-1")]["escalations"] == 1
         assert report["overall"]["shadow_comparable"] == 0
 
     def test_platform_unavailable_keeps_routing_as_before(self, tmp_path, monkeypatch, platform, catalog):

@@ -9,7 +9,10 @@ so far, :func:`next_recovery_action` returns exactly one action - ``stop`` or
 Why it cannot loop:
 
 * at most ``max_attempts`` attempts, itself capped by ``MAX_ATTEMPTS_CEILING``;
-* every step is a different class, higher on the ladder, used at most once;
+* every step names a model not yet tried; a class is re-entered only with a
+  different model (Routing V2 uses this at the top of the ladder, where
+  nothing is above ``deep_reasoning`` or ``vision``), and each step is used
+  at most once;
 * a model already tried is never tried again;
 * escalation needs *observed* failure. An unknown or unobserved verification
   outcome stops recovery - missing evidence is not a reason to spend more. An
@@ -165,9 +168,8 @@ def next_recovery_action(
         if any(c is None for c in costs) or sum(c for c in costs if c is not None) >= cost_budget_usd:
             return RecoveryAction(ACTION_STOP, STOP_COST_EXHAUSTED)
     tried = {a.model_id for a in attempts}
-    tried_classes = {a.routing_class for a in attempts if a.routing_class}
     for step in plan.steps:
-        if step.model_id in tried or step.routing_class in tried_classes:
+        if not step.model_id or step.model_id in tried:
             continue
         return RecoveryAction(ACTION_ESCALATE, TRIGGER_VERIFICATION_FAILED, step)
     return RecoveryAction(ACTION_STOP, STOP_LADDER_EXHAUSTED)

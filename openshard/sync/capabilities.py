@@ -6,12 +6,20 @@ second credential. The Platform lists only the capabilities that are *on*
 for that organisation, and a key can read no other organisation's list.
 
 Core caches the key set briefly in ``<OPENSHARD_HOME>/capabilities.json``
-so a run makes at most one request. The cache answers only for the link
+so a command makes at most one request. The cache answers only for the link
 that wrote it: endpoint, organisation id and key prefix must match and the
 entry carries an HMAC over its contents keyed with the API key itself, so
 an entry written under another key (or edited by hand) is ignored without
 the key ever being stored. A failed read is remembered for one minute so an
 offline Platform does not cost every run a full timeout.
+
+Run-level snapshot: a new OSN run must see a dashboard toggle immediately,
+not after the cache expires, and must not change policy half-way through
+if the toggle flips again. ``LazyCapabilities(refresh=True)`` therefore
+skips the positive cache on its first lookup (one fresh read, which also
+rewrites the cache for other commands), then freezes that answer for the
+rest of the process. The negative cache still applies: a Platform that just
+failed is not asked again for a minute, and everything stays off.
 
 Everything that is not a fresh or validly cached answer -- no link, the
 ``OPENSHARD_PLATFORM_SYNC`` kill switch, 401/403/404/5xx, a timeout, bad
@@ -50,6 +58,14 @@ NEGATIVE_TTL_SECONDS = 60.0
 _MAX_BODY_BYTES = 256 * 1024
 
 CAPABILITY_AGENT_BUDGETS = "agent_budgets"
+CAPABILITY_ADAPTIVE_ROUTING = "adaptive_routing"
+CAPABILITY_SUPERVISOR_ROUTING = "supervisor_routing"
+# The capabilities an OSN run snapshots at its start.
+OSN_RUN_CAPABILITIES: tuple[str, ...] = (
+    CAPABILITY_AGENT_BUDGETS,
+    CAPABILITY_ADAPTIVE_ROUTING,
+    CAPABILITY_SUPERVISOR_ROUTING,
+)
 
 SOURCE_FRESH = "fresh"
 SOURCE_CACHE = "cache"
@@ -272,18 +288,50 @@ class LazyCapabilities:
     """One lookup per command, made only when a feature first asks.
 
     A command that never asks makes no request; several features asking in
-    the same process share one answer.
+    the same process share one answer. With ``refresh=True`` the one lookup
+    bypasses the positive cache (a run-start snapshot: the newest grant
+    applies to this run and this run only sees that one answer).
     """
 
-    def __init__(self, env: dict | os._Environ | None = None) -> None:
+    def __init__(
+        self,
+        env: dict | os._Environ | None = None,
+        *,
+        refresh: bool = False,
+        fetcher: Fetcher | None = None,
+    ) -> None:
         self._env = env
+        self._refresh = refresh
+        self._fetcher = fetcher
         self._state: CapabilityState | None = None
 
     @property
     def state(self) -> CapabilityState:
         if self._state is None:
-            self._state = resolve_capabilities(self._env)
+            kwargs: dict = {}
+            if self._refresh:
+                kwargs["ttl_seconds"] = 0.0
+            if self._fetcher is not None:
+                kwargs["fetcher"] = self._fetcher
+            self._state = resolve_capabilities(self._env, **kwargs)
         return self._state
+
+    @property
+    def refreshed_at_start(self) -> bool:
+        return self._refresh
+
+    def to_record(self, keys: tuple[str, ...] = OSN_RUN_CAPABILITIES) -> dict | None:
+        """What governed this run: which of *keys* were on, from where. None if
+        nothing ever asked (no lookup was made, nothing to record)."""
+        if self._state is None:
+            return None
+        st = self._state
+        return {
+            "source": st.source,
+            "reason": st.reason,
+            "refreshed_at_run_start": self._refresh,
+            "enabled": {k: st.enabled(k) for k in keys},
+        }
 
     @property
     def looked_up(self) -> bool:
@@ -296,7 +344,10 @@ class LazyCapabilities:
 __all__ = [
     "CACHE_FILENAME",
     "CACHE_TTL_SECONDS",
+    "CAPABILITY_ADAPTIVE_ROUTING",
     "CAPABILITY_AGENT_BUDGETS",
+    "CAPABILITY_SUPERVISOR_ROUTING",
+    "OSN_RUN_CAPABILITIES",
     "NEGATIVE_TTL_SECONDS",
     "REASON_NO_LINK",
     "REASON_SYNC_DISABLED",

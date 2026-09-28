@@ -2222,7 +2222,16 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
             lines.append(_row("Ladder", f"{', '.join(_ladder) if _ladder else 'none'} [{_routing.get('ladder_source')}]"))
         else:
             lines.append(_row("Applied", f"no ({_routing.get('reason') or 'unknown'})"))
+        _pol = _routing.get("policy") or {}
+        if _pol.get("name"):
+            _step = f", step {_routing['step_type']}" if _routing.get("step_type") else ""
+            lines.append(_row("Policy", f"{_pol.get('name')}@{_pol.get('version')}{_step}"))
+        if _routing.get("promotion_state"):
+            lines.append(_row("Promotion", str(_routing["promotion_state"])))
         lines.append(_row("History", str(_routing.get("history_evidence") or "unknown")))
+        _shadow = _routing.get("shadow_candidates") or []
+        if _shadow:
+            lines.append(_row("Shadow", ", ".join(_shadow) + " (discovered; would qualify if promoted)"))
         lines.append("")
 
     _sup = (receipt.recorded_evidence or {}).get("supervisor_routing")
@@ -2236,10 +2245,24 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
             _line = f"after attempt {_d.get('attempt')}: {_d.get('action')} ({_d.get('reason')})"
             if _d.get("recommended_model"):
                 _line += f" -> {_d['recommended_model']}"
+            _rr = (_d.get("evidence") or {}).get("reroute") or {}
+            if _rr.get("changed_from_plan"):
+                _line += " (re-routed)"
             _line += "" if _d.get("acted_on") else " [not acted on]"
             lines.append(_row("Decision", _line))
         if not _sup.get("decisions"):
             lines.append(_row("Decision", "never consulted"))
+        lines.append("")
+
+    _caps = (receipt.recorded_evidence or {}).get("capability_snapshot")
+    if isinstance(_caps, dict):
+        lines.append(f"{_INDENT}CAPABILITIES")
+        _on = sorted(k for k, v in (_caps.get("enabled") or {}).items() if v)
+        _src = str(_caps.get("source") or "unknown")
+        if _caps.get("reason"):
+            _src += f" ({_caps['reason']})"
+        lines.append(_row("Source", _src + (", read at run start" if _caps.get("refreshed_at_run_start") else "")))
+        lines.append(_row("Enabled", ", ".join(_on) if _on else "none"))
         lines.append("")
 
     if receipt.execution_spans:
