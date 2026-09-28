@@ -18,10 +18,11 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from openshard.osn.budget import STATUS_BUDGET_EXHAUSTED, BudgetExhausted, BudgetLedger
+from openshard.policy.decision import PolicyDecision, make_deny
 from openshard.policy.file_mutation import Approver, FileMutationGate
 from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
 from openshard.verification.setup_failure import detect_setup_failure
@@ -82,6 +83,9 @@ class AttemptRecord:
     blocked: list[str]
     policy: dict
     verification: VerificationResult | None = None
+    # Canonical policy decisions for this attempt's proposed writes (file gate
+    # plus path safety); the Shard entry's ``policy_decisions`` are built from these.
+    decisions: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -141,6 +145,15 @@ def _display_path(p: str) -> str:
     if norm.startswith("/") or ":" in norm or ".." in norm.split("/") or norm.startswith("~"):
         return "<unsafe-path>"
     return p
+
+
+def _stored_decision(decision: PolicyDecision) -> dict:
+    """A policy decision as stored: the same shape the run pipeline writes, with any
+    model-supplied path masked exactly like the rest of the receipt."""
+    d = asdict(decision)
+    if isinstance(d.get("resource"), str):
+        d["resource"] = _display_path(d["resource"])
+    return d
 
 
 def _stored_policy(policy: dict) -> dict:
@@ -286,12 +299,17 @@ def run_bounded_loop(
         gate = FileMutationGate(approver=approver)
         applied: list[str] = []
         blocked: list[str] = []
+        unsafe: list[PolicyDecision] = []
         budget_stop: BudgetExhausted | None = None
         for act in actions:
             try:
                 dest = resolve_safe_repo_path(sandbox, act.path)
             except UnsafePathError:
                 blocked.append(act.path)
+                unsafe.append(make_deny(
+                    "file_write", _display_path(act.path), "path escapes the repository or is unsafe",
+                    source="path_safety", severity="high",
+                ))
                 continue
             if not gate.authorize(act.path):
                 blocked.append(act.path)
@@ -311,6 +329,9 @@ def run_bounded_loop(
             if act.path not in changed:
                 changed.append(act.path)
         rec = AttemptRecord(n, [a.path for a in actions], applied, blocked, gate.summary())
+        rec.decisions = [
+            _stored_decision(d) for d in (*unsafe, *gate.decisions())
+        ]
         attempts.append(rec)
         blocked_seen.extend(p for p in blocked if p not in blocked_seen)
 

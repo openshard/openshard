@@ -73,6 +73,8 @@ class FileMutationOutcome:
     approval_granted: bool | None = None
     approval_source: str | None = None  # observed channel, e.g. "interactive_prompt"
     executed: bool = False
+    reason: str | None = None  # the policy's own reason, kept for the Receipt
+    severity: str | None = None
 
 
 @dataclass
@@ -85,7 +87,9 @@ class FileMutationGate:
     def authorize(self, rel: str) -> bool:
         """True only if policy (plus approval when asked) permits the write."""
         decision = resolve_policy_decisions([evaluate_file_write(rel)])
-        outcome = FileMutationOutcome(path=rel, decision=decision.decision)
+        outcome = FileMutationOutcome(
+            path=rel, decision=decision.decision, reason=decision.reason, severity=decision.severity,
+        )
         self.outcomes.append(outcome)
         if decision.decision == "allow":
             return True
@@ -103,6 +107,23 @@ class FileMutationGate:
         for o in self.outcomes:
             if o.path == rel:
                 o.executed = True
+
+    def decisions(self) -> list[PolicyDecision]:
+        """One canonical ``PolicyDecision`` per evaluated write, for the Receipt's
+        ``policy_decisions``: what was allowed, what needed approval (and whether
+        anyone granted it), what was denied. Nothing is inferred beyond the
+        outcomes this gate observed."""
+        out: list[PolicyDecision] = []
+        for o in self.outcomes:
+            if o.decision == "deny":
+                out.append(make_deny(ACTION_FILE_WRITE, o.path, o.reason, source=SOURCE, severity=o.severity))
+            elif o.decision == "ask":
+                d = make_ask(ACTION_FILE_WRITE, o.path, o.reason, source=SOURCE)
+                d.approval_granted = o.approval_granted  # None: no approver was available
+                out.append(d)
+            else:
+                out.append(make_allow(ACTION_FILE_WRITE, o.path, o.reason, source=SOURCE))
+        return out
 
     def summary(self) -> dict:
         return {

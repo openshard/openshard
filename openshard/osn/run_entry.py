@@ -113,7 +113,53 @@ def _retry_attempts(usage: list[AttemptUsage]) -> list[dict]:
     return out
 
 
-def _shadow_provenance(task: str, executed_model: str, verification_available: bool) -> dict | None:
+MAX_POLICY_DECISIONS = 50
+APPROVAL_SOURCE = "file_mutation_policy"
+
+
+def _policy_decisions(receipt: LoopReceipt) -> list[dict]:
+    """Every write decision the loop observed, oldest attempt first, bounded."""
+    out: list[dict] = []
+    for a in receipt.attempts:
+        for d in getattr(a, "decisions", None) or []:
+            if isinstance(d, dict) and d.get("decision_id") and d.get("decision"):
+                out.append(dict(d))
+            if len(out) >= MAX_POLICY_DECISIONS:
+                return out
+    return out
+
+
+def _approval_receipt(decisions: list[dict]) -> dict | None:
+    """What approval was needed and what came of it, from the ask decisions alone.
+
+    ``granted`` is True only when every sensitive write was approved. An ask
+    that no approver could answer is recorded as such (the loop fails closed),
+    never as a refusal by someone.
+    """
+    asks = [d for d in decisions if d.get("decision") == "ask"]
+    if not asks:
+        return None
+    granted = [d for d in asks if d.get("approval_granted") is True]
+    refused = [d for d in asks if d.get("approval_granted") is False]
+    unanswered = [d for d in asks if d.get("approval_granted") is None]
+    if refused:
+        reason = f"approval refused for {len(refused)} sensitive path(s)"
+    elif unanswered:
+        reason = f"approval required for {len(unanswered)} sensitive path(s) but no approver was available"
+    else:
+        reason = f"approval granted for {len(granted)} sensitive path(s)"
+    return {
+        "source": APPROVAL_SOURCE,
+        "requested": True,
+        "granted": not refused and not unanswered,
+        "action": "file_write",
+        "reason": reason,
+    }
+
+
+def _shadow_provenance(
+    task: str, executed_model: str | None, verification_available: bool, explicit_model: str | None = None,
+) -> dict | None:
     """What the adaptive baseline would choose, recorded beside the executed model."""
     try:
         from openshard.routing.adaptive import shadow_decision_for_run
@@ -123,7 +169,7 @@ def _shadow_provenance(task: str, executed_model: str, verification_available: b
         decision = shadow_decision_for_run(
             task_category=category, read_only=False, write_requested=True, risk=None,
             verification_available=verification_available, verification_requested=True,
-            harness=EXECUTOR,
+            harness=EXECUTOR, explicit_model=explicit_model,
         )
         if decision is None:
             return None
@@ -184,6 +230,19 @@ def build_osn_run_entry(
         "summary": f"OSN loop {receipt.status}: {receipt.stop_reason}",
         "osn_loop": _stored_loop_block(receipt),
     }
+    decisions = _policy_decisions(receipt)
+    if decisions:
+        # The file gate's allow / ask / deny per proposed write, so history, failure
+        # classification and trust scoring see an OSN policy block as a policy block.
+        entry["policy_decisions"] = decisions
+        approval = _approval_receipt(decisions)
+        if approval is not None:
+            sources = sorted({
+                s for a in receipt.attempts for s in ((a.policy or {}).get("approval_sources") or [])
+            })
+            if sources:
+                approval["approval_sources"] = sources
+            entry["approval_receipt"] = approval
     if budget_record:
         # Agent Budgets: configured limits, observed usage, the limit reached and
         # what OpenShard did -- or, when the capability was off/unconfirmed,
@@ -217,7 +276,7 @@ def build_osn_run_entry(
         )["outcome_classification"]
 
     executed_first: str | None = first_model if usage else None  # None: no model call ever ran
-    executed_final: str = final_model
+    executed_final: str | None = final_model if usage else None
     if routing_decision is not None:
         # The decision the CLI computed for this run (it knows about --model and,
         # when applied, chose the first model). An applied decision is compared
@@ -232,7 +291,8 @@ def build_osn_run_entry(
         # would contradict the recorded reason. Nothing is recomputed.
         prov = None
     else:
-        prov = _shadow_provenance(safe_task, executed_final, verification_available=True)
+        prov = _shadow_provenance(safe_task, executed_final, verification_available=True,
+                                  explicit_model=explicit_model)
     if prov is not None:
         entry["routing_provenance"] = prov
     if routing_record:

@@ -38,7 +38,7 @@ OpenShard runs `--verify-cmd` -> bounded retry / escalation -> receipt.
 | Field | Level |
 |---|---|
 | Proposed writes | agent-declared |
-| Policy decisions, file effects | OpenShard-observed |
+| Policy decisions, file effects | OpenShard-observed; every proposed write is stored as an allow / ask / deny `policy_decisions` entry (with whether an approver granted an ask), and an `approval_receipt` says what approval was needed and whether it was given, so `history`, failure classification and trust scoring treat an OSN policy block as a policy block |
 | Verification (exit code) | OpenShard-observed (`directly_observed` / `openshard_executed`) |
 | Model cost | recorded only when the provider reported it; otherwise unknown |
 
