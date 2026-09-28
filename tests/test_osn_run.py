@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from openshard.cli.main import cli
 from openshard.history.run_cost import run_total_cost
-from openshard.history.shard_contract import build_shard_receipt
+from openshard.history.shard_contract import build_shard_receipt, render_compact_shard_receipt
 from openshard.history.verification import derive_verification
 from openshard.history.views import receipt_to_dict
 from openshard.osn.loop import FileWriteAction, LoopContext, run_bounded_loop
@@ -408,3 +408,124 @@ class TestOsnSetupFailure:
         assert receipt.status == "verified" and len(fp.calls) == 2
         entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
         assert "outcome_classification" not in entry
+
+
+def test_osn_progress_reports_observable_steps(repo):
+    events: list[tuple[str, dict]] = []
+    fp = FakeProvider([_writes("out.txt", "ok")])
+    ap = ModelActionProvider(fp, ["cheap/m"], repo)
+
+    receipt = run_bounded_loop(
+        repo, "fix out", ap, CHECK,
+        progress=lambda event, data: events.append((event, data)),
+    )
+
+    assert receipt.status == "verified"
+    names = [name for name, _ in events]
+    assert names == [
+        "workspace_ready", "attempt_start", "model_response",
+        "policy_result", "verification_start", "verification_result",
+    ]
+    attempt = dict(events[1][1])
+    assert attempt["model"] == "cheap/m"
+    assert events[-1][1]["status"] == "passed"
+
+
+def test_provider_error_keeps_safe_detail_and_human_summary(repo):
+    class BrokenProvider(FakeProvider):
+        def execute(self, model, prompt, system=None, max_tokens=None):
+            raise RuntimeError("upstream service unavailable")
+
+    ap = ModelActionProvider(BrokenProvider([]), ["cheap/m"], repo)
+    receipt = run_bounded_loop(repo, "t", ap, CHECK)
+    assert receipt.status == "error" and receipt.stop_reason == "provider_error"
+    assert receipt.attempts[0].error_class == "RuntimeError"
+    assert receipt.attempts[0].error_message == "upstream service unavailable"
+
+    entry = build_osn_run_entry(
+        receipt, task="t", usage=ap.usage, duration_seconds=1.0, repo_path=repo,
+    )
+    assert entry["error_class"] == "provider_error"
+    assert entry["error_message"] == "upstream service unavailable"
+    assert entry["summary"] == "Provider failed before verification; repository unchanged."
+    assert entry["sandbox"]["sandbox_enabled"] is True
+    assert entry["repo_name"] == "repo"
+
+
+def test_osn_routing_receipt_is_a_five_second_summary():
+    entry = {
+        "schema_version": "1.2",
+        "timestamp": "2026-09-28T23:02:06Z",
+        "task": "Fix the failing tests in this repository.",
+        "task_title": "Fix the failing tests",
+        "executor": "osn_loop",
+        "workflow": "osn_loop",
+        "execution_model": "deepseek/deepseek-v4.1-flash",
+        "duration_seconds": 287.9,
+        "retry_triggered": False,
+        "verification_attempted": False,
+        "verification_passed": None,
+        "verification": {
+            "source": None, "observation_mode": "none", "status": "not_run",
+            "checks": [], "reason": "verification did not run (provider_error)",
+        },
+        "files_created": 0,
+        "files_updated": 0,
+        "files_deleted": 0,
+        "files_detail": [],
+        "estimated_cost": 0.0069,
+        "prompt_tokens": 1200,
+        "completion_tokens": 300,
+        "tokens_provenance": "provider_reported",
+        "summary": "Provider failed before verification; repository unchanged.",
+        "error_class": "provider_error",
+        "repo_name": "openshard-demo-routing",
+        "git_branch": "main",
+        "owner": "Michael Obasa",
+        "write_path": "sandbox",
+        "sandbox": {"sandbox_enabled": True, "sandbox_type": "isolated_copy"},
+        "shard_id": "shard-20260928-0001",
+        "receipt_id": "rcpt_fd40acf779b54cebb5f4f233e7226fc4",
+        "adaptive_routing": {
+            "capability": "adaptive_routing",
+            "record_mode": "applied",
+            "applied": True,
+            "selected_model": "deepseek/deepseek-v4.1-flash",
+            "routing_class": "routine_coding",
+            "escalation_ladder": ["anthropic/claude-opus-5.5"],
+            "ladder_source": "recovery_plan",
+            "policy": {"name": "deterministic_trajectory_v2", "version": "1"},
+        },
+        "supervisor_routing": {
+            "capability": "supervisor_routing",
+            "record_mode": "applied",
+            "boundary": "observed_verification_failure",
+            "decisions": [],
+        },
+        "osn_loop": {
+            "status": "error",
+            "stop_reason": "provider_error",
+            "verification_state": "not_run",
+            "attempts": [{"n": 1, "proposed": [], "applied": [], "blocked": []}],
+            "evidence": {
+                "actions": "agent_declared",
+                "policy_and_file_effects": "openshard_observed",
+                "verification": "openshard_observed",
+            },
+        },
+    }
+
+    out = render_compact_shard_receipt(build_shard_receipt(entry, index=0))
+
+    assert "OPENSHARD · ROUTING RECEIPT" in out
+    assert "SHARD #0001" in out
+    assert "RECEIPT #FD40ACF779B5" in out
+    assert "rcpt_" not in out
+    assert "Openshard Native (OSN)" in out
+    assert "openshard-demo-routing" in out and "main" in out and "Michael Obasa" in out
+    assert "Deepseek V4.1 Flash" in out
+    assert "Claude Opus 5.5" in out and "not used" in out
+    assert "provider failed before verification" in out.lower()
+    assert "Files modified" in out and "0" in out
+    assert "Run cost · recorded" in out and "$0.0069" in out
+    assert "PROVIDER ERROR" in out
