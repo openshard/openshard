@@ -165,8 +165,9 @@ class TestAllowAskEscalateVerify:
         assert asks[0]["approval_required"] is True and asks[0]["approval_granted"] is True
         assert asks[0]["source"] == "file_mutation_policy" and asks[0]["action"] == "file_write"
         assert entry["approval_receipt"] == {
-            "source": "file_mutation_policy", "requested": True, "granted": True, "action": "file_write",
-            "reason": "approval granted for 1 sensitive path(s)", "approval_sources": ["test_reviewer"],
+            "source": "file_mutation_policy", "requested": True, "granted": True, "outcome": "granted",
+            "action": "file_write", "reason": "approval granted for 1 sensitive path(s)",
+            "approval_sources": ["test_reviewer"],
         }
         assert receipt.approval == "Required → Granted" and receipt.approval_granted is True
         assert len(receipt.policy_decisions) == 3
@@ -208,7 +209,7 @@ class TestAllowAskEscalateVerify:
         assert ev["adaptive_routing"]["escalation_ladder"] == ["acme/frontier-1"]
         for section in ("POLICY DECISIONS", "BUDGET", "ADAPTIVE ROUTING", "APPROVAL"):
             assert section in text, section
-        assert "ask     file_write" in text.replace("  ", " ").replace(" ", " ") or "ask" in text
+        assert "ask     file_write" in text  # the POLICY DECISIONS row for the approved write
         ext = receipt_to_dict(receipt, extended=True)
         assert ext["policy_decisions"] and {d["decision"] for d in ext["policy_decisions"]} == {"allow", "ask"}
         assert all("resource" not in d for d in ext["policy_decisions"])  # paths never leave the machine
@@ -352,3 +353,57 @@ class TestDenyAndAskViaCli:
         assert _decisions(entry, "deny") == [] and len(_decisions(entry, "allow")) == 2
         receipt = build_shard_receipt(entry, index=0)
         assert classify_failure(entry, receipt).category == "verification_failed"
+
+
+class TestApprovalOutcomes:
+    """The approval record never says somebody refused unless somebody did."""
+
+    def _run(self, repo, approver, replies=None):
+        model = FakeModel(replies or [_writes(("src/app.txt", "ok"), ("pyproject.toml", "x"))])
+        provider = ModelActionProvider(model, ["m/a"], repo)
+        result = run_bounded_loop(repo, TASK, provider, VERIFY, max_attempts=1, approver=approver)
+        entry = build_osn_run_entry(result, task=TASK, usage=provider.usage, duration_seconds=1.0, repo_path=repo)
+        return result, entry
+
+    def test_an_approver_that_refuses_is_a_refusal(self, repo):
+        result, entry = self._run(repo, lambda rel, d: (False, "reviewer"))
+        assert result.status == "blocked"
+        ask = _decisions(entry, "ask")[0]
+        assert ask["approval_granted"] is False and ask["approval_source"] == "reviewer"
+        assert entry["approval_receipt"]["outcome"] == "refused" and entry["approval_receipt"]["granted"] is False
+        assert "refused" in entry["approval_receipt"]["reason"]
+
+    def test_an_approver_that_crashes_is_not_a_refusal(self, repo):
+        def broken(rel, d):
+            raise RuntimeError("approver down")
+
+        result, entry = self._run(repo, broken)
+        assert result.status == "blocked"  # fail closed
+        ask = _decisions(entry, "ask")[0]
+        assert ask["approval_granted"] is False and ask["approval_source"] == "approver_error"
+        assert entry["approval_receipt"]["outcome"] == "approver_error"
+        reason = entry["approval_receipt"]["reason"]
+        assert "refused" not in reason and "approver failed" in reason
+
+    def test_no_approver_is_unanswered_and_classified_as_unavailable(self, repo):
+        from openshard.history.outcome_classification import facts_from_entry
+
+        result, entry = self._run(repo, None)
+        assert entry["approval_receipt"]["outcome"] == "unanswered"
+        assert facts_from_entry(entry).approval == "unavailable"
+
+    def test_a_mix_of_granted_and_refused_is_not_granted(self, repo):
+        answers = {"pyproject.toml": True, "package.json": False}
+        _, entry = self._run(repo, lambda rel, d: (answers[rel], "reviewer"),
+                             replies=[_writes(("pyproject.toml", "x"), ("package.json", "{}"))])
+        assert entry["approval_receipt"]["outcome"] == "refused" and entry["approval_receipt"]["granted"] is False
+        asks = _decisions(entry, "ask")
+        assert [(d["resource"], d["approval_granted"]) for d in asks] == [("package.json", False), ("pyproject.toml", True)]
+
+    def test_a_path_that_escapes_the_repository_is_a_masked_path_safety_deny(self, repo):
+        _, entry = self._run(repo, None, replies=[_writes(("../outside.txt", "x"), ("src/app.txt", "ok"))])
+        deny = _decisions(entry, "deny")[0]
+        assert deny["source"] == "path_safety" and deny["resource"] == "<unsafe-path>"
+        # Stored in the order the model proposed them: the deny first, then the allow.
+        assert [d["decision"] for d in entry["policy_decisions"]] == ["deny", "allow"]
+        assert "../outside.txt" not in json.dumps(entry)

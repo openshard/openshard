@@ -129,29 +129,43 @@ def _policy_decisions(receipt: LoopReceipt) -> list[dict]:
     return out
 
 
+APPROVAL_GRANTED = "granted"
+APPROVAL_REFUSED = "refused"
+APPROVAL_UNANSWERED = "unanswered"
+APPROVAL_APPROVER_ERROR = "approver_error"
+
+
 def _approval_receipt(decisions: list[dict]) -> dict | None:
     """What approval was needed and what came of it, from the ask decisions alone.
 
-    ``granted`` is True only when every sensitive write was approved. An ask
-    that no approver could answer is recorded as such (the loop fails closed),
-    never as a refusal by someone.
+    ``granted`` is True only when every sensitive write was approved. The
+    structured ``outcome`` keeps the cases apart that a boolean cannot: an
+    approver said no (``refused``), no approver existed so the loop failed
+    closed (``unanswered``), or the approver itself failed (``approver_error``).
+    Nobody is recorded as having refused unless somebody did.
     """
     asks = [d for d in decisions if d.get("decision") == "ask"]
     if not asks:
         return None
     granted = [d for d in asks if d.get("approval_granted") is True]
-    refused = [d for d in asks if d.get("approval_granted") is False]
+    errored = [d for d in asks if d.get("approval_granted") is False
+               and d.get("approval_source") == APPROVAL_APPROVER_ERROR]
+    refused = [d for d in asks if d.get("approval_granted") is False and d not in errored]
     unanswered = [d for d in asks if d.get("approval_granted") is None]
     if refused:
-        reason = f"approval refused for {len(refused)} sensitive path(s)"
+        outcome, reason = APPROVAL_REFUSED, f"approval refused for {len(refused)} sensitive path(s)"
+    elif errored:
+        outcome, reason = APPROVAL_APPROVER_ERROR, f"the approver failed for {len(errored)} sensitive path(s); treated as not approved"
     elif unanswered:
+        outcome = APPROVAL_UNANSWERED
         reason = f"approval required for {len(unanswered)} sensitive path(s) but no approver was available"
     else:
-        reason = f"approval granted for {len(granted)} sensitive path(s)"
+        outcome, reason = APPROVAL_GRANTED, f"approval granted for {len(granted)} sensitive path(s)"
     return {
         "source": APPROVAL_SOURCE,
         "requested": True,
-        "granted": not refused and not unanswered,
+        "granted": outcome == APPROVAL_GRANTED,
+        "outcome": outcome,
         "action": "file_write",
         "reason": reason,
     }

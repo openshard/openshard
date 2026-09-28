@@ -16,6 +16,7 @@ import hashlib
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -140,19 +141,26 @@ class LoopReceipt:
 
 
 def _display_path(p: str) -> str:
-    """Model-supplied paths that are absolute or escaping are masked in receipts."""
+    """Model-supplied paths that are absolute, escaping or carry control characters are masked."""
     norm = p.replace("\\", "/")
     if norm.startswith("/") or ":" in norm or ".." in norm.split("/") or norm.startswith("~"):
+        return "<unsafe-path>"
+    if any(unicodedata.category(ch) == "Cc" for ch in p):
         return "<unsafe-path>"
     return p
 
 
-def _stored_decision(decision: PolicyDecision) -> dict:
+def _stored_decision(decision: PolicyDecision | None, approval_source: str | None = None) -> dict:
     """A policy decision as stored: the same shape the run pipeline writes, with any
-    model-supplied path masked exactly like the rest of the receipt."""
+    model-supplied path masked exactly like the rest of the receipt, plus the
+    observed approval channel (``approver_error`` when the approver itself failed)."""
+    if decision is None:
+        return {}
     d = asdict(decision)
     if isinstance(d.get("resource"), str):
         d["resource"] = _display_path(d["resource"])
+    if approval_source:
+        d["approval_source"] = approval_source
     return d
 
 
@@ -299,19 +307,21 @@ def run_bounded_loop(
         gate = FileMutationGate(approver=approver)
         applied: list[str] = []
         blocked: list[str] = []
-        unsafe: list[PolicyDecision] = []
+        attempt_decisions: list[dict] = []  # in the order the model proposed the writes
         budget_stop: BudgetExhausted | None = None
         for act in actions:
             try:
                 dest = resolve_safe_repo_path(sandbox, act.path)
             except UnsafePathError:
                 blocked.append(act.path)
-                unsafe.append(make_deny(
-                    "file_write", _display_path(act.path), "path escapes the repository or is unsafe",
+                attempt_decisions.append(_stored_decision(make_deny(
+                    "file_write", act.path, "path escapes the repository or is unsafe",
                     source="path_safety", severity="high",
-                ))
+                )))
                 continue
-            if not gate.authorize(act.path):
+            permitted = gate.authorize(act.path)
+            attempt_decisions.append(_stored_decision(gate.outcomes[-1].policy, gate.outcomes[-1].approval_source))
+            if not permitted:
                 blocked.append(act.path)
                 continue
             if budget is not None:
@@ -329,9 +339,7 @@ def run_bounded_loop(
             if act.path not in changed:
                 changed.append(act.path)
         rec = AttemptRecord(n, [a.path for a in actions], applied, blocked, gate.summary())
-        rec.decisions = [
-            _stored_decision(d) for d in (*unsafe, *gate.decisions())
-        ]
+        rec.decisions = attempt_decisions
         attempts.append(rec)
         blocked_seen.extend(p for p in blocked if p not in blocked_seen)
 
