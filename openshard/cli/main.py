@@ -969,7 +969,8 @@ def models_show(model_id: str):
     click.echo(f"  {'Model':<{w}}  {entry.display_name}")
     click.echo(f"  {'ID':<{w}}  {entry.id}")
     click.echo(f"  {'Provider':<{w}}  {entry.provider}")
-    click.echo(f"  {'Tier':<{w}}  {entry.tier}")
+    click.echo(f"  {'Lifecycle':<{w}}  {entry.lifecycle}")
+    click.echo(f"  {'Tier':<{w}}  {entry.tier} (legacy label; not a routing filter)")
     click.echo(f"  {'Roles':<{w}}  {roles_str}")
     click.echo(f"  {'Experimental':<{w}}  {'yes' if entry.experimental else 'no'}")
     click.echo(f"  {'Context':<{w}}  {ctx_str}")
@@ -7236,6 +7237,9 @@ def _print_catalog_entry(e) -> None:
     click.echo(f"  {'Source':<{w}}  {e.discovery_source}")
     click.echo(f"  {'Lifecycle':<{w}}  {e.lifecycle}")
     click.echo(f"  {'Routing':<{w}}  {e.routing_eligibility}")
+    from openshard.models.promotion import promotion_state
+
+    click.echo(f"  {'Promotion':<{w}}  {promotion_state(e)}")
     if not e.curated:
         click.echo(
             "\n  Discovered, not evaluated by OpenShard: never routed by default. "
@@ -7321,23 +7325,35 @@ def models_catalog(refresh: bool, offline: bool, discovered: bool, family: str |
 def models_classes(refresh: bool, offline: bool) -> None:
     """Show routing classes, their current model, and promotion candidates.
 
-    Promotion candidates are newer same-family models that meet the class but
-    are not promoted; they are never selected until curated or pinned.
+    Two views. Legacy routing classes are the stable public defaults
+    (capability off). Requirement classes are what Routing V2 resolves per
+    step under the adaptive_routing capability: the selection shown assumes
+    every model is reachable and ignores observed history; the real run also
+    applies provider keys, the models policy and trajectory evidence.
+    Promotion candidates and shadow candidates are newer or discovered
+    models that meet the class but are not promoted; they are never selected
+    until curated, pinned, or named as a dogfood candidate.
     """
     from openshard.models.catalog import load_catalog
     from openshard.routing.model_policy import model_policy_from_config
+    from openshard.routing.requirements import REQUIREMENT_CLASSES, select_all_requirements
     from openshard.routing.routing_classes import ROUTING_CLASSES, select_all_classes
 
     catalog = load_catalog(refresh=_catalog_refresh_mode(refresh, offline))
     pins: dict[str, str] = {}
+    dogfood: dict = {}
     config, valid, _ = load_config_safe()
     if valid:
         try:
-            pins = model_policy_from_config(config).class_pin_map
+            policy = model_policy_from_config(config)
+            pins = policy.class_pin_map
+            dogfood = policy.dogfood_map
         except ValueError as exc:
             click.echo(f"[WARN] models config ignored: {exc}")
 
     _print_catalog_status(catalog)
+    click.echo("")
+    click.echo("Legacy routing classes (stable public defaults)")
     for name, sel in select_all_classes(catalog, pins=pins).items():
         click.echo("")
         click.echo(f"{name}  -  {ROUTING_CLASSES[name].description}")
@@ -7346,6 +7362,25 @@ def models_classes(refresh: bool, offline: bool) -> None:
             click.echo(f"  Pin ignored: {sel.rejected_pin} ({sel.rejected_pin_reason})")
         if sel.promotion_candidates:
             click.echo(f"  Candidates : {', '.join(sel.promotion_candidates)}  (not promoted; evaluate, then curate or pin)")
+
+    click.echo("")
+    click.echo("Requirement classes (Routing V2, adaptive_routing capability)")
+    v2 = select_all_requirements(catalog, dogfood=dogfood, dogfood_enabled=bool(dogfood), pins=pins)
+    for name, req_sel in v2.items():
+        click.echo("")
+        click.echo(f"{name}  -  {REQUIREMENT_CLASSES[name].description}")
+        state = req_sel.ranked[0].promotion_state if req_sel.ranked else "-"
+        click.echo(f"  Selected   : {req_sel.model or '(none)'}  [{req_sel.source}; {state}]")
+        if req_sel.rejected_pin:
+            click.echo(f"  Pin ignored: {req_sel.rejected_pin} ({req_sel.rejected_pin_reason})")
+        if len(req_sel.ranked) > 1:
+            click.echo(f"  Next       : {', '.join(r.model_id for r in req_sel.ranked[1:4])}")
+        if dogfood.get(name):
+            click.echo(f"  Dogfood    : {', '.join(sorted(dogfood[name]))}  (capability-gated)")
+        if req_sel.shadow_candidates:
+            click.echo(
+                f"  Shadow     : {', '.join(req_sel.shadow_candidates)}  (discovered; would qualify if promoted)"
+            )
 
 
 # roster command group

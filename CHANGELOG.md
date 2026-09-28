@@ -2,6 +2,34 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Changed
+
+- **Routing around dynamic model candidates.** Curated `tier`, `roles`,
+  `latency_class`, `experimental` and `cost_class` are now legacy advisory
+  metadata (`registry.LEGACY_ADVISORY_FIELDS`): shown, kept for old Receipts
+  and configs, never a routing filter for new work. Every catalog entry has a
+  derived **promotion state** (`openshard/models/promotion.py`: discovered,
+  eligible_for_shadow, dogfood_candidate, validated, stable, retired,
+  restricted) built from provider facts and curation, and **requirement
+  classes** (`openshard/routing/requirements.py`: fast_control,
+  routine_coding, deep_reasoning, vision, long_context, verifier) describe
+  what a step needs and resolve against the current eligible pool with an
+  ordered, per-candidate-recorded ranking (promotion, observed evidence when
+  meaningful, requirement fit, in-family supersession, price band, legacy
+  hint, price). `models.dogfood_candidates` names discovered models an
+  organisation wants Routing V2 to evaluate for a class; they never enter
+  public (capability-off) routing. `models classes` shows both views.
+- **Stale defaults.** `minimax/m2.7` was never an OpenRouter id and is now
+  curated `deprecated`; the legacy `complex` role selects on the
+  `long_context` fact (`minimax/minimax-m3`). `anthropic/claude-opus-4.8-fast`
+  (not listed) moved to `watchlist`. A curated id missing from a fresh
+  provider snapshot is `retired` for fresh runs (a stale cache never retires
+  anything; an explicit choice is still honoured). Guard tests run every
+  class against a checked-in real provider snapshot.
+  See `docs/architecture/routing.md`.
+
 ## 0.4.8 - 2026-09-25
 
 ### Added

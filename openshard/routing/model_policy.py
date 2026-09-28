@@ -111,10 +111,23 @@ class ModelPolicyConfig:
     # (class_name, canonical_model_id) pairs. A pin is explicit selection: it
     # may name a discovery-only model and bypasses the lifecycle gate.
     class_pins: tuple[tuple[str, str], ...] = ()
+    # Dogfood candidates from ``models.dogfood_candidates`` as sorted
+    # (requirement_class, canonical_model_id) pairs. Not a pin: the model
+    # competes for that class only when the ``adaptive_routing`` capability
+    # applies (Routing V2), must still meet the class's hard requirements, and
+    # is never selected for public (capability-off) runs.
+    dogfood_candidates: tuple[tuple[str, str], ...] = ()
 
     @property
     def class_pin_map(self) -> dict[str, str]:
         return dict(self.class_pins)
+
+    @property
+    def dogfood_map(self) -> dict[str, frozenset[str]]:
+        out: dict[str, set[str]] = {}
+        for cls, mid in self.dogfood_candidates:
+            out.setdefault(cls, set()).add(mid)
+        return {k: frozenset(v) for k, v in out.items()}
 
 
 def explicit_selection_ids(policy: ModelPolicyConfig | None) -> frozenset[str]:
@@ -288,6 +301,7 @@ def model_policy_from_config(config: dict) -> ModelPolicyConfig:
     )
 
     class_pins = _parse_class_pins(raw.get("routing_classes"), _canonical)
+    dogfood = _parse_dogfood_candidates(raw.get("dogfood_candidates"), _canonical)
 
     return ModelPolicyConfig(
         mode=mode,
@@ -306,6 +320,7 @@ def model_policy_from_config(config: dict) -> ModelPolicyConfig:
         custom_roster_models=roster_models,
         custom_roster_name=str(roster_raw.get("name", "default")),
         class_pins=class_pins,
+        dogfood_candidates=dogfood,
     )
 
 
@@ -319,7 +334,12 @@ def _parse_class_pins(raw_pins, canonical) -> tuple[tuple[str, str], ...]:
     class's normal selection.
     """
     from openshard.models.catalog import curated_catalog, load_catalog
-    from openshard.routing.routing_classes import ROUTING_CLASSES, pin_rejection_reason
+    from openshard.routing.requirements import REQUIREMENT_CLASSES
+    from openshard.routing.routing_classes import (
+        ROUTING_CLASSES,
+        RoutingClass,
+        pin_rejection_reason,
+    )
 
     if not raw_pins:
         return ()
@@ -331,10 +351,18 @@ def _parse_class_pins(raw_pins, canonical) -> tuple[tuple[str, str], ...]:
         if not model_id:
             continue
         cls = ROUTING_CLASSES.get(str(class_name))
+        if cls is None and str(class_name) in REQUIREMENT_CLASSES:
+            # A requirement-class pin (Routing V2 name): validated on the class's
+            # own hard requirements.
+            req = REQUIREMENT_CLASSES[str(class_name)]
+            cls = RoutingClass(
+                name=req.name, description=req.description, lifecycles=frozenset(),
+                required_tags=req.required_tags,
+            )
         if cls is None:
             raise ValueError(
                 f"models.routing_classes has unknown class '{class_name}'. "
-                f"Choose from: {sorted(ROUTING_CLASSES)}"
+                f"Choose from: {sorted(set(ROUTING_CLASSES) | set(REQUIREMENT_CLASSES))}"
             )
         mid = canonical(str(model_id))
         if mid is None:
@@ -361,6 +389,48 @@ def _parse_class_pins(raw_pins, canonical) -> tuple[tuple[str, str], ...]:
             )
         pins.append((str(class_name), mid))
     return tuple(pins)
+
+
+def _parse_dogfood_candidates(raw, canonical) -> tuple[tuple[str, str], ...]:
+    """Parse ``models.dogfood_candidates: {requirement_class: [model_id, ...]}``.
+
+    Unknown requirement classes and unrecognised ids are config errors. Ids may
+    name discovered models (that is the point). Whether a candidate meets the
+    class's hard requirements is decided at routing time, from live facts, and
+    recorded; a candidate that does not is simply never ranked.
+    """
+    from openshard.routing.requirements import REQUIREMENT_CLASSES
+
+    if not raw:
+        return ()
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "models.dogfood_candidates must be a mapping of requirement class to a list of model IDs."
+        )
+    out: list[tuple[str, str]] = []
+    for class_name, ids in sorted(raw.items()):
+        if str(class_name) not in REQUIREMENT_CLASSES:
+            raise ValueError(
+                f"models.dogfood_candidates has unknown requirement class '{class_name}'. "
+                f"Choose from: {sorted(REQUIREMENT_CLASSES)}"
+            )
+        if ids is None:
+            continue
+        if isinstance(ids, str):
+            ids = [ids]
+        if not isinstance(ids, (list, tuple)):
+            raise ValueError(f"models.dogfood_candidates.{class_name} must be a list of model IDs.")
+        for mid in ids:
+            if not mid:
+                continue
+            canon = canonical(str(mid))
+            if canon is None:
+                raise ValueError(
+                    f"models.dogfood_candidates.{class_name} names unknown model ID '{mid}'. "
+                    "Run openshard models sync-openrouter to discover new models."
+                )
+            out.append((str(class_name), canon))
+    return tuple(sorted(set(out)))
 
 
 # ---------------------------------------------------------------------------
@@ -472,4 +542,5 @@ def policy_summary(policy: ModelPolicyConfig) -> dict:
             policy.custom_roster_name if policy.mode == "custom_roster" else None
         ),
         "class_pins_count": len(policy.class_pins),
+        "dogfood_candidates_count": len(policy.dogfood_candidates),
     }

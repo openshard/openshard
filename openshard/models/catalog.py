@@ -1,9 +1,11 @@
 """Dynamic model catalog: discovery is dynamic, routing eligibility is controlled.
 
 The curated registry (``openshard.models.registry``) records what OpenShard has
-*evaluated*: lifecycle, tier, roles, cost class. Provider metadata (today the
+*evaluated*: the lifecycle (policy), plus legacy advisory labels (tier, roles,
+cost class) kept for display and compatibility. Provider metadata (today the
 OpenRouter ``/models`` list, cached locally by ``openrouter_fetcher``) records
-what *exists*. This module merges the two into one normalized, read-only
+what *exists* and its facts: price, context, modalities, supported parameters,
+release and expiry. This module merges the two into one normalized, read-only
 :class:`ModelCatalog` so that:
 
 * a newly released model is recognised, displayed and explicitly selectable
@@ -757,8 +759,17 @@ def catalog_entry_to_dict(entry: CatalogEntry) -> dict:
         "discovery_source": entry.discovery_source,
         "lifecycle": entry.lifecycle,
         "routing_eligibility": entry.routing_eligibility,
+        "promotion_state": _promotion_state(entry),
         "cost_class": entry.cost_class,
+        # Legacy advisory label; shown, never a routing filter for new work.
+        "tier": entry.tier,
     }
+
+
+def _promotion_state(entry: CatalogEntry) -> str:
+    from openshard.models.promotion import promotion_state
+
+    return promotion_state(entry)
 
 
 __all__ = [

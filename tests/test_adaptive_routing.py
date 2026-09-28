@@ -109,6 +109,14 @@ DISCOVERED = [
         "pricing": {"prompt": "0.0000002", "completion": "0.0000008"},
         "supported_parameters": ["tools"],
     }
+] + [
+    # The provider lists every curated fake, as a real snapshot would; a
+    # curated id missing from a fresh snapshot is retired.
+    {
+        "id": m.id, "name": m.id, "created": 1780000000,
+        "architecture": {"input_modalities": list(m.input_modalities), "output_modalities": ["text"]},
+    }
+    for m in CURATED
 ]
 
 

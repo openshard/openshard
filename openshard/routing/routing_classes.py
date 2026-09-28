@@ -1,9 +1,18 @@
-"""Routing classes: routing policy by capability, not by permanent model version.
+"""Legacy routing classes (V1): the public-default selection behind the resolver.
 
 A routing class (``cheap_coding``, ``balanced_coding``, ``frontier_reasoning``,
-``fast``, ``vision``) declares *what kind* of model a routing decision needs.
-:func:`select_for_class` picks the model from a :class:`ModelCatalog`
-deterministically:
+``fast``, ``vision``, ``long_context``) declares *what kind* of model a
+routing decision needs. :func:`select_for_class` picks the model from a
+:class:`ModelCatalog` deterministically. This is the stable behaviour behind
+``MODEL_*`` constants and the capability-off path; it is kept unchanged so
+existing runs, configs and pins behave as before.
+
+Compatibility note: the ``cost_classes`` and ``tiers`` filters below read the
+curated ``cost_class`` / ``tier`` labels, which are legacy advisory metadata
+(see ``registry.LEGACY_ADVISORY_FIELDS``). They are not routing authority for
+new work: requirement classes (``openshard.routing.requirements``) describe a
+step's needs on facts and promotion state, and Routing V2 selects against
+them. New rules must not add tier or role requirements here.
 
 1. **Pin** - an explicit user/team pin (``models.routing_classes`` in config)
    wins if the pinned model is recognised, meets the class's required
@@ -99,17 +108,29 @@ ROUTING_CLASSES: dict[str, RoutingClass] = {
         required_tags=frozenset({"vision"}),
         roles_hint=("visual", "multimodal"),
     ),
+    # Backs the legacy ``complex`` resolver role. Its previous default id
+    # (minimax/m2.7) was never listed by OpenRouter and is now retired; the
+    # class selects on the long_context fact instead of a fixed id.
+    "long_context": RoutingClass(
+        name="long_context",
+        description="Very large context window for multi-file and long-horizon work.",
+        lifecycles=frozenset({"active_default", "active_specialist"}),
+        required_tags=frozenset({"long_context", "tools"}),
+        preferred_tags=frozenset({"tools"}),
+        roles_hint=("complex", "long_context"),
+    ),
 }
 
 CLASS_NAMES: tuple[str, ...] = tuple(ROUTING_CLASSES)
 
 # Legacy resolver roles (routing/model_resolver.py) backed by a routing class.
-# "strong" and "complex" keep their legacy role queries in this change.
+# "strong" keeps its legacy role query.
 ROLE_TO_CLASS: dict[str, str] = {
     "cheap": "cheap_coding",
     "main": "balanced_coding",
     "escalate": "frontier_reasoning",
     "visual": "vision",
+    "complex": "long_context",
 }
 
 
