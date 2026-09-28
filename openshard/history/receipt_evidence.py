@@ -247,6 +247,45 @@ def agent_budgets_block(entry: dict) -> dict[str, Any] | None:
     }
 
 
+_ROUTING_RECORD_MODES = frozenset({"shadow", "applied"})
+
+
+def adaptive_routing_block(entry: dict) -> dict[str, Any] | None:
+    """Adaptive routing (OSN dogfood): whether the decision chose the model, and what it chose.
+
+    Local Receipt surfaces only. Model ids are identifiers, never paths.
+    """
+    raw = _dict(entry.get("adaptive_routing"))
+    if not raw or raw.get("capability") != "adaptive_routing":
+        return None
+    applied = raw.get("applied")
+    if not isinstance(applied, bool):
+        return None
+    mode = raw.get("record_mode")
+    block: dict[str, Any] = {
+        "applied": applied,
+        "record_mode": mode if mode in _ROUTING_RECORD_MODES else None,
+        "reason": _text(raw.get("reason"), 64),
+        "history_evidence": _text(raw.get("history_evidence"), 64),
+    }
+    if not applied:
+        block["requested_class"] = _text(raw.get("requested_class"), 64)
+        block["eligible_count"] = _count(raw.get("eligible_count"))
+        return block
+    ladder_raw = raw.get("escalation_ladder")
+    ladder = [_text(m, 256) for m in ladder_raw if isinstance(m, str)] if isinstance(ladder_raw, list) else []
+    block.update({
+        "selected_model": _text(raw.get("selected_model"), 256),
+        "selection_mode": _text(raw.get("selection_mode"), 32),
+        "routing_class": _text(raw.get("routing_class"), 64),
+        "escalation_ladder": [m for m in ladder if m][:8] or None,
+        "ladder_source": _text(raw.get("ladder_source"), 32),
+        "recovery_enabled": _bool(raw.get("recovery_enabled")),
+        "decision_fingerprint": _text(raw.get("decision_fingerprint"), 32),
+    })
+    return block
+
+
 def base_commit_value(entry: dict) -> str | None:
     """HEAD at run/session start (every producer records it then): a base, not a result."""
     value = entry.get("git_head_commit_hash")
@@ -369,6 +408,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "sandbox_detail": sandbox_detail_block,
         "execution_loop": execution_loop_block,
         "agent_budgets": agent_budgets_block,
+        "adaptive_routing": adaptive_routing_block,
         "base_commit": base_commit_value,
         "content_hash": content_hash_value,
         "session": session_block,

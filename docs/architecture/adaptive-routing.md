@@ -1,9 +1,16 @@
 # Adaptive Routing v1
 
-Status: foundation + deterministic baseline, recorded in **shadow mode**. The
-model a run executes is still chosen by legacy routing (keyword category ->
-provider-aware resolver -> scored selection). The adaptive decision is computed
-from the same facts and stored next to it in the Receipt.
+Status: foundation + deterministic baseline, recorded in **shadow mode** for
+`openshard run`. The model that pipeline executes is still chosen by legacy
+routing (keyword category -> provider-aware resolver -> scored selection); the
+adaptive decision is computed from the same facts and stored next to it in the
+Receipt.
+
+For `openshard osn run` the decision is **applied** behind the Platform
+capability `adaptive_routing` (dogfood V1, `openshard/osn/routing.py`,
+`docs/osn-run.md`): with the capability on and no `--model`, the selected model
+runs first and the recovery plan is the escalation ladder. An explicit model
+always wins; the capability off leaves the OSN path as it was.
 
 ## Pipeline
 
