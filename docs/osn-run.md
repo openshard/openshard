@@ -45,8 +45,34 @@ OpenShard runs `--verify-cmd` -> bounded retry / escalation -> receipt.
 A verifier that cannot be started is recorded as `not_run`, never as a pass or a model failure. A
 verifier that rewrites the files it is checking does not count as a pass. The Shard entry
 (`executor: osn_loop`) stores no task text beyond the usual sanitised task, only the verifier's
-executable name, and a shadow routing provenance block, so `openshard stats routing` includes
-these runs. The model that ran is chosen by you or by keyword routing, not by adaptive routing.
+executable name, and a routing provenance block, so `openshard stats routing` includes
+these runs. The model that ran is chosen by you (`--model`) or by keyword routing, unless the
+`adaptive_routing` capability applies (next section).
+
+## Adaptive routing (experimental)
+
+Only when the Platform lists the `adaptive_routing` capability as enabled for the linked
+organisation, and only when you did not pass `--model`. Then the adaptive baseline
+(`docs/architecture/adaptive-routing.md`) chooses the first model from the catalog, the provider
+keys you have, the repository's `models` policy and the task's routing class, and its recovery
+plan becomes the escalation ladder when you gave no `--escalate-model`. The loop still climbs that
+ladder only after an observed verification failure, and the budget (above) still applies.
+
+What never changes: an explicit `--model` always runs and is never substituted (the capability is
+not even looked up); an explicit `--escalate-model` ladder always wins; no eligible candidate, or
+no decision at all, falls back to keyword routing exactly as before; the capability off,
+unconfirmed or unreachable leaves everything as it was. Historical per-model success is not used
+to route: there is not enough observed data yet, and the record says so.
+
+The Shard entry's `routing_provenance` block gets `record_mode: applied` (compared with the model
+that ran first) instead of `shadow`, and an `adaptive_routing` block records whether the decision
+was applied, why not when it was not (`explicit_model`, `no_eligible_candidate`,
+`decision_unavailable`), the selected model and routing class, the `escalation_ladder` and where it
+came from (`recovery_plan` or `user`), and `history_evidence: not_used_insufficient_observed_data`.
+The block appears in `osn run --json` and the full receipt (`ADAPTIVE ROUTING` section); like the
+budget block it is not yet part of the `history --json` / Platform sync projection. With the
+capability off, the shadow provenance is unchanged except that a `--model` you passed is now
+recorded as an explicit choice rather than as free routing.
 
 ## Agent budgets (experimental)
 
