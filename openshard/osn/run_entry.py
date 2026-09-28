@@ -205,6 +205,7 @@ def build_osn_run_entry(
     routing_record_mode: str = "shadow",
     routing_record: dict | None = None,
     explicit_model: str | None = None,
+    supervisor_record: dict | None = None,
 ) -> dict:
     from openshard.adapters.claude_code_import import _sanitize_model, _sanitize_task
     from openshard.history.receipt_identity import ensure_receipt_id
@@ -311,6 +312,11 @@ def build_osn_run_entry(
         entry["routing_provenance"] = prov
     if routing_record:
         entry["adaptive_routing"] = dict(routing_record)
+    if supervisor_record:
+        # Supervisor routing: each decision taken at an observed-failure boundary,
+        # whether it was acted on, and the evidence it had. Present whenever the
+        # capability governed the run, even if it was never consulted.
+        entry["supervisor_routing"] = dict(supervisor_record)
 
     try:
         from openshard.history.repo_identity import REPO_IDENTITY_FIELD, capture_repo_identity

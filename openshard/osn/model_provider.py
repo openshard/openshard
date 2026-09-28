@@ -44,6 +44,9 @@ class AttemptUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float | None = None  # None: provider did not report a cost
+    # The id OpenShard asked for; ``model`` is what the provider reported, which
+    # may be a variant of it. Plans and ladders are expressed in requested ids.
+    requested_model: str | None = None
 
 
 @dataclass
@@ -57,12 +60,31 @@ class ModelActionProvider:
     # Agent Budgets: consulted before every call (the re-ask included) and
     # told the reported cost after it, so no retry path can spend unchecked.
     budget: BudgetLedger | None = None
+    # Supervisor routing: a one-shot override of the next attempt's model,
+    # set by the loop when an applied supervisor chose differently from the ladder.
+    next_model_override: str | None = None
 
     def model_for(self, attempt: int) -> str:
         return self.models[min(max(attempt, 1), len(self.models)) - 1]
 
+    def set_next_model(self, model: str) -> None:
+        self.next_model_override = model
+
+    def usage_for(self, attempt: int) -> tuple[str | None, float | None]:
+        """``(requested model, estimated cost)`` of *attempt*, summed over its calls; cost None if any
+        call's cost is unknown. The requested id is what plans and ladders speak in."""
+        uses = [u for u in self.usage if u.attempt == attempt]
+        if not uses:
+            return None, None
+        costs = [u.cost_usd for u in uses]
+        model = uses[-1].requested_model or uses[-1].model
+        return model, (sum(c for c in costs if c is not None) if all(c is not None for c in costs) else None)
+
     def __call__(self, ctx: LoopContext) -> list[FileWriteAction]:
-        model = self.model_for(ctx.attempt)
+        if self.next_model_override is not None:
+            model, self.next_model_override = self.next_model_override, None
+        else:
+            model = self.model_for(ctx.attempt)
         prompt = build_prompt(ctx, self.repo_root, self.context_files)
         content = self._ask(ctx.attempt, model, prompt)
         try:
@@ -85,6 +107,7 @@ class ModelActionProvider:
         u = resp.usage
         self.usage.append(AttemptUsage(
             attempt, resp.model or model, u.prompt_tokens, u.completion_tokens, u.estimated_cost,
+            requested_model=model,
         ))
         if self.budget is not None:
             self.budget.record_model_call(u.estimated_cost)

@@ -168,6 +168,23 @@ class BudgetLedger:
         if cap is not None and self.attempts >= cap and self.limit_reached is None:
             self.limit_reached = LIMIT_ATTEMPTS
 
+    def would_stop_next_attempt(self) -> str | None:
+        """The limit that would refuse another attempt (or its first model call), or None.
+
+        A non-raising look-ahead for callers that must not pre-empt the budget's
+        own stop: when this returns a limit, the next attempt cannot happen.
+        """
+        if self.limits.max_attempts is not None and self.attempts >= self.limits.max_attempts:
+            return LIMIT_ATTEMPTS
+        if self.limits.max_commands is not None and self.commands >= self.limits.max_commands:
+            return LIMIT_COMMANDS
+        if self.limits.max_writes is not None and self.writes >= self.limits.max_writes:
+            return LIMIT_WRITES
+        cap = self.limits.max_spend_usd
+        if cap is not None and (not self.spend_known or self.spend_usd >= cap):
+            return LIMIT_SPEND
+        return None
+
     def before_model_call(self) -> None:
         cap = self.limits.max_spend_usd
         if cap is None:

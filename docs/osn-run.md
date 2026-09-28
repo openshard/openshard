@@ -69,6 +69,36 @@ One cost is new: a run without `--model` in a Platform-linked repository asks th
 whether the capability is on (cached ten minutes; a failed read is remembered for one). Historical
 per-model success is not used to route: there is not enough observed data yet, and the record says so.
 
+## Supervisor routing (experimental)
+
+Only when the Platform lists the `supervisor_routing` capability as enabled, and never for an
+explicit `--model` (the user's choice is not re-evaluated and the capability is not looked up).
+The loop already retries only after a verification failure it observed; the supervisor
+re-evaluates at exactly that boundary, before a retry, and nowhere else. Its decision function is
+the recovery policy that already existed (`routing/adaptive/recovery.py`): given which models ran,
+that OpenShard saw the verification fail, and what the attempts cost, it says *escalate* to a
+specific model or *stop* (the plan's attempts exhausted, ladder exhausted, spend at the cap or
+unknowable under a spend limit). It is never consulted when a budget would refuse the next attempt
+anyway: the budget's own stop is never pre-empted.
+
+It is *applied* only when adaptive routing applied the decision whose recovery plan it follows and
+you typed no `--escalate-model`; then a `stop` ends the run (`stop_reason:
+supervisor_stop:<reason>`, status `failed`, because the last observed verification did fail) and an
+`escalate` sets the next attempt's model. An escalation is recorded as acted on only once the next
+attempt really called that model; if the run ends first (a provider error, a budget stop) the record
+says `run_ended_before_retry`. Otherwise it runs in *shadow*: every decision is recorded with
+`acted_on: false` and why (`user_ladder`, `adaptive_routing_not_applied`), and the ladder runs as
+before. The main thing an applied supervisor changes today is stopping a retry that would rerun
+the ladder's last model with no new evidence.
+
+The Shard entry's `supervisor_routing` block records the mode, the boundary, and each decision:
+the attempt it followed, the action, the policy's reason, the recommended model, whether it was
+acted on, and the evidence it had (verification status and source, attempts and models so far,
+spend and whether it was known, the spend cap, the loop's and the plan's attempt caps, what the
+ladder would have run next and whether the recommendation differed from it). Historical performance is not consulted. The
+block appears in `osn run --json` and the full receipt (`SUPERVISOR` section); it is not part of
+the `history --json` / sync projection.
+
 The Shard entry's `routing_provenance` block gets `record_mode: applied` (compared with the model
 that ran first) instead of `shadow`, and an `adaptive_routing` block records whether the decision
 was applied and why not otherwise, the selected model and routing class, the `escalation_ladder`,
