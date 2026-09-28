@@ -137,14 +137,15 @@ def test_receipt_evidence_labels_and_no_task_text(repo):
     assert d["attempts"][0]["verification"]["observed"] is True
 
 
-def test_verifier_timeout_is_failure(repo):
+def test_verifier_timeout_is_unknown(repo):
     slow = [PY, "-c", "import time; print('x', flush=True); time.sleep(30)"]
     rec = run_bounded_loop(
         repo, "t", lambda c: [FileWriteAction("out.txt", "ok")], slow,
         max_attempts=1, verify_timeout=1.0,
     )
     v = rec.attempts[0].verification
-    assert rec.status == "failed" and v.timed_out and v.exit_code is None and not v.passed
+    assert (rec.status, rec.stop_reason, rec.verification_state) == ("error", "verifier_timeout", "unknown")
+    assert v.timed_out and v.exit_code is None and not v.passed
 
 
 def test_sandbox_must_be_separate_from_repo(repo):

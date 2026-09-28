@@ -245,6 +245,7 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **OSN verifier timeouts stay unknown.** A verification command that starts but times out no longer becomes a failed model outcome or triggers Supervisor/model recovery. The run stops with `verifier_timeout`, the Receipt records unknown directly observed verification with incomplete evidence, and legacy `verification_passed` stays unset.
 - `proof last` coerced the record with the write-path default and so stamped a
   fresh content hash on a historical Receipt that never stored one; the proof
   contract now reads the record as-is, so integrity stays "Not recorded" and

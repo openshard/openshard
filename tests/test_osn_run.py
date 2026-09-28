@@ -185,6 +185,40 @@ def test_verifier_that_rewrites_files_is_not_a_pass(repo):
     assert receipt.attempts[0].verification.tainted is True
 
 
+def test_verifier_timeout_is_unknown_and_never_triggers_model_recovery(repo):
+    class SupervisorSpy:
+        called = False
+
+        def after_failed_attempt(self, *_args, **_kwargs):
+            self.called = True
+            raise AssertionError("timeout must not reach supervisor recovery")
+
+    fp = FakeProvider([_writes("out.txt", "ok")])
+    ap = ModelActionProvider(fp, ["cheap/m", "strong/m"], repo)
+    supervisor = SupervisorSpy()
+    slow = [PY, "-c", "import time; time.sleep(1)"]
+
+    receipt = run_bounded_loop(
+        repo, "t", ap, slow, max_attempts=3, verify_timeout=0.01, supervisor=supervisor,
+    )
+
+    assert (receipt.status, receipt.stop_reason, receipt.verification_state) == (
+        "error", "verifier_timeout", "unknown",
+    )
+    assert len(fp.calls) == 1 and len(receipt.attempts) == 1
+    assert supervisor.called is False
+
+    entry = build_osn_run_entry(receipt, task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
+    ev = derive_verification(entry)
+    assert (ev.status, ev.source, ev.observation_mode) == (
+        "unknown", "directly_observed", "openshard_executed",
+    )
+    assert "check_not_completed" in ev.incomplete_reasons
+    assert entry["verification_attempted"] is True and entry["verification_passed"] is None
+    assert entry["retry_triggered"] is False
+    assert outcome_from_receipt(entry).verified_success is None
+
+
 def test_receipt_hides_verifier_argv_and_unsafe_paths(repo):
     secret_cmd = [PY, "-c", "pass", "--token=SECRET123"]
     ap = ModelActionProvider(FakeProvider([_writes("C:/Windows/evil.txt", "x")]), ["m"], repo)

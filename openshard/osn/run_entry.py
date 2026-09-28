@@ -18,6 +18,7 @@ from typing import Any
 from openshard.history.verification import (
     MODE_NONE,
     MODE_OPENSHARD_EXECUTED,
+    REASON_CHECK_NOT_COMPLETED,
     SOURCE_DIRECTLY_OBSERVED,
     build_verification,
 )
@@ -36,6 +37,19 @@ def _verification_block(receipt: LoopReceipt) -> dict[str, Any]:
             source=None, observation_mode=MODE_NONE, status="not_run",
             reason=f"verification did not run ({receipt.stop_reason})",
             incomplete_reasons=["verifier_setup_failed"] if getattr(last, "setup_failure", None) else None,
+        )
+    if last.timed_out:
+        return build_verification(
+            source=SOURCE_DIRECTLY_OBSERVED,
+            observation_mode=MODE_OPENSHARD_EXECUTED,
+            checks=[{"name": "verify_command", "status": "unknown", "kind": "other", "exit_code": None}],
+            status="unknown",
+            exit_code=None,
+            checks_attempted=1,
+            checks_passed=0,
+            checks_failed=0,
+            reason="verification command timed out before an outcome was observed",
+            incomplete_reasons=[REASON_CHECK_NOT_COMPLETED],
         )
     status = "passed" if last.passed else "failed"
     return build_verification(
@@ -236,7 +250,9 @@ def build_osn_run_entry(
         "retry_triggered": retry,
         "verification_attempted": bool(verified_attempts),
         "verification_passed": (
-            verified_attempts[-1].verification.passed if verified_attempts else None  # type: ignore[union-attr]
+            None
+            if verified_attempts and verified_attempts[-1].verification.timed_out  # type: ignore[union-attr]
+            else verified_attempts[-1].verification.passed if verified_attempts else None  # type: ignore[union-attr]
         ),
         "verification": verification,
         "files_created": files_created,
