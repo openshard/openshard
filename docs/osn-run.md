@@ -104,8 +104,8 @@ the attempt it followed, the action, the policy's reason, the recommended model,
 acted on, and the evidence it had (verification status and source, attempts and models so far,
 spend and whether it was known, the spend cap, the loop's and the plan's attempt caps, what the
 ladder would have run next and whether the recommendation differed from it). Historical performance is not consulted. The
-block appears in `osn run --json` and the full receipt (`SUPERVISOR` section); it is not part of
-the `history --json` / sync projection.
+block appears in `osn run --json`, the full local Receipt (`SUPERVISOR` section), and the hosted
+Receipt sync projection in a bounded form that omits raw candidate lists and other private detail.
 
 The Shard entry's `routing_provenance` block gets `record_mode: applied` (compared with the model
 that ran first) instead of `shadow`, and an `adaptive_routing` block records whether the decision
@@ -117,10 +117,12 @@ the `max_attempts` it was cut to, and whether history was used (`history`). `ope
 applied run to the model the decision chose (its `escalations` column counts how often the ladder
 was climbed) and excludes applied runs from the shadow-agreement rate, which only means something
 for decisions that did not pick the model.
-The block appears in `osn run --json` and the full receipt (`ADAPTIVE ROUTING` section); like the
-budget block it is not yet part of the `history --json` / Platform sync projection. With the
-capability off, the shadow provenance is unchanged except that a `--model` you passed is now
-recorded as an explicit choice rather than as free routing.
+The block appears in `osn run --json`, the full local Receipt (`ADAPTIVE ROUTING` section), and
+the hosted Receipt sync projection in a bounded form. The hosted form keeps the selected model,
+class, policy, recovery route, shadow candidates and whether history was used; detailed rankings,
+rejected counts and the full candidate set remain local. With the capability off, the shadow
+provenance is unchanged except that a `--model` you passed is now recorded as an explicit choice
+rather than as free routing.
 
 ## Agent budgets (experimental)
 
@@ -170,6 +172,7 @@ and the `action` OpenShard took (`none`, `stopped_before_model_call`, `stopped_b
 configured but not enforced the block says `enforced: false` and why (`capability_not_enabled`,
 `no_platform_link`, `platform_unreachable_or_refused`, `platform_sync_disabled` when
 `OPENSHARD_PLATFORM_SYNC=off`). A `.openshard/config.yml` that cannot be parsed is refused before any
-work starts, because whether it holds a budget is then unknowable. The block appears in `osn run --json`
-and the full receipt (`BUDGET` section). It is not yet part of the `history --json` / Platform
-sync projection, whose key set is fixed by the Platform contract.
+work starts, because whether it holds a budget is then unknowable. The block appears in `osn run --json`,
+the full local Receipt (`BUDGET` section), and the hosted Receipt sync projection. The hosted form
+contains the configured limits, observed usage, whether enforcement applied, the limit reached and
+the action OpenShard took; it carries no prompt, path, command line or command output.
