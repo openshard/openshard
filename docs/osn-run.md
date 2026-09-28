@@ -52,11 +52,15 @@ these runs. The model that ran is chosen by you (`--model`) or by keyword routin
 ## Adaptive routing (experimental)
 
 Only when the Platform lists the `adaptive_routing` capability as enabled for the linked
-organisation, and only when you did not pass `--model`. Then the adaptive baseline
-(`docs/architecture/adaptive-routing.md`) chooses the first model from the catalog, the provider
-keys you have, the repository's `models` policy and the task's routing class, and its recovery
-plan becomes the escalation ladder when you gave no `--escalate-model`. The loop still climbs that
-ladder only after an observed verification failure, and the budget (above) still applies.
+organisation, and only when you did not pass `--model`. Then Routing V2
+(`docs/architecture/routing.md`) chooses the first model for the `execute` step from the live
+catalog, the provider keys you have, the repository's `models` policy (including any
+`dogfood_candidates` named for the requirement class, which may compete because the capability is
+on), the budget's spend cap, and observed history when the sample is meaningful. Its recovery plan
+becomes the escalation ladder when you gave no `--escalate-model`. The loop still climbs that
+ladder only after an observed verification failure, the budget (above) still applies, and with
+`supervisor_routing` on the `repair` step is re-decided at that boundary from what the run observed
+(models tried, the observed failure, spend so far).
 
 What never changes: an explicit `--model` always runs and is never substituted (the capability is
 not even looked up); an explicit `--escalate-model` ladder always wins; the ladder is cut to what
@@ -65,9 +69,13 @@ be parsed, no eligible candidate, no decision at all, or a selected model the ch
 cannot dispatch all fall back to keyword routing and are recorded as `applied: false` with the
 reason (`model_policy_invalid`, `no_eligible_candidate`, `decision_unavailable`,
 `provider_mismatch`); the capability off, unconfirmed or unreachable leaves what runs as it was.
-One cost is new: a run without `--model` in a Platform-linked repository asks the Platform once
-whether the capability is on (cached ten minutes; a failed read is remembered for one). Historical
-per-model success is not used to route: there is not enough observed data yet, and the record says so.
+One cost is new: a run without `--model` in a Platform-linked repository asks the Platform once,
+at the start of the run, whether the capability is on (a failed read is remembered for one minute).
+That one answer is frozen for the whole run and recorded as `capability_snapshot`, so a dashboard
+toggle applies to the next new run immediately and never to a run already in progress. Historical
+per-model success is used only when at least five independently verified outcomes exist for at
+least two eligible models; otherwise the record says `history_evidence:
+not_used_insufficient_observed_data` and why.
 
 ## Supervisor routing (experimental)
 
@@ -101,9 +109,11 @@ the `history --json` / sync projection.
 
 The Shard entry's `routing_provenance` block gets `record_mode: applied` (compared with the model
 that ran first) instead of `shadow`, and an `adaptive_routing` block records whether the decision
-was applied and why not otherwise, the selected model and routing class, the `escalation_ladder`,
-where it came from (`recovery_plan` or `user`), the `max_attempts` it was cut to, and
-`history_evidence: not_used_insufficient_observed_data`. `openshard stats routing` attributes an
+was applied and why not otherwise, the policy and step, the selected model, its requirement class
+and promotion state, the ranking components of the models it was compared with, how many models
+were eligible and rejected per reason, which discovered models would have qualified
+(`shadow_candidates`), the `escalation_ladder`, where it came from (`recovery_plan` or `user`),
+the `max_attempts` it was cut to, and whether history was used (`history`). `openshard stats routing` attributes an
 applied run to the model the decision chose (its `escalations` column counts how often the ladder
 was climbed) and excludes applied runs from the shadow-agreement rate, which only means something
 for decisions that did not pick the model.
@@ -119,7 +129,7 @@ organisation (`openshard sync connect`). Without a link, when the Platform canno
 refuses the key, or when the capability is simply not on, `osn run` behaves exactly as above and a
 configured budget is recorded as *not enforced*. Nothing about the link changes: the same
 endpoint, organisation and `osk_` key that receipt sync uses are read once per run and the answer
-is cached for ten minutes (see `docs/platform-sync.md`).
+is read once at the start of each run (see `docs/platform-sync.md`).
 
 Configure hard limits in the repository's `.openshard/config.yml`:
 

@@ -4,8 +4,10 @@ A decision answers, from its own fields: which candidates were considered,
 what was selected, why (stable reason tokens), which policy and version made
 it, which routing class was requested and which resolved, and whether the
 model was explicit, pinned or routed. ``score`` and ``confidence`` exist for
-policies that produce real ones; the deterministic baseline produces neither
-and leaves them ``None``.
+policies that produce real ones; the deterministic policies produce neither
+and leave them ``None``. Routing V2 additionally records the step type, the
+ranking components per compared candidate, whether observed history was used
+(and why not), shadow candidates and the selected model's promotion state.
 
 ``to_provenance`` is the Receipt projection (``routing_provenance``): bounded,
 JSON-safe, model ids but no policy lists (rejections are counted, matching the
@@ -35,6 +37,8 @@ RECORD_APPLIED = "applied"  # the decision chose the executed model
 
 MAX_CONSIDERED = 8
 MAX_PROMOTION = 3
+MAX_RANKING = 5
+MAX_SHADOW = 3
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,16 @@ class RoutingDecision:
     context: RoutingContext = field(default_factory=RoutingContext)
     catalog_fingerprint: str = ""
     candidate_set_version: str = ""
+    # ---- Routing V2 (trajectory policy); empty/None for V1 decisions --------
+    step_type: str | None = None
+    # Per-candidate ranking components (requirements.RankedCandidate.to_dict),
+    # selected first, bounded when recorded.
+    ranking: tuple[dict[str, Any], ...] = ()
+    # Whether observed history was used and, if not, why (history_evidence.gate).
+    history_evidence: dict[str, Any] = field(default_factory=dict)
+    # Discovered models that would qualify if promoted; reported, never selected.
+    shadow_candidates: tuple[str, ...] = ()
+    selected_promotion_state: str | None = None
 
     @property
     def decision_fingerprint(self) -> str:
@@ -117,4 +131,9 @@ class RoutingDecision:
                 "decision": self.decision_fingerprint,
             },
             "candidate_set_version": self.candidate_set_version,
+            "step_type": self.step_type,
+            "ranking": [dict(r) for r in self.ranking[:MAX_RANKING]],
+            "history_evidence": dict(self.history_evidence) if self.history_evidence else None,
+            "shadow_candidates": list(self.shadow_candidates[:MAX_SHADOW]),
+            "selected_promotion_state": self.selected_promotion_state,
         }

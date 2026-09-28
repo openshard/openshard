@@ -515,12 +515,13 @@ class TestCli:
         assert "BUDGET" in text and "Reached" in text and "max_attempts" in text
         assert "agent_budgets" not in receipt_to_dict(receipt, extended=True)
 
-        # Second run inside the TTL: served from the cache, no second request.
+        # A second run takes its own fresh snapshot at its start (one request per
+        # run), so a dashboard toggle applies to the next run, not after a TTL.
         fp2 = FakeProvider([_writes(("out.txt", "ok"))], cost=0.05)
         r2 = _invoke(monkeypatch, fp2, "--json")
         assert r2.exit_code == 0, r2.output
         assert json.loads(r2.stdout)["agent_budgets"]["enforced"] is True
-        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"]
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"] * 2
 
     def test_capability_on_text_output_shows_the_budget_line(self, tmp_path, monkeypatch, platform):
         _cli_repo(tmp_path, monkeypatch, {"max_writes": 1})

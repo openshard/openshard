@@ -29,6 +29,24 @@ All notable changes to OpenShard are documented here.
   anything; an explicit choice is still honoured). Guard tests run every
   class against a checked-in real provider snapshot.
   See `docs/architecture/routing.md`.
+- **Routing V2 for `openshard osn run`** (behind the `adaptive_routing`
+  capability). `TrajectoryPolicyV2` (`routing/adaptive/policy_v2.py`) decides
+  per step (`execute`, then `repair` after an observed verification failure)
+  over requirement classes: explicit model, budget, observed failure required,
+  escalation along the class ladder with tried models excluded, pins, then
+  the requirement ranking with dogfood candidates competing and observed
+  history used only past an evidence gate (5 verified outcomes per model, 2
+  models). The supervisor re-decides the `repair` step inside the existing
+  recovery envelope. `RoutingContext` v2 carries the trajectory (step,
+  attempt, models tried, last verification, spend, cap). Receipts record the
+  policy and step, promotion state, ranking components, shadow candidates
+  and whether history was used; the capability-off path is unchanged.
+- **Run-level capability snapshot.** An OSN run reads the organisation's
+  enabled capabilities once at its start (bypassing the positive cache) and
+  keeps that answer for the whole run, recorded as `capability_snapshot`.
+  A Platform toggle applies to the next new run; offline still fails closed.
+- Recovery may re-enter a class with a different model (it still never
+  retries a tried model and the attempt cap still holds).
 
 ## 0.4.8 - 2026-09-25
 
