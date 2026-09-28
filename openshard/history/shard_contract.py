@@ -2113,6 +2113,18 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
             lines.append(_row("Action", str(_budget["action"])))
         lines.append("")
 
+    _routing = (receipt.recorded_evidence or {}).get("adaptive_routing")
+    if isinstance(_routing, dict):
+        lines.append(f"{_INDENT}ADAPTIVE ROUTING")
+        if _routing.get("applied"):
+            lines.append(_row("Applied", f"yes: {_routing.get('selected_model')} ({_routing.get('routing_class')})"))
+            _ladder = _routing.get("escalation_ladder") or []
+            lines.append(_row("Ladder", f"{', '.join(_ladder) if _ladder else 'none'} [{_routing.get('ladder_source')}]"))
+        else:
+            lines.append(_row("Applied", f"no ({_routing.get('reason') or 'unknown'})"))
+        lines.append(_row("History", str(_routing.get("history_evidence") or "unknown")))
+        lines.append("")
+
     if receipt.execution_spans:
         lines.append(f"{_INDENT}EXECUTION SPANS")
         _es_cap = 10

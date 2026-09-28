@@ -58,9 +58,14 @@ def shadow_decision_for_run(
     verification_requested: bool | None,
     harness: str | None,
     model_policy=None,
+    explicit_model: str | None = None,
 ) -> RoutingDecision | None:
     """The baseline decision for a pipeline run, or None if it cannot be
-    computed. Never raises: shadow routing must not affect a run."""
+    computed. Never raises: shadow routing must not affect a run.
+
+    *explicit_model* is the model the user named; the decision then records
+    that choice as explicit instead of pretending routing was free.
+    """
     try:
         context = routing_context_for_run(
             task_category=task_category,
@@ -71,6 +76,7 @@ def shadow_decision_for_run(
             verification_available=verification_available,
             verification_requested=verification_requested,
             harness=harness,
+            explicit_model=explicit_model,
         )
         return plan_route(context, model_policy=model_policy)
     except Exception:

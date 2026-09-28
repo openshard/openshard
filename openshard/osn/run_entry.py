@@ -140,6 +140,9 @@ def build_osn_run_entry(
     repo_path: Path,
     task_id: str | None = None,
     budget_record: dict | None = None,
+    routing_decision: Any | None = None,
+    routing_record_mode: str = "shadow",
+    routing_record: dict | None = None,
 ) -> dict:
     from openshard.adapters.claude_code_import import _sanitize_model, _sanitize_task
     from openshard.history.receipt_identity import ensure_receipt_id
@@ -211,9 +214,21 @@ def build_osn_run_entry(
             setup_kind, None, model=final_model, attempt=len(receipt.attempts),
         )["outcome_classification"]
 
-    prov = _shadow_provenance(safe_task, final_model, verification_available=True)
+    if routing_decision is not None:
+        # The decision the CLI computed for this run (it knows about --model and,
+        # when applied, chose the first model). An applied decision is compared
+        # with the model that ran first; escalation past it is the plan working.
+        try:
+            executed = first_model if routing_record_mode == "applied" else final_model
+            prov = routing_decision.to_provenance(record_mode=routing_record_mode, executed_model=executed)
+        except Exception:
+            prov = None
+    else:
+        prov = _shadow_provenance(safe_task, final_model, verification_available=True)
     if prov is not None:
         entry["routing_provenance"] = prov
+    if routing_record:
+        entry["adaptive_routing"] = dict(routing_record)
 
     try:
         from openshard.history.repo_identity import REPO_IDENTITY_FIELD, capture_repo_identity

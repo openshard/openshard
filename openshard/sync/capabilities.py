@@ -268,6 +268,31 @@ def capability_enabled(key: str, env: dict | os._Environ | None = None, **kwargs
     return resolve_capabilities(env, **kwargs).enabled(key)
 
 
+class LazyCapabilities:
+    """One lookup per command, made only when a feature first asks.
+
+    A command that never asks makes no request; several features asking in
+    the same process share one answer.
+    """
+
+    def __init__(self, env: dict | os._Environ | None = None) -> None:
+        self._env = env
+        self._state: CapabilityState | None = None
+
+    @property
+    def state(self) -> CapabilityState:
+        if self._state is None:
+            self._state = resolve_capabilities(self._env)
+        return self._state
+
+    @property
+    def looked_up(self) -> bool:
+        return self._state is not None
+
+    def enabled(self, key: str) -> bool:
+        return self.state.enabled(key)
+
+
 __all__ = [
     "CACHE_FILENAME",
     "CACHE_TTL_SECONDS",
@@ -280,6 +305,7 @@ __all__ = [
     "SOURCE_FRESH",
     "SOURCE_UNAVAILABLE",
     "CapabilityState",
+    "LazyCapabilities",
     "cache_path",
     "capability_enabled",
     "fetch_enabled_capabilities",

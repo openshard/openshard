@@ -20,6 +20,8 @@ import click
 
 if TYPE_CHECKING:
     from openshard.osn.budget import BudgetLedger
+    from openshard.osn.routing import OsnRouting
+    from openshard.sync.capabilities import LazyCapabilities
 
 
 @click.group("osn")
@@ -91,11 +93,14 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         if Path(rel).is_absolute() or ".." in Path(rel).parts:
             raise click.UsageError(f"--context-file must be repo-relative: {rel}")
 
-    if model is None:
-        from openshard.routing.engine import route
-        model = route(task).model
-    models = [model, *escalate]
-    budget, budget_record = _resolve_budget(repo_root)
+    from openshard.sync.capabilities import LazyCapabilities
+
+    capabilities = LazyCapabilities()
+    routing = _resolve_routing(task, repo_root, explicit_model=model, escalate=list(escalate),
+                               capabilities=capabilities)
+    model = routing.first_model
+    models = routing.models
+    budget, budget_record = _resolve_budget(repo_root, capabilities)
     provider_name, provider_obj = _resolve_provider(provider, model)
 
     action_provider = ModelActionProvider(
@@ -114,10 +119,12 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         receipt, task=task, usage=action_provider.usage, duration_seconds=duration,
         repo_path=repo_root, task_id=task_id,
         budget_record=budget.to_record() if budget is not None else budget_record,
+        routing_decision=routing.decision, routing_record_mode=routing.record_mode,
+        routing_record=routing.record,
     )
-    # Only present when a budget was configured: the machine output is
-    # otherwise byte-for-byte what it was before this feature existed.
-    budget_output = {"agent_budgets": entry["agent_budgets"]} if "agent_budgets" in entry else {}
+    # Only present when a budget was configured / the routing capability is
+    # on: the machine output is otherwise byte-for-byte what it was before.
+    budget_output = {k: entry[k] for k in ("agent_budgets", "adaptive_routing") if k in entry}
     store = repo_root / ".openshard"
     store.mkdir(parents=True, exist_ok=True)
     append_jsonl(store / "runs.jsonl", entry)
@@ -147,6 +154,9 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     budget_line = _budget_line(entry.get("agent_budgets"))
     if budget_line:
         click.echo(f"  budget: {budget_line}")
+    routing_line = _routing_line(entry.get("adaptive_routing"))
+    if routing_line:
+        click.echo(f"  routing: {routing_line}")
     for f in receipt.changed_files:
         click.echo(f"  changed: {f}")
     click.echo("  Changes were made in an isolated copy, verified there by OpenShard.")
@@ -158,7 +168,44 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         click.echo(f"  Blocked by policy/skipped: {', '.join(skipped)}")
 
 
-def _resolve_budget(repo_root: Path) -> tuple[BudgetLedger | None, dict | None]:
+def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, escalate: list[str],
+                     capabilities: LazyCapabilities) -> OsnRouting:
+    """First model and escalation ladder: the user's choice, else adaptive routing when
+    the ``adaptive_routing`` capability is on, else the keyword router as before."""
+    from openshard.osn.routing import CAPABILITY as ROUTING_CAPABILITY
+    from openshard.osn.routing import resolve_osn_routing
+    from openshard.routing.engine import route
+
+    def model_policy_loader():
+        from openshard.config.settings import load_config_safe
+        from openshard.routing.model_policy import model_policy_from_config
+
+        config, _valid, _path = load_config_safe(cwd=repo_root)
+        return model_policy_from_config(config if isinstance(config, dict) else {})
+
+    return resolve_osn_routing(
+        task,
+        explicit_model=explicit_model,
+        escalate=escalate,
+        capability_enabled=lambda: capabilities.enabled(ROUTING_CAPABILITY),
+        legacy_model=lambda t: route(t).model,
+        model_policy_loader=model_policy_loader,
+    )
+
+
+def _routing_line(record: dict | None) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    if not record.get("applied"):
+        return f"adaptive routing not applied ({record.get('reason') or 'unknown'})"
+    ladder = ", ".join(record.get("escalation_ladder") or []) or "none"
+    return (
+        f"adaptive routing applied: {record.get('selected_model')} ({record.get('routing_class')}); "
+        f"ladder {ladder} [{record.get('ladder_source')}]"
+    )
+
+
+def _resolve_budget(repo_root: Path, capabilities: LazyCapabilities) -> tuple[BudgetLedger | None, dict | None]:
     """``(ledger, not_enforced_record)`` for this run: at most one of the two is set.
 
     A budget comes from the repository's ``agent_budgets:`` config block and is
@@ -181,9 +228,9 @@ def _resolve_budget(repo_root: Path) -> tuple[BudgetLedger | None, dict | None]:
     if not limits.configured:
         return None, None
 
-    from openshard.sync.capabilities import CAPABILITY_AGENT_BUDGETS, resolve_capabilities
+    from openshard.sync.capabilities import CAPABILITY_AGENT_BUDGETS
 
-    state = resolve_capabilities()
+    state = capabilities.state
     if state.enabled(CAPABILITY_AGENT_BUDGETS):
         return BudgetLedger(limits), None
     reason = state.reason or "capability_not_enabled"
