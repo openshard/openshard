@@ -224,6 +224,10 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
         "session": evidence.get("session"),
         "routing": evidence.get("routing"),
         "retry": evidence.get("retry"),
+        "agent_budgets": evidence.get("agent_budgets"),
+        "adaptive_routing": evidence.get("adaptive_routing"),
+        "supervisor_routing": evidence.get("supervisor_routing"),
+        "capability_snapshot": evidence.get("capability_snapshot"),
     }
 
 

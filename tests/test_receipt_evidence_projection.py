@@ -16,6 +16,7 @@ from openshard.sync import envelope
 NEW_KEYS = (
     "policy_decisions", "approval_detail", "sandbox_detail", "execution_loop", "base_commit",
     "content_hash", "session", "routing", "retry",
+    "agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot",
 )
 SHA = "c2dbd23"
 HASH = "sha256:" + "a" * 64
@@ -279,6 +280,112 @@ class TestRetry:
                      "total_tokens": None, "cost_usd": None}
         assert ev.retry_block({"retry_triggered": "yes", "retry_estimated_cost": True}) is None
         assert ev.retry_block({}) is None
+
+
+class TestOsnControlEvidence:
+    def test_hosted_shapes_keep_the_decisions_and_drop_private_detail(self):
+        d = _ext(_entry(
+            agent_budgets={
+                "capability": "agent_budgets", "enforced": True,
+                "limits": {"max_spend_usd": 1.0, "max_attempts": 3, "max_writes": 8},
+                "usage": {"spend_usd": 0.031, "spend_known": True, "spend_is_estimate": True,
+                          "model_calls": 2, "attempts": 2, "commands": 2, "writes": 3},
+                "limit_reached": None, "action": "none",
+                "evidence": {"counts": "openshard_observed", "spend": "provider_usage_estimate"},
+            },
+            adaptive_routing={
+                "capability": "adaptive_routing", "applied": True, "record_mode": "applied",
+                "reason": "applied", "history_evidence": "used",
+                "selected_model": "deepseek/deepseek-v4.1-flash", "selection_mode": "routed",
+                "routing_class": "routine_coding", "requested_class": "routine_coding",
+                "escalation_ladder": ["openai/gpt-5.5"], "ladder_source": "recovery_plan",
+                "recovery_enabled": True, "decision_fingerprint": "abc123",
+                "policy": {"name": "deterministic_trajectory_v2", "version": "1"},
+                "step_type": "execute", "promotion_state": "dogfood_candidate",
+                "shadow_candidates": ["z-ai/glm-5.3-prime"],
+                "history": {"used": True, "reason": "used", "candidates_with_evidence": 2},
+                "ranking": [{"model": "private/ranking-detail"}],
+                "considered": ["private/considered-detail"],
+                "rejected_counts": {"status": 10},
+            },
+            supervisor_routing={
+                "capability": "supervisor_routing", "record_mode": "applied",
+                "boundary": "observed_verification_failure_before_retry",
+                "decisions": [{
+                    "attempt": 1, "action": "escalate", "reason": "trajectory_reroute",
+                    "recommended_model": "openai/gpt-5.5", "acted_on": True,
+                    "evidence": {
+                        "verification_status": "failed", "verification_source": "directly_observed",
+                        "attempts_so_far": 1, "models_tried": ["deepseek/deepseek-v4.1-flash"],
+                        "spend_usd": 0.00018, "spend_known": True, "cost_budget_usd": 1.0,
+                        "ladder_model": "openai/gpt-5.5", "changed_next_model": False,
+                        "reroute": {"resolved_class": "deep_reasoning", "selected_model": "openai/gpt-5.5",
+                                    "changed_from_plan": False, "history_used": False,
+                                    "considered": ["private/reroute-detail"]},
+                    },
+                }],
+            },
+            capability_snapshot={
+                "source": "fresh", "reason": None, "refreshed_at_run_start": True,
+                "enabled": {"agent_budgets": True, "adaptive_routing": True, "supervisor_routing": True},
+            },
+        ))
+
+        assert d["agent_budgets"]["enforced"] is True
+        assert d["agent_budgets"]["limits"] == {"max_spend_usd": 1.0, "max_attempts": 3, "max_writes": 8}
+        assert d["agent_budgets"]["usage"]["writes"] == 3
+
+        adaptive = d["adaptive_routing"]
+        assert adaptive["selected_model"] == "deepseek/deepseek-v4.1-flash"
+        assert adaptive["history"] == {"used": True, "reason": "used", "candidates_with_evidence": 2}
+        assert adaptive["shadow_candidates"] == ["z-ai/glm-5.3-prime"]
+        assert "ranking" not in adaptive and "considered" not in adaptive and "rejected_counts" not in adaptive
+
+        supervisor = d["supervisor_routing"]
+        [decision] = supervisor["decisions"]
+        assert decision["recommended_model"] == "openai/gpt-5.5" and decision["acted_on"] is True
+        assert "models_tried" not in decision["evidence"]
+        assert decision["evidence"]["reroute"] == {
+            "resolved_class": "deep_reasoning", "selected_model": "openai/gpt-5.5",
+            "changed_from_plan": False, "history_used": False,
+        }
+
+        assert d["capability_snapshot"] == {
+            "source": "fresh", "reason": None, "refreshed_at_run_start": True,
+            "enabled": {"agent_budgets": True, "adaptive_routing": True, "supervisor_routing": True},
+        }
+
+    def test_capability_off_budget_is_hosted_as_not_enforced(self):
+        d = _ext(_entry(
+            agent_budgets={"capability": "agent_budgets", "enforced": False,
+                           "reason": "capability_not_enabled", "limits": {"max_writes": 1}},
+            capability_snapshot={"source": "fresh", "refreshed_at_run_start": True,
+                                 "enabled": {"agent_budgets": False, "adaptive_routing": True,
+                                             "supervisor_routing": True}},
+        ))
+        assert d["agent_budgets"] == {
+            "enforced": False, "reason": "capability_not_enabled", "limits": {"max_writes": 1},
+        }
+        assert d["capability_snapshot"]["enabled"]["agent_budgets"] is False
+
+    def test_projectors_bound_lists_before_the_hosted_contract(self):
+        d = _ext(_entry(
+            adaptive_routing={
+                "capability": "adaptive_routing", "applied": True, "record_mode": "applied",
+                "escalation_ladder": [f"m/{i}" for i in range(20)],
+                "shadow_candidates": [f"s/{i}" for i in range(20)],
+            },
+            supervisor_routing={
+                "capability": "supervisor_routing", "record_mode": "applied",
+                "decisions": [
+                    {"attempt": i, "action": "stop", "reason": "ladder_exhausted", "evidence": {}}
+                    for i in range(20)
+                ],
+            },
+        ))
+        assert len(d["adaptive_routing"]["escalation_ladder"]) == 8
+        assert len(d["adaptive_routing"]["shadow_candidates"]) == 3
+        assert len(d["supervisor_routing"]["decisions"]) == ev.MAX_SUPERVISOR_DECISIONS
 
 
 class TestModelStageMetrics:

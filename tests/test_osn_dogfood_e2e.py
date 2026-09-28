@@ -214,7 +214,9 @@ class TestAllowAskEscalateVerify:
         assert ext["policy_decisions"] and {d["decision"] for d in ext["policy_decisions"]} == {"allow", "ask"}
         assert all("resource" not in d for d in ext["policy_decisions"])  # paths never leave the machine
         assert ext["verification_status"] == "passed"
-        assert "agent_budgets" not in ext and "adaptive_routing" not in ext  # closed wire contract
+        assert ext["agent_budgets"]["usage"]["commands"] == 2
+        assert ext["adaptive_routing"]["selected_model"] == "acme/mid-1"
+        assert ext["adaptive_routing"]["escalation_ladder"] == ["acme/frontier-1"]
         assert classify_failure(entry, receipt).category == "no_failure_detected"
         assert not any("policy_denied" in str(p) for p in evaluate_trust_score(entry, receipt).penalties)
 

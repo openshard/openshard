@@ -140,8 +140,9 @@ for another organisation, an expired, foreign or unsigned cache. A capability is
 `OPENSHARD_PLATFORM_SYNC=off` switches this read off too (no request leaves the machine); the
 repository-level `platform: {sync: false}` governs sending receipts only.
 
-Today one capability is consumed: `agent_budgets` (see `docs/osn-run.md`). Core looks it up only
-when a repository actually configures a budget.
+Today three capabilities are consumed by `openshard osn run`: `agent_budgets`,
+`adaptive_routing` and `supervisor_routing` (see `docs/osn-run.md`). A run takes one fresh
+capability snapshot at its start and keeps that answer for the whole run.
 
 ## Not done, on purpose
 

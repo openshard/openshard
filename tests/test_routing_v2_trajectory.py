@@ -672,7 +672,11 @@ class TestCli:
         assert "deterministic_trajectory_v2@1, step execute" in text
         assert "CAPABILITIES" in text and "adaptive_routing, agent_budgets, supervisor_routing" in text
         wire = receipt_to_dict(receipt, extended=True)
-        assert not {"adaptive_routing", "supervisor_routing", "capability_snapshot"} & set(wire)
+        assert wire["adaptive_routing"]["selected_model"] == "acme/mid-1"
+        assert wire["adaptive_routing"]["shadow_candidates"] == [NEW]
+        assert wire["supervisor_routing"]["decisions"][0]["recommended_model"] == "acme/frontier-1"
+        assert wire["supervisor_routing"]["decisions"][0]["evidence"]["reroute"]["selected_model"] == "acme/frontier-1"
+        assert wire["capability_snapshot"]["enabled"] == snap
 
     def test_capability_off_keeps_the_stable_behaviour(self, tmp_path, monkeypatch, platform, catalog):
         repo = _cli_repo(tmp_path, monkeypatch, platform, [])

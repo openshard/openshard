@@ -45,6 +45,12 @@ All notable changes to OpenShard are documented here.
   enabled capabilities once at its start (bypassing the positive cache) and
   keeps that answer for the whole run, recorded as `capability_snapshot`.
   A Platform toggle applies to the next new run; offline still fails closed.
+- **Hosted OSN control evidence.** The extended Receipt / Platform sync projection now carries
+  bounded `agent_budgets`, `adaptive_routing`, `supervisor_routing` and
+  `capability_snapshot` blocks. Platform can show the limits that governed a run, the
+  starting route and recovery route, and supervisor actions without receiving prompts,
+  paths, command lines, raw output or the full candidate ranking. Older Receipts keep the
+  four fields null.
 - Recovery may re-enter a class with a different model (it still never
   retries a tried model and the attempt cap still holds).
 

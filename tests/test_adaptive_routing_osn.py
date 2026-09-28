@@ -325,7 +325,9 @@ class TestCli:
         assert ev["escalation_ladder"] == ["acme/frontier-1"] and ev["ladder_source"] == "recovery_plan"
         text = render_full_shard_receipt(receipt)
         assert "ADAPTIVE ROUTING" in text and "acme/mid-1" in text
-        assert "adaptive_routing" not in receipt_to_dict(receipt, extended=True)  # wire unchanged
+        hosted = receipt_to_dict(receipt, extended=True)
+        assert hosted["adaptive_routing"] == ev
+        assert "adaptive_routing" not in receipt_to_dict(receipt)  # default/MCP shape stays unchanged
 
     def test_capability_on_but_explicit_model_wins_without_a_lookup(self, tmp_path, monkeypatch, platform, catalog):
         repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing"])

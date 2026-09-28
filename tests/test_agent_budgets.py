@@ -310,7 +310,7 @@ class TestReceiptEntry:
                                     budget_record=led.to_record())
         return r, entry
 
-    def test_enforced_budget_is_recorded_and_projected_locally_only(self, repo):
+    def test_enforced_budget_is_recorded_and_projected_to_hosted_receipt(self, repo):
         r, entry = self._run(repo, BudgetLimits(max_attempts=1, max_spend_usd=1.0))
         assert r.status == "budget_exhausted"
         block = entry["agent_budgets"]
@@ -332,9 +332,9 @@ class TestReceiptEntry:
         text = render_full_shard_receipt(receipt)
         assert "BUDGET" in text and "max_attempts=1" in text and "stopped_before_attempt" in text
 
-        # The Platform sync contract is a closed key set: nothing new crosses the wire yet.
-        assert "agent_budgets" not in receipt_to_dict(receipt, extended=True)
-        assert "agent_budgets" not in receipt_to_dict(receipt)
+        hosted = receipt_to_dict(receipt, extended=True)
+        assert hosted["agent_budgets"] == ev
+        assert "agent_budgets" not in receipt_to_dict(receipt)  # default/MCP shape stays unchanged
 
     def test_not_enforced_budget_is_recorded_as_such(self, repo):
         fp = FakeProvider([_writes(("out.txt", "ok"))])
@@ -513,7 +513,10 @@ class TestCli:
         receipt = build_shard_receipt(entry, index=0)
         text = render_full_shard_receipt(receipt)
         assert "BUDGET" in text and "Reached" in text and "max_attempts" in text
-        assert "agent_budgets" not in receipt_to_dict(receipt, extended=True)
+        hosted = receipt_to_dict(receipt, extended=True)["agent_budgets"]
+        assert hosted["enforced"] is True
+        assert hosted["limits"] == {"max_spend_usd": 1.0, "max_attempts": 1}
+        assert hosted["limit_reached"] == "max_attempts" and hosted["action"] == "stopped_before_attempt"
 
         # A second run takes its own fresh snapshot at its start (one request per
         # run), so a dashboard toggle applies to the next run, not after a TTL.
