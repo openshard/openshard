@@ -74,12 +74,11 @@ _CI_AGENT_VARS = (
     "GITLAB_CI",
 )
 
-# Headless/agent signals for output formatting (output_mode=agent_json). This is
-# broader than _CI_AGENT_VARS and includes NO_COLOR as a conventional headless hint.
-_AGENT_VARS = (
-    *_CI_AGENT_VARS,
-    "NO_COLOR",
-)
+# Headless/agent signals for output formatting (output_mode=agent_json). The
+# same explicit signals as onboarding: NO_COLOR is a colour preference
+# (https://no-color.org/), so a person who sets it gets plain, uncoloured
+# human output -- never agent JSON.
+_AGENT_VARS = _CI_AGENT_VARS
 
 
 def detect_provider() -> str:
@@ -98,8 +97,9 @@ def detect_provider() -> str:
 def is_agent_environment() -> bool:
     """Return True if any recognised CI or agent env var is set and truthy.
 
-    Checks OPENSHARD_AGENT (explicit opt-in), CI, GITHUB_ACTIONS, GITLAB_CI,
-    and NO_COLOR (conventional headless/agent signal).  Never raises.
+    Checks OPENSHARD_AGENT (explicit opt-in), CI, GITHUB_ACTIONS and
+    GITLAB_CI. NO_COLOR is deliberately not a signal: it is a colour
+    preference, not an agent environment.  Never raises.
     """
     try:
         return any(os.environ.get(v, "") for v in _AGENT_VARS)
@@ -111,9 +111,8 @@ def is_ci_or_agent_environment() -> bool:
     """Return True only for explicit agent/CI sessions (OPENSHARD_AGENT, CI,
     GITHUB_ACTIONS, GITLAB_CI).
 
-    Unlike :func:`is_agent_environment`, this excludes NO_COLOR so that a real
-    human who simply prefers uncoloured output is not mistaken for an agent and
-    skipped past first-run onboarding.  Never raises.
+    Kept as a separate name for onboarding callers; it now checks the same
+    explicit signals as :func:`is_agent_environment`.  Never raises.
     """
     try:
         return any(os.environ.get(v, "") for v in _CI_AGENT_VARS)

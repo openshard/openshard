@@ -61,6 +61,7 @@ def _summary_sentence(
     recommended_gaps: int,
     unsafe_count: int,
     verification: str,
+    phrase: str | None = None,
 ) -> str:
     """Build a plain-English summary from safe tokens only."""
     clauses: list[str] = []
@@ -81,14 +82,16 @@ def _summary_sentence(
         noun = "recommended gap" if recommended_gaps == 1 else "recommended gaps"
         clauses.append(f"{recommended_gaps} {noun}")
 
-    clauses.append(_VERIFICATION_PHRASE.get(verification, "verification status unknown"))
+    clauses.append(phrase or _VERIFICATION_PHRASE.get(verification, "verification status unknown"))
 
     # Capitalise the first clause; keep the rest as written.
     sentence = "; ".join(clauses)
     return sentence[:1].upper() + sentence[1:] if sentence else "Quality summary unavailable"
 
 
-def build_shard_quality_summary(entry: dict, receipt: object | None = None) -> dict:
+def build_shard_quality_summary(
+    entry: dict, receipt: object | None = None, *, post_session_verification: dict | None = None,
+) -> dict:
     """Derive a compact quality summary for a single run entry. Never raises.
 
     Reuses the Shard Proof Contract v1 and the existing verification signal; it
@@ -104,7 +107,7 @@ def build_shard_quality_summary(entry: dict, receipt: object | None = None) -> d
         return _fallback()
 
     try:
-        contract = build_shard_proof_contract(entry)
+        contract = build_shard_proof_contract(entry, post_session_verification=post_session_verification)
 
         missing_required = contract.get("missing_required_sections") or []
         weak_recommended = contract.get("weak_recommended_sections") or []
@@ -116,8 +119,12 @@ def build_shard_quality_summary(entry: dict, receipt: object | None = None) -> d
         unsafe_count = len(unsafe_findings)
 
         if receipt is None:
-            receipt = build_shard_receipt(entry, index=None)
+            receipt = build_shard_receipt(entry, index=None, post_session_verification=post_session_verification)
         verification = verification_status_from_receipt(receipt)  # type: ignore[arg-type]  # receipt is ShardReceipt after build or assignment above
+        from openshard.history.verification_truth import interpret_receipt, verification_phrase
+
+        truth = interpret_receipt(receipt)  # type: ignore[arg-type]
+        phrase = verification_phrase(truth)
         raw_output_stored = bool(getattr(receipt, "verification_raw_output_stored", False))
 
         return {
@@ -127,9 +134,12 @@ def build_shard_quality_summary(entry: dict, receipt: object | None = None) -> d
             "recommended_gaps_count": recommended_gaps,
             "unsafe_findings_count": unsafe_count,
             "verification": verification,
+            "verification_state": truth.state,
+            "verification_authority": truth.authority,
+            "integrity": truth.integrity,
             "raw_output_stored": raw_output_stored,
             "summary": _summary_sentence(
-                required_proof, recommended_gaps, unsafe_count, verification
+                required_proof, recommended_gaps, unsafe_count, verification, phrase
             ),
         }
     except Exception:

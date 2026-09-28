@@ -65,6 +65,7 @@ openshard last --full                              # Show full stored/debug deta
 openshard verify                                   # Re-run approved checks for the latest receipt (OpenShard-observed evidence)
 openshard verify --dry-run                         # Show which checks would run, and their safety class
 openshard verify --from-observed --approve         # Also re-run the agent's observed checks; allow needs-approval commands
+openshard verify --strict                          # Same, but exit 1 when a check failed and 2 when a planned check could not run
 openshard history                                  # Recent receipts for this repo, newest first
 openshard history --limit 20 --json                # Same, more rows, machine-readable
 openshard context "fix the flaky auth test"        # What relevant_context would give an agent, and why

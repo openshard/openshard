@@ -31,10 +31,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-from openshard.history.proof_signals import (
-    secret_scan_finding_count,
-    verification_status_from_receipt,
-)
+from openshard.history.proof_signals import secret_scan_finding_count
 from openshard.history.provenance import build_provenance_from_entry
 from openshard.history.shard_contract import ShardReceipt, build_shard_receipt
 from openshard.history.shard_schema import (
@@ -398,9 +395,22 @@ def _eval_checks(receipt: ShardReceipt, entry: dict) -> tuple[str, str]:
 
 
 def _eval_verification(receipt: ShardReceipt, entry: dict) -> tuple[str, str]:
-    status = verification_status_from_receipt(receipt)
+    from openshard.history.verification_truth import (
+        STATE_AGENT_REPORTED_PARTIAL,
+        STATE_AGENT_REPORTED_PASSED,
+        STATE_ATTEMPTED_UNVERIFIED,
+        interpret_receipt,
+    )
+
+    truth = interpret_receipt(receipt)
+    status = truth.effective_status
     if status in ("passed", "failed"):
         return PRESENT, status
+    if truth.state in (STATE_AGENT_REPORTED_PASSED, STATE_AGENT_REPORTED_PARTIAL, STATE_ATTEMPTED_UNVERIFIED):
+        # The agent's own claim (or a check seen without an outcome) is weak
+        # proof, never the verified outcome: the detail names the state so a
+        # reader sees "agent_reported_passed", not "passed".
+        return PARTIAL, truth.state
     if status in ("not_run", "skipped", "manual_review", "partial"):
         # A recorded not_run / skipped / manual_review is weak proof, not absent
         # proof: the run states what happened, just not a clean pass or fail.
@@ -542,28 +552,41 @@ def _empty_contract(overall: str, summary: str) -> dict:
     }
 
 
-def build_shard_proof_contract(entry: object) -> dict:
+UNSAFE_CONTENT_HASH_MISMATCH = "content_hash_mismatch"
+
+
+def build_shard_proof_contract(entry: object, *, post_session_verification: dict | None = None) -> dict:
     """Build a Shard Proof Contract v1 view from a run entry. Never raises.
 
     Accepts current, old, partial, and malformed entries. Returns a
     JSON-serializable dict. Never fabricates proof and never emits unsafe raw
-    content.
+    content. *post_session_verification* is the latest ``openshard verify``
+    attestation for the record, so the verification section states the
+    current evidence. A record whose content no longer matches its stored
+    checksum is an unsafe finding (``content_hash_mismatch``): an edited
+    record is not usable as evidence whatever its sections say.
     """
     try:
         # Record-level safety: detect blocked fields on the raw entry before we
         # strip them. Names only; values are never read.
         blocked = _blocked_fields_present(entry)
 
-        coerced = coerce_shard_entry(entry)
+        # Read path: never stamp a hash a historical record did not store, or the
+        # receipt built below would report a manufactured 'Checksum matches'.
+        coerced = coerce_shard_entry(entry, stamp_hash=False)
         # Truly malformed input (non-dict) coerces to an invalid_entry marker.
         if coerced.get("_coerce_warning") == "invalid_entry":
             return _empty_contract(OVERALL_UNKNOWN, "input was not a run record")
 
-        receipt = build_shard_receipt(coerced, index=None)
+        receipt = build_shard_receipt(
+            coerced, index=None, post_session_verification=post_session_verification,
+        )
 
         unsafe_findings: list[str] = []
         for name in blocked:
             unsafe_findings.append(f"blocked_field:{name}")
+        if receipt.integrity_status == "mismatch":
+            unsafe_findings.append(UNSAFE_CONTENT_HASH_MISMATCH)
 
         secret_findings = secret_scan_finding_count(receipt)
         if secret_findings > 0:

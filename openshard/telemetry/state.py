@@ -140,10 +140,16 @@ def _write(path: Path, state: TelemetryState) -> bool:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
+        # Owner-only: the file carries the installation id and the consent decision.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(state.to_dict(), fh, indent=2)
             fh.write("\n")
         os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         return True
     except Exception:
         return False

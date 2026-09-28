@@ -444,7 +444,6 @@ def env_cmd() -> None:
         "CI",
         "GITHUB_ACTIONS",
         "GITLAB_CI",
-        "NO_COLOR",
     )
 
     # Determine which env var triggered agent mode (first match wins).
@@ -688,7 +687,7 @@ def _render_setup_result(result) -> None:
     for key, label in (
         ("codex", "Codex:        "), ("opencode", "OpenCode:     "), ("cursor", "Cursor:       "),
         ("antigravity", "Antigravity:  "), ("grok_build", "Grok Build:   "),
-        ("antigravity", "Antigravity:  "), ("hermes", "Hermes:       "),
+        ("hermes", "Hermes:       "),
     ):
         agent_result = (result.agents or {}).get(key)
         if agent_result is None:
@@ -1538,8 +1537,15 @@ def metrics():
     click.echo(f"    not attempted    {v['unknown']}")
 
 
-def _render_log_entry(entry: dict, detail: str, index: int | None = None) -> None:
-    """Render a stored run log entry at the requested detail level."""
+def _render_log_entry(
+    entry: dict, detail: str, index: int | None = None, *, post_session_verification: dict | None = None,
+) -> None:
+    """Render a stored run log entry at the requested detail level.
+
+    *post_session_verification* is the latest ``openshard verify`` attestation
+    for the entry; the receipt rows and the proof line read it so the human
+    view never says less than ``last --json``.
+    """
     ts = entry.get("timestamp", "").rstrip("Z").replace("T", " ").split(".")[0]
     task = entry.get("task", "")
     summary = entry.get("summary", "")
@@ -1646,7 +1652,7 @@ def _render_log_entry(entry: dict, detail: str, index: int | None = None) -> Non
             render_compact_shard_receipt,
             render_full_shard_receipt,
         )
-        _shard = build_shard_receipt(entry, index)
+        _shard = build_shard_receipt(entry, index, post_session_verification=post_session_verification)
         click.echo("")
         click.echo(render_compact_shard_receipt(_shard))
         click.echo("")
@@ -1890,16 +1896,21 @@ def _render_log_entry(entry: dict, detail: str, index: int | None = None) -> Non
             build_shard_receipt,
             render_compact_shard_receipt,
         )
-        _shard = build_shard_receipt(entry, index)
+        _shard = build_shard_receipt(entry, index, post_session_verification=post_session_verification)
         click.echo("")
         click.echo(render_compact_shard_receipt(_shard))
 
         # One compact proof-quality line, derived from the Shard Proof Contract.
         from openshard.history.shard_quality import build_shard_quality_summary
-        _quality = build_shard_quality_summary(entry, _shard)
+        _quality = build_shard_quality_summary(
+            entry, _shard, post_session_verification=post_session_verification,
+        )
         click.echo(f"Proof: {_quality['status']}")
         if _quality["unsafe_findings_count"] > 0:
             click.echo(f"Unsafe findings: {_quality['unsafe_findings_count']}")
+        if _shard.integrity_status == "mismatch":
+            from openshard.history.verification_truth import INTEGRITY_MISMATCH_NOTICE
+            click.echo(f"Integrity: {INTEGRITY_MISMATCH_NOTICE}")
 
     click.echo(f"\nTime: {duration:.1f}s   Cost: {cost_str}")
 
@@ -1994,10 +2005,15 @@ def last(more: bool, full: bool, as_json: bool):
             ))
             return
         entry = entries[-1]
-        receipt = build_shard_receipt(entry, index=len(entries) - 1)
+        # Verification v2: the latest ``openshard verify`` attestation
+        # (sidecar, OpenShard-executed); None when never re-verified. It is
+        # carried on the receipt so trust, proof and quality all read it.
+        _post = _post_session_verification_for(entry, log_path)
+        receipt = build_shard_receipt(entry, index=len(entries) - 1, post_session_verification=_post)
         from openshard.history.proof_contract import build_shard_proof_contract
         from openshard.history.shard_quality import build_shard_quality_summary
         from openshard.history.trust_score import evaluate_trust_score
+        from openshard.history.verification_truth import interpret_receipt
 
         _ts = evaluate_trust_score(
             entry, receipt,
@@ -2016,11 +2032,10 @@ def last(more: bool, full: bool, as_json: bool):
                     for p in _ts.penalties
                 ],
             },
-            proof_contract=build_shard_proof_contract(entry),
-            shard_quality=build_shard_quality_summary(entry, receipt),
-            # Verification v2: the latest ``openshard verify`` attestation
-            # (sidecar, OpenShard-executed); None when never re-verified.
-            post_session_verification=_post_session_verification_for(entry, log_path),
+            proof_contract=build_shard_proof_contract(entry, post_session_verification=_post),
+            shard_quality=build_shard_quality_summary(entry, receipt, post_session_verification=_post),
+            verification_truth=interpret_receipt(receipt).to_dict(),
+            post_session_verification=_post,
             **_content_hash_fields(entry),
         )
         click.echo(json.dumps(payload, indent=2))
@@ -2037,8 +2052,8 @@ def last(more: bool, full: bool, as_json: bool):
         return
     for line in repo_note_lines(loc):
         click.echo(line)
-    _render_log_entry(entries[-1], detail, index=len(entries) - 1)
     _post_verification = _post_session_verification_for(entries[-1], log_path)
+    _render_log_entry(entries[-1], detail, index=len(entries) - 1, post_session_verification=_post_verification)
     if _post_verification is not None:
         from openshard.verification.post_session import display_line
 
@@ -2079,8 +2094,12 @@ def _select_entry(entries: list[dict], ref: str | None) -> dict | None:
               help="Seconds before a check is stopped (its outcome is then unknown).")
 @click.option("--json", "as_json", is_flag=True, default=False,
               help="Machine-readable output (check output is not shown).")
+@click.option("--strict", is_flag=True, default=False,
+              help="Exit 1 when an executed check fails and 2 when a planned check could not run "
+                   "(blocked, needing approval, not found, timed out) or nothing was planned. "
+                   "The attestation is recorded either way.")
 def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run: bool, timeout: float,
-           as_json: bool) -> None:
+           as_json: bool, strict: bool) -> None:
     """Re-run approved checks and record the outcome OpenShard itself observed.
 
     Picks the repository's verification contract (``verification_commands``
@@ -2089,8 +2108,10 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
     (never through a shell), reads each exit code, and appends an attestation
     to .openshard/verifications.jsonl linked to the receipt: evidence
     ``directly_observed``, bound to the commit only when the working tree is
-    clean. The receipt itself is never modified. This records evidence; it
-    never blocks anything, and exits 0 whatever the checks' outcome.
+    clean. The receipt itself is never modified. This records evidence; by
+    default it never blocks anything and exits 0 whatever the checks'
+    outcome. With --strict the exit code carries the result (1: a check
+    failed; 2: a planned check could not run), for scripts and CI.
     """
     from openshard.config.settings import load_config_safe
     from openshard.verification.post_session import (
@@ -2147,12 +2168,16 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
     )
     record_attestation(repo_root, attestation)
     summary = summarize_attestation(attestation)
+    strict_exit = _strict_verify_exit_code(results) if strict else 0
 
     if as_json:
         click.echo(json.dumps(_machine_envelope(
             "verify", "ok", receipt=receipt_label, attestation_id=attestation["attestation_id"],
             checks=attestation["checks"], verification=summary["verification"],
+            strict=strict, exit_code=strict_exit,
         ), indent=2))
+        if strict_exit:
+            sys.exit(strict_exit)
         return
     click.echo("")
     for result in results:
@@ -2160,6 +2185,24 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         click.echo(f"  {result.check.name}: {result.status}" + (f" ({detail})" if detail else ""))
     click.echo(f"\nRe-verified: {display_line(summary)}")
     click.echo("Recorded in .openshard/verifications.jsonl (evidence: directly_observed).")
+    if strict_exit == 1:
+        click.echo("Strict: an executed check failed (exit 1).")
+    elif strict_exit == 2:
+        click.echo("Strict: a planned check could not run, or nothing was planned (exit 2).")
+    if strict_exit:
+        sys.exit(strict_exit)
+
+
+def _strict_verify_exit_code(results: list) -> int:
+    """``--strict`` exit code: 1 when any executed check failed, 2 when any planned
+    check has no outcome (skipped / not run to completion) or nothing was planned, else 0."""
+    if not results:
+        return 2
+    if any(r.status == "failed" for r in results):
+        return 1
+    if any(r.status in ("skipped", "unknown") for r in results):
+        return 2
+    return 0
 
 
 def _utc_stamp() -> str:
@@ -2279,7 +2322,7 @@ def trust_last(as_json: bool) -> None:
     from openshard.history.shard_contract import build_shard_receipt
     from openshard.history.trust_score import evaluate_trust_score, format_human, to_payload
 
-    log_path = Path.cwd() / _LOG_PATH
+    log_path = _locate_history().runs_path
     entries = _load_run_entries(log_path)
     if not entries:
         if as_json:
@@ -2292,7 +2335,10 @@ def trust_last(as_json: bool) -> None:
         return
 
     entry = entries[-1]
-    receipt = build_shard_receipt(entry, index=len(entries) - 1)
+    receipt = build_shard_receipt(
+        entry, index=len(entries) - 1,
+        post_session_verification=_post_session_verification_for(entry, log_path),
+    )
     ts = evaluate_trust_score(
         entry, receipt,
         interaction_event_types=_interaction_event_types(entry.get("timestamp", "")),
@@ -2335,8 +2381,12 @@ _PROOF_RECOMMENDATIONS: dict[str, str] = {
 }
 
 
-def _proof_recommendation(overall_status: str) -> str:
+def _proof_recommendation(overall_status: str, contract: dict | None = None) -> str:
     """Map a contract overall_status to a one-line, human recommendation."""
+    if contract and "content_hash_mismatch" in (contract.get("unsafe_findings") or []):
+        from openshard.history.verification_truth import INTEGRITY_MISMATCH_NOTICE
+
+        return INTEGRITY_MISMATCH_NOTICE + " Do not use it as evidence."
     return _PROOF_RECOMMENDATIONS.get(
         overall_status, _PROOF_RECOMMENDATIONS["unknown"]
     )
@@ -2369,7 +2419,9 @@ def _proof_section_label(name: object) -> str:
     return _PROOF_SECTION_LABELS.get(name, name.replace("_", " ").capitalize())
 
 
-def _proof_human_lines(contract: dict, errors: list[str], shard_id: str | None) -> list[str]:
+def _proof_human_lines(
+    contract: dict, errors: list[str], shard_id: str | None, receipt=None,
+) -> list[str]:
     """Render the compact human view of a proof contract.
 
     Shows the heading, status, summary, the required sections, the recommended
@@ -2382,6 +2434,11 @@ def _proof_human_lines(contract: dict, errors: list[str], shard_id: str | None) 
         lines.append(f"Shard: {shard_id}")
     lines.append(f"Status: {overall}")
     lines.append(f"Summary: {contract.get('summary', '')}")
+    if receipt is not None:
+        from openshard.history.shard_contract import verified_label
+
+        lines.append(f"Verified: {verified_label(receipt)}")
+        lines.append(f"Integrity: {receipt.integrity}")
     lines.append(
         f"Contract: Shard Proof Contract v{contract.get('contract_version', '')}"
     )
@@ -2424,7 +2481,7 @@ def _proof_human_lines(contract: dict, errors: list[str], shard_id: str | None) 
 
     lines.append("")
     lines.append("Next action:")
-    lines.append(f"- {_proof_recommendation(overall)}")
+    lines.append(f"- {_proof_recommendation(overall, contract)}")
     return lines
 
 
@@ -2441,7 +2498,7 @@ def _proof_verify_last(as_json: bool) -> None:
     )
     from openshard.history.shard_contract import build_shard_receipt
 
-    log_path = Path.cwd() / _LOG_PATH
+    log_path = _locate_history().runs_path
     entries = _load_run_entries(log_path)
     if not entries:
         if as_json:
@@ -2457,8 +2514,9 @@ def _proof_verify_last(as_json: bool) -> None:
         sys.exit(1)
 
     entry = entries[-1]
-    receipt = build_shard_receipt(entry, index=len(entries) - 1)
-    contract = build_shard_proof_contract(entry)
+    _post = _post_session_verification_for(entry, log_path)
+    receipt = build_shard_receipt(entry, index=len(entries) - 1, post_session_verification=_post)
+    contract = build_shard_proof_contract(entry, post_session_verification=_post)
     errors = validate_shard_proof_contract(contract)
     overall = contract.get("overall_status", "unknown")
 
@@ -2472,16 +2530,19 @@ def _proof_verify_last(as_json: bool) -> None:
     exit_code = 1 if (errors or overall == "unsafe") else 0
 
     if as_json:
+        from openshard.history.verification_truth import interpret_receipt
+
         payload = _machine_envelope(
             "proof last", envelope_status, shard_id=receipt.shard_id,
             proof_contract=contract,
             validation_errors=errors,
-            recommendation=_proof_recommendation(overall),
+            recommendation=_proof_recommendation(overall, contract),
+            verification_truth=interpret_receipt(receipt).to_dict(),
             **_content_hash_fields(entry),
         )
         click.echo(json.dumps(payload, indent=2))
     else:
-        for line in _proof_human_lines(contract, errors, receipt.shard_id):
+        for line in _proof_human_lines(contract, errors, receipt.shard_id, receipt=receipt):
             click.echo(line)
 
     if exit_code:
@@ -4953,6 +5014,15 @@ def _export_verification_block(receipt) -> dict:  # receipt: ShardReceipt | None
     }
 
 
+def _export_verification_truth(receipt) -> dict | None:  # receipt: ShardReceipt | None
+    """The shared interpretation (history/verification_truth.py) for machine output."""
+    if receipt is None:
+        return None
+    from openshard.history.verification_truth import interpret_receipt
+
+    return interpret_receipt(receipt).to_dict()
+
+
 def _routing_truth_export(entry: dict) -> dict:
     """Honest routing-truth block for JSON export. Recomputed so old records
     (written before routing_truth was persisted) also get it. Never raises."""
@@ -5007,6 +5077,7 @@ def _export_run_entry(entry: dict, include_notes: bool = False, include_timeline
         "verification_attempted":    entry.get("verification_attempted"),
         "verification_passed":       entry.get("verification_passed"),
         "verification":              _export_verification_block(receipt),
+        "verification_truth":        _export_verification_truth(receipt),
         "duration_seconds":          entry.get("duration_seconds"),
         "total_cost_usd":            run_cost_usd(entry),
         "prompt_tokens":             entry.get("prompt_tokens"),
@@ -5440,6 +5511,8 @@ def _demo_shard_artifacts():
 
 def _demo_shard_human_lines(receipt, contract, quality, trust) -> list[str]:
     """Render the plain-language demo walkthrough as a list of lines."""
+    from openshard.history.shard_contract import verified_label
+
     unsafe_count = int(quality.get("unsafe_findings_count") or 0)
     unsafe_display = "none" if unsafe_count == 0 else str(unsafe_count)
     lines = [
@@ -5451,7 +5524,7 @@ def _demo_shard_human_lines(receipt, contract, quality, trust) -> list[str]:
         f"  Task: {receipt.task_full}",
         "  Status: completed",
         f"  Files changed: {receipt.files_changed}",
-        f"  Verification: {receipt.verification_status}",
+        f"  Verification: {verified_label(receipt)}",
         "",
         "Proof:",
         f"  Status: {contract.get('overall_status', 'unknown')}",
@@ -5467,9 +5540,9 @@ def _demo_shard_human_lines(receipt, contract, quality, trust) -> list[str]:
         "  It records what happened, what was checked, and whether the proof is",
         "  good enough to rely on.",
         "",
-        "  Receipt is what happened.",
-        "  Proof is whether the saved record is good enough.",
-        "  Trust is whether the run is safe to rely on.",
+        "  Receipt is what happened, and who observed it.",
+        "  Proof is whether the saved record is complete enough to use as evidence.",
+        "  Trust is a heuristic over the recorded proof signals, not a safety guarantee.",
         "  A Shard is the saved proof record for one AI coding run.",
         "",
         "Try next:",
@@ -5491,11 +5564,14 @@ def demo_shard(as_json: bool) -> None:
     entry, receipt, contract, quality, trust = _demo_shard_artifacts()
 
     if as_json:
+        from openshard.history.verification_truth import interpret_receipt
+
         compact_receipt = {
             "task": receipt.task_full,
             "status": "completed",
             "files_changed": receipt.files_changed,
             "verification": receipt.verification_status,
+            "verification_truth": interpret_receipt(receipt).to_dict(),
         }
         payload = _machine_envelope(
             "demo shard", "ok", shard_id=receipt.shard_id,

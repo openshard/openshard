@@ -510,6 +510,9 @@ def _derive_legacy(entry: dict) -> VerificationEvidence:
         attempted = fr.get("verification_attempted")
         if passed is None:
             passed = fr.get("verification_passed")
+    if attempted is None and isinstance(passed, bool):
+        # An outcome implies an attempt (older native records stored only the result).
+        attempted = True
 
     if executor in _NOT_OBSERVABLE_EXECUTORS:
         # import/wrap stored ``verification_attempted: False`` meaning "not

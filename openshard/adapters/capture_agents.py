@@ -81,7 +81,8 @@ CLAUDE_CODE_PROFILE = AgentProfile(
         "Tool/file facts are as reported by Claude Code; files are inferred from git diff. "
         "Model/cost/tokens are read from Claude Code's status line when one is configured "
         "(see `openshard mcp install claude`); otherwise they stay Unknown/Not recorded. "
-        "Verification is never recorded by OpenShard for this capture path."
+        "OpenShard does not run checks for this capture path: any check outcome here is the "
+        "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
 )
 
@@ -104,7 +105,8 @@ CODEX_PROFILE = AgentProfile(
         "Tool/file facts are as reported by Codex; files are inferred from git diff. "
         "The model slug is the one Codex reports in its hook payloads; cost and token "
         "counts are not exposed by Codex hooks and stay Not recorded. "
-        "Verification is never recorded by OpenShard for this capture path."
+        "OpenShard does not run checks for this capture path: any check outcome here is the "
+        "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
 )
 
@@ -127,7 +129,8 @@ OPENCODE_PROFILE = AgentProfile(
         "Tool/file facts are as reported by OpenCode; files are inferred from git diff. "
         "Provider/model identity and cost/token counts are the values OpenCode reports "
         "on its own assistant messages, recorded only when present. "
-        "Verification is never recorded by OpenShard for this capture path."
+        "OpenShard does not run checks for this capture path: any check outcome here is the "
+        "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
 )
 
@@ -150,7 +153,8 @@ CURSOR_PROFILE = AgentProfile(
         "Tool/file facts are as reported by Cursor; files are inferred from git diff. "
         "The model name is the one Cursor reports in its hook payloads; cost and token "
         "counts are not exposed by Cursor hooks and stay Not recorded. "
-        "Verification is never recorded by OpenShard for this capture path."
+        "OpenShard does not run checks for this capture path: any check outcome here is the "
+        "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
 )
 
@@ -173,7 +177,8 @@ ANTIGRAVITY_PROFILE = AgentProfile(
         "Tool/file facts are as reported by Antigravity; files are inferred from git diff. "
         "The model is the name Antigravity reports on each hook; the task prompt, cost and "
         "token counts are not exposed to hooks and stay Not recorded. "
-        "Verification is never recorded by OpenShard for this capture path."
+        "OpenShard does not run checks for this capture path: any check outcome here is the "
+        "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
 )
 
@@ -196,7 +201,8 @@ GROK_BUILD_PROFILE = AgentProfile(
         "Tool/file facts are as reported by Grok Build; files are inferred from git diff. "
         "Grok Build's hook payloads name no model, provider, cost or token counts, so those "
         "stay Not recorded; the task is the prompt Grok Build delivers on its UserPromptSubmit hook. "
-        "Verification is never recorded by OpenShard for this capture path."
+        "OpenShard does not run checks for this capture path: any check outcome here is the "
+        "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
 )
 
@@ -220,7 +226,8 @@ HERMES_PROFILE = AgentProfile(
         "The model and provider are the ones Hermes reports on its own hooks, and token "
         "counts are the usage Hermes reports per provider request; Hermes reports no cost, "
         "so cost stays Not recorded. "
-        "Verification is never recorded by OpenShard for this capture path."
+        "OpenShard does not run checks for this capture path: any check outcome here is the "
+        "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
     opt_in_repo=True,
 )

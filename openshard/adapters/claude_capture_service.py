@@ -194,13 +194,19 @@ def _version() -> str:
 
 
 def _write_state(path: Path, state: dict) -> None:
+    """Write the state file owner-only (0600): it names recent repository paths."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(state, fh, indent=2)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _pid_alive(pid: object) -> bool:

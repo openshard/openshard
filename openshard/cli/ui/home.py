@@ -13,7 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from openshard.analysis.repo import RepoFacts, analyze_repo
-from openshard.config.settings import load_config
+from openshard.config.settings import load_config_safe
 from openshard.models.registry import display_name_for
 from openshard.run.pipeline import _LOG_PATH
 
@@ -46,12 +46,14 @@ class HomeState:
 
 def gather_home_state() -> HomeState:
     cwd = Path.cwd()
-    config = _safe_load_config()
+    config, configured = _safe_load_config()
     facts = _safe_analyze_repo(cwd)
-    execution_model = _extract_model(config)
+    # Bundled defaults are not the person's configuration: without a config
+    # file of their own, Home says so rather than naming the default model.
+    execution_model = _extract_model(config) if configured else None
     return HomeState(
         title=_title(),
-        mode="Configured" if execution_model else "Not configured",
+        mode="Configured" if (configured and execution_model) else "Not configured",
         model=execution_model or "Not configured",
         repo_short=_repo_short(cwd),
         git_state=_git_state(cwd, facts),
@@ -129,8 +131,9 @@ def render_recent_receipts(receipts: list[dict[str, Any]]) -> Table:
     table.add_column(style=MUTED_STYLE, no_wrap=True, justify="left", min_width=7)  # Cost
     table.add_column(style=MUTED_STYLE, no_wrap=True, min_width=7)  # Verify
     table.add_row("Task", "Cost", "Verify")
+    attestations = _load_attestations(Path.cwd() / _LOG_PATH)
     for entry in reversed(receipts):
-        task, cost, verify = _receipt_row(entry)
+        task, cost, verify = _receipt_row(entry, attestations)
         table.add_row(task, cost, verify)
 
     outer.add_row(table)
@@ -204,11 +207,17 @@ def _title() -> str:
     return f"OpenShard v{version}"
 
 
-def _safe_load_config() -> dict[str, Any]:
+def _safe_load_config() -> tuple[dict[str, Any], bool]:
+    """``(config, configured)``: *configured* only when a user config file resolved.
+
+    ``load_config_safe`` reports the resolved path; ``None`` means the values
+    came from the bundled defaults, which never count as configured.
+    """
     try:
-        return load_config()
+        config, _valid, path = load_config_safe()
+        return (config or {}), path is not None
     except Exception:
-        return {}
+        return {}, False
 
 
 def _safe_analyze_repo(path: Path) -> RepoFacts | None:
@@ -318,22 +327,64 @@ def _recent_receipts(log_path: Path) -> list[dict[str, Any]]:
     return entries[-3:]
 
 
-def _receipt_row(entry: dict[str, Any]) -> tuple[str, str, str]:
+def _receipt_row(entry: dict[str, Any], attestations: list[dict[str, Any]] | None = None) -> tuple[str, str, str]:
     """Return (task, cost, verify) cells for one recent-receipt row."""
     task = _shorten(str(entry.get("task") or entry.get("summary") or "untitled run"), 16)
     cost = entry.get("estimated_cost")
     cost_label = f"${cost:.4f}" if isinstance(cost, (int, float)) else "no cost"
-    return task, cost_label, _verify_label(entry)
+    return task, cost_label, _verify_label(entry, attestations)
 
 
-def _verify_label(entry: dict[str, Any]) -> str:
-    if entry.get("verification_passed") is True:
-        return "verified"
-    if entry.get("verification_passed") is False:
-        return "failed"
-    if entry.get("verification_attempted") is False:
-        return "skipped"
-    return "none"
+def _load_attestations(log_path: Path) -> list[dict[str, Any]]:
+    try:
+        from openshard.verification.post_session import load_attestations
+
+        return load_attestations(log_path.parent)
+    except Exception:
+        return []
+
+
+def _verify_label(entry: dict[str, Any], attestations: list[dict[str, Any]] | None = None) -> str:
+    """The Verify cell: the same interpretation ``last`` / ``proof`` / ``trust`` use.
+
+    ``verified`` only when OpenShard (or an independent system) observed the
+    outcome; an agent's own reported pass is ``reported``, never ``verified``.
+    """
+    from openshard.history.shard_contract import build_shard_receipt
+    from openshard.history.verification_truth import (
+        STATE_AGENT_REPORTED_FAILED,
+        STATE_AGENT_REPORTED_PARTIAL,
+        STATE_AGENT_REPORTED_PASSED,
+        STATE_ATTEMPTED_UNVERIFIED,
+        STATE_NOT_RUN,
+        STATE_SKIPPED,
+        STATE_VERIFIED_FAILED,
+        STATE_VERIFIED_PARTIAL,
+        STATE_VERIFIED_PASSED,
+        interpret_receipt,
+    )
+
+    try:
+        from openshard.verification.post_session import latest_for_entry
+
+        post = latest_for_entry(entry, attestations or [])
+        receipt = build_shard_receipt(entry, index=None, post_session_verification=post)
+        truth = interpret_receipt(receipt)
+    except Exception:
+        return "none"
+    if truth.integrity_mismatch:
+        return "edited"
+    return {
+        STATE_VERIFIED_PASSED: "verified",
+        STATE_VERIFIED_FAILED: "failed",
+        STATE_VERIFIED_PARTIAL: "partial",
+        STATE_AGENT_REPORTED_PASSED: "reported",
+        STATE_AGENT_REPORTED_PARTIAL: "reported",
+        STATE_AGENT_REPORTED_FAILED: "failed*",
+        STATE_ATTEMPTED_UNVERIFIED: "unverified",
+        STATE_NOT_RUN: "skipped",
+        STATE_SKIPPED: "skipped",
+    }.get(truth.state, "none")
 
 
 def _shorten(value: str, limit: int) -> str:

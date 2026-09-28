@@ -86,7 +86,7 @@ class TestAmendmentKeepsIntegrity:
         _write(repo, _fresh_entry())
         runner = CliRunner()
         assert _last_json(runner)["content_hash_status"] == "valid"
-        assert "Matches (content hash)" in _last_human(runner)
+        assert "Checksum matches" in _last_human(runner)
 
     def test_note_keeps_matches(self, repo: Path):
         runs = _write(repo, _fresh_entry())
@@ -98,7 +98,7 @@ class TestAmendmentKeepsIntegrity:
         assert stored["notes"][0]["text"] == "looks right"
         assert verify_shard_hash(stored)["status"] == "valid"
         assert _last_json(runner)["content_hash_status"] == "valid"
-        assert "Matches (content hash)" in _last_human(runner)
+        assert "Checksum matches" in _last_human(runner)
         assert "Mismatch" not in _last_human(runner)
 
     def test_feedback_keeps_matches(self, repo: Path):
@@ -111,7 +111,7 @@ class TestAmendmentKeepsIntegrity:
         assert stored["developer_feedback"]["outcome"] == "accepted"
         assert verify_shard_hash(stored)["status"] == "valid"
         assert _last_json(runner)["content_hash_status"] == "valid"
-        assert "Matches (content hash)" in _last_human(runner)
+        assert "Checksum matches" in _last_human(runner)
 
     def test_feedback_note_subcommand_keeps_matches(self, repo: Path):
         runs = _write(repo, _fresh_entry())
@@ -226,7 +226,7 @@ class TestOldHistoryCompatibility:
         assert stored["amendments"][0]["integrity_before"] == "mismatch"
         assert stored["amendments"][0]["content_hash_restamped"] is False
         assert _last_json(runner)["content_hash_status"] == "mismatch"
-        assert "Mismatch (content hash)" in _last_human(runner)
+        assert "Checksum mismatch" in _last_human(runner)
 
     def test_mixed_history_each_record_keeps_its_own_verdict(self, repo: Path):
         runs = _write(repo, _legacy_entry(), _fresh_entry())
@@ -234,7 +234,7 @@ class TestOldHistoryCompatibility:
         assert verify_shard_hash(records[0])["status"] == "missing"
         assert verify_shard_hash(records[1])["status"] == "valid"
         assert build_shard_receipt(records[0], index=0).integrity == "Not recorded"
-        assert build_shard_receipt(records[1], index=1).integrity == "Matches (content hash)"
+        assert build_shard_receipt(records[1], index=1).integrity == "Checksum matches"
 
 
 # ---------------------------------------------------------------------------

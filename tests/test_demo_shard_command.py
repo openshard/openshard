@@ -28,7 +28,7 @@ class TestDemoShardHuman(unittest.TestCase):
         self.assertIn("Task: Fix a failing test", out)
         self.assertIn("Status: completed", out)
         self.assertIn("Files changed: 1", out)
-        self.assertIn("Verification: passed", out)
+        self.assertIn("Verification: Passed (OpenShard ran the check(s))", out)
 
     def test_proof_section(self):
         out = CliRunner().invoke(cli, ["demo", "shard"]).output
@@ -45,9 +45,9 @@ class TestDemoShardHuman(unittest.TestCase):
 
     def test_mental_model_lines(self):
         out = CliRunner().invoke(cli, ["demo", "shard"]).output
-        self.assertIn("Receipt is what happened.", out)
-        self.assertIn("Proof is whether the saved record is good enough.", out)
-        self.assertIn("Trust is whether the run is safe to rely on.", out)
+        self.assertIn("Receipt is what happened, and who observed it.", out)
+        self.assertIn("Proof is whether the saved record is complete enough to use as evidence.", out)
+        self.assertIn("Trust is a heuristic over the recorded proof signals, not a safety guarantee.", out)
         self.assertIn("A Shard is the saved proof record for one AI coding run.", out)
 
     def test_try_next_commands(self):
