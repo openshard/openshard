@@ -139,6 +139,7 @@ def build_osn_run_entry(
     duration_seconds: float,
     repo_path: Path,
     task_id: str | None = None,
+    budget_record: dict | None = None,
 ) -> dict:
     from openshard.adapters.claude_code_import import _sanitize_model, _sanitize_task
     from openshard.history.receipt_identity import ensure_receipt_id
@@ -178,6 +179,11 @@ def build_osn_run_entry(
         "summary": f"OSN loop {receipt.status}: {receipt.stop_reason}",
         "osn_loop": _stored_loop_block(receipt),
     }
+    if budget_record:
+        # Agent Budgets: configured limits, observed usage, the limit reached and
+        # what OpenShard did -- or, when the capability was off/unconfirmed,
+        # the configured limits and the fact that they were not enforced.
+        entry["agent_budgets"] = dict(budget_record)
     if retry and usage:
         entry["fixer_model"] = final_model if final_model != first_model else None
         first_cost = _sum_costs([u for u in usage if u.attempt == 1])

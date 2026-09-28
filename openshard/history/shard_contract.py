@@ -2088,6 +2088,31 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
             lines.append(f"{_INDENT}  +{len(receipt.policy_decisions) - _pd_cap} more")
         lines.append("")
 
+    _budget = (receipt.recorded_evidence or {}).get("agent_budgets")
+    if isinstance(_budget, dict):
+        lines.append(f"{_INDENT}BUDGET")
+        _limits = _budget.get("limits") or {}
+        if _budget.get("enforced"):
+            lines.append(_row("Enforced", "yes (agent_budgets)"))
+        else:
+            lines.append(_row("Enforced", f"no ({_budget.get('reason') or 'unknown'})"))
+        if _limits:
+            lines.append(_row("Limits", ", ".join(f"{k}={v}" for k, v in _limits.items())))
+        _usage = _budget.get("usage") or {}
+        if _usage:
+            _spend = _usage.get("spend_usd")
+            _spend_text = f"${_spend:.4f}" if isinstance(_spend, (int, float)) else "unknown"
+            lines.append(_row(
+                "Used",
+                f"spend {_spend_text}, attempts {_usage.get('attempts')}, "
+                f"commands {_usage.get('commands')}, writes {_usage.get('writes')}",
+            ))
+        if _budget.get("limit_reached"):
+            lines.append(_row("Reached", str(_budget["limit_reached"])))
+        if _budget.get("action") and _budget["action"] != "none":
+            lines.append(_row("Action", str(_budget["action"])))
+        lines.append("")
+
     if receipt.execution_spans:
         lines.append(f"{_INDENT}EXECUTION SPANS")
         _es_cap = 10

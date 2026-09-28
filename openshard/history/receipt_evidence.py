@@ -192,6 +192,61 @@ def execution_loop_block(entry: dict) -> dict[str, Any] | None:
     return None if _all_none(block) else block
 
 
+_BUDGET_LIMIT_KEYS = ("max_spend_usd", "max_attempts", "max_commands", "max_writes")
+_BUDGET_USAGE_KEYS = ("spend_usd", "model_calls", "attempts", "commands", "writes")
+
+
+def _budget_number(value: Any) -> int | float | None:
+    """A finite number; whole counts stay ``int`` so ``max_attempts=3`` does not become ``3.0``."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return _number(value)
+
+
+def agent_budgets_block(entry: dict) -> dict[str, Any] | None:
+    """Agent Budgets: configured limits, observed usage, the limit reached, what OpenShard did.
+
+    Local Receipt surfaces only (the Platform sync contract has no such key
+    yet). ``enforced`` is False when a budget was configured but the
+    capability was off or unconfirmed; then only the limits and the reason
+    are kept.
+    """
+    raw = _dict(entry.get("agent_budgets"))
+    if not raw or raw.get("capability") != "agent_budgets":
+        return None
+    enforced = raw.get("enforced")
+    if not isinstance(enforced, bool):
+        return None
+    limits_raw = _dict(raw.get("limits"))
+    limits = {
+        k: _budget_number(limits_raw.get(k))
+        for k in _BUDGET_LIMIT_KEYS
+        if _budget_number(limits_raw.get(k)) is not None
+    }
+    if not enforced:
+        return {
+            "enforced": False,
+            "reason": _text(raw.get("reason"), 64),
+            "limits": limits or None,
+        }
+    usage_raw = _dict(raw.get("usage"))
+    usage: dict[str, Any] = {k: _budget_number(usage_raw.get(k)) for k in _BUDGET_USAGE_KEYS}
+    for flag in ("spend_known", "spend_is_estimate"):
+        usage[flag] = usage_raw.get(flag) if isinstance(usage_raw.get(flag), bool) else None
+    ev_raw = _dict(raw.get("evidence"))
+    evidence = {"counts": _text(ev_raw.get("counts"), 64), "spend": _text(ev_raw.get("spend"), 64)}
+    return {
+        "enforced": True,
+        "limits": limits or None,
+        "usage": None if _all_none(usage) else usage,
+        "limit_reached": _text(raw.get("limit_reached"), 32),
+        "action": _text(raw.get("action"), 48),
+        "evidence": None if _all_none(evidence) else evidence,
+    }
+
+
 def base_commit_value(entry: dict) -> str | None:
     """HEAD at run/session start (every producer records it then): a base, not a result."""
     value = entry.get("git_head_commit_hash")
@@ -313,6 +368,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "approval_detail": approval_detail_block,
         "sandbox_detail": sandbox_detail_block,
         "execution_loop": execution_loop_block,
+        "agent_budgets": agent_budgets_block,
         "base_commit": base_commit_value,
         "content_hash": content_hash_value,
         "session": session_block,
