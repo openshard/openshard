@@ -206,7 +206,9 @@ class TestInTheLoop:
         assert ev["decisions"][0]["evidence"]["spend_known"] is True
         text = render_full_shard_receipt(receipt)
         assert "SUPERVISOR" in text and "plan_attempts_exhausted" in text
-        assert "supervisor_routing" not in receipt_to_dict(receipt, extended=True)  # closed wire contract
+        hosted = receipt_to_dict(receipt, extended=True)["supervisor_routing"]
+        assert hosted == ev
+        assert "supervisor_routing" not in receipt_to_dict(receipt)  # default/MCP shape stays unchanged
 
 
     def test_not_consulted_where_the_loop_would_not_retry(self, repo):
