@@ -4,9 +4,10 @@ Evidence rules: verification is written as a stored block with source
 ``directly_observed`` / mode ``openshard_executed`` only when OpenShard itself
 ran the verify command and read its exit code; a run that never reached
 verification records ``not_run``. Model cost is recorded only when the
-provider reported it. The routing block is a *shadow* decision: it records
-what the adaptive baseline would pick next to the model actually executed and
-never influences the choice.
+provider reported it. The routing provenance block says how the adaptive
+decision related to the run: ``record_mode: shadow`` when it was only recorded
+beside the model actually executed, ``applied`` when (behind the
+``adaptive_routing`` capability) it chose the first model.
 """
 from __future__ import annotations
 
@@ -143,6 +144,7 @@ def build_osn_run_entry(
     routing_decision: Any | None = None,
     routing_record_mode: str = "shadow",
     routing_record: dict | None = None,
+    explicit_model: str | None = None,
 ) -> dict:
     from openshard.adapters.claude_code_import import _sanitize_model, _sanitize_task
     from openshard.history.receipt_identity import ensure_receipt_id
@@ -214,17 +216,23 @@ def build_osn_run_entry(
             setup_kind, None, model=final_model, attempt=len(receipt.attempts),
         )["outcome_classification"]
 
+    executed_first: str | None = first_model if usage else None  # None: no model call ever ran
+    executed_final: str = final_model
     if routing_decision is not None:
         # The decision the CLI computed for this run (it knows about --model and,
         # when applied, chose the first model). An applied decision is compared
         # with the model that ran first; escalation past it is the plan working.
         try:
-            executed = first_model if routing_record_mode == "applied" else final_model
+            executed = executed_first if routing_record_mode == "applied" else executed_final
             prov = routing_decision.to_provenance(record_mode=routing_record_mode, executed_model=executed)
         except Exception:
             prov = None
+    elif routing_record:
+        # The CLI tried and could not compute a decision; a second attempt here
+        # would contradict the recorded reason. Nothing is recomputed.
+        prov = None
     else:
-        prov = _shadow_provenance(safe_task, final_model, verification_available=True)
+        prov = _shadow_provenance(safe_task, executed_final, verification_available=True)
     if prov is not None:
         entry["routing_provenance"] = prov
     if routing_record:

@@ -96,12 +96,28 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     from openshard.sync.capabilities import LazyCapabilities
 
     capabilities = LazyCapabilities()
+    budget, budget_record = _resolve_budget(repo_root, capabilities)
+    attempts_allowed = max_attempts
+    if budget is not None and budget.limits.max_attempts is not None:
+        attempts_allowed = min(attempts_allowed, budget.limits.max_attempts)
     routing = _resolve_routing(task, repo_root, explicit_model=model, escalate=list(escalate),
-                               capabilities=capabilities)
+                               capabilities=capabilities, max_attempts=attempts_allowed)
+    provider_name, provider_obj = _resolve_provider(provider, routing.first_model)
+    if routing.applied and routing.decision is not None \
+            and provider_name not in tuple(routing.decision.selected_via or ()):
+        # The decision knew which providers can serve the model; the one that
+        # will actually dispatch is not among them, so applying it would fail.
+        from openshard.osn.routing import REASON_PROVIDER_MISMATCH
+        from openshard.routing.engine import route
+
+        routing.fall_back(REASON_PROVIDER_MISMATCH, route(task).model, provider=provider_name)
+    if routing.record is not None and not routing.record.get("applied"):
+        click.echo(
+            f"adaptive_routing: not applied ({routing.record.get('reason')}); using keyword routing.",
+            err=True,
+        )
     model = routing.first_model
     models = routing.models
-    budget, budget_record = _resolve_budget(repo_root, capabilities)
-    provider_name, provider_obj = _resolve_provider(provider, model)
 
     action_provider = ModelActionProvider(
         provider=provider_obj, models=models, repo_root=repo_root, context_files=list(context_files),
@@ -120,7 +136,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         repo_path=repo_root, task_id=task_id,
         budget_record=budget.to_record() if budget is not None else budget_record,
         routing_decision=routing.decision, routing_record_mode=routing.record_mode,
-        routing_record=routing.record,
+        routing_record=routing.record, explicit_model=routing.first_model if routing.decision is None else None,
     )
     # Only present when a budget was configured / the routing capability is
     # on: the machine output is otherwise byte-for-byte what it was before.
@@ -169,7 +185,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
 
 
 def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, escalate: list[str],
-                     capabilities: LazyCapabilities) -> OsnRouting:
+                     capabilities: LazyCapabilities, max_attempts: int | None = None) -> OsnRouting:
     """First model and escalation ladder: the user's choice, else adaptive routing when
     the ``adaptive_routing`` capability is on, else the keyword router as before."""
     from openshard.osn.routing import CAPABILITY as ROUTING_CAPABILITY
@@ -190,6 +206,7 @@ def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, 
         capability_enabled=lambda: capabilities.enabled(ROUTING_CAPABILITY),
         legacy_model=lambda t: route(t).model,
         model_policy_loader=model_policy_loader,
+        max_attempts=max_attempts,
     )
 
 

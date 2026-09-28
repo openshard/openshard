@@ -59,16 +59,24 @@ plan becomes the escalation ladder when you gave no `--escalate-model`. The loop
 ladder only after an observed verification failure, and the budget (above) still applies.
 
 What never changes: an explicit `--model` always runs and is never substituted (the capability is
-not even looked up); an explicit `--escalate-model` ladder always wins; no eligible candidate, or
-no decision at all, falls back to keyword routing exactly as before; the capability off,
-unconfirmed or unreachable leaves everything as it was. Historical per-model success is not used
-to route: there is not enough observed data yet, and the record says so.
+not even looked up); an explicit `--escalate-model` ladder always wins; the ladder is cut to what
+`--max-attempts` (and a budget's `max_attempts`) can actually run; a `models:` policy that cannot
+be parsed, no eligible candidate, no decision at all, or a selected model the chosen `--provider`
+cannot dispatch all fall back to keyword routing and are recorded as `applied: false` with the
+reason (`model_policy_invalid`, `no_eligible_candidate`, `decision_unavailable`,
+`provider_mismatch`); the capability off, unconfirmed or unreachable leaves what runs as it was.
+One cost is new: a run without `--model` in a Platform-linked repository asks the Platform once
+whether the capability is on (cached ten minutes; a failed read is remembered for one). Historical
+per-model success is not used to route: there is not enough observed data yet, and the record says so.
 
 The Shard entry's `routing_provenance` block gets `record_mode: applied` (compared with the model
 that ran first) instead of `shadow`, and an `adaptive_routing` block records whether the decision
-was applied, why not when it was not (`explicit_model`, `no_eligible_candidate`,
-`decision_unavailable`), the selected model and routing class, the `escalation_ladder` and where it
-came from (`recovery_plan` or `user`), and `history_evidence: not_used_insufficient_observed_data`.
+was applied and why not otherwise, the selected model and routing class, the `escalation_ladder`,
+where it came from (`recovery_plan` or `user`), the `max_attempts` it was cut to, and
+`history_evidence: not_used_insufficient_observed_data`. `openshard stats routing` attributes an
+applied run to the model the decision chose (its `escalations` column counts how often the ladder
+was climbed) and excludes applied runs from the shadow-agreement rate, which only means something
+for decisions that did not pick the model.
 The block appears in `osn run --json` and the full receipt (`ADAPTIVE ROUTING` section); like the
 budget block it is not yet part of the `history --json` / Platform sync projection. With the
 capability off, the shadow provenance is unchanged except that a `--model` you passed is now

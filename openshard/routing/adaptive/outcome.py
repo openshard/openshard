@@ -54,6 +54,9 @@ class RoutingOutcome:
     cost_usd: float | None
     human_correction: bool | None = None
     shadow_agreed: bool | None = None
+    # "shadow": the decision was recorded beside legacy routing; "applied": it
+    # chose the executed model (OSN dogfood). None for records that predate it.
+    record_mode: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {"version": ROUTING_OUTCOME_VERSION, **self.__dict__}
@@ -101,7 +104,11 @@ def outcome_from_receipt(entry: object) -> RoutingOutcome:
 
     final_model = entry.get("execution_model")
     routed = prov.get("selected_model")
-    agreed = prov.get("agrees_with_execution")
+    mode = prov.get("record_mode")
+    mode = mode if isinstance(mode, str) else None
+    # Agreement is a *shadow* metric: for an applied decision the first model is
+    # the selected model by construction, so counting it would inflate the rate.
+    agreed = prov.get("agrees_with_execution") if mode == "shadow" else None
     context = _dict(prov.get("context"))
     return RoutingOutcome(
         receipt_id=entry.get("receipt_id") if isinstance(entry.get("receipt_id"), str) else None,
@@ -130,4 +137,5 @@ def outcome_from_receipt(entry: object) -> RoutingOutcome:
         latency_seconds=_float(entry.get("duration_seconds")),
         cost_usd=cost,
         shadow_agreed=agreed if isinstance(agreed, bool) else None,
+        record_mode=mode,
     )

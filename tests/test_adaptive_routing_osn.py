@@ -63,7 +63,7 @@ def catalog():
         yield
 
 
-def _resolve(task=TASK, *, explicit_model=None, escalate=(), enabled=True, policy_loader=None):
+def _resolve(task=TASK, *, explicit_model=None, escalate=(), enabled=True, policy_loader=None, max_attempts=None):
     calls = {"lookups": 0}
 
     def capability_enabled():
@@ -73,7 +73,7 @@ def _resolve(task=TASK, *, explicit_model=None, escalate=(), enabled=True, polic
     r = resolve_osn_routing(
         task, explicit_model=explicit_model, escalate=list(escalate),
         capability_enabled=capability_enabled, legacy_model=lambda t: route(t).model,
-        model_policy_loader=policy_loader,
+        model_policy_loader=policy_loader, max_attempts=max_attempts,
     )
     return r, calls["lookups"]
 
@@ -143,12 +143,46 @@ class TestResolve:
         r_off, _ = _resolve(enabled=False, policy_loader=loader)
         assert r_off.first_model == route(TASK).model and loads["n"] == 1  # never consulted when off
 
-    def test_a_broken_policy_loader_does_not_break_routing(self, catalog):
+    def test_an_unreadable_models_policy_falls_back_and_says_so(self, catalog):
         def loader():
             raise ValueError("bad models section")
 
         r, _ = _resolve(policy_loader=loader)
-        assert r.first_model == "acme/mid-1" and r.record["applied"] is True
+        assert r.first_model == route(TASK).model and r.record_mode == "shadow"
+        assert r.record["applied"] is False and r.record["reason"] == "model_policy_invalid"
+        assert r.record["detail"] == "ValueError"
+        assert r.decision is not None  # the shadow decision is still recorded
+
+    def test_the_ladder_is_cut_to_what_max_attempts_can_run(self, catalog):
+        task = "add a simple helper"  # boilerplate -> cheap_coding -> two rungs: balanced, frontier
+        full, _ = _resolve(task, max_attempts=3)
+        assert full.first_model == "acme/cheap-1" and full.ladder == ["acme/mid-1", "acme/frontier-1"]
+        assert full.record["recovery_enabled"] is True and full.record["max_attempts"] == 3
+        one, _ = _resolve(task, max_attempts=2)
+        assert one.ladder == ["acme/mid-1"] and one.models == ["acme/cheap-1", "acme/mid-1"]
+        none, _ = _resolve(task, max_attempts=1)
+        assert none.ladder == [] and none.record["ladder_source"] == "none"
+        assert none.record["recovery_enabled"] is False and none.record["applied"] is True
+
+    def test_fall_back_after_the_fact_keeps_the_user_ladder_and_records_the_rejected_model(self, catalog):
+        r, _ = _resolve(escalate=["zeta/mid-2"])
+        assert r.applied and r.first_model == "acme/mid-1"
+        r.fall_back("provider_mismatch", route(TASK).model, provider="anthropic")
+        assert r.first_model == route(TASK).model and r.ladder == ["zeta/mid-2"]
+        assert r.record_mode == "shadow" and r.applied is False
+        assert r.record["applied"] is False and r.record["reason"] == "provider_mismatch"
+        assert r.record["rejected_model"] == "acme/mid-1" and r.record["provider"] == "anthropic"
+
+    def test_the_record_carries_identifiers_and_counts_only(self, catalog):
+        r, _ = _resolve()
+        allowed = {
+            "capability", "record_mode", "history_evidence", "applied", "reason", "selected_model",
+            "selection_mode", "selected_via", "routing_class", "requested_class", "policy", "considered",
+            "escalation_ladder", "ladder_source", "recovery_enabled", "max_attempts", "decision_fingerprint",
+        }
+        assert set(r.record) == allowed
+        assert len(r.record["considered"]) <= 8 and all("/" in m for m in r.record["considered"])
+        assert TASK not in json.dumps(r.record)  # no task text
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +261,7 @@ def _cli_repo(tmp_path, monkeypatch, platform, keys):
 
 
 def _invoke(monkeypatch, fp, *extra):
-    monkeypatch.setattr("openshard.cli.osn_cmd._resolve_provider", lambda n, m: ("fake", fp))
+    monkeypatch.setattr("openshard.cli.osn_cmd._resolve_provider", lambda n, m: ("openrouter", fp))
     return CliRunner().invoke(cli, [
         "osn", "run", TASK, "--verify-cmd",
         f'"{PY}" -c "import sys; c=open(\'out.txt\').read(); print(c); sys.exit(0 if c==\'ok\' else 1)"',
@@ -299,10 +333,65 @@ class TestCli:
         r = _invoke(monkeypatch, fp)
         assert r.exit_code == 0, r.output
         body = json.loads(r.stdout)
-        assert body["status"] == "budget_exhausted" and body["models"] == ["acme/mid-1", "acme/frontier-1"]
-        assert len(fp.calls) == 1  # the budget stopped the escalation the plan would have made
+        # The budget allows one attempt, so the plan's ladder is cut to nothing: the
+        # record promises no escalation the run could not make.
+        assert body["status"] == "budget_exhausted" and body["models"] == ["acme/mid-1"]
+        assert len(fp.calls) == 1
         assert body["agent_budgets"]["enforced"] is True and body["adaptive_routing"]["applied"] is True
+        assert body["adaptive_routing"]["escalation_ladder"] == [] and body["adaptive_routing"]["max_attempts"] == 1
         assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"]
+
+    def test_user_escalation_ladder_wins_with_the_capability_on(self, tmp_path, monkeypatch, platform, catalog):
+        repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing"])
+        fp = FakeProvider([_writes(("out.txt", "nope")), _writes(("out.txt", "ok"))])
+        r = _invoke(monkeypatch, fp, "--escalate-model", "zeta/mid-2")
+        assert r.exit_code == 0, r.output
+        body = json.loads(r.stdout)
+        assert body["models"] == ["acme/mid-1", "zeta/mid-2"] and [m for m, _ in fp.calls] == ["acme/mid-1", "zeta/mid-2"]
+        assert _last_run(repo)["adaptive_routing"]["ladder_source"] == "user"
+
+    def test_a_provider_that_cannot_serve_the_selected_model_falls_back(self, tmp_path, monkeypatch, platform, catalog):
+        repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing"])
+        fp = FakeProvider([_writes(("out.txt", "ok"))])
+        monkeypatch.setattr("openshard.cli.osn_cmd._resolve_provider", lambda n, m: ("anthropic", fp))
+        r = CliRunner().invoke(cli, [
+            "osn", "run", TASK, "--verify-cmd", f'"{PY}" -c "pass"', "--provider", "anthropic", "--json",
+        ])
+        assert r.exit_code == 0, r.output
+        body = json.loads(r.stdout)
+        assert body["models"] == [route(TASK).model] and fp.calls[0][0] == route(TASK).model
+        ar = body["adaptive_routing"]
+        assert ar["applied"] is False and ar["reason"] == "provider_mismatch"
+        assert ar["rejected_model"] == "acme/mid-1" and ar["provider"] == "anthropic"
+        assert "not applied (provider_mismatch)" in r.output
+        assert _last_run(repo)["routing_provenance"]["record_mode"] == "shadow"
+
+    def test_sync_kill_switch_leaves_routing_as_before(self, tmp_path, monkeypatch, platform, catalog):
+        repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing"])
+        monkeypatch.setenv(sync_config.DISABLE_ENV, "off")
+        fp = FakeProvider([_writes(("out.txt", "ok"))])
+        r = _invoke(monkeypatch, fp)
+        assert r.exit_code == 0, r.output
+        assert json.loads(r.stdout)["models"] == [route(TASK).model]
+        assert "adaptive_routing" not in _last_run(repo) and _Handler.seen == []
+
+    def test_stats_routing_attributes_an_applied_run_to_the_chosen_model(self, tmp_path, monkeypatch, platform, catalog):
+        from openshard.routing.adaptive.outcome import outcome_from_receipt
+        from openshard.routing.adaptive.report import build_routing_report
+
+        repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing"])
+        fp = FakeProvider([_writes(("out.txt", "nope")), _writes(("out.txt", "ok"))])
+        assert _invoke(monkeypatch, fp).exit_code == 0
+        entry = _last_run(repo)
+        outcome = outcome_from_receipt(entry)
+        assert outcome.record_mode == "applied" and outcome.shadow_agreed is None  # not a shadow metric
+        assert outcome.routed_model == "acme/mid-1" and outcome.final_model == "acme/frontier-1"
+        assert outcome.escalation_model == "acme/frontier-1" and outcome.verified_success is True
+        report = build_routing_report([entry])
+        groups = {(g["routing_class"], g["model"]): g for g in report["groups"]}
+        assert ("balanced_coding", "acme/mid-1") in groups  # credited to the decision, not the rung
+        assert groups[("balanced_coding", "acme/mid-1")]["escalations"] == 1
+        assert report["overall"]["shadow_comparable"] == 0
 
     def test_platform_unavailable_keeps_routing_as_before(self, tmp_path, monkeypatch, platform, catalog):
         repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing"])

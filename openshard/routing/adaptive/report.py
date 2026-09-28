@@ -20,6 +20,15 @@ UNKNOWN = "unknown"
 
 
 def _group_key(o: RoutingOutcome) -> tuple[str, str]:
+    """(class, model) a run is attributed to.
+
+    A shadow record is attributed to the model that actually ran (the class was
+    hypothetical). An *applied* record is attributed to the model the decision
+    chose: that is the choice being evaluated, and the ``escalations`` column
+    says how often its ladder had to be climbed.
+    """
+    if o.record_mode == "applied" and o.routed_model:
+        return (o.routing_class or UNKNOWN, o.routed_model)
     return (o.routing_class or UNKNOWN, o.final_model or o.routed_model or UNKNOWN)
 
 
