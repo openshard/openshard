@@ -116,8 +116,8 @@ def derive_shard_identity(entry: dict) -> tuple[str, str, str]:
     if executor in HISTORICAL_IMPORT_EXECUTORS:
         return HISTORICAL_IMPORT_LABELS[executor], ORIGIN_HISTORICAL_IMPORT, CAPTURE_PARTIAL
 
-    if workflow == "native" or executor == "native":
-        return "OpenShard Native", ORIGIN_OPENSHARD_ROUTED, CAPTURE_FULL
+    if workflow in ("native", "osn_loop") or executor in ("native", "osn_loop"):
+        return "Openshard Native (OSN)", ORIGIN_OPENSHARD_ROUTED, CAPTURE_FULL
 
     if workflow == "opencode" or executor == "opencode" or adapter == "opencode":
         return "OpenCode", ORIGIN_OPENSHARD_ROUTED, CAPTURE_FULL
@@ -129,9 +129,9 @@ def derive_shard_identity(entry: dict) -> tuple[str, str, str]:
     # dedicated label above; its absence means this code cannot make that
     # claim, so origin/capture_depth stay unknown rather than assumed.
     if "retry_triggered" in entry:
-        return "OpenShard", ORIGIN_OPENSHARD_ROUTED, CAPTURE_FULL
+        return "Openshard", ORIGIN_OPENSHARD_ROUTED, CAPTURE_FULL
 
-    return "OpenShard", ORIGIN_UNKNOWN, CAPTURE_UNKNOWN
+    return "Openshard", ORIGIN_UNKNOWN, CAPTURE_UNKNOWN
 
 
 def build_shard(
