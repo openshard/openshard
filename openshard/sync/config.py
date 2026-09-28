@@ -64,6 +64,10 @@ class PlatformLink:
     def ingest_url(self) -> str:
         return f"{self.endpoint}/v1/orgs/{self.organisation_id}/receipts"
 
+    def capabilities_url(self) -> str:
+        """The capabilities enabled for *this* organisation; a key can read no other."""
+        return f"{self.endpoint}/v1/orgs/{self.organisation_id}/capabilities"
+
     def to_public_dict(self) -> dict:
         """Everything but the secret."""
         return {

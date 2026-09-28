@@ -117,6 +117,32 @@ resent in this version, because the Platform keeps the first copy it
 accepted and treats different content under the same `receipt_id` as a
 conflict. Hosted receipt revisions are the next Platform step.
 
+## Capabilities (experimental features the Platform has switched on)
+
+The Platform can enable private, experimental capabilities per organisation (all off by default).
+Core reads the list with the same link and key that sync uses:
+
+```
+GET {endpoint}/v1/orgs/{organisation_id}/capabilities
+Authorization: Bearer osk_...
+```
+
+The Platform answers only with the capabilities that are *on* for that organisation, and a key can
+read no other organisation's list. Core keeps the key set in `<OPENSHARD_HOME>/capabilities.json`
+(mode 0600 on POSIX) for ten minutes so a run makes at most one request. The cache answers only
+for the link that wrote it: endpoint, organisation and key prefix must match and the entry is
+signed (HMAC) with the API key itself, so an entry written under another key or edited by hand is
+ignored; the key is never stored in it. A failed read is remembered for one minute so an offline
+Platform does not cost every run a full timeout.
+
+Anything else means every capability is off: no link, `401`/`403`/`404`/`5xx`, a timeout, a body
+for another organisation, an expired, foreign or unsigned cache. A capability is never assumed on.
+`OPENSHARD_PLATFORM_SYNC=off` switches this read off too (no request leaves the machine); the
+repository-level `platform: {sync: false}` governs sending receipts only.
+
+Today one capability is consumed: `agent_budgets` (see `docs/osn-run.md`). Core looks it up only
+when a repository actually configures a budget.
+
 ## Not done, on purpose
 
 - **Task grouping.** `task_id` (`task_` + UUIDv7, minted only by
