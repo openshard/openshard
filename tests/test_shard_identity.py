@@ -87,7 +87,7 @@ def _claude_code_wrap_entry() -> dict:
 class TestDeriveShardIdentity(unittest.TestCase):
     def test_native_is_openshard_routed_full(self):
         agent, origin, capture = derive_shard_identity(_native_entry())
-        self.assertEqual(agent, "OpenShard Native")
+        self.assertEqual(agent, "Openshard Native (OSN)")
         self.assertEqual(origin, ORIGIN_OPENSHARD_ROUTED)
         self.assertEqual(capture, CAPTURE_FULL)
 
@@ -99,31 +99,31 @@ class TestDeriveShardIdentity(unittest.TestCase):
 
     def test_routed_but_unlabeled_workflow_stays_openshard_routed(self):
         agent, origin, capture = derive_shard_identity(_routed_but_unlabeled_entry())
-        self.assertEqual(agent, "OpenShard")
+        self.assertEqual(agent, "Openshard")
         self.assertEqual(origin, ORIGIN_OPENSHARD_ROUTED)
         self.assertEqual(capture, CAPTURE_FULL)
 
     def test_truly_ambiguous_entry_is_unknown_but_keeps_display_label(self):
         agent, origin, capture = derive_shard_identity(_truly_ambiguous_entry())
-        self.assertEqual(agent, "OpenShard")
+        self.assertEqual(agent, "Openshard")
         self.assertEqual(origin, ORIGIN_UNKNOWN)
         self.assertEqual(capture, CAPTURE_UNKNOWN)
 
     def test_claude_code_import_is_external_observed_partial(self):
         agent, origin, capture = derive_shard_identity(_claude_code_import_entry())
-        self.assertNotIn(agent, ("OpenShard", "OpenShard Native"))
+        self.assertNotIn(agent, ("Openshard", "Openshard Native (OSN)"))
         self.assertEqual(origin, ORIGIN_EXTERNAL_OBSERVED)
         self.assertEqual(capture, CAPTURE_PARTIAL)
 
     def test_claude_code_wrap_is_external_observed_partial(self):
         agent, origin, capture = derive_shard_identity(_claude_code_wrap_entry())
-        self.assertNotIn(agent, ("OpenShard", "OpenShard Native"))
+        self.assertNotIn(agent, ("Openshard", "Openshard Native (OSN)"))
         self.assertEqual(origin, ORIGIN_EXTERNAL_OBSERVED)
         self.assertEqual(capture, CAPTURE_PARTIAL)
 
     def test_never_raises_on_empty_entry(self):
         agent, origin, capture = derive_shard_identity({})
-        self.assertEqual(agent, "OpenShard")
+        self.assertEqual(agent, "Openshard")
         self.assertEqual(origin, ORIGIN_UNKNOWN)
         self.assertEqual(capture, CAPTURE_UNKNOWN)
 
@@ -191,8 +191,8 @@ class TestBuildShardReceiptHonestIdentity(unittest.TestCase):
     def test_claude_code_import_receipt_is_not_labelled_openshard(self):
         receipt = build_shard_receipt(_claude_code_import_entry())
         self.assertIsNotNone(receipt.shard)
-        self.assertNotEqual(receipt.agent, "OpenShard")
-        self.assertNotEqual(receipt.agent, "OpenShard Native")
+        self.assertNotEqual(receipt.agent, "Openshard")
+        self.assertNotEqual(receipt.agent, "Openshard Native (OSN)")
         self.assertEqual(receipt.shard.origin, ORIGIN_EXTERNAL_OBSERVED)
         self.assertEqual(receipt.shard.capture_depth, CAPTURE_PARTIAL)
         self.assertEqual(receipt.agent, receipt.shard.agent)
@@ -200,13 +200,13 @@ class TestBuildShardReceiptHonestIdentity(unittest.TestCase):
     def test_claude_code_wrap_receipt_is_not_labelled_openshard(self):
         receipt = build_shard_receipt(_claude_code_wrap_entry())
         self.assertIsNotNone(receipt.shard)
-        self.assertNotEqual(receipt.agent, "OpenShard")
+        self.assertNotEqual(receipt.agent, "Openshard")
         self.assertEqual(receipt.shard.origin, ORIGIN_EXTERNAL_OBSERVED)
         self.assertEqual(receipt.shard.capture_depth, CAPTURE_PARTIAL)
 
     def test_native_receipt_still_openshard_native(self):
         receipt = build_shard_receipt(_native_entry())
-        self.assertEqual(receipt.agent, "OpenShard Native")
+        self.assertEqual(receipt.agent, "Openshard Native (OSN)")
         self.assertEqual(receipt.shard.origin, ORIGIN_OPENSHARD_ROUTED)
         self.assertEqual(receipt.shard.capture_depth, CAPTURE_FULL)
 
@@ -223,7 +223,7 @@ class TestRendererShowsHonestCapture(unittest.TestCase):
         rendered = render_compact_shard_receipt(receipt)
         self.assertIn("Capture", rendered)
         self.assertIn("partial", rendered)
-        self.assertIn("OpenShard did not execute or verify this run", rendered)
+        self.assertIn("Openshard did not execute or verify this run", rendered)
 
     def test_full_receipt_shows_capture_line_for_external_observed(self):
         receipt = build_shard_receipt(_claude_code_wrap_entry())
