@@ -208,8 +208,7 @@ def _budget_number(value: Any) -> int | float | None:
 def agent_budgets_block(entry: dict) -> dict[str, Any] | None:
     """Agent Budgets: configured limits, observed usage, the limit reached, what OpenShard did.
 
-    Local Receipt surfaces only (the Platform sync contract has no such key
-    yet). ``enforced`` is False when a budget was configured but the
+    Projected to local and hosted Receipt surfaces. ``enforced`` is False when a budget was configured but the
     capability was off or unconfirmed; then only the limits and the reason
     are kept.
     """
@@ -253,7 +252,7 @@ _ROUTING_RECORD_MODES = frozenset({"shadow", "applied"})
 def adaptive_routing_block(entry: dict) -> dict[str, Any] | None:
     """Adaptive routing (OSN dogfood): whether the decision chose the model, and what it chose.
 
-    Local Receipt surfaces only. Model ids are identifiers, never paths.
+    Projected to local and hosted Receipt surfaces. Model ids are identifiers, never paths.
     """
     raw = _dict(entry.get("adaptive_routing"))
     if not raw or raw.get("capability") != "adaptive_routing":
@@ -323,7 +322,7 @@ _SUPERVISOR_ACTIONS = frozenset({"escalate", "stop"})
 
 def supervisor_routing_block(entry: dict) -> dict[str, Any] | None:
     """Supervisor routing (OSN dogfood): the decisions considered at each observed-failure
-    boundary, why, on what evidence, and whether the loop acted on them. Local only."""
+    boundary, why, on what evidence, and whether the loop acted on them. Local and hosted."""
     raw = _dict(entry.get("supervisor_routing"))
     if not raw or raw.get("capability") != "supervisor_routing":
         return None
