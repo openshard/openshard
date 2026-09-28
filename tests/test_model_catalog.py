@@ -361,10 +361,15 @@ class TestStaleAndDeprecated:
 
     def test_curated_model_missing_upstream_is_unlisted_but_still_routes(self):
         cat = _catalog()
-        # minimax/m2.7 is curated but absent from this (non-empty) snapshot.
-        assert cat.get("minimax/m2.7").status == "unlisted"
-        # Controlled: routing does not silently change because of it.
+        # Haiku 4.5 is curated but absent from this (non-empty) snapshot.
+        assert cat.get("anthropic/claude-haiku-4.5").status == "unlisted"
+        # Controlled: legacy class selection does not silently change because of it.
         assert select_for_class("cheap_coding", cat).model == OLD_FLASH
+
+    def test_retired_curated_id_is_deprecated_not_merely_unlisted(self):
+        # minimax/m2.7 was never an OpenRouter id; curation retired it.
+        e = _catalog().get("minimax/m2.7")
+        assert e.status == "deprecated" and e.routing_eligibility == "blocked"
 
     def test_curated_only_catalog_never_marks_unlisted(self):
         assert all(e.status != "unlisted" for e in curated_catalog().entries)

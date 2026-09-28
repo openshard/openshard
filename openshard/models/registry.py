@@ -3,11 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
-# ModelEntry — static capability profile for a single model.
+# ModelEntry — curated record for a single model.
 # ---------------------------------------------------------------------------
-# cost_class and latency_class are stable proxies for routing budget decisions.
-# Exact token pricing lives in openshard/providers/openrouter.py (labelled
-# snapshot). Do not hardcode volatile prices here.
+# Field categories (see docs/architecture/routing.md):
+#
+# * model facts (curated approximations; provider discovery overrides them
+#   for display): context_length, modalities, supports_*.
+# * policy metadata (authoritative): lifecycle (curation stage), and the
+#   access/model policy that lives outside this module.
+# * legacy / advisory metadata (NOT routing authority): tier, roles,
+#   latency_class, experimental, cost_class. They remain for display, for
+#   old Receipts and configs, and as an ordering hint of last resort after
+#   facts, promotion state and observed evidence. No routing rule may
+#   require a particular tier or role string. See LEGACY_ADVISORY_FIELDS.
+#
+# Exact token pricing lives in the discovered catalog (OpenRouter) and, as a
+# static fallback, in openshard/providers/openrouter.py. Do not hardcode
+# volatile prices here.
 #
 # Metadata v2 adds provenance and forward-looking routing fields (source,
 # risk_level, recommended_for, avoid_for) plus a StaticPricing placeholder.
@@ -18,6 +30,13 @@ from dataclasses import dataclass, field
 
 # Metadata schema version carried by every ModelEntry.
 METADATA_VERSION = "2"
+
+# Curated fields that describe a model's assumed quality or role. They are
+# compatibility/advisory data: routing may use them only as a final ordering
+# hint, never as a filter, and Receipts may still show them.
+LEGACY_ADVISORY_FIELDS: tuple[str, ...] = (
+    "tier", "roles", "latency_class", "experimental", "cost_class",
+)
 
 # Valid values for the provenance/risk/pricing enum-style fields. Tests use
 # these as the single source of truth for accepted tokens.
@@ -83,10 +102,14 @@ class ModelEntry:
     id: str
     display_name: str
     provider: str
-    # Quality/role tier: cheap | mid | strong | frontier | experimental |
-    #   code_specialist | small_coder | small | tiny | free_experimental |
-    #   long_horizon | value_worker | open_weight | fast_reasoning
+    # LEGACY / ADVISORY (not routing authority): a hand-assigned quality label
+    #   cheap | mid | strong | frontier | experimental | code_specialist |
+    #   small_coder | small | tiny | free_experimental | long_horizon |
+    #   value_worker | open_weight | fast_reasoning. Kept for display, old
+    #   Receipts and configs; routing filters on facts and lifecycle instead.
     tier: str
+    # LEGACY / ADVISORY: hand-assigned role hints. An ordering hint of last
+    # resort in routing, never a requirement.
     roles: tuple[str, ...] = field(default_factory=tuple)
     experimental: bool = False
 
@@ -100,9 +123,10 @@ class ModelEntry:
     supports_reasoning: bool = False
     supports_multimodal: bool = False
 
-    # fast | normal | slow | unknown
+    # LEGACY / ADVISORY: fast | normal | slow | unknown. Never measured.
     latency_class: str = "unknown"
-    # free | tiny | cheap | mid | expensive | unknown
+    # free | tiny | cheap | mid | expensive | unknown. A curated proxy; the
+    # catalog derives the live price band from provider pricing.
     cost_class: str = "unknown"
 
     notes: str = ""
@@ -130,11 +154,14 @@ class ModelEntry:
 
 
 # ---------------------------------------------------------------------------
-# Registry — all known models in a single list.
+# Registry — curated models in a single list.
 # ---------------------------------------------------------------------------
-# Add new entries here. Do not scatter model IDs across routing files.
-# Routing constants in openshard/routing/engine.py remain the authoritative
-# source for *default routing decisions* — the registry is metadata only.
+# Add new entries here. Do not scatter model IDs across routing files. The
+# registry is not the only source of models: provider discovery
+# (openshard/models/catalog.py) adds every model the provider lists, with
+# lifecycle "discovered". Curation here is what promotes a model into the
+# public default pool (active_default / active_specialist); see
+# openshard/models/promotion.py for the states in between.
 # ---------------------------------------------------------------------------
 
 _REGISTRY: list[ModelEntry] = [
@@ -239,7 +266,7 @@ _REGISTRY: list[ModelEntry] = [
     ),
     ModelEntry(
         id="minimax/m2.7",
-        lifecycle="active_specialist",
+        lifecycle="deprecated",
         display_name="MiniMax: M2.7",
         provider="MiniMax",
         tier="mid",
@@ -250,6 +277,11 @@ _REGISTRY: list[ModelEntry] = [
         supports_structured_outputs=True,
         latency_class="normal",
         cost_class="mid",
+        notes=(
+            "Retired 2026-09-28: this id was never listed by OpenRouter (the live id is "
+            "minimax/minimax-m2.7, curated as watchlist). Kept so old Receipts stay readable; "
+            "never a fresh-run default."
+        ),
     ),
 
     # ------------------------------------------------------------------
@@ -364,7 +396,7 @@ _REGISTRY: list[ModelEntry] = [
     ),
     ModelEntry(
         id="anthropic/claude-opus-4.8-fast",
-        lifecycle="active_specialist",
+        lifecycle="watchlist",
         display_name="Anthropic: Claude Opus 4.8 Fast",
         provider="Anthropic",
         tier="frontier",
@@ -378,6 +410,10 @@ _REGISTRY: list[ModelEntry] = [
         supports_multimodal=True,
         latency_class="normal",
         cost_class="expensive",
+        notes=(
+            "Moved to watchlist 2026-09-28: not listed by OpenRouter as of 2026-09-25, so the "
+            "id cannot be verified against a provider; not a fresh-run default until it is."
+        ),
     ),
     # ------------------------------------------------------------------
     # Claude Fable 5 — generally available (2026-06).

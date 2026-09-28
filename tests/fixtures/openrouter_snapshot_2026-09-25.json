@@ -1,0 +1,3408 @@
+{
+ "schema_version": "1",
+ "synced_at": "2026-09-25T17:21:13Z",
+ "source": "https://openrouter.ai/api/v1/models (trimmed to curated ids and successor candidates)",
+ "model_count": 82,
+ "models": [
+  {
+   "id": "anthropic/claude-fable-5",
+   "name": "Anthropic: Claude Fable 5",
+   "created": 1781007515,
+   "canonical_slug": "anthropic/claude-5-fable-20260609",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00005"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "anthropic/claude-fable-5.1",
+   "name": "Anthropic: Claude Fable 5.1",
+   "created": 1788285838,
+   "canonical_slug": "anthropic/claude-fable-5.1-20260831",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00005"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "anthropic/claude-haiku-4.5",
+   "name": "Anthropic: Claude Haiku 4.5",
+   "created": 1760547638,
+   "canonical_slug": "anthropic/claude-4.5-haiku-20251001",
+   "context_length": 200000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000001",
+    "completion": "0.000005"
+   },
+   "top_provider": {
+    "max_completion_tokens": 64000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "anthropic/claude-opus-4.7",
+   "name": "Anthropic: Claude Opus 4.7",
+   "created": 1776351100,
+   "canonical_slug": "anthropic/claude-4.7-opus-20260416",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.000025"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "anthropic/claude-opus-4.8",
+   "name": "Anthropic: Claude Opus 4.8",
+   "created": 1779905091,
+   "canonical_slug": "anthropic/claude-4.8-opus-20260528",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.000025"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "anthropic/claude-opus-5",
+   "name": "Anthropic: Claude Opus 5",
+   "created": 1784912544,
+   "canonical_slug": "anthropic/claude-opus-5-20260723",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.000025"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "anthropic/claude-opus-5.5",
+   "name": "Anthropic: Claude Opus 5.5",
+   "created": 1790094732,
+   "canonical_slug": "anthropic/claude-opus-5.5-20260921",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000004",
+    "completion": "0.00002"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "anthropic/claude-sonnet-4.6",
+   "name": "Anthropic: Claude Sonnet 4.6",
+   "created": 1771342990,
+   "canonical_slug": "anthropic/claude-4.6-sonnet-20260217",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p",
+    "verbosity"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "anthropic/claude-sonnet-5",
+   "name": "Anthropic: Claude Sonnet 5",
+   "created": 1782843083,
+   "canonical_slug": "anthropic/claude-sonnet-5-20260630",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.00001"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "deepseek/deepseek-chat-v3.1",
+   "name": "DeepSeek: DeepSeek V3.1",
+   "created": 1755779628,
+   "canonical_slug": "deepseek/deepseek-chat-v3.1",
+   "context_length": 163840,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.00000095"
+   },
+   "top_provider": {
+    "max_completion_tokens": 32768
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "deepseek/deepseek-v3.2",
+   "name": "DeepSeek: DeepSeek V3.2",
+   "created": 1764594642,
+   "canonical_slug": "deepseek/deepseek-v3.2-20251201",
+   "context_length": 163840,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000000269",
+    "completion": "0.0000004"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": "2026-09-28"
+  },
+  {
+   "id": "deepseek/deepseek-v4-flash",
+   "name": "DeepSeek: DeepSeek V4 Flash 0423",
+   "created": 1777000666,
+   "canonical_slug": "deepseek/deepseek-v4-flash-20260423",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000000476",
+    "completion": "0.0000000952"
+   },
+   "top_provider": {
+    "max_completion_tokens": 384000
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_a",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "deepseek/deepseek-v4-flash-0731",
+   "name": "DeepSeek: DeepSeek V4 Flash 0731",
+   "created": 1785478908,
+   "canonical_slug": "deepseek/deepseek-v4-flash-20260731",
+   "context_length": 1310720,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000003",
+    "completion": "0.00000032"
+   },
+   "top_provider": {
+    "max_completion_tokens": 943718
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_a",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "deepseek/deepseek-v4-pro",
+   "name": "DeepSeek: DeepSeek V4 Pro 0423",
+   "created": 1777000679,
+   "canonical_slug": "deepseek/deepseek-v4-pro-20260423",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000000692694",
+    "completion": "0.000001385388"
+   },
+   "top_provider": {
+    "max_completion_tokens": 384000
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "deepseek/deepseek-v4-pro-0813",
+   "name": "DeepSeek: DeepSeek V4 Pro 0813",
+   "created": 1786549364,
+   "canonical_slug": "deepseek/deepseek-v4-pro-20260813",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000034584",
+    "completion": "0.00000103752"
+   },
+   "top_provider": {
+    "max_completion_tokens": 384000
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "deepseek/deepseek-v4.1-flash",
+   "name": "DeepSeek: DeepSeek V4.1 Flash",
+   "created": 1789021285,
+   "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000000075",
+    "completion": "0.0000003"
+   },
+   "top_provider": {
+    "max_completion_tokens": 943718
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "deepseek/deepseek-v4.1-flash:batch",
+   "name": "DeepSeek: DeepSeek V4.1 Flash (batch)",
+   "created": 1789021285,
+   "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000000112",
+    "completion": "0.000000336"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "google/gemini-3.1-flash-lite",
+   "name": "Google: Gemini 3.1 Flash Lite",
+   "created": 1778168828,
+   "canonical_slug": "google/gemini-3.1-flash-lite-20260507",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.0000015"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "google/gemini-3.5-flash",
+   "name": "Google: Gemini 3.5 Flash",
+   "created": 1779193800,
+   "canonical_slug": "google/gemini-3.5-flash-20260519",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000015",
+    "completion": "0.000009"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "google/gemini-3.5-flash-lite",
+   "name": "Google: Gemini 3.5 Flash Lite",
+   "created": 1784646726,
+   "canonical_slug": "google/gemini-3.5-flash-lite-20260721",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000025"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "google/gemini-3.6-flash",
+   "name": "Google: Gemini 3.6 Flash",
+   "created": 1784646733,
+   "canonical_slug": "google/gemini-3.6-flash-20260721",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000075",
+    "completion": "0.00000375"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "google/gemini-3.7-flash",
+   "name": "Google: Gemini 3.7 Flash",
+   "created": 1786640581,
+   "canonical_slug": "google/gemini-3.7-flash-20260813",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000075",
+    "completion": "0.00000375"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "google/gemini-3.8-flash",
+   "name": "Google: Gemini 3.8 Flash",
+   "created": 1788362056,
+   "canonical_slug": "google/gemini-3.8-flash-20260902",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000075",
+    "completion": "0.00000375"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "google/gemma-4-26b-a4b-it",
+   "name": "Google: Gemma 4 26B A4B ",
+   "created": 1775227989,
+   "canonical_slug": "google/gemma-4-26b-a4b-it-20260403",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "image",
+     "text",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000000675",
+    "completion": "0.000000225"
+   },
+   "top_provider": {
+    "max_completion_tokens": 235929
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "google/gemma-4-31b-it",
+   "name": "Google: Gemma 4 31B",
+   "created": 1775148486,
+   "canonical_slug": "google/gemma-4-31b-it-20260402",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "image",
+     "text",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000009",
+    "completion": "0.00000034"
+   },
+   "top_provider": {
+    "max_completion_tokens": 16384
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "inception/mercury-2",
+   "name": "Inception: Mercury 2",
+   "created": 1772636275,
+   "canonical_slug": "inception/mercury-2-20260304",
+   "context_length": 128000,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.00000075"
+   },
+   "top_provider": {
+    "max_completion_tokens": 50000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "inception/mercury-2.5",
+   "name": "Inception: Mercury 2.5",
+   "created": 1788892137,
+   "canonical_slug": "inception/mercury-2.5-20260908",
+   "context_length": 260000,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000004",
+    "completion": "0.00000015"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "minimax/minimax-m2.7",
+   "name": "MiniMax: MiniMax M2.7",
+   "created": 1773836697,
+   "canonical_slug": "minimax/minimax-m2.7-20260318",
+   "context_length": 204800,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000012"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "minimax/minimax-m3",
+   "name": "MiniMax: MiniMax M3",
+   "created": 1780245374,
+   "canonical_slug": "minimax/minimax-m3-20260531",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000012"
+   },
+   "top_provider": {
+    "max_completion_tokens": 512000
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "mistralai/codestral-2508",
+   "name": "Mistral: Codestral 2508",
+   "created": 1754079630,
+   "canonical_slug": "mistralai/codestral-2508",
+   "context_length": 256000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000009"
+   },
+   "top_provider": {
+    "max_completion_tokens": 204800
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "max_tokens",
+    "prediction",
+    "presence_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "mistralai/devstral-2512",
+   "name": "Mistral: Devstral 2 2512",
+   "created": 1765285419,
+   "canonical_slug": "mistralai/devstral-2512",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000004",
+    "completion": "0.000002"
+   },
+   "top_provider": {
+    "max_completion_tokens": 209715
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "max_tokens",
+    "presence_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "mistralai/mistral-medium-3-5",
+   "name": "Mistral: Mistral Medium 3.5",
+   "created": 1777570439,
+   "canonical_slug": "mistralai/mistral-medium-3.5-20260430",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000015",
+    "completion": "0.0000075"
+   },
+   "top_provider": {
+    "max_completion_tokens": 209715
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "moonshotai/kimi-k2.5",
+   "name": "MoonshotAI: Kimi K2.5",
+   "created": 1769487076,
+   "canonical_slug": "moonshotai/kimi-k2.5-0127",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000045",
+    "completion": "0.00000225"
+   },
+   "top_provider": {
+    "max_completion_tokens": 235929
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "moonshotai/kimi-k2.6",
+   "name": "MoonshotAI: Kimi K2.6",
+   "created": 1776699402,
+   "canonical_slug": "moonshotai/kimi-k2.6-20260420",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000095",
+    "completion": "0.000004"
+   },
+   "top_provider": {
+    "max_completion_tokens": 235929
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "moonshotai/kimi-k2.7-code",
+   "name": "MoonshotAI: Kimi K2.7 Code",
+   "created": 1781266361,
+   "canonical_slug": "moonshotai/kimi-k2.7-code-20260612",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000006562",
+    "completion": "0.0000033"
+   },
+   "top_provider": {
+    "max_completion_tokens": 235929
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "moonshotai/kimi-k3",
+   "name": "MoonshotAI: Kimi K3",
+   "created": 1784215858,
+   "canonical_slug": "moonshotai/kimi-k3-20260715",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015"
+   },
+   "top_provider": {
+    "max_completion_tokens": 943718
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-4o",
+   "name": "OpenAI: GPT-4o",
+   "created": 1715558400,
+   "canonical_slug": "openai/gpt-4o",
+   "context_length": 128000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000025",
+    "completion": "0.00001"
+   },
+   "top_provider": {
+    "max_completion_tokens": 16384
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "prediction",
+    "presence_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p",
+    "web_search_options"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-4o-mini",
+   "name": "OpenAI: GPT-4o-mini",
+   "created": 1721260800,
+   "canonical_slug": "openai/gpt-4o-mini",
+   "context_length": 128000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006"
+   },
+   "top_provider": {
+    "max_completion_tokens": 16384
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "prediction",
+    "presence_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p",
+    "web_search_options"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5-mini",
+   "name": "OpenAI: GPT-5 Mini",
+   "created": 1754587407,
+   "canonical_slug": "openai/gpt-5-mini-2025-08-07",
+   "context_length": 400000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.000002"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5-nano",
+   "name": "OpenAI: GPT-5 Nano",
+   "created": 1754587402,
+   "canonical_slug": "openai/gpt-5-nano-2025-08-07",
+   "context_length": 400000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000005",
+    "completion": "0.0000004"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5.4",
+   "name": "OpenAI: GPT-5.4",
+   "created": 1772734352,
+   "canonical_slug": "openai/gpt-5.4-20260305",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000025",
+    "completion": "0.000015"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5.4-mini",
+   "name": "OpenAI: GPT-5.4 Mini",
+   "created": 1773748178,
+   "canonical_slug": "openai/gpt-5.4-mini-20260317",
+   "context_length": 400000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000075",
+    "completion": "0.0000045"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5.4-nano",
+   "name": "OpenAI: GPT-5.4 Nano",
+   "created": 1773748187,
+   "canonical_slug": "openai/gpt-5.4-nano-20260317",
+   "context_length": 400000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000002",
+    "completion": "0.00000125"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5.4-pro",
+   "name": "OpenAI: GPT-5.4 Pro",
+   "created": 1772734366,
+   "canonical_slug": "openai/gpt-5.4-pro-20260305",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00003",
+    "completion": "0.00018"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5.5",
+   "name": "OpenAI: GPT-5.5",
+   "created": 1777051893,
+   "canonical_slug": "openai/gpt-5.5-20260423",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.00003"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5.5-pro",
+   "name": "OpenAI: GPT-5.5 Pro",
+   "created": 1777051896,
+   "canonical_slug": "openai/gpt-5.5-pro-20260423",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00003",
+    "completion": "0.00018"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5.6-luna",
+   "name": "OpenAI: GPT-5.6 Luna",
+   "created": 1783590864,
+   "canonical_slug": "openai/gpt-5.6-luna-20260709",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000002",
+    "completion": "0.0000012"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5.6-sol",
+   "name": "OpenAI: GPT-5.6 Sol",
+   "created": 1783590850,
+   "canonical_slug": "openai/gpt-5.6-sol-20260709",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.00001"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-5.6-terra",
+   "name": "OpenAI: GPT-5.6 Terra",
+   "created": 1783590857,
+   "canonical_slug": "openai/gpt-5.6-terra-20260709",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000012"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-6-astra",
+   "name": "OpenAI: GPT-6 Astra",
+   "created": 1788552838,
+   "canonical_slug": "openai/gpt-6-astra-20260903",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00005"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-6-luna",
+   "name": "OpenAI: GPT-6 Luna",
+   "created": 1790100786,
+   "canonical_slug": "openai/gpt-6-luna-20260922",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000005"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-6-sol",
+   "name": "OpenAI: GPT-6 Sol",
+   "created": 1790100775,
+   "canonical_slug": "openai/gpt-6-sol-20260922",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.00001"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-oss-120b",
+   "name": "OpenAI: gpt-oss-120b",
+   "created": 1754414231,
+   "canonical_slug": "openai/gpt-oss-120b",
+   "context_length": 131072,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_a",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "openai/gpt-oss-20b",
+   "name": "OpenAI: gpt-oss-20b",
+   "created": 1754414229,
+   "canonical_slug": "openai/gpt-oss-20b",
+   "context_length": 131072,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000000018",
+    "completion": "0.00000009"
+   },
+   "top_provider": {
+    "max_completion_tokens": 32768
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "qwen/qwen3-coder-30b-a3b-instruct",
+   "name": "Qwen: Qwen3 Coder 30B A3B Instruct",
+   "created": 1753972379,
+   "canonical_slug": "qwen/qwen3-coder-30b-a3b-instruct",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000007",
+    "completion": "0.00000028"
+   },
+   "top_provider": {
+    "max_completion_tokens": 235929
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "qwen/qwen3.6-flash",
+   "name": "Qwen: Qwen3.6 Flash",
+   "created": 1777261362,
+   "canonical_slug": "qwen/qwen3.6-flash",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000001875",
+    "completion": "0.000001125"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "qwen/qwen3.7-max",
+   "name": "Qwen: Qwen3.7 Max",
+   "created": 1779376861,
+   "canonical_slug": "qwen/qwen3.7-max-20260520",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000001475",
+    "completion": "0.000004425"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "qwen/qwen3.7-plus",
+   "name": "Qwen: Qwen3.7 Plus",
+   "created": 1780491783,
+   "canonical_slug": "qwen/qwen3.7-plus-20260602",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000032",
+    "completion": "0.00000128"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "qwen/qwen3.8-2.4t-a95b",
+   "name": "Qwen: Qwen3.8 2.4T A95B",
+   "created": 1786551702,
+   "canonical_slug": "qwen/qwen3.8-2.4t-a95b-20260812",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000006"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "qwen/qwen3.8-27b",
+   "name": "Qwen: Qwen3.8 27B",
+   "created": 1786722910,
+   "canonical_slug": "qwen/qwen3.8-27b-20260814",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000042",
+    "completion": "0.000003"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_a",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "qwen/qwen3.8-flash",
+   "name": "Qwen: Qwen3.8 Flash",
+   "created": 1787773060,
+   "canonical_slug": "qwen/qwen3.8-flash-20260826",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.00000047"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "qwen/qwen3.8-max-0902",
+   "name": "Qwen: Qwen3.8 Max (0902)",
+   "created": 1788469704,
+   "canonical_slug": "qwen/qwen3.8-max-20260902",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000006"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "qwen/qwen3.8-max-prime",
+   "name": "Qwen: Qwen3.8 Max Prime",
+   "created": 1790191228,
+   "canonical_slug": "qwen/qwen3.8-max-prime-20260923",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000004",
+    "completion": "0.000012"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "stepfun/step-3.5-flash",
+   "name": "StepFun: Step 3.5 Flash",
+   "created": 1769728337,
+   "canonical_slug": "stepfun/step-3.5-flash",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000003"
+   },
+   "top_provider": {
+    "max_completion_tokens": 65536
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "stepfun/step-3.7-flash",
+   "name": "StepFun: Step 3.7 Flash",
+   "created": 1779985069,
+   "canonical_slug": "stepfun/step-3.7-flash-20260528",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000002",
+    "completion": "0.00000115"
+   },
+   "top_provider": {
+    "max_completion_tokens": 230400
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "tencent/hy3",
+   "name": "Tencent: Hy3",
+   "created": 1783344048,
+   "canonical_slug": "tencent/hy3-20260706",
+   "context_length": 262144,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000000825",
+    "completion": "0.00000033"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "max_completion_tokens",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "tencent/hy4-preview",
+   "name": "Tencent: Hy4 preview",
+   "created": 1787897375,
+   "canonical_slug": "tencent/hy4-preview-20260827",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000000834",
+    "completion": "0.000002501"
+   },
+   "top_provider": {
+    "max_completion_tokens": 64000
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "x-ai/grok-4.3",
+   "name": "SpaceXAI: Grok 4.3",
+   "created": 1777591821,
+   "canonical_slug": "x-ai/grok-4.3-20260430",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.0000025"
+   },
+   "top_provider": {
+    "max_completion_tokens": 900000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "x-ai/grok-4.5",
+   "name": "SpaceXAI: Grok 4.5",
+   "created": 1783523154,
+   "canonical_slug": "x-ai/grok-4.5-20260708",
+   "context_length": 500000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000006"
+   },
+   "top_provider": {
+    "max_completion_tokens": 450000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "x-ai/grok-4.6",
+   "name": "SpaceXAI: Grok 4.6",
+   "created": 1786548957,
+   "canonical_slug": "x-ai/grok-4.6-20260810",
+   "context_length": 500000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.000006"
+   },
+   "top_provider": {
+    "max_completion_tokens": 450000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "x-ai/grok-4.7",
+   "name": "SpaceXAI: Grok 4.7",
+   "created": 1790007541,
+   "canonical_slug": "x-ai/grok-4.7-20260916",
+   "context_length": 500000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000016",
+    "completion": "0.0000048"
+   },
+   "top_provider": {
+    "max_completion_tokens": 450000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "x-ai/grok-build-0.1",
+   "name": "SpaceXAI: Grok Build 0.1",
+   "created": 1779298123,
+   "canonical_slug": "x-ai/grok-build-0.1-20260520",
+   "context_length": 256000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000001",
+    "completion": "0.000002"
+   },
+   "top_provider": {
+    "max_completion_tokens": 230400
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "reasoning",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "xiaomi/mimo-v2.5",
+   "name": "Xiaomi: MiMo-V2.5",
+   "created": 1776874269,
+   "canonical_slug": "xiaomi/mimo-v2.5-20260422",
+   "context_length": 1050000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "audio",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000014",
+    "completion": "0.00000028"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "xiaomi/mimo-v2.6-flash",
+   "name": "Xiaomi: MiMo-V2.6-Flash",
+   "created": 1790021264,
+   "canonical_slug": "xiaomi/mimo-v2.6-flash-20260921",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000014",
+    "completion": "0.00000028"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "xiaomi/mimo-v2.6-pro",
+   "name": "Xiaomi: MiMo-V2.6-Pro",
+   "created": 1790021259,
+   "canonical_slug": "xiaomi/mimo-v2.6-pro-20260921",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000000435",
+    "completion": "0.00000087"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "z-ai/glm-5.1",
+   "name": "Z.ai: GLM 5.1",
+   "created": 1775578025,
+   "canonical_slug": "z-ai/glm-5.1-20260406",
+   "context_length": 204800,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000009646",
+    "completion": "0.0000030316"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "z-ai/glm-5.2",
+   "name": "Z.ai: GLM 5.2",
+   "created": 1781631930,
+   "canonical_slug": "z-ai/glm-5.2-20260616",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000006496",
+    "completion": "0.0000020416"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "z-ai/glm-5.3",
+   "name": "Z.ai: GLM 5.3",
+   "created": 1787086655,
+   "canonical_slug": "z-ai/glm-5.3-20260816",
+   "context_length": 1310720,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000014",
+    "completion": "0.0000044"
+   },
+   "top_provider": {
+    "max_completion_tokens": 943717
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "z-ai/glm-5.3-flash",
+   "name": "Z.ai: GLM 5.3 Flash",
+   "created": 1787752741,
+   "canonical_slug": "z-ai/glm-5.3-flash-20260826",
+   "context_length": 1310720,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000000045",
+    "completion": "0.00000014"
+   },
+   "top_provider": {
+    "max_completion_tokens": 128000
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "min_p",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "z-ai/glm-5.3-flashx",
+   "name": "Z.ai: GLM 5.3 FlashX",
+   "created": 1789744020,
+   "canonical_slug": "z-ai/glm-5.3-flashx-20260918",
+   "context_length": 1048576,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.00000037",
+    "completion": "0.00000125"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "z-ai/glm-5.3-prime",
+   "name": "Z.ai: GLM 5.3 Prime",
+   "created": 1790199651,
+   "canonical_slug": "z-ai/glm-5.3-prime-20260921",
+   "context_length": 1000000,
+   "architecture": {
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.0000028",
+    "completion": "0.0000088"
+   },
+   "top_provider": {
+    "max_completion_tokens": 131072
+   },
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_logprobs",
+    "top_p"
+   ],
+   "expiration_date": null
+  },
+  {
+   "id": "~anthropic/claude-haiku-latest",
+   "name": "Anthropic: Claude Haiku Latest",
+   "created": 1777318492,
+   "canonical_slug": "~anthropic/claude-haiku-latest",
+   "context_length": 200000,
+   "architecture": {
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ]
+   },
+   "pricing": {
+    "prompt": "0.000001",
+    "completion": "0.000005"
+   },
+   "top_provider": {
+    "max_completion_tokens": 64000
+   },
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+   ],
+   "expiration_date": null
+  }
+ ]
+}

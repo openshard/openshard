@@ -1,5 +1,12 @@
 # Adaptive Routing v1
 
+See `docs/architecture/routing.md` for the current routing architecture: the
+separation of model facts, routing requirements, observed performance and
+policy; promotion states; requirement classes; and why curated tiers are no
+longer routing authority. This page documents the V1 pipeline that remains
+the stable (capability-off) behaviour and the Receipt block both versions
+share.
+
 Status: foundation + deterministic baseline, recorded in **shadow mode** for
 `openshard run`. The model that pipeline executes is still chosen by legacy
 routing (keyword category -> provider-aware resolver -> scored selection); the

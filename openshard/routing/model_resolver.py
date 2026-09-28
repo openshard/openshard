@@ -5,12 +5,16 @@ live lookups against the model registry. Falls back to the original
 hardcoded IDs when no eligible registry candidate is found, so the
 system degrades gracefully if the registry is empty or malformed.
 
-Roles cheap/main/escalate/visual are backed by routing classes
+Roles cheap/main/escalate/visual/complex are backed by routing classes
 (``openshard.routing.routing_classes``): the class declares the capability
-requirement, and the model is selected from the curated catalog. strong and
-complex keep their legacy role queries. Import-time resolution uses the
-curated-only catalog (no disk or network), so it is identical online and
-offline; discovery-only models never become defaults here.
+requirement, and the model is selected from the curated catalog. strong keeps
+its legacy role query. Import-time resolution uses the curated-only catalog
+(no disk or network), so it is identical online and offline; discovery-only
+models never become defaults here.
+
+These constants are the stable (capability-off) behaviour. Routing V2
+(``openshard.routing.adaptive.policy_v2``) does not read them: it resolves
+requirement classes against the live candidate pool per step.
 
 Module-level constants (MODEL_CHEAP, MODEL_MAIN, …) are evaluated once
 at import time and cached. The registry is static at startup, so the
@@ -39,13 +43,15 @@ from openshard.routing.routing_classes import ROLE_TO_CLASS, ROUTING_CLASSES
 # These are ONLY used when the registry returns no eligible candidate.
 # ---------------------------------------------------------------------------
 
+# ``complex`` previously fell back to minimax/m2.7, an id OpenRouter never
+# listed; it now falls back to the curated long-context model.
 _FALLBACKS: dict[str, str] = {
     "cheap":    "deepseek/deepseek-v4-flash",
     "main":     "z-ai/glm-5.1",
     "strong":   "anthropic/claude-sonnet-4.6",
     "escalate": "anthropic/claude-opus-4.7",
     "visual":   "moonshotai/kimi-k2.5",
-    "complex":  "minimax/m2.7",
+    "complex":  "minimax/minimax-m3",
 }
 
 # ---------------------------------------------------------------------------
@@ -84,12 +90,7 @@ _ROLE_QUERY: dict[str, dict] = {
     },
     "escalate": _class_query(ROLE_TO_CLASS["escalate"]),
     "visual":   _class_query(ROLE_TO_CLASS["visual"]),
-    "complex": {
-        "lifecycle":    "active_specialist",  # complex/long-horizon specialist
-        "cost_classes": set(),
-        "tiers":        set(),
-        "roles_hint":   ("complex", "long_context"),
-    },
+    "complex":  _class_query(ROLE_TO_CLASS["complex"]),
 }
 
 
