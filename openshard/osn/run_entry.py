@@ -127,6 +127,33 @@ def _retry_attempts(usage: list[AttemptUsage]) -> list[dict]:
     return out
 
 
+def _human_summary(receipt: LoopReceipt) -> str:
+    """Short result text that explains the run at a glance."""
+    if receipt.status == "verified":
+        if len(receipt.attempts) > 1:
+            return f"Verified after {len(receipt.attempts)} attempts."
+        return "Verified on the first attempt."
+    if receipt.stop_reason == "provider_error":
+        return (
+            "Provider failed before verification; repository unchanged."
+            if not receipt.changed_files
+            else "Provider failed during recovery; repository unchanged."
+        )
+    if receipt.stop_reason == "verifier_timeout":
+        return "Verification timed out; no result was claimed."
+    if receipt.stop_reason == "verifier_setup_failed":
+        return "Verification could not run; no result was claimed."
+    if receipt.status == "blocked":
+        return "Blocked by policy before changes could be promoted."
+    if receipt.status == "budget_exhausted":
+        return "Stopped by the configured agent budget."
+    if receipt.status == "no_actions":
+        return "Model returned no usable changes."
+    if receipt.status == "failed":
+        return "Verification failed; repository unchanged."
+    return f"OSN run ended: {receipt.stop_reason}."
+
+
 MAX_POLICY_DECISIONS = 50
 APPROVAL_SOURCE = "file_mutation_policy"
 
@@ -241,6 +268,7 @@ def build_osn_run_entry(
     entry: dict = {
         "schema_version": SHARD_SCHEMA_VERSION,
         "timestamp": now,
+        "repo_name": repo_path.name,
         "task": safe_task,
         "task_title": derive_task_title(safe_task),
         "execution_model": final_model,
@@ -259,8 +287,10 @@ def build_osn_run_entry(
         "files_updated": files_updated,
         "files_deleted": 0,
         "files_detail": files_detail,
-        "summary": f"OSN loop {receipt.status}: {receipt.stop_reason}",
+        "summary": _human_summary(receipt),
         "osn_loop": _stored_loop_block(receipt),
+        "write_path": "sandbox",
+        "sandbox": {"sandbox_enabled": True, "sandbox_type": "isolated_copy"},
     }
     decisions = _policy_decisions(receipt)
     if decisions:
@@ -293,6 +323,39 @@ def build_osn_run_entry(
         entry["estimated_cost"] = _sum_costs(usage)
     entry["prompt_tokens"] = sum(u.prompt_tokens for u in usage)
     entry["completion_tokens"] = sum(u.completion_tokens for u in usage)
+    entry["total_tokens"] = entry["prompt_tokens"] + entry["completion_tokens"]
+    if usage:
+        entry["tokens_provenance"] = "provider_reported"
+
+    try:
+        from openshard.analysis.repo_map import collect_git_info
+
+        git = collect_git_info(repo_path)
+        if git.branch:
+            entry["git_branch"] = git.branch
+        if git.head_commit:
+            entry["git_head_commit_hash"] = git.head_commit
+        entry["git_dirty"] = git.dirty
+    except Exception:
+        pass
+
+    try:
+        from openshard.config.settings import load_config_safe
+        from openshard.safety.sanitize import sanitize_text
+
+        config, valid, _ = load_config_safe(cwd=repo_path)
+        identity = config.get("identity") if valid and isinstance(config, dict) else None
+        owner = sanitize_text(identity.get("owner"), 120) if isinstance(identity, dict) else None
+        if owner:
+            entry["owner"] = owner
+    except Exception:
+        pass
+
+    if receipt.stop_reason == "provider_error":
+        failed = next((a for a in reversed(receipt.attempts) if a.error_class), None)
+        entry["error_class"] = "provider_error"
+        if failed is not None and failed.error_message:
+            entry["error_message"] = failed.error_message
 
     setup_kind = next(
         (a.verification.setup_failure for a in reversed(receipt.attempts)
