@@ -21,6 +21,8 @@ from openshard.policy.decision import (
 
 ACTION_FILE_WRITE = "file_write"
 SOURCE = "file_mutation_policy"
+# The approval "source" recorded when the approver itself raised: nobody refused.
+APPROVER_ERROR = "approver_error"
 
 # Never written by OpenShard on the agent's behalf.
 _DENY_PATTERNS = (
@@ -73,6 +75,9 @@ class FileMutationOutcome:
     approval_granted: bool | None = None
     approval_source: str | None = None  # observed channel, e.g. "interactive_prompt"
     executed: bool = False
+    reason: str | None = None  # the policy's own reason, kept for the Receipt
+    severity: str | None = None
+    policy: PolicyDecision | None = None  # the decision as evaluated (the one an approver saw)
 
 
 @dataclass
@@ -85,7 +90,10 @@ class FileMutationGate:
     def authorize(self, rel: str) -> bool:
         """True only if policy (plus approval when asked) permits the write."""
         decision = resolve_policy_decisions([evaluate_file_write(rel)])
-        outcome = FileMutationOutcome(path=rel, decision=decision.decision)
+        outcome = FileMutationOutcome(
+            path=rel, decision=decision.decision, reason=decision.reason, severity=decision.severity,
+            policy=decision,
+        )
         self.outcomes.append(outcome)
         if decision.decision == "allow":
             return True
@@ -93,9 +101,10 @@ class FileMutationGate:
             try:
                 granted, source = self.approver(rel, decision)
             except Exception:
-                granted, source = False, "approver_error"
+                granted, source = False, APPROVER_ERROR
             outcome.approval_granted = bool(granted)
             outcome.approval_source = source
+            decision.approval_granted = bool(granted)
             return bool(granted)
         return False  # deny, or ask without an approver: fail closed
 
@@ -103,6 +112,14 @@ class FileMutationGate:
         for o in self.outcomes:
             if o.path == rel:
                 o.executed = True
+
+    def decisions(self) -> list[PolicyDecision]:
+        """The canonical ``PolicyDecision`` per evaluated write, in evaluation order,
+        for the Receipt's ``policy_decisions``: what was allowed, what needed
+        approval (and whether anyone granted it: ``approval_granted`` None means no
+        approver was available), what was denied. These are the very decisions this
+        gate evaluated, not re-made ones."""
+        return [o.policy for o in self.outcomes if o.policy is not None]
 
     def summary(self) -> dict:
         return {

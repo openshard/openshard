@@ -416,7 +416,13 @@ def facts_from_entry(entry: object) -> ObservedFacts:
     approval = None
     receipt = _dict(e.get("approval_receipt"))
     if receipt:
-        approval = "granted" if receipt.get("granted") else "denied"
+        if receipt.get("granted"):
+            approval = "granted"
+        elif receipt.get("outcome") == "unanswered":
+            # The writer's explicit signal: no approver existed, nobody refused.
+            approval = "unavailable"
+        else:
+            approval = "denied"
     decisions = e.get("policy_decisions")
     denied = isinstance(decisions, list) and any(
         isinstance(pd, dict) and pd.get("decision") == "deny" for pd in decisions
