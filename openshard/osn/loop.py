@@ -110,8 +110,13 @@ class LoopReceipt:
     @property
     def verification_state(self) -> str:
         for a in reversed(self.attempts):
-            if a.verification is not None:
-                return "passed" if a.verification.passed else "failed"
+            if a.verification is None:
+                continue
+            if not a.verification.ran:
+                return "not_run"
+            if a.verification.timed_out:
+                return "unknown"
+            return "passed" if a.verification.passed else "failed"
         return "not_run"
 
     def to_dict(self) -> dict:
@@ -400,6 +405,12 @@ def run_bounded_loop(
             receipt = _receipt("verified", "verification_passed")
             receipt.verified_file_hashes = after
             return receipt
+
+        if result.timed_out:
+            # The command started, but OpenShard did not observe a pass or fail
+            # outcome. Retrying with another model would turn verifier uncertainty
+            # into model-quality evidence, so stop without consulting recovery.
+            return _receipt("error", "verifier_timeout")
 
         kind = detect_setup_failure(result.exit_code, output)
         if kind is not None:
