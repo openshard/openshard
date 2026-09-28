@@ -14,8 +14,12 @@ import shlex
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
+
+if TYPE_CHECKING:
+    from openshard.osn.budget import BudgetLedger
 
 
 @click.group("osn")
@@ -91,22 +95,29 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         from openshard.routing.engine import route
         model = route(task).model
     models = [model, *escalate]
+    budget, budget_record = _resolve_budget(repo_root)
     provider_name, provider_obj = _resolve_provider(provider, model)
 
     action_provider = ModelActionProvider(
         provider=provider_obj, models=models, repo_root=repo_root, context_files=list(context_files),
+        budget=budget,
     )
 
     started = time.monotonic()
     receipt = run_bounded_loop(
         repo_root, task, action_provider, argv, task_id=task_id, max_attempts=max_attempts,
+        budget=budget,
     )
     duration = time.monotonic() - started
 
     entry = build_osn_run_entry(
         receipt, task=task, usage=action_provider.usage, duration_seconds=duration,
         repo_path=repo_root, task_id=task_id,
+        budget_record=budget.to_record() if budget is not None else budget_record,
     )
+    # Only present when a budget was configured: the machine output is
+    # otherwise byte-for-byte what it was before this feature existed.
+    budget_output = {"agent_budgets": entry["agent_budgets"]} if "agent_budgets" in entry else {}
     store = repo_root / ".openshard"
     store.mkdir(parents=True, exist_ok=True)
     append_jsonl(store / "runs.jsonl", entry)
@@ -128,10 +139,14 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "provider": provider_name, "models": models, "attempts": len(receipt.attempts),
             "changed_files": receipt.changed_files, "promoted": promoted, "skipped": skipped,
             "sandbox_path": receipt.sandbox_path,
+            **budget_output,
         }, indent=2))
         return
     click.echo(f"OSN loop: {receipt.status} ({receipt.stop_reason}); verification {receipt.verification_state}")
     click.echo(f"  attempts: {len(receipt.attempts)}   model(s): {', '.join(models)}   provider: {provider_name}")
+    budget_line = _budget_line(entry.get("agent_budgets"))
+    if budget_line:
+        click.echo(f"  budget: {budget_line}")
     for f in receipt.changed_files:
         click.echo(f"  changed: {f}")
     click.echo("  Changes were made in an isolated copy, verified there by OpenShard.")
@@ -141,6 +156,63 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         click.echo(f"  Not promoted. Review the copy at {receipt.sandbox_path}, or re-run with --promote.")
     if skipped:
         click.echo(f"  Blocked by policy/skipped: {', '.join(skipped)}")
+
+
+def _resolve_budget(repo_root: Path) -> tuple[BudgetLedger | None, dict | None]:
+    """``(ledger, not_enforced_record)`` for this run: at most one of the two is set.
+
+    A budget comes from the repository's ``agent_budgets:`` config block and is
+    enforced only when the Platform confirms the ``agent_budgets`` capability
+    for the linked organisation. No block: nothing is looked up and nothing
+    changes. A block the Platform did not confirm is recorded as not enforced.
+    A config file that cannot be parsed is refused outright: whether it holds
+    a budget is unknowable, and a budget must never vanish silently.
+    """
+    from openshard.config.settings import load_config_safe
+    from openshard.osn.budget import CONFIG_KEY, BudgetLedger, BudgetLimits, not_enforced_record
+
+    config, valid, path = load_config_safe(cwd=repo_root)
+    if not valid:
+        raise click.UsageError(f"{path} could not be parsed; refusing to run with an unreadable config.")
+    try:
+        limits = BudgetLimits.from_config(config.get(CONFIG_KEY) if isinstance(config, dict) else None)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
+    if not limits.configured:
+        return None, None
+
+    from openshard.sync.capabilities import CAPABILITY_AGENT_BUDGETS, resolve_capabilities
+
+    state = resolve_capabilities()
+    if state.enabled(CAPABILITY_AGENT_BUDGETS):
+        return BudgetLedger(limits), None
+    reason = state.reason or "capability_not_enabled"
+    click.echo(
+        f"agent_budgets: not enabled for this organisation ({reason}); the configured budget is not enforced.",
+        err=True,
+    )
+    return None, not_enforced_record(limits, reason)
+
+
+def _budget_line(record: dict | None) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    limits = ", ".join(f"{k}={v}" for k, v in (record.get("limits") or {}).items())
+    if not record.get("enforced"):
+        return f"not enforced ({record.get('reason') or 'unknown'}); configured {limits}"
+    usage = record.get("usage") or {}
+    spend = usage.get("spend_usd")
+    spend_text = f"${spend:.4f}" if isinstance(spend, (int, float)) else "unknown"
+    used = (
+        f"spend {spend_text}, attempts {usage.get('attempts')}, commands {usage.get('commands')}, "
+        f"writes {usage.get('writes')}"
+    )
+    tail = ""
+    if record.get("limit_reached"):
+        tail = f"; reached {record['limit_reached']}"
+    if record.get("action") and record["action"] != "none":
+        tail += f"; {record['action']}"
+    return f"enforced ({limits}); used {used}{tail}"
 
 
 def _promote(repo_root: Path, receipt, entry: dict, assume_yes: bool) -> tuple[list[str], list[str]]:

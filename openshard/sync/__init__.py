@@ -13,6 +13,8 @@ Modules
 ``outbox``    per-repository sync state keyed by ``receipt_id``
 ``transport`` one HTTPS POST per receipt, with the response classified
 ``client``    discovery of unsynced receipts and the retry-safe flush loop
+``capabilities`` which experimental capabilities the Platform has on for the
+              linked organisation (one GET, short cache, fails closed)
 
 See ``docs/platform-sync.md`` for the user-facing contract.
 """

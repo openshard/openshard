@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from openshard.osn.budget import STATUS_BUDGET_EXHAUSTED, BudgetExhausted, BudgetLedger
 from openshard.policy.file_mutation import Approver, FileMutationGate
 from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
 from openshard.verification.setup_failure import detect_setup_failure
@@ -86,7 +87,7 @@ class AttemptRecord:
 @dataclass
 class LoopReceipt:
     task_id: str
-    status: str  # verified | failed | blocked | no_actions | error
+    status: str  # verified | failed | blocked | no_actions | error | budget_exhausted
     stop_reason: str
     attempts: list[AttemptRecord]
     changed_files: list[str]
@@ -227,8 +228,15 @@ def run_bounded_loop(
     approver: Approver | None = None,
     verify_timeout: float = 120.0,
     sandbox_path: Path | None = None,
+    budget: BudgetLedger | None = None,
 ) -> LoopReceipt:
-    """Run the bounded loop. Never writes to *repo_root*."""
+    """Run the bounded loop. Never writes to *repo_root*.
+
+    With a *budget* (Agent Budgets, capability-gated by the caller) each
+    attempt, verify-command launch and file write is authorized first; the
+    first limit that would be exceeded ends the run with status
+    ``budget_exhausted`` and no further model call, command or write.
+    """
     task_id = task_id or f"task_{uuid.uuid4()}"
     max_attempts = max(1, min(max_attempts, 5))  # hard bound
     sandbox = sandbox_path or create_isolated_copy(repo_root)
@@ -246,9 +254,21 @@ def run_bounded_loop(
         return LoopReceipt(task_id, status, reason, attempts, changed, str(sandbox))
 
     for n in range(1, max_attempts + 1):
+        if budget is not None:
+            try:
+                budget.start_attempt()
+            except BudgetExhausted as exc:
+                return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         ctx = LoopContext(task, _list_files(sandbox), n, prev_failure, list(blocked_seen))
         try:
             actions = provider(ctx)
+        except BudgetExhausted as exc:
+            # The provider consulted the same ledger before a call and refused
+            # it. The attempt had started (an earlier call in it may have been
+            # paid for, e.g. before a re-ask), so it is recorded like a
+            # provider error: proposed nothing, applied nothing.
+            attempts.append(AttemptRecord(n, [], [], [], {"budget_stop": exc.stop_reason}))
+            return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         except Exception as exc:
             attempts.append(AttemptRecord(n, [], [], [], {"provider_error": type(exc).__name__}))
             return _receipt("error", "provider_error")
@@ -266,6 +286,7 @@ def run_bounded_loop(
         gate = FileMutationGate(approver=approver)
         applied: list[str] = []
         blocked: list[str] = []
+        budget_stop: BudgetExhausted | None = None
         for act in actions:
             try:
                 dest = resolve_safe_repo_path(sandbox, act.path)
@@ -275,6 +296,14 @@ def run_bounded_loop(
             if not gate.authorize(act.path):
                 blocked.append(act.path)
                 continue
+            if budget is not None:
+                try:
+                    budget.authorize_write()
+                except BudgetExhausted as exc:
+                    # Nothing past this point is written; what was already
+                    # applied stays in the isolated copy only.
+                    budget_stop = exc
+                    break
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(act.content, encoding="utf-8")
             gate.mark_executed(act.path)
@@ -285,11 +314,18 @@ def run_bounded_loop(
         attempts.append(rec)
         blocked_seen.extend(p for p in blocked if p not in blocked_seen)
 
+        if budget_stop is not None:
+            return _receipt(STATUS_BUDGET_EXHAUSTED, budget_stop.stop_reason)
         if blocked:
             # Policy/safety blocks are not retried automatically: the same
             # proposal would be blocked again and a human decision is needed.
             return _receipt("blocked", "policy_or_path_block")
 
+        if budget is not None:
+            try:
+                budget.authorize_command()
+            except BudgetExhausted as exc:
+                return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         before = _hash_files(sandbox, changed)
         result, output = _run_verification(verify_command, sandbox, verify_timeout)
         rec.verification = result

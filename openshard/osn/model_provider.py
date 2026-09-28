@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from openshard.osn.budget import BudgetLedger
 from openshard.osn.loop import FileWriteAction, LoopContext
 from openshard.providers.base import BaseProvider
 
@@ -53,6 +54,9 @@ class ModelActionProvider:
     context_files: list[str] = field(default_factory=list)
     max_tokens: int | None = 8000
     usage: list[AttemptUsage] = field(default_factory=list)
+    # Agent Budgets: consulted before every call (the re-ask included) and
+    # told the reported cost after it, so no retry path can spend unchecked.
+    budget: BudgetLedger | None = None
 
     def model_for(self, attempt: int) -> str:
         return self.models[min(max(attempt, 1), len(self.models)) - 1]
@@ -73,6 +77,8 @@ class ModelActionProvider:
             return parse_writes(self._ask(ctx.attempt, model, repair))
 
     def _ask(self, attempt: int, model: str, prompt: str) -> str:
+        if self.budget is not None:
+            self.budget.before_model_call()  # raises BudgetExhausted; no call is made
         resp = self.provider.execute(
             model, prompt, system=SYSTEM_PROMPT, max_tokens=self.max_tokens,
         )
@@ -80,6 +86,8 @@ class ModelActionProvider:
         self.usage.append(AttemptUsage(
             attempt, resp.model or model, u.prompt_tokens, u.completion_tokens, u.estimated_cost,
         ))
+        if self.budget is not None:
+            self.budget.record_model_call(u.estimated_cost)
         return resp.content
 
     @property
