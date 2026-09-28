@@ -1636,7 +1636,7 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
     if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
         rows.append(_row(
             "Capture",
-            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
+            f"{receipt.shard.capture_depth} {_EM} Openshard did not execute or verify this run",
         ))
         rows.append(_row("Gaps", gaps_display(block)))
     elif receipt.shard is not None and receipt.shard.origin == ORIGIN_HISTORICAL_IMPORT:
@@ -1648,7 +1648,7 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
 
 
 # Historical Ingestion v1: the "Reconstructed from history" badge.
-_HISTORICAL_CAPTURE_TEXT = "Reconstructed from history; OpenShard did not observe this session live"
+_HISTORICAL_CAPTURE_TEXT = "Reconstructed from history; Openshard did not observe this session live"
 
 _CAPTURE_COL = 15  # the CAPTURE section's labels are longer than the receipt's default gutter
 
@@ -1659,7 +1659,7 @@ def _capture_rows_full(receipt: ShardReceipt) -> list[str]:
     depth = str(block.get("depth") or (receipt.shard.capture_depth if receipt.shard else "unknown"))
     origin = receipt.shard.origin if receipt.shard is not None else None
     if origin == ORIGIN_EXTERNAL_OBSERVED:
-        depth_text = f"{depth} {_EM} OpenShard did not execute or verify this run"
+        depth_text = f"{depth} {_EM} Openshard did not execute or verify this run"
     elif origin == ORIGIN_HISTORICAL_IMPORT:
         depth_text = f"{depth} {_EM} {_HISTORICAL_CAPTURE_TEXT}"
     else:
