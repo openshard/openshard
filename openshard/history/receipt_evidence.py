@@ -286,6 +286,51 @@ def adaptive_routing_block(entry: dict) -> dict[str, Any] | None:
     return block
 
 
+MAX_SUPERVISOR_DECISIONS = 8
+_SUPERVISOR_ACTIONS = frozenset({"continue", "escalate", "stop"})
+
+
+def supervisor_routing_block(entry: dict) -> dict[str, Any] | None:
+    """Supervisor routing (OSN dogfood): the decisions considered at each observed-failure
+    boundary, why, on what evidence, and whether the loop acted on them. Local only."""
+    raw = _dict(entry.get("supervisor_routing"))
+    if not raw or raw.get("capability") != "supervisor_routing":
+        return None
+    mode = raw.get("record_mode")
+    if mode not in _ROUTING_RECORD_MODES:
+        return None
+    decisions: list[dict[str, Any]] = []
+    raw_decisions = raw.get("decisions")
+    items: list[Any] = raw_decisions[:MAX_SUPERVISOR_DECISIONS] if isinstance(raw_decisions, list) else []
+    for item in items:
+        d = _dict(item)
+        if d.get("action") not in _SUPERVISOR_ACTIONS:
+            continue
+        ev = _dict(d.get("evidence"))
+        decisions.append({
+            "attempt": _count(d.get("attempt")),
+            "action": d["action"],
+            "reason": _text(d.get("reason"), 64),
+            "recommended_model": _text(d.get("recommended_model"), 256),
+            "acted_on": _bool(d.get("acted_on")),
+            "not_acted_reason": _text(d.get("not_acted_reason"), 64),
+            "evidence": {
+                "verification_status": _text(ev.get("verification_status"), 32),
+                "verification_source": _text(ev.get("verification_source"), 32),
+                "attempts_so_far": _count(ev.get("attempts_so_far")),
+                "spend_usd": _number(ev.get("spend_usd")),
+                "spend_known": _bool(ev.get("spend_known")),
+                "cost_budget_usd": _number(ev.get("cost_budget_usd")),
+            },
+        })
+    return {
+        "record_mode": mode,
+        "not_applied_reason": _text(raw.get("not_applied_reason"), 64),
+        "boundary": _text(raw.get("boundary"), 64),
+        "decisions": decisions or None,
+    }
+
+
 def base_commit_value(entry: dict) -> str | None:
     """HEAD at run/session start (every producer records it then): a base, not a result."""
     value = entry.get("git_head_commit_hash")
@@ -409,6 +454,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "execution_loop": execution_loop_block,
         "agent_budgets": agent_budgets_block,
         "adaptive_routing": adaptive_routing_block,
+        "supervisor_routing": supervisor_routing_block,
         "base_commit": base_commit_value,
         "content_hash": content_hash_value,
         "session": session_block,

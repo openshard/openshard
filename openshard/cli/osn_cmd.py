@@ -96,6 +96,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     from openshard.sync.capabilities import LazyCapabilities
 
     capabilities = LazyCapabilities()
+    explicit_model = model  # the user's --model, if any; never re-evaluated by routing or a supervisor
     budget, budget_record = _resolve_budget(repo_root, capabilities)
     attempts_allowed = max_attempts
     if budget is not None and budget.limits.max_attempts is not None:
@@ -123,11 +124,13 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         provider=provider_obj, models=models, repo_root=repo_root, context_files=list(context_files),
         budget=budget,
     )
+    supervisor = _resolve_supervisor(routing, budget, action_provider, capabilities, user_ladder=list(escalate),
+                                     explicit_model=explicit_model)
 
     started = time.monotonic()
     receipt = run_bounded_loop(
         repo_root, task, action_provider, argv, task_id=task_id, max_attempts=max_attempts,
-        budget=budget,
+        budget=budget, supervisor=supervisor,
     )
     duration = time.monotonic() - started
 
@@ -137,10 +140,13 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         budget_record=budget.to_record() if budget is not None else budget_record,
         routing_decision=routing.decision, routing_record_mode=routing.record_mode,
         routing_record=routing.record, explicit_model=routing.first_model if routing.decision is None else None,
+        supervisor_record=supervisor.to_record() if supervisor is not None else None,
     )
-    # Only present when a budget was configured / the routing capability is
-    # on: the machine output is otherwise byte-for-byte what it was before.
-    budget_output = {k: entry[k] for k in ("agent_budgets", "adaptive_routing") if k in entry}
+    # Only present when a budget was configured / a capability is on: the
+    # machine output is otherwise byte-for-byte what it was before.
+    budget_output = {
+        k: entry[k] for k in ("agent_budgets", "adaptive_routing", "supervisor_routing") if k in entry
+    }
     store = repo_root / ".openshard"
     store.mkdir(parents=True, exist_ok=True)
     append_jsonl(store / "runs.jsonl", entry)
@@ -173,6 +179,9 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     routing_line = _routing_line(entry.get("adaptive_routing"))
     if routing_line:
         click.echo(f"  routing: {routing_line}")
+    supervisor_line = _supervisor_line(entry.get("supervisor_routing"))
+    if supervisor_line:
+        click.echo(f"  supervisor: {supervisor_line}")
     for f in receipt.changed_files:
         click.echo(f"  changed: {f}")
     click.echo("  Changes were made in an isolated copy, verified there by OpenShard.")
@@ -208,6 +217,66 @@ def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, 
         model_policy_loader=model_policy_loader,
         max_attempts=max_attempts,
     )
+
+
+def _resolve_supervisor(routing: OsnRouting, budget: BudgetLedger | None, action_provider, capabilities: LazyCapabilities,
+                        *, user_ladder: list[str], explicit_model: str | None):
+    """A recovery supervisor for this run, or None.
+
+    Never for an explicit ``--model`` (the user's choice is not re-evaluated and
+    the capability is not looked up) and never without the ``supervisor_routing``
+    capability. Applied only when adaptive routing applied the decision whose
+    recovery plan the supervisor follows and the user typed no ladder; otherwise
+    the supervisor runs in shadow and the record says why.
+    """
+    from openshard.osn.supervisor import (
+        CAPABILITY,
+        NOT_ACTED_ROUTING_NOT_APPLIED,
+        NOT_ACTED_USER_LADDER,
+        RECORD_APPLIED,
+        RECORD_SHADOW,
+        RecoverySupervisor,
+    )
+
+    decision = routing.decision
+    if explicit_model or decision is None:
+        # The user named the model (whatever the catalog thinks of it): nothing
+        # to supervise and no lookup. Without a decision there is no plan to follow.
+        return None
+    if not capabilities.enabled(CAPABILITY):
+        return None
+    if user_ladder:
+        not_acted: str | None = NOT_ACTED_USER_LADDER
+    elif not routing.applied:
+        not_acted = NOT_ACTED_ROUTING_NOT_APPLIED
+    else:
+        not_acted = None
+    return RecoverySupervisor(
+        plan=decision.recovery,
+        usage_for=action_provider.usage_for,
+        record_mode=RECORD_APPLIED if not_acted is None else RECORD_SHADOW,
+        not_acted_reason=not_acted,
+        cost_budget_usd=budget.limits.max_spend_usd if budget is not None else None,
+        first_model=routing.first_model,
+        first_class=decision.resolved_class,
+    )
+
+
+def _supervisor_line(record: dict | None) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    decisions = record.get("decisions") or []
+    mode = record.get("record_mode")
+    head = f"{mode}" + (f" ({record.get('not_applied_reason')})" if record.get("not_applied_reason") else "")
+    if not decisions:
+        return f"{head}; never consulted"
+    parts = [
+        f"after attempt {d.get('attempt')}: {d.get('action')} ({d.get('reason')})"
+        + (f" -> {d['recommended_model']}" if d.get("recommended_model") else "")
+        + ("" if d.get("acted_on") else " [not acted on]")
+        for d in decisions
+    ]
+    return f"{head}; " + "; ".join(parts)
 
 
 def _routing_line(record: dict | None) -> str | None:

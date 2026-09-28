@@ -2125,6 +2125,23 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append(_row("History", str(_routing.get("history_evidence") or "unknown")))
         lines.append("")
 
+    _sup = (receipt.recorded_evidence or {}).get("supervisor_routing")
+    if isinstance(_sup, dict):
+        lines.append(f"{_INDENT}SUPERVISOR")
+        _mode = str(_sup.get("record_mode") or "unknown")
+        if _sup.get("not_applied_reason"):
+            _mode += f" ({_sup['not_applied_reason']})"
+        lines.append(_row("Mode", _mode))
+        for _d in _sup.get("decisions") or []:
+            _line = f"after attempt {_d.get('attempt')}: {_d.get('action')} ({_d.get('reason')})"
+            if _d.get("recommended_model"):
+                _line += f" -> {_d['recommended_model']}"
+            _line += "" if _d.get("acted_on") else " [not acted on]"
+            lines.append(_row("Decision", _line))
+        if not _sup.get("decisions"):
+            lines.append(_row("Decision", "never consulted"))
+        lines.append("")
+
     if receipt.execution_spans:
         lines.append(f"{_INDENT}EXECUTION SPANS")
         _es_cap = 10

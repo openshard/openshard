@@ -57,12 +57,29 @@ class ModelActionProvider:
     # Agent Budgets: consulted before every call (the re-ask included) and
     # told the reported cost after it, so no retry path can spend unchecked.
     budget: BudgetLedger | None = None
+    # Supervisor routing: a one-shot override of the next attempt's model,
+    # set by the loop when an applied supervisor chose differently from the ladder.
+    next_model_override: str | None = None
 
     def model_for(self, attempt: int) -> str:
         return self.models[min(max(attempt, 1), len(self.models)) - 1]
 
+    def set_next_model(self, model: str) -> None:
+        self.next_model_override = model
+
+    def usage_for(self, attempt: int) -> tuple[str | None, float | None]:
+        """``(model, estimated cost)`` of *attempt*, summed over its calls; cost None if any is unknown."""
+        uses = [u for u in self.usage if u.attempt == attempt]
+        if not uses:
+            return None, None
+        costs = [u.cost_usd for u in uses]
+        return uses[-1].model, (sum(c for c in costs if c is not None) if all(c is not None for c in costs) else None)
+
     def __call__(self, ctx: LoopContext) -> list[FileWriteAction]:
-        model = self.model_for(ctx.attempt)
+        if self.next_model_override is not None:
+            model, self.next_model_override = self.next_model_override, None
+        else:
+            model = self.model_for(ctx.attempt)
         prompt = build_prompt(ctx, self.repo_root, self.context_files)
         content = self._ask(ctx.attempt, model, prompt)
         try:
