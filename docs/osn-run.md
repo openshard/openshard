@@ -47,3 +47,55 @@ verifier that rewrites the files it is checking does not count as a pass. The Sh
 (`executor: osn_loop`) stores no task text beyond the usual sanitised task, only the verifier's
 executable name, and a shadow routing provenance block, so `openshard stats routing` includes
 these runs. The model that ran is chosen by you or by keyword routing, not by adaptive routing.
+
+## Agent budgets (experimental)
+
+Only when the Platform lists the `agent_budgets` capability as enabled for the linked
+organisation (`openshard sync connect`). Without a link, when the Platform cannot be reached or
+refuses the key, or when the capability is simply not on, `osn run` behaves exactly as above and a
+configured budget is recorded as *not enforced*. Nothing about the link changes: the same
+endpoint, organisation and `osk_` key that receipt sync uses are read once per run and the answer
+is cached for ten minutes (see `docs/platform-sync.md`).
+
+Configure hard limits in the repository's `.openshard/config.yml`:
+
+```yaml
+agent_budgets:
+  max_spend_usd: 0.50   # estimated model spend, summed over every call
+  max_attempts: 3       # loop attempts (one model proposal + one verify run each)
+  max_commands: 3       # verify-command launches by OpenShard
+  max_writes: 10        # whole-file writes applied to the isolated copy
+```
+
+Every key is optional; an unreadable block (unknown key, zero, negative, a string) is refused
+before any work starts. Each limit is checked at the last boundary before that work would
+happen, and the first limit that would be exceeded ends the run with status `budget_exhausted`
+and a `stop_reason` of `budget_<limit>`. Nothing retries past a budget: the re-ask for a
+malformed model reply and every escalation attempt go through the same ledger.
+
+What is, and is not, counted:
+
+| Limit | Counts | Boundary |
+|---|---|---|
+| `max_spend_usd` | the estimated cost of each model call (the provider's own figure when it reports one, otherwise OpenShard's price table applied to the token counts) | before the next model call |
+| `max_attempts` | loop attempts started | before an attempt starts |
+| `max_commands` | verify-command launches by OpenShard | before an attempt whose verify run could not happen, and again before the launch |
+| `max_writes` | files written into the isolated copy | before an attempt that could apply nothing, and again before each write |
+
+Spend is an estimate and is known only after a call answers, so one call can overshoot the limit;
+the Receipt records the estimated total (`spend_is_estimate: true`). A call with no usable cost
+(an unknown model, no usage report) makes spend unobservable: with a spend limit configured the run
+stops (`budget_spend_unobservable`) rather than treating the cost as zero. Processes the verify command itself spawns are not counted. Promoting verified files with
+`--promote` is the separate policy-gated step described above and is not a budgeted write.
+
+The Shard entry carries an `agent_budgets` block: the configured `limits`, the observed `usage`
+(`spend_usd` and whether it was known, `model_calls`, `attempts`, `commands`, `writes`), the
+`limit_reached` (set whenever usage met a limit, even if the run then ended for another reason)
+and the `action` OpenShard took (`none`, `stopped_before_model_call`, `stopped_before_attempt`,
+`stopped_before_command`, `stopped_before_write`, `stopped_spend_unobservable`). When a budget was
+configured but not enforced the block says `enforced: false` and why (`capability_not_enabled`,
+`no_platform_link`, `platform_unreachable_or_refused`, `platform_sync_disabled` when
+`OPENSHARD_PLATFORM_SYNC=off`). A `.openshard/config.yml` that cannot be parsed is refused before any
+work starts, because whether it holds a budget is then unknowable. The block appears in `osn run --json`
+and the full receipt (`BUDGET` section). It is not yet part of the `history --json` / Platform
+sync projection, whose key set is fixed by the Platform contract.
