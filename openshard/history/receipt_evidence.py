@@ -287,7 +287,7 @@ def adaptive_routing_block(entry: dict) -> dict[str, Any] | None:
 
 
 MAX_SUPERVISOR_DECISIONS = 8
-_SUPERVISOR_ACTIONS = frozenset({"continue", "escalate", "stop"})
+_SUPERVISOR_ACTIONS = frozenset({"escalate", "stop"})
 
 
 def supervisor_routing_block(entry: dict) -> dict[str, Any] | None:
@@ -321,6 +321,8 @@ def supervisor_routing_block(entry: dict) -> dict[str, Any] | None:
                 "spend_usd": _number(ev.get("spend_usd")),
                 "spend_known": _bool(ev.get("spend_known")),
                 "cost_budget_usd": _number(ev.get("cost_budget_usd")),
+                "ladder_model": _text(ev.get("ladder_model"), 256),
+                "changed_next_model": _bool(ev.get("changed_next_model")),
             },
         })
     return {

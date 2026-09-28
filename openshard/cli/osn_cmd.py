@@ -259,6 +259,7 @@ def _resolve_supervisor(routing: OsnRouting, budget: BudgetLedger | None, action
         cost_budget_usd=budget.limits.max_spend_usd if budget is not None else None,
         first_model=routing.first_model,
         first_class=decision.resolved_class,
+        ladder_model_for=action_provider.model_for,
     )
 
 

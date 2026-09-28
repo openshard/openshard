@@ -44,6 +44,9 @@ class AttemptUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float | None = None  # None: provider did not report a cost
+    # The id OpenShard asked for; ``model`` is what the provider reported, which
+    # may be a variant of it. Plans and ladders are expressed in requested ids.
+    requested_model: str | None = None
 
 
 @dataclass
@@ -68,12 +71,14 @@ class ModelActionProvider:
         self.next_model_override = model
 
     def usage_for(self, attempt: int) -> tuple[str | None, float | None]:
-        """``(model, estimated cost)`` of *attempt*, summed over its calls; cost None if any is unknown."""
+        """``(requested model, estimated cost)`` of *attempt*, summed over its calls; cost None if any
+        call's cost is unknown. The requested id is what plans and ladders speak in."""
         uses = [u for u in self.usage if u.attempt == attempt]
         if not uses:
             return None, None
         costs = [u.cost_usd for u in uses]
-        return uses[-1].model, (sum(c for c in costs if c is not None) if all(c is not None for c in costs) else None)
+        model = uses[-1].requested_model or uses[-1].model
+        return model, (sum(c for c in costs if c is not None) if all(c is not None for c in costs) else None)
 
     def __call__(self, ctx: LoopContext) -> list[FileWriteAction]:
         if self.next_model_override is not None:
@@ -102,6 +107,7 @@ class ModelActionProvider:
         u = resp.usage
         self.usage.append(AttemptUsage(
             attempt, resp.model or model, u.prompt_tokens, u.completion_tokens, u.estimated_cost,
+            requested_model=model,
         ))
         if self.budget is not None:
             self.budget.record_model_call(u.estimated_cost)

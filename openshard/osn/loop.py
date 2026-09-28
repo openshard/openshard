@@ -285,11 +285,28 @@ def run_bounded_loop(
     def _receipt(status: str, reason: str) -> LoopReceipt:
         return LoopReceipt(task_id, status, reason, attempts, changed, str(sandbox))
 
+    # An applied supervisor escalation is confirmed only when the next attempt
+    # really calls the recommended model; until then the previous attempt's
+    # record says "pending". If the run ends first, it says so.
+    pending_supervision: AttemptRecord | None = None
+
+    def _settle_supervision(reason: str | None) -> None:
+        nonlocal pending_supervision
+        if pending_supervision is None or supervisor is None:
+            return
+        if reason is None:
+            supervisor.mark_acted()
+        else:
+            supervisor.mark_not_acted(reason)
+        pending_supervision.supervision = supervisor.decisions[-1].to_record()
+        pending_supervision = None
+
     for n in range(1, max_attempts + 1):
         if budget is not None:
             try:
                 budget.start_attempt()
             except BudgetExhausted as exc:
+                _settle_supervision("run_ended_before_retry")
                 return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         ctx = LoopContext(task, _list_files(sandbox), n, prev_failure, list(blocked_seen))
         try:
@@ -299,11 +316,14 @@ def run_bounded_loop(
             # it. The attempt had started (an earlier call in it may have been
             # paid for, e.g. before a re-ask), so it is recorded like a
             # provider error: proposed nothing, applied nothing.
+            _settle_supervision("run_ended_before_retry")
             attempts.append(AttemptRecord(n, [], [], [], {"budget_stop": exc.stop_reason}))
             return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         except Exception as exc:
+            _settle_supervision("run_ended_before_retry")
             attempts.append(AttemptRecord(n, [], [], [], {"provider_error": type(exc).__name__}))
             return _receipt("error", "provider_error")
+        _settle_supervision(None)  # the recommended model was called
         if not actions:
             return _receipt("no_actions", "provider proposed no actions")
 
@@ -399,18 +419,24 @@ def run_bounded_loop(
         # Always non-empty, even when the verifier prints nothing.
         prev_failure = f"verify command failed ({status_line})\n{output[-2000:]}"
 
-        if supervisor is not None and n < max_attempts:
+        budget_would_stop = budget is not None and budget.would_stop_next_attempt() is not None
+        if supervisor is not None and n < max_attempts and not budget_would_stop:
             # The one meaningful boundary in this loop: an observed failure the
-            # loop is about to retry. The supervisor sees exactly what happened.
-            decision = supervisor.after_failed_attempt(n, verification_observed=bool(result.observed))
+            # loop is about to retry (and that a budget would not refuse anyway:
+            # the budget's own stop is never pre-empted). The supervisor sees
+            # exactly what happened.
+            decision = supervisor.after_failed_attempt(
+                n, verification_observed=bool(result.observed), loop_max_attempts=max_attempts,
+            )
             rec.supervision = decision.to_record()
-            if decision.acted_on:
+            if decision.acted_on is not False:
                 if decision.action == "stop":
                     return _receipt("failed", f"supervisor_stop:{decision.reason}")
                 if decision.action == "escalate" and decision.recommended_model:
                     setter = getattr(provider, "set_next_model", None)
                     if callable(setter):
                         setter(decision.recommended_model)
+                        pending_supervision = rec
                     else:
                         supervisor.mark_not_acted("provider_cannot_switch")
                         rec.supervision = decision.to_record()

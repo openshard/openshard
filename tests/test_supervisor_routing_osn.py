@@ -22,6 +22,7 @@ from openshard.cli.main import cli
 from openshard.history.shard_contract import build_shard_receipt, render_full_shard_receipt
 from openshard.history.views import receipt_to_dict
 from openshard.models.catalog import ModelEntry, build_catalog
+from openshard.osn.budget import BudgetLedger, BudgetLimits
 from openshard.osn.loop import run_bounded_loop
 from openshard.osn.model_provider import AttemptUsage, ModelActionProvider
 from openshard.osn.run_entry import build_osn_run_entry
@@ -94,6 +95,7 @@ def _supervisor(ap, plan, *, mode=RECORD_APPLIED, budget=None, not_acted=None):
     return RecoverySupervisor(
         plan=plan, usage_for=ap.usage_for, record_mode=mode, not_acted_reason=not_acted,
         cost_budget_usd=budget, first_model="acme/mid-1", first_class="balanced_coding",
+        ladder_model_for=ap.model_for,
     )
 
 
@@ -104,24 +106,30 @@ class TestDecisionFunction:
         sup = _supervisor(ap, _plan("acme/frontier-1"))
         ap.usage.append(AttemptUsage(1, "acme/mid-1", 10, 5, 0.01))
         d1 = sup.after_failed_attempt(1, verification_observed=True)
-        assert d1.action == "escalate" and d1.recommended_model == "acme/frontier-1" and d1.acted_on
+        assert d1.action == "escalate" and d1.recommended_model == "acme/frontier-1"
+        assert d1.acted_on is None  # pending until the next attempt really calls the model
+        sup.mark_acted()
+        assert d1.acted_on is True
         assert d1.evidence["models_tried"] == ["acme/mid-1"] and d1.evidence["spend_usd"] == 0.01
         ap.usage.append(AttemptUsage(2, "acme/frontier-1", 10, 5, 0.02))
         d2 = sup.after_failed_attempt(2, verification_observed=True)
-        assert d2.action == "stop" and d2.reason == "attempt_budget_exhausted"
+        assert d2.action == "stop" and d2.reason == "plan_attempts_exhausted"
         assert d2.evidence["attempts_so_far"] == 2 and d2.evidence["spend_usd"] == 0.03
 
     def test_unobserved_failure_never_escalates(self, repo):
         fp = FakeProvider([])
         ap = ModelActionProvider(fp, ["acme/mid-1"], repo)
         sup = _supervisor(ap, _plan("acme/frontier-1"))
+        ap.usage.append(AttemptUsage(1, "acme/mid-1", 10, 5, 0.01))
         d = sup.after_failed_attempt(1, verification_observed=False)
         assert d.action == "stop" and d.reason == "failure_not_directly_observed"
+        assert d.evidence["verification_source"] is None
 
     def test_shadow_decisions_are_never_acted_on(self, repo):
         fp = FakeProvider([])
         ap = ModelActionProvider(fp, ["acme/mid-1"], repo)
         sup = _supervisor(ap, _plan("acme/frontier-1"), mode=RECORD_SHADOW, not_acted="user_ladder")
+        ap.usage.append(AttemptUsage(1, "acme/mid-1", 10, 5, 0.01))
         d = sup.after_failed_attempt(1, verification_observed=True)
         assert d.action == "escalate" and d.acted_on is False and d.not_acted_reason == "user_ladder"
         assert sup.to_record()["record_mode"] == "shadow" and sup.to_record()["not_applied_reason"] == "user_ladder"
@@ -135,7 +143,7 @@ class TestInTheLoop:
         r = run_bounded_loop(repo, TASK, ap, CHECK, max_attempts=3, supervisor=sup)
         # Without the supervisor attempt 3 would rerun acme/frontier-1 with no new evidence;
         # the plan (one rung) allows two attempts, so the policy stops on its attempt cap.
-        assert r.status == "failed" and r.stop_reason == "supervisor_stop:attempt_budget_exhausted"
+        assert r.status == "failed" and r.stop_reason == "supervisor_stop:plan_attempts_exhausted"
         assert fp.calls == ["acme/mid-1", "acme/frontier-1"]
         assert [a.supervision["action"] for a in r.attempts] == ["escalate", "stop"]
         assert all(a.supervision["acted_on"] for a in r.attempts)
@@ -171,15 +179,13 @@ class TestInTheLoop:
     def test_a_provider_that_cannot_switch_is_recorded_not_acted_on(self, repo):
         fp = FakeProvider([_writes(("out.txt", "a")), _writes(("out.txt", "ok"))])
         ap = ModelActionProvider(fp, ["acme/mid-1"], repo)
-        usage = ap.usage
-
         def plain(ctx):  # a bare callable provider: no set_next_model
             return ap(ctx)
 
         sup = RecoverySupervisor(plan=_plan("acme/frontier-1"), usage_for=lambda n: ap.usage_for(n),
                                  record_mode=RECORD_APPLIED, first_model="acme/mid-1", first_class="balanced_coding")
         r = run_bounded_loop(repo, TASK, plain, CHECK, max_attempts=2, supervisor=sup)
-        assert r.status == "verified" and fp.calls == ["acme/mid-1", "acme/mid-1"] and usage is ap.usage
+        assert r.status == "verified" and fp.calls == ["acme/mid-1", "acme/mid-1"]
         assert r.attempts[0].supervision["acted_on"] is False
         assert r.attempts[0].supervision["not_acted_reason"] == "provider_cannot_switch"
 
@@ -196,11 +202,101 @@ class TestInTheLoop:
         assert block["evidence"]["history"] == "not_used"
         receipt = build_shard_receipt(entry, index=0)
         ev = receipt.recorded_evidence["supervisor_routing"]
-        assert ev["decisions"][1]["reason"] == "attempt_budget_exhausted"
+        assert ev["decisions"][1]["reason"] == "plan_attempts_exhausted"
         assert ev["decisions"][0]["evidence"]["spend_known"] is True
         text = render_full_shard_receipt(receipt)
-        assert "SUPERVISOR" in text and "attempt_budget_exhausted" in text
+        assert "SUPERVISOR" in text and "plan_attempts_exhausted" in text
         assert "supervisor_routing" not in receipt_to_dict(receipt, extended=True)  # closed wire contract
+
+
+    def test_not_consulted_where_the_loop_would_not_retry(self, repo):
+        # Identical failure output: the loop stops on its own rule first.
+        same = [PY, "-c", "import sys; sys.exit(1)"]
+        fp = FakeProvider([_writes(("out.txt", "a")), _writes(("out.txt", "b"))])
+        ap = ModelActionProvider(fp, ["acme/mid-1", "acme/frontier-1"], repo)
+        sup = _supervisor(ap, _plan("acme/frontier-1"))
+        r = run_bounded_loop(repo, TASK, ap, same, max_attempts=3, supervisor=sup)
+        assert r.stop_reason == "no_progress_identical_failure"
+        assert r.attempts[0].supervision is not None and r.attempts[1].supervision is None
+        # A verifier that could not even start: no outcome was observed. The policy
+        # never escalates on a failure nobody saw, so an applied supervisor stops
+        # the retry the loop would otherwise have made.
+        fp2 = FakeProvider([_writes(("out.txt", "a")), _writes(("out.txt", "b"))])
+        ap2 = ModelActionProvider(fp2, ["acme/mid-1"], repo)
+        sup2 = _supervisor(ap2, _plan("acme/frontier-1"))
+        r2 = run_bounded_loop(repo, TASK, ap2, ["definitely-not-a-command-xyz"], max_attempts=3, supervisor=sup2)
+        assert r2.attempts[0].verification.observed is False
+        if r2.stop_reason == "verifier_setup_failed":
+            assert sup2.decisions == []  # detected as an environment problem: not a boundary
+        else:
+            assert r2.stop_reason == "supervisor_stop:failure_not_directly_observed" and len(fp2.calls) == 1
+            assert sup2.decisions[0].evidence["verification_source"] is None
+
+    def test_a_budget_that_would_stop_is_never_pre_empted(self, repo):
+        fp = FakeProvider([_writes(("out.txt", "a")), _writes(("out.txt", "b")), _writes(("out.txt", "ok"))])
+        led = BudgetLedger(BudgetLimits(max_attempts=2))
+        ap = ModelActionProvider(fp, ["acme/mid-1", "acme/frontier-1"], repo, budget=led)
+        sup = _supervisor(ap, _plan("acme/frontier-1", "acme/mid-1", max_attempts=4))
+        r = run_bounded_loop(repo, TASK, ap, CHECK, max_attempts=3, budget=led, supervisor=sup)
+        # After attempt 2 the budget refuses another attempt: the budget stops, the supervisor stays silent.
+        assert r.status == "budget_exhausted" and r.stop_reason == "budget_max_attempts"
+        assert led.limit_reached == "max_attempts" and led.action == "stopped_before_attempt"
+        assert r.attempts[0].supervision["action"] == "escalate" and r.attempts[1].supervision is None
+        assert len(sup.decisions) == 1
+
+    def test_an_escalation_is_acted_on_only_once_the_next_attempt_ran(self, repo):
+        class Flaky(FakeProvider):
+            def execute(self, model, prompt, system=None, max_tokens=None):
+                if len(self.calls) == 1:
+                    self.calls.append(model)
+                    raise RuntimeError("provider down")
+                return super().execute(model, prompt, system, max_tokens)
+
+        fp = Flaky([_writes(("out.txt", "a")), _writes(("out.txt", "ok"))])
+        ap = ModelActionProvider(fp, ["acme/mid-1"], repo)
+        sup = _supervisor(ap, _plan("acme/frontier-1"))
+        r = run_bounded_loop(repo, TASK, ap, CHECK, max_attempts=3, supervisor=sup)
+        assert r.status == "error" and r.stop_reason == "provider_error"
+        d = r.attempts[0].supervision
+        assert d["action"] == "escalate" and d["acted_on"] is False
+        assert d["not_acted_reason"] == "run_ended_before_retry"
+        # And when the retry does run, the record confirms it afterwards.
+        fp_ok = FakeProvider([_writes(("out.txt", "a")), _writes(("out.txt", "ok"))])
+        ap_ok = ModelActionProvider(fp_ok, ["acme/mid-1"], repo)
+        sup_ok = _supervisor(ap_ok, _plan("acme/frontier-1"))
+        r_ok = run_bounded_loop(repo, TASK, ap_ok, CHECK, max_attempts=2, supervisor=sup_ok)
+        assert r_ok.attempts[0].supervision["acted_on"] is True and fp_ok.calls[1] == "acme/frontier-1"
+        assert r_ok.attempts[0].supervision["evidence"]["ladder_model"] == "acme/mid-1"
+        assert r_ok.attempts[0].supervision["evidence"]["changed_next_model"] is True
+
+    def test_a_provider_reporting_variant_ids_does_not_confuse_the_plan(self, repo):
+        class Variant(FakeProvider):
+            def execute(self, model, prompt, system=None, max_tokens=None):
+                self.calls.append(model)
+                return ChatResponse(self.replies.pop(0), f"{model}:nitro", UsageStats(10, 5, 15, self.cost))
+
+        fp = Variant([_writes(("out.txt", "a")), _writes(("out.txt", "b")), _writes(("out.txt", "ok"))])
+        ap = ModelActionProvider(fp, ["acme/mid-1", "acme/frontier-1"], repo)
+        sup = _supervisor(ap, _plan("acme/frontier-1"))
+        r = run_bounded_loop(repo, TASK, ap, CHECK, max_attempts=3, supervisor=sup)
+        # The plan speaks requested ids: the rung that just ran is recognised and not rerun.
+        assert fp.calls == ["acme/mid-1", "acme/frontier-1"]
+        assert r.stop_reason == "supervisor_stop:plan_attempts_exhausted"
+        assert r.attempts[1].supervision["evidence"]["models_tried"] == ["acme/mid-1", "acme/frontier-1"]
+
+    def test_the_reask_uses_the_recommended_model(self, repo):
+        fp = FakeProvider([_writes(("out.txt", "a")), "not json", _writes(("out.txt", "ok"))])
+        ap = ModelActionProvider(fp, ["acme/mid-1"], repo)
+        sup = _supervisor(ap, _plan("acme/frontier-1"))
+        r = run_bounded_loop(repo, TASK, ap, CHECK, max_attempts=2, supervisor=sup)
+        assert r.status == "verified" and fp.calls == ["acme/mid-1", "acme/frontier-1", "acme/frontier-1"]
+
+    def test_unknown_attempt_usage_is_a_recorded_non_decision(self, repo):
+        sup = RecoverySupervisor(plan=_plan("acme/frontier-1"), usage_for=lambda n: (None, None),
+                                 record_mode=RECORD_APPLIED, first_model="acme/mid-1", first_class="balanced_coding")
+        d = sup.after_failed_attempt(1, verification_observed=True)
+        assert d.action == "stop" and d.reason == "attempt_usage_unknown"
+        assert d.acted_on is False and d.not_acted_reason == "attempt_usage_unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +372,7 @@ class TestCli:
         r = _invoke(monkeypatch, fp)
         assert r.exit_code == 0, r.output
         body = json.loads(r.stdout)
-        assert body["status"] == "failed" and body["stop_reason"] == "supervisor_stop:attempt_budget_exhausted"
+        assert body["status"] == "failed" and body["stop_reason"] == "supervisor_stop:plan_attempts_exhausted"
         assert fp.calls == ["acme/mid-1", "acme/frontier-1"]
         assert body["supervisor_routing"]["record_mode"] == "applied"
         assert _last_run(repo)["supervisor_routing"]["decisions"][-1]["acted_on"] is True
@@ -313,6 +409,7 @@ class TestCli:
         _Handler.seen = []
         # A model the catalog does not know: the decision cannot call it "explicit",
         # but the user named it, so nothing is supervised and nothing is looked up.
+        monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path / "home2"))  # no cache can answer for it
         fp2 = FakeProvider([_writes(("out.txt", "ok"))])
         assert _invoke(monkeypatch, fp2, "--model", "nobody/custom").exit_code == 0
         entry = _last_run(repo)
