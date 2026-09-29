@@ -299,7 +299,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             budget=budget,
             supervisor=supervisor,
             progress=progress_renderer,
-            approver=run_approver,
+            organisation_approver=run_approver,
             blocked_write_patterns=permissions.blocked_write_paths,
             approval_write_patterns=permissions.approval_write_paths,
             blocked_command_prefixes=permissions.blocked_command_prefixes,
