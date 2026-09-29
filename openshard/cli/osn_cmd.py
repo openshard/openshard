@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import click
 
 if TYPE_CHECKING:
-    from openshard.osn.budget import BudgetLedger
+    from openshard.osn.budget import BudgetLedger, BudgetLimits
     from openshard.osn.routing import OsnRouting
     from openshard.sync.capabilities import LazyCapabilities
 
