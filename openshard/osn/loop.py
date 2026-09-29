@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from openshard.osn.budget import STATUS_BUDGET_EXHAUSTED, BudgetExhausted, BudgetLedger
-from openshard.policy.command_execution import evaluate_command
+from openshard.policy.command_execution import organisation_command_blocked
 from openshard.policy.decision import PolicyDecision, make_deny
 from openshard.policy.file_mutation import Approver, FileMutationGate
 from openshard.safety.sanitize import sanitize_text
@@ -334,19 +334,19 @@ def run_bounded_loop(
             command_decision=command_record,
         )
 
-    # The verifier command is user-supplied, so an ordinary "ask" classification
-    # is already explicitly approved by the user choosing it. Built-in denies and
-    # organisation command-prefix denies remain final and stop before any model call.
-    command_policy = evaluate_command(
+    # --verify-cmd is an explicit user choice and historically runs as supplied.
+    # Organisation policy may tighten that boundary with an explicit prefix deny,
+    # but the generic command classifier must not reinterpret existing verifier
+    # forms (for example python -c with punctuation) and break compatibility.
+    command_blocked = organisation_command_blocked(
         verify_command,
-        blocked_prefixes=blocked_command_prefixes,
+        blocked_command_prefixes,
     )
-    if command_policy.decision == "ask":
-        command_policy.approval_granted = True
-        command_record = _stored_decision(command_policy, "user_verify_command")
-    else:
-        command_record = _stored_decision(command_policy)
-    if command_policy.decision == "deny":
+    command_record = {
+        "scope": "verification:execute",
+        "state": "blocked" if command_blocked else "granted",
+    }
+    if command_blocked:
         return _receipt("blocked", "verification_command_policy_block")
 
     # An applied supervisor escalation is confirmed only when the next attempt
