@@ -599,6 +599,9 @@ def _cli_repo(tmp_path, monkeypatch, platform, keys):
     monkeypatch.setenv(sync_config.ORG_ENV, ORG)
     monkeypatch.setenv(sync_config.API_KEY_ENV, KEY)
     _Handler.routes[f"/v1/orgs/{ORG}/capabilities"] = (200, _caps_body(ORG, keys))
+    _Handler.routes[f"/v1/orgs/{ORG}/policy"] = (200, json.dumps({
+        "organisation_id": ORG, "version": None, "hash": None, "policy": None, "updated_at": None,
+    }).encode())
     return repo
 
 
