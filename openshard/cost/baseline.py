@@ -3,7 +3,7 @@ from __future__ import annotations
 from openshard.providers.openrouter import compute_cost
 
 BASELINE_MODELS: list[tuple[str, str]] = [
-    ("GPT-5.5",    "openai/gpt-5.5"),
+    ("GPT-5.6 Sol", "openai/gpt-5.6-sol"),
     ("Sonnet 4.6", "anthropic/claude-sonnet-4.6"),
 ]
 
@@ -51,7 +51,7 @@ FRONTIER_BASELINE_MODEL = "anthropic/claude-sonnet-4.6"
 FULL_COMPARISON_MODELS: list[tuple[str, str]] = [
     ("Sonnet 4.6", "anthropic/claude-sonnet-4.6"),
     ("GPT-5.5",    "openai/gpt-5.5"),
-    ("Opus 4.7",   "anthropic/claude-opus-4.7"),
+    ("Opus 4.8",   "anthropic/claude-opus-4.8"),
 ]
 
 
