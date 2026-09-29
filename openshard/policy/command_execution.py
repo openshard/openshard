@@ -82,9 +82,26 @@ def _shape_problem(argv: object) -> str | None:
     return None
 
 
+def _blocked_by_prefix(argv: list[str], prefixes: tuple[str, ...]) -> bool:
+    if not prefixes or not argv:
+        return False
+    executable = min(
+        (PureWindowsPath(argv[0]).name, PurePosixPath(argv[0]).name),
+        key=len,
+    ) or argv[0]
+    tokens = [executable.lower(), *(t.lower() for t in argv[1:])]
+    for raw in prefixes:
+        prefix = raw.lower().split()
+        if prefix and tokens[: len(prefix)] == prefix:
+            return True
+    return False
+
+
 def evaluate_command(
     argv: list[str],
     declared_safety: CommandSafety | None = None,
+    *,
+    blocked_prefixes: tuple[str, ...] = (),
 ) -> PolicyDecision:
     """Evaluate a proposed command. Pure; no I/O.
 
@@ -97,6 +114,15 @@ def evaluate_command(
         return make_deny(
             ACTION_COMMAND_EXEC, None, f"malformed command: {problem}",
             source=SOURCE, severity="high",
+        )
+
+    if _blocked_by_prefix(argv, blocked_prefixes):
+        return make_deny(
+            ACTION_COMMAND_EXEC,
+            command_label(argv),
+            "blocked by organisation command policy",
+            source="organisation_policy",
+            severity="high",
         )
 
     safety, reason = classify_command_safety(argv, VerificationSource.config)
@@ -162,13 +188,15 @@ def authorize_command(
     argv: list[str],
     approver: CommandApprover | None = None,
     declared_safety: CommandSafety | None = None,
+    *,
+    blocked_prefixes: tuple[str, ...] = (),
 ) -> CommandOutcome:
     """Decide whether *argv* may run. Never executes anything.
 
     Deny is final: an approver is not consulted. Ask without an approver, with
     a refusing approver, or with one that raises, does not proceed.
     """
-    decision = evaluate_command(argv, declared_safety)
+    decision = evaluate_command(argv, declared_safety, blocked_prefixes=blocked_prefixes)
     outcome = CommandOutcome(argv=list(argv) if isinstance(argv, list) else [], decision=decision)
     if decision.decision == "allow":
         return outcome
@@ -234,7 +262,13 @@ def run_gated_command(
     capture: bool = False,
     timeout: float | None = None,
     runner: Callable[..., Any] | None = None,
+    blocked_prefixes: tuple[str, ...] = (),
 ) -> CommandOutcome:
     """Authorize then execute *argv* (no shell). Executes only if permitted."""
-    outcome = authorize_command(argv, approver, declared_safety)
+    outcome = authorize_command(
+        argv,
+        approver,
+        declared_safety,
+        blocked_prefixes=blocked_prefixes,
+    )
     return execute_authorized(outcome, cwd, capture=capture, timeout=timeout, runner=runner)
