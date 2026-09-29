@@ -128,6 +128,17 @@ def test_malformed_argv_denied(bad):
     assert evaluate_command(bad).decision == "deny"  # type: ignore[arg-type]
 
 
+def test_organisation_command_prefix_can_only_tighten():
+    decision = evaluate_command(
+        ["npm", "run", "build"],
+        blocked_prefixes=("npm run build",),
+    )
+    assert decision.decision == "deny"
+    assert decision.source == "organisation_policy"
+    # A non-matching organisation rule leaves the existing classifier unchanged.
+    assert evaluate_command(["git", "status"], blocked_prefixes=("npm run build",)).decision == "allow"
+
+
 def test_batch_script_with_cmd_metachar_denied():
     assert evaluate_command(["tool.cmd", "a&calc"]).decision == "deny"
 
