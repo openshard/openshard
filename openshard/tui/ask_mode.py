@@ -124,9 +124,9 @@ def answer_ask_mode(question: str) -> str:
 
 
 _ROSTER_FRONTIER = (
-    "openai/gpt-5.5",
-    "openai/gpt-5.5-pro",
-    "anthropic/claude-opus-4.7",
+    "openai/gpt-5.6-sol",
+    "anthropic/claude-opus-4.8",
+    "anthropic/claude-fable-5",
     "anthropic/claude-sonnet-4.6",
 )
 _ROSTER_VALUE = (
