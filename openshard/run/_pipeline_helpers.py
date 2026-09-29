@@ -510,6 +510,8 @@ def _log_run(
                 "model": sr.model,
                 "duration": round(sr.duration, 2),
                 "cost": sr.cost,
+                "tokens_input": sr.tokens_input,
+                "tokens_output": sr.tokens_output,
             }
             for sr in stage_runs
         ]
