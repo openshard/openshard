@@ -489,6 +489,8 @@ class TestStageRunsDispatchLogging(unittest.TestCase):
             duration=0.5,
             cost=0.0001,
             summary="done",
+            tokens_input=120,
+            tokens_output=30,
         )
 
     def test_planning_stage_model_logged(self):
@@ -498,6 +500,8 @@ class TestStageRunsDispatchLogging(unittest.TestCase):
         self.assertIn("stage_runs", entry)
         self.assertEqual(entry["stage_runs"][0]["model"], MODEL_STRONG)
         self.assertEqual(entry["stage_runs"][0]["stage_type"], "planning")
+        self.assertEqual(entry["stage_runs"][0]["tokens_input"], 120)
+        self.assertEqual(entry["stage_runs"][0]["tokens_output"], 30)
 
     def test_implementation_stage_model_logged(self):
         sr = self._make_stage_run("implementation", MODEL_MAIN)

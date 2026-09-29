@@ -389,15 +389,23 @@ class TestOsnControlEvidence:
 
 
 class TestModelStageMetrics:
-    def test_duration_and_cost_added_only_when_recorded(self):
+    def test_duration_cost_and_tokens_added_only_when_recorded(self):
         d = _ext(_entry(stage_runs=[
-            {"stage_type": "planning", "model": "anthropic/claude-sonnet-4.6", "duration": 5.68, "cost": 0.002253},
-            {"stage_type": "implementation", "model": "z-ai/glm-5.1", "duration": "x", "cost": True},
+            {
+                "stage_type": "planning", "model": "anthropic/claude-sonnet-4.6",
+                "duration": 5.68, "cost": 0.002253, "tokens_input": 3900, "tokens_output": 600,
+            },
+            {
+                "stage_type": "implementation", "model": "z-ai/glm-5.1",
+                "duration": "x", "cost": True, "tokens_input": -1, "tokens_output": "bad",
+            },
             {"stage_type": "verification", "model": "m/v", "duration": 1.5},
         ]))["model_stages"]
         assert d[0]["duration_seconds"] == 5.68 and d[0]["cost_usd"] == 0.002253
+        assert d[0]["tokens_input"] == 3900 and d[0]["tokens_output"] == 600
         assert set(d[1]) == {"stage", "model"}
         assert d[2]["duration_seconds"] == 1.5 and "cost_usd" not in d[2]
+        assert "tokens_input" not in d[2] and "tokens_output" not in d[2]
 
     def test_observed_models_fallback_carries_no_metrics(self):
         d = _ext(_entry(capture={"models_seen": ["a/x", "b/y"]}))["model_stages"]

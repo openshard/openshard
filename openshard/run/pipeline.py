@@ -1293,6 +1293,8 @@ class RunPipeline:
                             duration=time.time() - _stage_t0,
                             cost=_plan_usage.estimated_cost if _plan_usage else None,
                             summary="Implementation plan produced",
+                            tokens_input=_plan_usage.prompt_tokens if _plan_usage else None,
+                            tokens_output=_plan_usage.completion_tokens if _plan_usage else None,
                         ))
                     except ProviderError:
                         _impl_task = task   # planning failed — fall back to plain task
@@ -1334,6 +1336,8 @@ class RunPipeline:
                         duration=time.time() - _stage_t0,
                         cost=exec_result.usage.estimated_cost if exec_result.usage else None,
                         summary=exec_result.summary,
+                        tokens_input=exec_result.usage.prompt_tokens if exec_result.usage else None,
+                        tokens_output=exec_result.usage.completion_tokens if exec_result.usage else None,
                     ))
 
         # --- Single-stage execution (simple tasks, opencode, stages not triggered) -
