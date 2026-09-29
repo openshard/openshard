@@ -634,7 +634,7 @@ class TestCli:
         body = json.loads(r.stdout)
         assert body["adaptive_routing"]["applied"] is True and body["models"][0] == "acme/mid-1"
         assert body["capability_snapshot"]["source"] == "fresh"
-        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"]
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy", f"/v1/orgs/{ORG}/capabilities"]
         entry = _last_run(repo)
         assert entry["capability_snapshot"]["enabled"] == {
             "agent_budgets": False, "adaptive_routing": True, "supervisor_routing": False,
@@ -651,7 +651,7 @@ class TestCli:
         body = json.loads(r.stdout)
         assert body["status"] == "verified"
         assert [m for m, _ in fp.calls] == ["acme/mid-1", "acme/frontier-1", "zeta/frontier-2"]
-        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"]  # one read for the whole run
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy", f"/v1/orgs/{ORG}/capabilities"]  # one read for the whole run
         snap = body["capability_snapshot"]["enabled"]
         assert snap == {"agent_budgets": True, "adaptive_routing": True, "supervisor_routing": True}
         sup = body["supervisor_routing"]
@@ -700,7 +700,7 @@ class TestCli:
             r = _invoke(monkeypatch, fp)
         assert r.exit_code == 0, r.output
         assert json.loads(r.stdout)["adaptive_routing"]["applied"] is True
-        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"]
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy", f"/v1/orgs/{ORG}/capabilities"]
 
 
 class TestDecisionCompat:
