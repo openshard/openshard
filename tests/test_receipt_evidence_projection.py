@@ -16,7 +16,7 @@ from openshard.sync import envelope
 NEW_KEYS = (
     "policy_decisions", "approval_detail", "sandbox_detail", "execution_loop", "base_commit",
     "content_hash", "session", "routing", "retry",
-    "agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot",
+    "agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot", "organisation_policy",
 )
 SHA = "c2dbd23"
 HASH = "sha256:" + "a" * 64
