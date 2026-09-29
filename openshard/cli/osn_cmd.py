@@ -122,7 +122,7 @@ class _OsnProgressRenderer:
             action = data.get("action")
             model = data.get("model")
             if action == "escalate" and model:
-                echo(f"  Verification failure observed")
+                echo("  Verification failure observed")
                 echo(f"  → {_friendly_model(model)}")
             else:
                 echo(f"  {action or 'stop'} · {data.get('reason') or 'no reason recorded'}")
