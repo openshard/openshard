@@ -164,6 +164,8 @@ def apply_sandbox_changes(
     exclude: list[str] | None = None,
     approver: Approver | None = None,
     explicit_files: list[str] | None = None,
+    blocked_patterns: tuple[str, ...] = (),
+    approval_patterns: tuple[str, ...] = (),
 ) -> SandboxApplyResult:
     """Copy changed sandbox files into repo_root, gated by file-mutation policy.
 
@@ -191,7 +193,11 @@ def apply_sandbox_changes(
         return SandboxApplyResult(sandbox_path=str(sandbox_path), reason=reason)
 
     result = SandboxApplyResult(sandbox_path=str(sandbox_path))
-    gate = FileMutationGate(approver=approver)
+    gate = FileMutationGate(
+        approver=approver,
+        blocked_patterns=blocked_patterns,
+        approval_patterns=approval_patterns,
+    )
     for rel in files:
         try:
             dest = resolve_safe_repo_path(repo_root, rel)
