@@ -63,6 +63,7 @@ category: security
 keywords: [auth, login, session, django]
 languages: [python]
 framework: django
+version: 1.2.0
 ---
 
 Long-form body that should be ignored.
