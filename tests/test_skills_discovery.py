@@ -83,6 +83,11 @@ def test_discover_skills_happy_path(tmp_path):
     assert s.keywords == ["auth", "login", "session", "django"]
     assert s.languages == ["python"]
     assert s.framework == "django"
+    assert s.source == "local"
+    assert s.scope == "repository"
+    assert s.version == "1.2.0"
+    assert s.digest.startswith("sha256:")
+    assert len(s.digest) == 71
 
 
 def test_discover_skills_missing_optional_fields(tmp_path):
@@ -99,6 +104,8 @@ def test_discover_skills_missing_optional_fields(tmp_path):
     assert s.framework is None
     assert s.keywords == []
     assert s.category == "standard"
+    assert s.version is None
+    assert s.digest.startswith("sha256:")
 
 
 def test_discover_skills_no_skills_dir(tmp_path):
