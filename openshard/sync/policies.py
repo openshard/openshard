@@ -22,7 +22,11 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from openshard.osn.budget import BudgetLimits
-from openshard.routing.model_policy import COST_CLASS_ORDER, ModelPolicyConfig, model_policy_from_config
+from openshard.routing.model_policy import (
+    COST_CLASS_ORDER,
+    ModelPolicyConfig,
+    model_policy_from_config,
+)
 from openshard.sync.config import PlatformLink, resolve_link, sync_disabled
 from openshard.sync.transport import TOTAL_TIMEOUT_SECONDS
 
