@@ -55,8 +55,9 @@ class RateLimitError(ProviderRateLimitError, OpenRouterError):
 # Pricing snapshot
 # ---------------------------------------------------------------------------
 
-# Dollars per million tokens — (prompt, completion).  Updated 2026-04.
-# Prices marked ~est are approximate; verify current rates at openrouter.ai/models.
+# Dollars per million tokens — (prompt, completion).
+# Current-family values below are sourced from the checked-in OpenRouter snapshot dated 2026-09-25.
+# Older values marked ~est are compatibility fallbacks.
 #
 # NOTE: a few legacy IDs below (anthropic/claude-opus-4.6,
 # anthropic/claude-haiku-4.5-20251001, openai/gpt-4o, openai/gpt-4o-mini) are
@@ -74,6 +75,7 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "anthropic/claude-sonnet-4.6":          (3.00,  15.00),
     "anthropic/claude-opus-4.6":            (15.00, 75.00),
     "anthropic/claude-opus-4.7":            (15.00, 75.00),   # ~est
+    "anthropic/claude-opus-4.8":            (5.00,  25.00),
     # Main worker
     "z-ai/glm-5.1":                         (0.10,   0.10),   # ~est
     # Cheap coding
@@ -86,8 +88,15 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     # OpenAI
     "openai/gpt-4o":                        (2.50,  10.00),
     "openai/gpt-4o-mini":                   (0.15,   0.60),
-    # GPT-5 family
-    "openai/gpt-5.5":                       (5.00,  30.00),   # ~est
+    # Current OpenAI families — verified from 2026-09-25 provider snapshot
+    "openai/gpt-5.6-luna":                  (0.20,   1.20),
+    "openai/gpt-5.6-sol":                   (2.00,  10.00),
+    "openai/gpt-5.6-terra":                 (2.00,  12.00),
+    "openai/gpt-6-astra":                  (10.00,  50.00),
+    "openai/gpt-6-luna":                    (0.10,   0.50),
+    "openai/gpt-6-sol":                     (2.00,  10.00),
+    # Compatibility pricing retained for historical Receipts/configs
+    "openai/gpt-5.5":                       (5.00,  30.00),
     # Tiny helpers
     "openai/gpt-5.4-nano":                  (0.10,   0.40),   # ~est
 }
