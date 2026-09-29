@@ -248,6 +248,7 @@ def build_osn_run_entry(
     explicit_model: str | None = None,
     supervisor_record: dict | None = None,
     capability_snapshot: dict | None = None,
+    organisation_policy: dict | None = None,
 ) -> dict:
     from openshard.adapters.claude_code_import import _sanitize_model, _sanitize_task
     from openshard.history.receipt_identity import ensure_receipt_id
@@ -401,6 +402,9 @@ def build_osn_run_entry(
     if capability_snapshot:
         # Which Platform capabilities governed this run, read once at its start.
         entry["capability_snapshot"] = dict(capability_snapshot)
+    if organisation_policy:
+        # Policy identity only. The full organisation document never enters the Receipt.
+        entry["organisation_policy"] = dict(organisation_policy)
 
     try:
         from openshard.history.repo_identity import REPO_IDENTITY_FIELD, capture_repo_identity
