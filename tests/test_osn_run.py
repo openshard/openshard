@@ -447,7 +447,8 @@ def test_provider_error_keeps_safe_detail_and_human_summary(repo):
     )
     assert entry["error_class"] == "provider_error"
     assert entry["error_message"] == "upstream service unavailable"
-    assert entry["summary"] == "Provider failed before verification; repository unchanged."
+    assert entry["summary"] == "OSN loop error: provider_error"
+    assert entry["human_summary"] == "Provider failed before verification; repository unchanged."
     assert entry["sandbox"]["sandbox_enabled"] is True
     assert entry["repo_name"] == "repo"
 
