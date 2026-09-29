@@ -1769,13 +1769,16 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
 
     lines += ["", f"{_INDENT}COST"]
     total = receipt.cost_raw
-    retry_costs = [
-        a.get("cost_usd") for a in retry_attempts
-        if isinstance(a, dict) and isinstance(a.get("cost_usd"), (int, float))
-    ]
+    retry_costs: list[float] = []
+    for attempt in retry_attempts:
+        if not isinstance(attempt, dict):
+            continue
+        retry_cost = attempt.get("cost_usd")
+        if isinstance(retry_cost, (int, float)) and not isinstance(retry_cost, bool):
+            retry_costs.append(float(retry_cost))
     first_cost = total
     if total is not None and retry_attempts and len(retry_costs) == len(retry_attempts):
-        first_cost = max(0.0, total - sum(float(x) for x in retry_costs))
+        first_cost = max(0.0, total - sum(retry_costs))
     if first_cost is not None:
         lines.append(_row(selected, "$" + f"{first_cost:.4f}", width=28))
     for attempt in retry_attempts:
