@@ -111,33 +111,25 @@ class TestPolicyDecisions:
 
 
 class TestPermissionScopes:
-    def test_projects_only_fixed_capability_names(self):
-        d = _ext(_entry(policy_decisions=[
-            {
-                "decision_id": "1", "action": "file_write", "resource": "src/a.py",
-                "decision": "allow", "reason": "ordinary path", "source": "file_mutation_policy",
-                "approval_required": False, "approval_granted": None,
-            },
-            {
-                "decision_id": "2", "action": "command_exec", "resource": "pytest -q",
-                "decision": "ask", "reason": "approval", "source": "command_policy",
-                "approval_required": True, "approval_granted": True,
-            },
+    def test_projects_only_explicit_fixed_capability_evidence(self):
+        d = _ext(_entry(permission_evidence=[
+            {"scope": "repo:write", "state": "granted"},
+            {"scope": "verification:execute", "state": "granted"},
+            {"scope": "secret:path", "state": "blocked"},
+            {"scope": "repo:read", "state": "invented"},
         ]))
         assert d["permissions"] == [
             {"scope": "repo:write", "state": "granted"},
             {"scope": "verification:execute", "state": "granted"},
         ]
-        assert "src/a.py" not in json.dumps(d["permissions"])
-        assert "pytest" not in json.dumps(d["permissions"])
 
-    def test_strictest_state_wins_for_same_capability(self):
-        d = _ext(_entry(policy_decisions=[
-            {"decision_id": "1", "action": "file_write", "decision": "allow"},
-            {"decision_id": "2", "action": "file_write", "decision": "ask", "approval_granted": None},
-            {"decision_id": "3", "action": "file_write", "decision": "deny"},
-        ]))
-        assert d["permissions"] == [{"scope": "repo:write", "state": "blocked"}]
+    def test_policy_decisions_can_be_compacted_before_recording_permission_evidence(self):
+        permissions = ev.permission_scopes_block([
+            {"action": "file_write", "decision": "allow"},
+            {"action": "file_write", "decision": "ask", "approval_granted": None},
+            {"action": "file_write", "decision": "deny"},
+        ])
+        assert permissions == [{"scope": "repo:write", "state": "blocked"}]
 
 
 class TestApprovalDetail:
