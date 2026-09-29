@@ -51,8 +51,18 @@ def _matches(rel: str, patterns: tuple[str, ...]) -> bool:
     )
 
 
-def evaluate_file_write(rel: str) -> PolicyDecision:
-    """Evaluate a proposed write to *rel* (repo-relative). Pure; no I/O."""
+def evaluate_file_write(
+    rel: str,
+    *,
+    blocked_patterns: tuple[str, ...] = (),
+    approval_patterns: tuple[str, ...] = (),
+) -> PolicyDecision:
+    """Evaluate a proposed write to *rel* (repo-relative). Pure; no I/O.
+
+    Organisation patterns can only tighten the built-in policy. A built-in
+    deny always wins, then organisation denies, then either source may require
+    approval.
+    """
     if ":" in rel:  # NTFS alternate data streams / drive-relative forms
         return make_deny(
             ACTION_FILE_WRITE, rel, "path contains ':' (alternate stream or drive form)",
@@ -63,8 +73,18 @@ def evaluate_file_write(rel: str) -> PolicyDecision:
             ACTION_FILE_WRITE, rel, "protected path (secrets/VCS/OpenShard state)",
             source=SOURCE, severity="high",
         )
+    if blocked_patterns and _matches(rel, blocked_patterns):
+        return make_deny(
+            ACTION_FILE_WRITE, rel, "blocked by organisation write-path policy",
+            source="organisation_policy", severity="high",
+        )
     if _matches(rel, _ASK_PATTERNS):
         return make_ask(ACTION_FILE_WRITE, rel, "sensitive path requires approval", source=SOURCE)
+    if approval_patterns and _matches(rel, approval_patterns):
+        return make_ask(
+            ACTION_FILE_WRITE, rel, "organisation policy requires approval for this path",
+            source="organisation_policy",
+        )
     return make_allow(ACTION_FILE_WRITE, rel, "ordinary path", source=SOURCE)
 
 
@@ -85,11 +105,19 @@ class FileMutationGate:
     """Collects per-file outcomes and decides which proposals may execute."""
 
     approver: Approver | None = None
+    blocked_patterns: tuple[str, ...] = ()
+    approval_patterns: tuple[str, ...] = ()
     outcomes: list[FileMutationOutcome] = field(default_factory=list)
 
     def authorize(self, rel: str) -> bool:
         """True only if policy (plus approval when asked) permits the write."""
-        decision = resolve_policy_decisions([evaluate_file_write(rel)])
+        decision = resolve_policy_decisions([
+            evaluate_file_write(
+                rel,
+                blocked_patterns=self.blocked_patterns,
+                approval_patterns=self.approval_patterns,
+            )
+        ])
         outcome = FileMutationOutcome(
             path=rel, decision=decision.decision, reason=decision.reason, severity=decision.severity,
             policy=decision,
