@@ -97,6 +97,19 @@ def _blocked_by_prefix(argv: list[str], prefixes: tuple[str, ...]) -> bool:
     return False
 
 
+def organisation_command_blocked(
+    argv: list[str],
+    blocked_prefixes: tuple[str, ...],
+) -> bool:
+    """Whether an organisation explicitly blocked this argv prefix.
+
+    This is intentionally narrower than the generic command classifier: OSN's
+    --verify-cmd is an explicit user choice and keeps its historic execution
+    semantics unless an organisation rule tightens it.
+    """
+    return _blocked_by_prefix(argv, blocked_prefixes)
+
+
 def evaluate_command(
     argv: list[str],
     declared_safety: CommandSafety | None = None,
