@@ -521,6 +521,21 @@ class TestStageRunsDispatchLogging(unittest.TestCase):
         self.assertEqual(plan_logged["model"], MODEL_STRONG)
         self.assertEqual(impl_logged["model"], MODEL_MAIN)
 
+    def test_stage_token_usage_logged_when_recorded(self):
+        sr = StageRun(
+            stage=Stage(stage_type="planning", description="test stage"),
+            model=MODEL_STRONG,
+            duration=0.5,
+            cost=0.0001,
+            summary="done",
+            prompt_tokens=120,
+            completion_tokens=30,
+        )
+        self._call(stage_runs=[sr])
+        entry = self._read_entry()
+        self.assertEqual(entry["stage_runs"][0]["prompt_tokens"], 120)
+        self.assertEqual(entry["stage_runs"][0]["completion_tokens"], 30)
+
     def test_no_stage_runs_key_when_empty(self):
         self._call(stage_runs=[])
         entry = self._read_entry()
