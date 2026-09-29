@@ -193,7 +193,7 @@ def _parse_policy_document(value: Any) -> dict[str, Any] | None:
             raw = float(raw)
         parsed_budgets[key] = raw
 
-    parsed_permissions = {
+    parsed_permissions: dict[str, list[str]] = {
         "blocked_write_paths": [],
         "approval_write_paths": [],
         "blocked_command_prefixes": [],
