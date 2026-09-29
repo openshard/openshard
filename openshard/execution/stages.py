@@ -47,6 +47,8 @@ class StageRun:
     duration: float
     cost: float | None
     summary: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 # ---------------------------------------------------------------------------
