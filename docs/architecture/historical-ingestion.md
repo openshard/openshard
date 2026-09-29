@@ -290,13 +290,13 @@ The historical receipt reuses the existing record shape, so `build_shard_receipt
 
 ### Sync
 
-A contract change is needed for `origin`, `import` (key, source hash, parser, job id, locator hash only), `facts`, and an attachments endpoint. This is **deferred**: it must be designed together with the platform `packages/contracts` after Verification v2 lands.
+The current Receipt sync contract already carries the evidence needed to host reconstructed history safely: `origin`, capture completeness, token provenance and structured verification including `imported_transcript`. Historical receipts therefore use the normal privacy-bounded Receipt projection. The raw `import` block, source hashes/locators, `facts` references and attachment sidecar are not added to the hosted payload; they remain local. A future attachments/import-detail contract may expose additional scrubbed provenance, but hosted Receipts do not depend on it.
 
 ## 10. Local vs hosted
 
 | Concern | Local (Core) | Hosted (Platform, later) |
 |---|---|---|
-| Local agent history, local files | Only here; the data never has to leave the machine | Shows the results via sync |
+| Local agent history, local files | Source bytes and import bookkeeping stay local | Receives only the existing scrubbed Receipt projection, labelled `historical_import` |
 | Upload, Drive, Dropbox, S3 | Not in the first milestone (the user downloads the file and imports it by path, once file-drop exists) | Blob connectors in a Python worker running `openshard.ingest`, with transient bytes only. **Not being built yet**; the connector interface is designed for them (opaque cursors, streaming `open`, `check_access`, etag-based stat). |
 | GitHub / CI | `gh`/PAT enrichment (later milestone) | GitHub App enrichment |
 | Canonical store | `runs.jsonl` + attachment sidecar | Rows keyed by `(org, receipt_id)` + an attachments table |
@@ -433,7 +433,7 @@ Tests follow the `tests/test_grok_bot_capture.py` structure (Normalize / Ingest 
 | 5 | Model and cost | Model ids are stored as the transcript records them (scrubbed), with no catalog normalization. Cost is not produced in v1: `facts.cost` is `unknown`. Tokens are kept, with `tokens_provenance = imported_transcript`. |
 | 6 | Grown sources | A grown source produces a new receipt with `import.supersedes`, as proposed. `--no-update` skips it. |
 | 7 | Grouping | One session → one Shard, recorded as `import.grouping`. |
-| 8 | Sync | Historical receipts are **not sync-eligible** (`sync/envelope.py` reason `historical_import_sync_deferred`) until the contract gains `origin`/`import`/`facts`. |
+| 8 | Sync | Historical receipts sync through the same privacy-bounded Receipt projection as live runs. Hosted data keeps `origin = historical_import`, partial capture and weak verification provenance; raw import metadata and source locators remain local. |
 | 9 | Retention | Only `source_sha256` and `locator_hash` are kept. |
 
 ### Differences from the design above
