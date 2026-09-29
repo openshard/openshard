@@ -118,8 +118,10 @@ def test_organisation_command_policy_blocks_before_model_call(repo):
     assert rec.stop_reason == "verification_command_policy_block"
     assert rec.attempts == []
     assert calls == []
-    assert rec.command_decision is not None
-    assert rec.command_decision["source"] == "organisation_policy"
+    assert rec.command_decision == {
+        "scope": "verification:execute",
+        "state": "blocked",
+    }
 
 
 def test_ask_path_without_approver_blocks(repo):
