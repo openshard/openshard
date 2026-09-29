@@ -508,13 +508,23 @@ def retry_block(entry: dict) -> dict[str, Any] | None:
     return None if _all_none(block) else block
 
 
-def stage_metrics(entry: dict) -> list[dict[str, float | None]]:
-    """Per-stage duration/cost, parallel to the ``model_stages`` built from ``stage_runs``."""
+def stage_metrics(entry: dict) -> list[dict[str, float | int | None]]:
+    """Per-stage duration, cost and provider-reported token counts.
+
+    The list stays parallel to ``model_stages`` built from ``stage_runs``.
+    Token fields are present only when the run stored them; older records keep
+    their previous shape at projection time.
+    """
     runs = entry.get("stage_runs")
     if not isinstance(runs, list):
         return []
     return [
-        {"duration_seconds": _number(s.get("duration")), "cost_usd": _number(s.get("cost"))}
+        {
+            "duration_seconds": _number(s.get("duration")),
+            "cost_usd": _number(s.get("cost")),
+            "tokens_input": _count(s.get("prompt_tokens")),
+            "tokens_output": _count(s.get("completion_tokens")),
+        }
         for s in runs
         if isinstance(s, dict) and "stage_type" in s and "model" in s
     ]
