@@ -124,6 +124,46 @@ def policy_decisions_block(decisions: Any) -> list[dict[str, Any]] | None:
     return out or None
 
 
+_PERMISSION_SCOPE_BY_ACTION = {
+    "file_write": "repo:write",
+    "command_exec": "verification:execute",
+    "read_only_review": "repo:read",
+}
+_PERMISSION_STATE_RANK = {"granted": 0, "requested": 1, "blocked": 2}
+
+
+def permission_scopes_block(decisions: Any) -> list[dict[str, str]] | None:
+    """Privacy-safe capability outcomes derived from actual policy decisions.
+
+    The scope names are fixed vocabulary; resource paths and raw commands are
+    never copied. When multiple decisions touch one capability, the strictest
+    observed state wins.
+    """
+    if not isinstance(decisions, list):
+        return None
+    states: dict[str, str] = {}
+    for raw in decisions:
+        if not isinstance(raw, dict):
+            continue
+        scope = _PERMISSION_SCOPE_BY_ACTION.get(raw.get("action"))
+        if scope is None:
+            continue
+        decision = raw.get("decision")
+        if decision == "deny":
+            state = "blocked"
+        elif decision == "ask":
+            granted = raw.get("approval_granted")
+            state = "granted" if granted is True else "blocked" if granted is False else "requested"
+        elif decision == "allow":
+            state = "granted"
+        else:
+            continue
+        previous = states.get(scope)
+        if previous is None or _PERMISSION_STATE_RANK[state] > _PERMISSION_STATE_RANK[previous]:
+            states[scope] = state
+    return [{"scope": scope, "state": states[scope]} for scope in sorted(states)] or None
+
+
 def approval_detail_block(entry: dict) -> dict[str, Any] | None:
     request = _dict(entry.get("approval_request"))
     receipt = _dict(entry.get("approval_receipt"))
