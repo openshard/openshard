@@ -389,7 +389,14 @@ def _caps_body(org, keys):
 
 @pytest.fixture
 def platform():
-    _Handler.routes, _Handler.seen = {}, []
+    no_policy = lambda org: json.dumps({
+        "organisation_id": org, "version": None, "hash": None, "policy": None, "updated_at": None,
+    }).encode()
+    _Handler.routes = {
+        f"/v1/orgs/{ORG}/policy": (200, no_policy(ORG)),
+        f"/v1/orgs/{ORG_B}/policy": (200, no_policy(ORG_B)),
+    }
+    _Handler.seen = []
     httpd = HTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
