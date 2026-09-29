@@ -1258,11 +1258,30 @@ def skills(ctx: click.Context):
 
 
 @skills.command("list")
-def skills_list():
+@click.option("--json", "as_json", is_flag=True, help="Print machine-readable Skill identity and integrity metadata.")
+def skills_list(as_json: bool):
     """List all skills discovered in the current repository."""
     from openshard.skills.discovery import discover_skills
 
     skills_ = discover_skills(Path.cwd())
+    if as_json:
+        import json as _json
+
+        click.echo(_json.dumps([
+            {
+                "slug": s.slug,
+                "name": s.name,
+                "description": s.description,
+                "category": s.category,
+                "source": s.source,
+                "scope": s.scope,
+                "version": s.version,
+                "digest": s.digest,
+            }
+            for s in skills_
+        ], sort_keys=True))
+        return
+
     if not skills_:
         click.echo("No skills found. Add skill definitions to .openshard/skills/*/SKILL.md")
         return
