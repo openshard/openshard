@@ -159,8 +159,11 @@ APPROVAL_SOURCE = "file_mutation_policy"
 
 
 def _policy_decisions(receipt: LoopReceipt) -> list[dict]:
-    """Every write decision the loop observed, oldest attempt first, bounded."""
+    """Every command/write decision the loop observed, bounded and privacy-safe."""
     out: list[dict] = []
+    command = getattr(receipt, "command_decision", None)
+    if isinstance(command, dict) and command.get("decision_id") and command.get("decision"):
+        out.append(dict(command))
     for a in receipt.attempts:
         for d in getattr(a, "decisions", None) or []:
             if isinstance(d, dict) and d.get("decision_id") and d.get("decision"):
