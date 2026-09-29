@@ -159,11 +159,8 @@ APPROVAL_SOURCE = "file_mutation_policy"
 
 
 def _policy_decisions(receipt: LoopReceipt) -> list[dict]:
-    """Every command/write decision the loop observed, bounded and privacy-safe."""
+    """Every write decision the loop observed, oldest attempt first, bounded."""
     out: list[dict] = []
-    command = getattr(receipt, "command_decision", None)
-    if isinstance(command, dict) and command.get("decision_id") and command.get("decision"):
-        out.append(dict(command))
     for a in receipt.attempts:
         for d in getattr(a, "decisions", None) or []:
             if isinstance(d, dict) and d.get("decision_id") and d.get("decision"):
@@ -171,6 +168,33 @@ def _policy_decisions(receipt: LoopReceipt) -> list[dict]:
             if len(out) >= MAX_POLICY_DECISIONS:
                 return out
     return out
+
+
+_PERMISSION_RANK = {"granted": 0, "requested": 1, "blocked": 2}
+
+
+def _permission_evidence(receipt: LoopReceipt, decisions: list[dict]) -> list[dict]:
+    """Explicit capability outcomes only; never paths, argv or free text."""
+    from openshard.history.receipt_evidence import permission_scopes_block
+
+    items = permission_scopes_block(decisions) or []
+    command = getattr(receipt, "command_decision", None)
+    if isinstance(command, dict):
+        scope = command.get("scope")
+        state = command.get("state")
+        if scope == "verification:execute" and state in _PERMISSION_RANK:
+            items.append({"scope": scope, "state": state})
+
+    strictest: dict[str, str] = {}
+    for item in items:
+        scope = item.get("scope")
+        state = item.get("state")
+        if not isinstance(scope, str) or state not in _PERMISSION_RANK:
+            continue
+        previous = strictest.get(scope)
+        if previous is None or _PERMISSION_RANK[state] > _PERMISSION_RANK[previous]:
+            strictest[scope] = state
+    return [{"scope": scope, "state": strictest[scope]} for scope in sorted(strictest)]
 
 
 APPROVAL_GRANTED = "granted"
@@ -298,6 +322,9 @@ def build_osn_run_entry(
         "sandbox": {"sandbox_enabled": True, "sandbox_type": "isolated_copy"},
     }
     decisions = _policy_decisions(receipt)
+    permissions = _permission_evidence(receipt, decisions)
+    if permissions:
+        entry["permission_evidence"] = permissions
     if decisions:
         # The file gate's allow / ask / deny per proposed write, so history, failure
         # classification and trust scoring see an OSN policy block as a policy block.
