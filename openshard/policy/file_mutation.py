@@ -105,6 +105,7 @@ class FileMutationGate:
     """Collects per-file outcomes and decides which proposals may execute."""
 
     approver: Approver | None = None
+    organisation_approver: Approver | None = None
     blocked_patterns: tuple[str, ...] = ()
     approval_patterns: tuple[str, ...] = ()
     outcomes: list[FileMutationOutcome] = field(default_factory=list)
@@ -125,9 +126,16 @@ class FileMutationGate:
         self.outcomes.append(outcome)
         if decision.decision == "allow":
             return True
-        if decision.decision == "ask" and self.approver is not None:
+        if decision.decision == "ask":
+            selected_approver = (
+                self.organisation_approver
+                if decision.source == "organisation_policy" and self.organisation_approver is not None
+                else self.approver
+            )
+            if selected_approver is None:
+                return False
             try:
-                granted, source = self.approver(rel, decision)
+                granted, source = selected_approver(rel, decision)
             except Exception:
                 granted, source = False, APPROVER_ERROR
             outcome.approval_granted = bool(granted)
