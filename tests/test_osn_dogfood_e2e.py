@@ -270,6 +270,13 @@ def _cli_repo(tmp_path, monkeypatch, platform):
         "capabilities": [{"key": k, "name": k, "description": "", "stage": "internal", "enabled": True,
                           "enabled_at": "x"} for k in ("agent_budgets", "adaptive_routing")],
     }).encode())
+    _Handler.routes[f"/v1/orgs/{ORG}/policy"] = (200, json.dumps({
+        "organisation_id": ORG,
+        "version": None,
+        "hash": None,
+        "policy": None,
+        "updated_at": None,
+    }).encode())
     return repo
 
 
