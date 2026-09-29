@@ -43,7 +43,7 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
 
 
 def _parse_body_preview(text: str, max_lines: int = 3) -> str:
-    """Return the first *max_lines* non-blank lines after the closing frontmatter ```---```."""
+    """Return the first *max_lines* non-blank lines after the closing frontmatter ``---``."""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return ""
