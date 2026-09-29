@@ -655,10 +655,9 @@ _REGISTRY: list[ModelEntry] = [
     # OpenRouter snapshot dated 2026-09-25.
     #
     # GPT-5.6 Sol is the validated frontier OpenAI lane. Luna is a stable,
-    # low-cost/fast lane. GPT-5.6 Terra and the GPT-6 family remain provider-
-    # discovered catalog entries rather than curated registry entries until
-    # evaluation promotes them. Catalog presence alone must never make a fresh
-    # model a production default.
+    # low-cost/fast lane. GPT-5.6 Terra and the GPT-6 family are tracked as
+    # watchlist entries until evaluation promotes them. Catalog presence alone
+    # must never make a fresh model a production default.
     # ------------------------------------------------------------------
     ModelEntry(
         id="openai/gpt-5.6-luna",
@@ -695,6 +694,78 @@ _REGISTRY: list[ModelEntry] = [
         latency_class="normal",
         cost_class="expensive",
         notes="Current validated OpenAI frontier lane; listed by OpenRouter in the 2026-09-25 snapshot.",
+    ),
+    ModelEntry(
+        id="openai/gpt-5.6-terra",
+        lifecycle="watchlist",
+        display_name="OpenAI: GPT-5.6 Terra",
+        provider="OpenAI",
+        tier="experimental",
+        roles=(),
+        experimental=False,
+        context_length=1_050_000,
+        input_modalities=("text", "image", "file"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="unknown",
+        cost_class="unknown",
+        notes="Provider-listed in the 2026-09-25 snapshot; watchlist until Openshard evaluation.",
+    ),
+    ModelEntry(
+        id="openai/gpt-6-astra",
+        lifecycle="watchlist",
+        display_name="OpenAI: GPT-6 Astra",
+        provider="OpenAI",
+        tier="experimental",
+        roles=(),
+        experimental=False,
+        context_length=1_050_000,
+        input_modalities=("text", "image", "file"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="unknown",
+        cost_class="unknown",
+        notes="Provider-listed in the 2026-09-25 snapshot; watchlist until Openshard evaluation.",
+    ),
+    ModelEntry(
+        id="openai/gpt-6-luna",
+        lifecycle="watchlist",
+        display_name="OpenAI: GPT-6 Luna",
+        provider="OpenAI",
+        tier="experimental",
+        roles=(),
+        experimental=False,
+        context_length=1_050_000,
+        input_modalities=("text", "image", "file"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="unknown",
+        cost_class="unknown",
+        notes="Provider-listed in the 2026-09-25 snapshot; watchlist until Openshard evaluation.",
+    ),
+    ModelEntry(
+        id="openai/gpt-6-sol",
+        lifecycle="watchlist",
+        display_name="OpenAI: GPT-6 Sol",
+        provider="OpenAI",
+        tier="experimental",
+        roles=(),
+        experimental=False,
+        context_length=1_050_000,
+        input_modalities=("text", "image", "file"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="unknown",
+        cost_class="unknown",
+        notes="Provider-listed in the 2026-09-25 snapshot; watchlist until Openshard evaluation.",
     ),
     # GPT-5.5 remains readable and explicitly selectable for compatibility,
     # but it no longer participates in fresh default/specialist routing.
