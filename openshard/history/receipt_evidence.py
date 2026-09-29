@@ -316,6 +316,41 @@ def capability_snapshot_block(entry: dict) -> dict[str, Any] | None:
     }
 
 
+_POLICY_SOURCES = frozenset({"fresh", "stale_cache", "none", "unavailable"})
+
+
+def organisation_policy_block(entry: dict) -> dict[str, Any] | None:
+    """Privacy-safe identity of the organisation policy that governed a run."""
+    raw = _dict(entry.get("organisation_policy"))
+    if raw.get("schema_version") != 1 or raw.get("source") not in _POLICY_SOURCES:
+        return None
+    applied = _bool(raw.get("applied"))
+    override = _bool(raw.get("repository_override_applied"))
+    refreshed = _bool(raw.get("refreshed_at_run_start"))
+    if applied is None or override is None or refreshed is None:
+        return None
+    version = raw.get("organisation_policy_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        version = None
+    policy_hash = raw.get("organisation_policy_hash")
+    if not isinstance(policy_hash, str) or not _CONTENT_HASH_RE.match(policy_hash):
+        policy_hash = None
+    effective_hash = raw.get("effective_policy_hash")
+    if not isinstance(effective_hash, str) or not _CONTENT_HASH_RE.match(effective_hash):
+        effective_hash = None
+    return {
+        "schema_version": 1,
+        "organisation_policy_version": version,
+        "organisation_policy_hash": policy_hash,
+        "source": raw["source"],
+        "applied": applied,
+        "repository_override_applied": override,
+        "effective_policy_hash": effective_hash,
+        "refreshed_at_run_start": refreshed,
+        "reason": _text(raw.get("reason"), 64),
+    }
+
+
 MAX_SUPERVISOR_DECISIONS = 8
 _SUPERVISOR_ACTIONS = frozenset({"escalate", "stop"})
 
@@ -497,6 +532,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "adaptive_routing": adaptive_routing_block,
         "supervisor_routing": supervisor_routing_block,
         "capability_snapshot": capability_snapshot_block,
+        "organisation_policy": organisation_policy_block,
         "base_commit": base_commit_value,
         "content_hash": content_hash_value,
         "session": session_block,
@@ -521,6 +557,7 @@ __all__ = [
     "base_commit_value",
     "content_hash_value",
     "execution_loop_block",
+    "organisation_policy_block",
     "policy_decisions_block",
     "project_entry_evidence",
     "retry_block",

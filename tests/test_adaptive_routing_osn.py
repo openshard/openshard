@@ -247,6 +247,16 @@ def _caps_body(org, keys):
     ]}).encode()
 
 
+def _policy_body(org):
+    return json.dumps({
+        "organisation_id": org,
+        "version": None,
+        "hash": None,
+        "policy": None,
+        "updated_at": None,
+    }).encode()
+
+
 @pytest.fixture
 def platform():
     _Handler.routes, _Handler.seen = {}, []
@@ -270,6 +280,7 @@ def _cli_repo(tmp_path, monkeypatch, platform, keys):
     monkeypatch.setenv(sync_config.ORG_ENV, ORG)
     monkeypatch.setenv(sync_config.API_KEY_ENV, KEY)
     _Handler.routes[f"/v1/orgs/{ORG}/capabilities"] = (200, _caps_body(ORG, keys))
+    _Handler.routes[f"/v1/orgs/{ORG}/policy"] = (200, _policy_body(ORG))
     return repo
 
 
@@ -299,7 +310,7 @@ class TestCli:
         assert "adaptive_routing" not in entry
         assert entry["routing_provenance"]["record_mode"] == "shadow"
         assert entry["routing_provenance"]["selected_model"] == "acme/mid-1"  # recorded, not run
-        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"]
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy", f"/v1/orgs/{ORG}/capabilities"]
 
     def test_capability_on_routes_and_escalates_along_the_plan(self, tmp_path, monkeypatch, platform, catalog):
         repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing"])
@@ -339,7 +350,7 @@ class TestCli:
         entry = _last_run(repo)
         prov = entry["routing_provenance"]
         assert prov["selection_mode"] == "explicit" and prov["record_mode"] == "shadow"
-        assert _Handler.seen == []  # no capability request when the user named the model
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy"]  # policy is always checked; capability is not
 
     def test_capability_on_with_a_budget_shares_one_lookup(self, tmp_path, monkeypatch, platform, catalog):
         import yaml
@@ -356,7 +367,7 @@ class TestCli:
         assert len(fp.calls) == 1
         assert body["agent_budgets"]["enforced"] is True and body["adaptive_routing"]["applied"] is True
         assert body["adaptive_routing"]["escalation_ladder"] == [] and body["adaptive_routing"]["max_attempts"] == 1
-        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"]
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy", f"/v1/orgs/{ORG}/capabilities"]
 
     def test_user_escalation_ladder_wins_with_the_capability_on(self, tmp_path, monkeypatch, platform, catalog):
         repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing"])
@@ -383,14 +394,15 @@ class TestCli:
         assert "not applied (provider_mismatch)" in r.output
         assert _last_run(repo)["routing_provenance"]["record_mode"] == "shadow"
 
-    def test_sync_kill_switch_leaves_routing_as_before(self, tmp_path, monkeypatch, platform, catalog):
+    def test_sync_kill_switch_refuses_a_linked_run_before_work(self, tmp_path, monkeypatch, platform, catalog):
         repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing"])
         monkeypatch.setenv(sync_config.DISABLE_ENV, "off")
         fp = FakeProvider([_writes(("out.txt", "ok"))])
         r = _invoke(monkeypatch, fp)
-        assert r.exit_code == 0, r.output
-        assert json.loads(r.stdout)["models"] == [route(TASK).model]
-        assert "adaptive_routing" not in _last_run(repo) and _Handler.seen == []
+        assert r.exit_code == 1
+        assert "Organisation policy could not be refreshed (platform_sync_disabled)" in r.output
+        assert fp.calls == [] and not (repo / ".openshard" / "runs.jsonl").exists()
+        assert _Handler.seen == []
 
     def test_stats_routing_attributes_an_applied_run_to_the_chosen_model(self, tmp_path, monkeypatch, platform, catalog):
         from openshard.routing.adaptive.outcome import outcome_from_receipt

@@ -355,6 +355,9 @@ def _cli_repo(tmp_path, monkeypatch, platform, keys):
     _Handler.routes[f"/v1/orgs/{ORG}/capabilities"] = (200, json.dumps({"organisation_id": ORG, "capabilities": [
         {"key": k, "name": k, "description": "", "stage": "internal", "enabled": True, "enabled_at": "x"} for k in keys
     ]}).encode())
+    _Handler.routes[f"/v1/orgs/{ORG}/policy"] = (200, json.dumps({
+        "organisation_id": ORG, "version": None, "hash": None, "policy": None, "updated_at": None,
+    }).encode())
     return repo
 
 
@@ -378,7 +381,7 @@ class TestCli:
         assert fp.calls == ["acme/mid-1", "acme/frontier-1"]
         assert body["supervisor_routing"]["record_mode"] == "applied"
         assert _last_run(repo)["supervisor_routing"]["decisions"][-1]["acted_on"] is True
-        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"]  # one shared lookup
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy", f"/v1/orgs/{ORG}/capabilities"]
 
     def test_user_ladder_keeps_the_supervisor_in_shadow(self, tmp_path, monkeypatch, platform, catalog):
         repo = _cli_repo(tmp_path, monkeypatch, platform, ["adaptive_routing", "supervisor_routing"])
@@ -415,5 +418,5 @@ class TestCli:
         fp2 = FakeProvider([_writes(("out.txt", "ok"))])
         assert _invoke(monkeypatch, fp2, "--model", "nobody/custom").exit_code == 0
         entry = _last_run(repo)
-        assert "supervisor_routing" not in entry and _Handler.seen == []
+        assert "supervisor_routing" not in entry and _Handler.seen == [f"/v1/orgs/{ORG}/policy"]
         assert fp2.calls == ["nobody/custom"] and entry["routing_provenance"]["selection_mode"] == "none"

@@ -230,6 +230,7 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
         "adaptive_routing": evidence.get("adaptive_routing"),
         "supervisor_routing": evidence.get("supervisor_routing"),
         "capability_snapshot": evidence.get("capability_snapshot"),
+        "organisation_policy": evidence.get("organisation_policy"),
     }
 
 

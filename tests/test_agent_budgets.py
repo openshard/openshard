@@ -389,7 +389,16 @@ def _caps_body(org, keys):
 
 @pytest.fixture
 def platform():
-    _Handler.routes, _Handler.seen = {}, []
+    def no_policy(org):
+        return json.dumps({
+            "organisation_id": org, "version": None, "hash": None, "policy": None, "updated_at": None,
+        }).encode()
+
+    _Handler.routes = {
+        f"/v1/orgs/{ORG}/policy": (200, no_policy(ORG)),
+        f"/v1/orgs/{ORG_B}/policy": (200, no_policy(ORG_B)),
+    }
+    _Handler.seen = []
     httpd = HTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
@@ -451,7 +460,7 @@ class TestCli:
         body = json.loads(r.stdout)
         assert body["status"] == "verified" and body["attempts"] == 2 and "agent_budgets" not in body
         assert "agent_budgets" not in _last_run(repo)
-        assert _Handler.seen == []  # no capability request without a configured budget
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy"]  # policy is checked even when no local budget exists
 
     def test_capability_off_records_not_enforced_and_runs_as_before(self, tmp_path, monkeypatch, platform):
         repo = _cli_repo(tmp_path, monkeypatch, {"max_attempts": 1})
@@ -465,18 +474,16 @@ class TestCli:
         assert entry["osn_loop"]["status"] == "verified" and len(entry["osn_loop"]["attempts"]) == 2
         assert entry["agent_budgets"] == {"capability": "agent_budgets", "enforced": False,
                                           "reason": "capability_not_enabled", "limits": {"max_attempts": 1}}
-        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"]
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy", f"/v1/orgs/{ORG}/capabilities"]
 
-    def test_platform_unavailable_keeps_the_feature_off(self, tmp_path, monkeypatch):
+    def test_platform_unavailable_refuses_a_linked_run_before_work(self, tmp_path, monkeypatch):
         repo = _cli_repo(tmp_path, monkeypatch, {"max_attempts": 1})
         _link_env(monkeypatch, f"http://127.0.0.1:{_closed_port()}")
         fp = FakeProvider([_writes(("out.txt", "nope")), _writes(("out.txt", "ok"))])
         r = _invoke(monkeypatch, fp)
-        assert r.exit_code == 0, r.output
-        entry = _last_run(repo)
-        assert entry["osn_loop"]["status"] == "verified" and len(fp.calls) == 2
-        assert entry["agent_budgets"]["enforced"] is False
-        assert entry["agent_budgets"]["reason"] == "platform_unreachable_or_refused"
+        assert r.exit_code == 1
+        assert "Organisation policy could not be refreshed (platform_policy_unavailable)" in r.output
+        assert fp.calls == [] and not (repo / ".openshard" / "runs.jsonl").exists()
 
     def test_no_platform_link_keeps_the_feature_off(self, tmp_path, monkeypatch):
         repo = _cli_repo(tmp_path, monkeypatch, {"max_writes": 1})
@@ -524,7 +531,7 @@ class TestCli:
         r2 = _invoke(monkeypatch, fp2, "--json")
         assert r2.exit_code == 0, r2.output
         assert json.loads(r2.stdout)["agent_budgets"]["enforced"] is True
-        assert _Handler.seen == [f"/v1/orgs/{ORG}/capabilities"] * 2
+        assert _Handler.seen == [f"/v1/orgs/{ORG}/policy", f"/v1/orgs/{ORG}/capabilities"] * 2
 
     def test_capability_on_text_output_shows_the_budget_line(self, tmp_path, monkeypatch, platform):
         _cli_repo(tmp_path, monkeypatch, {"max_writes": 1})
@@ -571,16 +578,14 @@ class TestCli:
         assert r.exit_code == 2
         assert "could not be parsed" in r.output and fp.calls == []
 
-    def test_platform_sync_kill_switch_stops_the_capability_read(self, tmp_path, monkeypatch, platform):
+    def test_platform_sync_kill_switch_refuses_a_linked_run(self, tmp_path, monkeypatch, platform):
         repo = _cli_repo(tmp_path, monkeypatch, {"max_attempts": 1})
         _link_env(monkeypatch, f"http://127.0.0.1:{platform.server_address[1]}")
         _Handler.routes[f"/v1/orgs/{ORG}/capabilities"] = (200, _caps_body(ORG, ["agent_budgets"]))
         monkeypatch.setenv(sync_config.DISABLE_ENV, "off")
         fp = FakeProvider([_writes(("out.txt", "nope")), _writes(("out.txt", "ok"))])
         r = _invoke(monkeypatch, fp)
-        assert r.exit_code == 0, r.output
-        entry = _last_run(repo)
-        assert entry["osn_loop"]["status"] == "verified" and len(fp.calls) == 2
-        assert entry["agent_budgets"]["enforced"] is False
-        assert entry["agent_budgets"]["reason"] == "platform_sync_disabled"
+        assert r.exit_code == 1
+        assert "Organisation policy could not be refreshed (platform_sync_disabled)" in r.output
+        assert fp.calls == [] and not (repo / ".openshard" / "runs.jsonl").exists()
         assert _Handler.seen == []  # no request left the machine

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import click
 
 if TYPE_CHECKING:
-    from openshard.osn.budget import BudgetLedger
+    from openshard.osn.budget import BudgetLedger, BudgetLimits
     from openshard.osn.routing import OsnRouting
     from openshard.sync.capabilities import LazyCapabilities
 
@@ -198,20 +198,54 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         if Path(rel).is_absolute() or ".." in Path(rel).parts:
             raise click.UsageError(f"--context-file must be repo-relative: {rel}")
 
+    from openshard.config.settings import load_config_safe
     from openshard.sync.capabilities import LazyCapabilities
+    from openshard.sync.policies import (
+        PolicyUnavailable,
+        combine_budget_limits,
+        combine_model_policy,
+        effective_policy_hash,
+        enforce_models_allowed,
+        repository_override_present,
+        resolve_organisation_policy,
+    )
+
+    repo_config, config_valid, config_path = load_config_safe(cwd=repo_root)
+    if not config_valid:
+        raise click.UsageError(f"{config_path} could not be parsed; refusing to run with an unreadable config.")
+    try:
+        organisation_policy = resolve_organisation_policy()
+        model_policy = combine_model_policy(repo_config, organisation_policy)
+        effective_limits, local_limits, _org_limits = combine_budget_limits(repo_config, organisation_policy)
+    except PolicyUnavailable as exc:
+        raise click.ClickException(
+            f"Organisation policy could not be refreshed ({exc}); refusing to start a linked OSN run."
+        ) from None
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
 
     # One fresh capability read at run start (when a feature asks), frozen for
     # the whole run: a dashboard toggle applies to the next new run, and never
     # to a run already in progress.
     capabilities = LazyCapabilities(refresh=True)
     explicit_model = model  # the user's --model, if any; never re-evaluated by routing or a supervisor
-    budget, budget_record = _resolve_budget(repo_root, capabilities)
+    budget, budget_record = _resolve_budget(
+        capabilities,
+        effective_limits=effective_limits,
+        local_limits=local_limits,
+        organisation_policy=organisation_policy,
+    )
     attempts_allowed = max_attempts
     if budget is not None and budget.limits.max_attempts is not None:
         attempts_allowed = min(attempts_allowed, budget.limits.max_attempts)
     routing = _resolve_routing(task, repo_root, explicit_model=model, escalate=list(escalate),
-                               capabilities=capabilities, max_attempts=attempts_allowed,
+                               capabilities=capabilities, model_policy=model_policy,
+                               max_attempts=attempts_allowed,
                                cost_budget_usd=budget.limits.max_spend_usd if budget is not None else None)
+    try:
+        enforce_models_allowed(routing.models, model_policy)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
     provider_name, provider_obj = _resolve_provider(provider, routing.first_model)
     if routing.applied and routing.decision is not None \
             and provider_name not in tuple(routing.decision.selected_via or ()):
@@ -221,6 +255,10 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         from openshard.routing.engine import route
 
         routing.fall_back(REASON_PROVIDER_MISMATCH, route(task).model, provider=provider_name)
+        try:
+            enforce_models_allowed(routing.models, model_policy)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from None
     if routing.record is not None and not routing.record.get("applied"):
         click.echo(
             f"adaptive_routing: not applied ({routing.record.get('reason')}); using keyword routing.",
@@ -260,12 +298,21 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         routing_record=routing.record, explicit_model=routing.first_model if routing.decision is None else None,
         supervisor_record=supervisor.to_record() if supervisor is not None else None,
         capability_snapshot=capabilities.to_record(),
+        organisation_policy=(
+            organisation_policy.receipt_record(
+                effective_policy_hash=effective_policy_hash(model_policy, effective_limits),
+                repository_override_applied=repository_override_present(
+                    repo_config, has_config_file=config_path is not None,
+                ),
+            )
+            if organisation_policy is not None else None
+        ),
     )
     # Only present when a budget was configured / a capability was looked up:
     # the machine output is otherwise byte-for-byte what it was before.
     budget_output = {
         k: entry[k]
-        for k in ("agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot")
+        for k in ("agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot", "organisation_policy")
         if k in entry
     }
     store = repo_root / ".openshard"
@@ -325,7 +372,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
 
 
 def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, escalate: list[str],
-                     capabilities: LazyCapabilities, max_attempts: int | None = None,
+                     capabilities: LazyCapabilities, model_policy, max_attempts: int | None = None,
                      cost_budget_usd: float | None = None) -> OsnRouting:
     """First model and escalation ladder: the user's choice, else Routing V2 when
     the ``adaptive_routing`` capability is on, else the keyword router as before."""
@@ -334,11 +381,7 @@ def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, 
     from openshard.routing.engine import route
 
     def model_policy_loader():
-        from openshard.config.settings import load_config_safe
-        from openshard.routing.model_policy import model_policy_from_config
-
-        config, _valid, _path = load_config_safe(cwd=repo_root)
-        return model_policy_from_config(config if isinstance(config, dict) else {})
+        return model_policy
 
     def history_loader():
         from openshard.routing.adaptive.history_evidence import load_history_evidence
@@ -433,41 +476,37 @@ def _routing_line(record: dict | None) -> str | None:
     )
 
 
-def _resolve_budget(repo_root: Path, capabilities: LazyCapabilities) -> tuple[BudgetLedger | None, dict | None]:
-    """``(ledger, not_enforced_record)`` for this run: at most one of the two is set.
+def _resolve_budget(
+    capabilities: LazyCapabilities,
+    *,
+    effective_limits: BudgetLimits,
+    local_limits: BudgetLimits,
+    organisation_policy,
+) -> tuple[BudgetLedger | None, dict | None]:
+    """Resolve the hard budget for this run.
 
-    A budget comes from the repository's ``agent_budgets:`` config block and is
-    enforced only when the Platform confirms the ``agent_budgets`` capability
-    for the linked organisation. No block: nothing is looked up and nothing
-    changes. A block the Platform did not confirm is recorded as not enforced.
-    A config file that cannot be parsed is refused outright: whether it holds
-    a budget is unknowable, and a budget must never vanish silently.
+    A saved organisation policy is authoritative, so its effective budget
+    (including stricter repository overrides) is enforced without a feature
+    toggle. Local-only budgets retain their existing capability gate.
     """
-    from openshard.config.settings import load_config_safe
-    from openshard.osn.budget import CONFIG_KEY, BudgetLedger, BudgetLimits, not_enforced_record
+    from openshard.osn.budget import BudgetLedger, not_enforced_record
 
-    config, valid, path = load_config_safe(cwd=repo_root)
-    if not valid:
-        raise click.UsageError(f"{path} could not be parsed; refusing to run with an unreadable config.")
-    try:
-        limits = BudgetLimits.from_config(config.get(CONFIG_KEY) if isinstance(config, dict) else None)
-    except ValueError as exc:
-        raise click.UsageError(str(exc)) from None
-    if not limits.configured:
+    if organisation_policy is not None and organisation_policy.applied:
+        return (BudgetLedger(effective_limits), None) if effective_limits.configured else (None, None)
+    if not local_limits.configured:
         return None, None
 
     from openshard.sync.capabilities import CAPABILITY_AGENT_BUDGETS
 
     state = capabilities.state
     if state.enabled(CAPABILITY_AGENT_BUDGETS):
-        return BudgetLedger(limits), None
+        return BudgetLedger(local_limits), None
     reason = state.reason or "capability_not_enabled"
     click.echo(
         f"agent_budgets: not enabled for this organisation ({reason}); the configured budget is not enforced.",
         err=True,
     )
-    return None, not_enforced_record(limits, reason)
-
+    return None, not_enforced_record(local_limits, reason)
 
 def _budget_line(record: dict | None) -> str | None:
     if not isinstance(record, dict):

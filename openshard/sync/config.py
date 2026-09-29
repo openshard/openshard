@@ -68,6 +68,10 @@ class PlatformLink:
         """The capabilities enabled for *this* organisation; a key can read no other."""
         return f"{self.endpoint}/v1/orgs/{self.organisation_id}/capabilities"
 
+    def policy_url(self) -> str:
+        """The current organisation policy; the linked key can read only its organisation."""
+        return f"{self.endpoint}/v1/orgs/{self.organisation_id}/policy"
+
     def to_public_dict(self) -> dict:
         """Everything but the secret."""
         return {
