@@ -26,8 +26,8 @@ from typing import Any
 from openshard.osn.budget import STATUS_BUDGET_EXHAUSTED, BudgetExhausted, BudgetLedger
 from openshard.policy.decision import PolicyDecision, make_deny
 from openshard.policy.file_mutation import Approver, FileMutationGate
-from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
 from openshard.safety.sanitize import sanitize_text
+from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
 from openshard.verification.setup_failure import detect_setup_failure
 
 SCHEMA_VERSION = 1
