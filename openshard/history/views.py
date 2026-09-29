@@ -186,7 +186,7 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
 
 
 def _model_stages_to_list(receipt: ShardReceipt, *, extended: bool) -> list[dict[str, Any]]:
-    """``[{stage, model}]``, plus per-stage ``duration_seconds`` / ``cost_usd`` when recorded.
+    """``[{stage, model}]``, plus recorded per-stage duration, cost and token counts.
 
     The extra keys are extended-projection only (the default MCP shape is
     frozen), appear only for stages built from ``stage_runs`` and only when
@@ -200,7 +200,7 @@ def _model_stages_to_list(receipt: ShardReceipt, *, extended: bool) -> list[dict
     for i, (stage, model) in enumerate(receipt.model_stages):
         item: dict[str, Any] = {"stage": stage, "model": model}
         if aligned:
-            for key in ("duration_seconds", "cost_usd"):
+            for key in ("duration_seconds", "cost_usd", "tokens_input", "tokens_output"):
                 value = metrics[i].get(key)
                 if value is not None:
                     item[key] = value
