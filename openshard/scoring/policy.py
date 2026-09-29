@@ -13,21 +13,19 @@ CATEGORY_PREFERRED: dict[str, list[str]] = {
     "standard": [
         "anthropic/claude-sonnet-4.6",
         "deepseek/deepseek-v4-pro",
-        "openai/gpt-5.4",
+        "openai/gpt-5.6-luna",
         "z-ai/glm-5.1",
     ],
     "complex": [
-        "openai/gpt-5.5",
-        "openai/gpt-5.5-pro",
-        "anthropic/claude-opus-4.7",
+        "openai/gpt-5.6-sol",
+        "anthropic/claude-opus-4.8",
         "openai/gpt-5.4-pro",
         "openai/gpt-5.4",
         "anthropic/claude-sonnet-4.6",
     ],
     "security": [
-        "openai/gpt-5.5",
-        "openai/gpt-5.5-pro",
-        "anthropic/claude-opus-4.7",
+        "openai/gpt-5.6-sol",
+        "anthropic/claude-opus-4.8",
         "openai/gpt-5.4-pro",
         "anthropic/claude-sonnet-4.6",
     ],
@@ -51,9 +49,9 @@ CATEGORY_PREFERRED: dict[str, list[str]] = {
 # a candidate's slug (model ID with provider prefix stripped) when no
 # exact preferred ID is present in the inventory.
 CATEGORY_PREFERRED_FAMILIES: dict[str, list[str]] = {
-    "standard":    ["claude-sonnet", "deepseek", "gpt-5.4", "glm"],
-    "complex":     ["gpt-5.5", "claude-opus", "gpt-5.4", "claude-sonnet"],
-    "security":    ["gpt-5.5", "claude-opus", "gpt-5.4", "claude-sonnet"],
+    "standard":    ["claude-sonnet", "deepseek", "gpt-5.6", "glm"],
+    "complex":     ["gpt-5.6", "claude-opus", "gpt-5.4", "claude-sonnet"],
+    "security":    ["gpt-5.6", "claude-opus", "gpt-5.4", "claude-sonnet"],
     "boilerplate": ["deepseek", "gpt-5.4", "glm", "minimax"],
     "visual":      ["gemini-3.1", "qwen3.6", "kimi-k2"],
 }

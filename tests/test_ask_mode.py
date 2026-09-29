@@ -107,9 +107,9 @@ def test_lightweight_routes_to_cheap_control():
     assert "Low-cost" in result
 
 
-def test_model_roster_includes_gpt_5_5():
+def test_model_roster_includes_gpt_5_6_sol():
     result = answer_ask_mode("what models do you have")
-    assert "GPT-5.5" in result
+    assert "GPT-5.6 Sol" in result
 
 
 def test_model_roster_includes_kimi_k2_6():

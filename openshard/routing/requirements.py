@@ -359,8 +359,9 @@ def shadow_candidates(
     min_context_tokens: int | None = None,
     limit: int = 3,
 ) -> tuple[str, ...]:
-    """Discovered models that would satisfy *cls* if they were promoted, newest
-    first. Reported, never selected."""
+    """Models eligible for shadow evaluation that would satisfy *cls* if promoted,
+    newest first. Includes provider-discovered and curated watchlist entries.
+    Reported, never selected."""
     found = [
         e for e in entries
         if states.get(e.id) == STATE_ELIGIBLE_FOR_SHADOW

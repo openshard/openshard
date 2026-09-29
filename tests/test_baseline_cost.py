@@ -31,9 +31,9 @@ class TestFormatBaselineLine(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(result.startswith("Baseline estimate: "))
 
-    def test_contains_gpt55_label(self):
+    def test_contains_gpt56_sol_label(self):
         result = format_baseline_line(1_000_000, 1_000_000)
-        self.assertIn("GPT-5.5", result)
+        self.assertIn("GPT-5.6 Sol", result)
 
     def test_contains_sonnet46_label(self):
         result = format_baseline_line(1_000_000, 1_000_000)
@@ -51,11 +51,11 @@ class TestFormatBaselineLine(unittest.TestCase):
         result = format_baseline_line(500_000, 500_000)
         self.assertIn("Sonnet 4.6 $9.000", result)
 
-    def test_gpt55_cost_computed_correctly(self):
-        # openai/gpt-5.5: (5.00, 30.00) per million
-        # 500k prompt + 500k completion = 2.50 + 15.00 = $17.500
+    def test_gpt56_sol_cost_computed_correctly(self):
+        # openai/gpt-5.6-sol: (2.00, 10.00) per million
+        # 500k prompt + 500k completion = 1.00 + 5.00 = $6.000
         result = format_baseline_line(500_000, 500_000)
-        self.assertIn("GPT-5.5 $17.500", result)
+        self.assertIn("GPT-5.6 Sol $6.000", result)
 
     def test_three_decimal_places(self):
         import re
@@ -77,7 +77,7 @@ class TestFormatBaselineLine(unittest.TestCase):
         self.assertNotIn("x higher", result)
 
     def test_no_multiplier_when_baseline_cheaper_than_actual(self):
-        # 1k/1k → Sonnet 4.6 ≈ $0.018, GPT-5.5 ≈ $0.035; actual $1.00 → both ratios ≈ 0.02–0.04 (<1.05)
+        # 1k/1k → Sonnet 4.6 ≈ $0.018, GPT-5.6 Sol ≈ $0.035; actual $1.00 → both ratios ≈ 0.02–0.04 (<1.05)
         result = format_baseline_line(1_000, 1_000, actual_cost=1.0)
         self.assertIsNotNone(result)
         self.assertNotIn("x higher", result)
@@ -130,7 +130,7 @@ class TestFormatBaselineLine(unittest.TestCase):
             result = format_baseline_line(1_000_000, 1_000_000)
         self.assertIsNotNone(result)
         self.assertIn("Sonnet 4.6", result)
-        self.assertNotIn("GPT-5.5", result)
+        self.assertNotIn("GPT-5.6 Sol", result)
 
     # --- Custom models override ---
 
@@ -138,7 +138,7 @@ class TestFormatBaselineLine(unittest.TestCase):
         custom = [("Custom", "anthropic/claude-sonnet-4.6")]
         result = format_baseline_line(1_000_000, 1_000_000, models=custom)
         self.assertIn("Custom", result)
-        self.assertNotIn("GPT-5.5", result)
+        self.assertNotIn("GPT-5.6 Sol", result)
 
     # --- No prohibited language ---
 
@@ -154,8 +154,8 @@ class TestBaselineModelsConstant(unittest.TestCase):
     def test_has_two_entries(self):
         self.assertEqual(len(BASELINE_MODELS), 2)
 
-    def test_gpt55_is_first(self):
-        self.assertEqual(BASELINE_MODELS[0][1], "openai/gpt-5.5")
+    def test_gpt56_sol_is_first(self):
+        self.assertEqual(BASELINE_MODELS[0][1], "openai/gpt-5.6-sol")
 
     def test_sonnet46_is_second(self):
         self.assertEqual(BASELINE_MODELS[1][1], "anthropic/claude-sonnet-4.6")
@@ -244,13 +244,13 @@ class TestFullComparisonModels(unittest.TestCase):
         ids = [m for _, m in FULL_COMPARISON_MODELS]
         self.assertTrue(any("claude-sonnet-4.6" in m for m in ids))
 
-    def test_full_comparison_models_includes_gpt55(self):
+    def test_full_comparison_models_includes_gpt56_sol(self):
         ids = [m for _, m in FULL_COMPARISON_MODELS]
         self.assertTrue(any("gpt-5.5" in m for m in ids))
 
-    def test_full_comparison_models_includes_opus47(self):
+    def test_full_comparison_models_includes_opus48(self):
         ids = [m for _, m in FULL_COMPARISON_MODELS]
-        self.assertTrue(any("claude-opus-4.7" in m for m in ids))
+        self.assertTrue(any("claude-opus-4.8" in m for m in ids))
 
 
 class TestFormatFullComparisonLines(unittest.TestCase):
@@ -280,5 +280,5 @@ class TestFormatFullComparisonLines(unittest.TestCase):
 
         with patch("openshard.cost.baseline.compute_cost", side_effect=fake_compute):
             result = format_full_comparison_lines(500_000, 500_000, 1.0)
-        self.assertFalse(any("GPT-5.5" in row for row in result))
+        self.assertFalse(any("GPT-5.6 Sol" in row for row in result))
         self.assertTrue(any("Sonnet 4.6" in row for row in result))

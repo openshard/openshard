@@ -1472,9 +1472,9 @@ class TestBaselineLineInLastDefault(unittest.TestCase):
         out = _render(self._entry_with_tokens(1_000_000, 1_000_000), detail="default")
         self.assertIn("Sonnet 4.6", out)
 
-    def test_baseline_contains_gpt55(self):
+    def test_baseline_contains_gpt56_sol(self):
         out = _render(self._entry_with_tokens(1_000_000, 1_000_000), detail="default")
-        self.assertIn("GPT-5.5", out)
+        self.assertIn("GPT-5.6 Sol", out)
 
     def test_baseline_hidden_in_native_more(self):
         out = _render(self._entry_with_tokens(1_000_000, 1_000_000), detail="more")

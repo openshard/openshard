@@ -262,7 +262,10 @@ class TestSuccessors:
 
         sel = select_for_requirement("routine_coding", live_catalog)
         assert sel.model != NEW_GLM
-        assert all(not live_catalog.get(m).curated for m in sel.shadow_candidates)
+        assert all(
+            promotion_state(live_catalog.get(m)) == STATE_ELIGIBLE_FOR_SHADOW
+            for m in sel.shadow_candidates
+        )
         everything = shadow_candidates(
             REQUIREMENT_CLASSES["routine_coding"], live_catalog.entries, states=states_for(live_catalog), limit=100,
         )

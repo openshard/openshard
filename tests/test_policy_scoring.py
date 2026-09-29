@@ -53,6 +53,10 @@ class TestPolicyBonus(unittest.TestCase):
             EXACT_BONUS,
         )
 
+    def test_current_openai_frontier_is_preferred_for_complex_work(self):
+        self.assertEqual(policy_bonus("openai/gpt-5.6-sol", "complex"), EXACT_BONUS)
+        self.assertEqual(policy_bonus("openai/gpt-5.5", "complex"), 0.0)
+
     def test_exact_match_visual(self):
         self.assertEqual(
             policy_bonus("google/gemini-3.1-pro-preview", "visual"),
