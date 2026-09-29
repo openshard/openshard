@@ -124,6 +124,76 @@ def policy_decisions_block(decisions: Any) -> list[dict[str, Any]] | None:
     return out or None
 
 
+_PERMISSION_SCOPE_BY_ACTION = {
+    "file_write": "repo:write",
+    "command_exec": "verification:execute",
+    "read_only_review": "repo:read",
+}
+_PERMISSION_STATE_RANK = {"granted": 0, "requested": 1, "blocked": 2}
+
+
+def permission_scopes_block(decisions: Any) -> list[dict[str, str]] | None:
+    """Privacy-safe capability outcomes derived from actual policy decisions.
+
+    The scope names are fixed vocabulary; resource paths and raw commands are
+    never copied. When multiple decisions touch one capability, the strictest
+    observed state wins.
+    """
+    if not isinstance(decisions, list):
+        return None
+    states: dict[str, str] = {}
+    for raw in decisions:
+        if not isinstance(raw, dict):
+            continue
+        action = raw.get("action")
+        if not isinstance(action, str):
+            continue
+        scope = _PERMISSION_SCOPE_BY_ACTION.get(action)
+        if scope is None:
+            continue
+        decision = raw.get("decision")
+        if decision == "deny":
+            state = "blocked"
+        elif decision == "ask":
+            granted = raw.get("approval_granted")
+            state = "granted" if granted is True else "blocked" if granted is False else "requested"
+        elif decision == "allow":
+            state = "granted"
+        else:
+            continue
+        previous = states.get(scope)
+        if previous is None or _PERMISSION_STATE_RANK[state] > _PERMISSION_STATE_RANK[previous]:
+            states[scope] = state
+    return [{"scope": scope, "state": states[scope]} for scope in sorted(states)] or None
+
+
+_PERMISSION_SCOPES = frozenset({"repo:read", "repo:write", "verification:execute"})
+_PERMISSION_STATES = frozenset({"granted", "requested", "blocked"})
+
+
+def permission_evidence_block(entry: dict) -> list[dict[str, str]] | None:
+    """Validated explicit permission evidence recorded by a controlled runtime."""
+    raw = entry.get("permission_evidence")
+    if not isinstance(raw, list):
+        return None
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw[:20]:
+        if not isinstance(item, dict):
+            continue
+        scope = item.get("scope")
+        state = item.get("state")
+        if not isinstance(scope, str) or scope not in _PERMISSION_SCOPES:
+            continue
+        if not isinstance(state, str) or state not in _PERMISSION_STATES:
+            continue
+        if scope in seen:
+            continue
+        seen.add(scope)
+        out.append({"scope": scope, "state": state})
+    return out or None
+
+
 def approval_detail_block(entry: dict) -> dict[str, Any] | None:
     request = _dict(entry.get("approval_request"))
     receipt = _dict(entry.get("approval_receipt"))
@@ -538,6 +608,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "supervisor_routing": supervisor_routing_block,
         "capability_snapshot": capability_snapshot_block,
         "organisation_policy": organisation_policy_block,
+        "permissions": permission_evidence_block,
         "base_commit": base_commit_value,
         "content_hash": content_hash_value,
         "session": session_block,
@@ -563,6 +634,8 @@ __all__ = [
     "content_hash_value",
     "execution_loop_block",
     "organisation_policy_block",
+    "permission_evidence_block",
+    "permission_scopes_block",
     "policy_decisions_block",
     "project_entry_evidence",
     "retry_block",

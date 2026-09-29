@@ -45,12 +45,30 @@ _MODEL_KEYS = frozenset({
     "allow_deprecated", "allow_open_weight", "allow_fallback", "allow_openrouter_wide",
 })
 _BUDGET_KEYS = ("max_spend_usd", "max_attempts", "max_commands", "max_writes")
+_PERMISSION_KEYS = ("blocked_write_paths", "approval_write_paths", "blocked_command_prefixes")
+_COMMAND_META_RE = re.compile(r"[;&|<>$\n\r\x00]")
 
 PolicyFetcher = Callable[[PlatformLink], "OrganisationPolicyState | None"]
 
 
 class PolicyUnavailable(RuntimeError):
     """The linked organisation's policy could not be refreshed safely."""
+
+
+@dataclass(frozen=True)
+class OrganisationPermissions:
+    """Organisation restrictions that tighten built-in OSN file/command gates."""
+
+    blocked_write_paths: tuple[str, ...] = ()
+    approval_write_paths: tuple[str, ...] = ()
+    blocked_command_prefixes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, list[str]]:
+        return {
+            "blocked_write_paths": list(self.blocked_write_paths),
+            "approval_write_paths": list(self.approval_write_paths),
+            "blocked_command_prefixes": list(self.blocked_command_prefixes),
+        }
 
 
 @dataclass(frozen=True)
@@ -96,14 +114,41 @@ def _valid_string_list(value: Any, *, max_items: int = 100, max_len: int = 256) 
     return out
 
 
+def _valid_write_patterns(value: Any) -> list[str] | None:
+    parsed = _valid_string_list(value, max_len=200)
+    if parsed is None:
+        return None
+    for item in parsed:
+        norm = item.replace("\\", "/")
+        if item != item.strip() or norm.startswith("/") or ":" in item or ".." in norm.split("/") or "\x00" in item:
+            return None
+    return parsed
+
+
+def _valid_command_prefixes(value: Any) -> list[str] | None:
+    parsed = _valid_string_list(value, max_len=200)
+    if parsed is None:
+        return None
+    for item in parsed:
+        if item != item.strip() or _COMMAND_META_RE.search(item):
+            return None
+    return parsed
+
+
 def _parse_policy_document(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, dict) or set(value) != {"schema_version", "models", "budgets"}:
+    if not isinstance(value, dict) or set(value) not in (
+        {"schema_version", "models", "budgets"},
+        {"schema_version", "models", "budgets", "permissions"},
+    ):
         return None
     if value.get("schema_version") != 1:
         return None
     models = value.get("models")
     budgets = value.get("budgets")
+    permissions = value.get("permissions")
     if not isinstance(models, dict) or set(models) != _MODEL_KEYS or not isinstance(budgets, dict):
+        return None
+    if permissions is not None and (not isinstance(permissions, dict) or set(permissions) != set(_PERMISSION_KEYS)):
         return None
     if set(budgets) != set(_BUDGET_KEYS):
         return None
@@ -148,7 +193,29 @@ def _parse_policy_document(value: Any) -> dict[str, Any] | None:
             raw = float(raw)
         parsed_budgets[key] = raw
 
-    return {"schema_version": 1, "models": parsed_models, "budgets": parsed_budgets}
+    parsed_permissions: dict[str, list[str]] = {
+        "blocked_write_paths": [],
+        "approval_write_paths": [],
+        "blocked_command_prefixes": [],
+    }
+    if permissions is not None:
+        blocked_paths = _valid_write_patterns(permissions.get("blocked_write_paths"))
+        approval_paths = _valid_write_patterns(permissions.get("approval_write_paths"))
+        blocked_commands = _valid_command_prefixes(permissions.get("blocked_command_prefixes"))
+        if blocked_paths is None or approval_paths is None or blocked_commands is None:
+            return None
+        parsed_permissions = {
+            "blocked_write_paths": blocked_paths,
+            "approval_write_paths": approval_paths,
+            "blocked_command_prefixes": blocked_commands,
+        }
+
+    return {
+        "schema_version": 1,
+        "models": parsed_models,
+        "budgets": parsed_budgets,
+        "permissions": parsed_permissions,
+    }
 
 
 def _parse_response(body: bytes, *, organisation_id: str) -> OrganisationPolicyState | None:
@@ -310,6 +377,20 @@ def _organisation_budget(organisation: OrganisationPolicyState | None) -> Budget
     )
 
 
+def organisation_permissions(
+    organisation: OrganisationPolicyState | None,
+) -> OrganisationPermissions:
+    if organisation is None or not organisation.applied:
+        return OrganisationPermissions()
+    assert organisation.document is not None
+    raw = organisation.document.get("permissions") or {}
+    return OrganisationPermissions(
+        blocked_write_paths=tuple(raw.get("blocked_write_paths") or ()),
+        approval_write_paths=tuple(raw.get("approval_write_paths") or ()),
+        blocked_command_prefixes=tuple(raw.get("blocked_command_prefixes") or ()),
+    )
+
+
 def _minimum(a: int | float | None, b: int | float | None):
     if a is None:
         return b
@@ -340,7 +421,11 @@ def repository_override_present(repository_config: dict[str, Any], *, has_config
     return isinstance(repository_config.get("models"), dict) or repository_config.get("agent_budgets") is not None
 
 
-def effective_policy_hash(model_policy: ModelPolicyConfig, budget: BudgetLimits) -> str:
+def effective_policy_hash(
+    model_policy: ModelPolicyConfig,
+    budget: BudgetLimits,
+    permissions: OrganisationPermissions | None = None,
+) -> str:
     """Opaque fingerprint of the complete effective policy; no policy values leave Core."""
     payload = {
         "models": {
@@ -362,6 +447,7 @@ def effective_policy_hash(model_policy: ModelPolicyConfig, budget: BudgetLimits)
             "dogfood_candidates": list(model_policy.dogfood_candidates),
         },
         "budgets": budget.to_dict(),
+        "permissions": (permissions or OrganisationPermissions()).to_dict(),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return f"sha256:{hashlib.sha256(blob).hexdigest()}"
@@ -412,6 +498,7 @@ def enforce_models_allowed(models: list[str], policy: ModelPolicyConfig) -> None
 
 
 __all__ = [
+    "OrganisationPermissions",
     "OrganisationPolicyState",
     "PolicyUnavailable",
     "combine_budget_limits",
@@ -419,6 +506,7 @@ __all__ = [
     "effective_policy_hash",
     "enforce_models_allowed",
     "fetch_organisation_policy",
+    "organisation_permissions",
     "repository_override_present",
     "resolve_organisation_policy",
 ]

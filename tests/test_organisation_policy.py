@@ -9,6 +9,7 @@ from openshard.sync.policies import (
     combine_budget_limits,
     combine_model_policy,
     effective_policy_hash,
+    organisation_permissions,
 )
 
 SONNET = "anthropic/claude-sonnet-4.6"
@@ -16,7 +17,12 @@ GPT = "openai/gpt-5.6-sol"
 HASH_A = "sha256:" + "a" * 64
 
 
-def _document(*, models: dict | None = None, budgets: dict | None = None) -> dict:
+def _document(
+    *,
+    models: dict | None = None,
+    budgets: dict | None = None,
+    permissions: dict | None = None,
+) -> dict:
     base_models = {
         "allowed_models": [],
         "blocked_models": [],
@@ -41,7 +47,15 @@ def _document(*, models: dict | None = None, budgets: dict | None = None) -> dic
     }
     if budgets:
         base_budgets.update(budgets)
-    return {"schema_version": 1, "models": base_models, "budgets": base_budgets}
+    document = {"schema_version": 1, "models": base_models, "budgets": base_budgets}
+    if permissions is not None:
+        document["permissions"] = {
+            "blocked_write_paths": [],
+            "approval_write_paths": [],
+            "blocked_command_prefixes": [],
+            **permissions,
+        }
+    return document
 
 
 def _state(document: dict | None = None) -> OrganisationPolicyState:
@@ -91,6 +105,30 @@ def test_budget_uses_strictest_limit_and_accepts_org_zero() -> None:
     assert local == BudgetLimits(2.0, 4, None, 20)
     assert hosted == BudgetLimits(1.0, 0, 3, None)
     assert effective == BudgetLimits(1.0, 0, 3, 20)
+
+
+def test_permission_policy_defaults_old_documents_and_reads_new_rules() -> None:
+    old = organisation_permissions(_state(_document()))
+    assert old.blocked_write_paths == ()
+    assert old.approval_write_paths == ()
+    assert old.blocked_command_prefixes == ()
+
+    new = organisation_permissions(_state(_document(permissions={
+        "blocked_write_paths": ["infra/prod/**"],
+        "approval_write_paths": [".github/**"],
+        "blocked_command_prefixes": ["npm run deploy"],
+    })))
+    assert new.blocked_write_paths == ("infra/prod/**",)
+    assert new.approval_write_paths == (".github/**",)
+    assert new.blocked_command_prefixes == ("npm run deploy",)
+
+
+def test_effective_hash_includes_permission_policy() -> None:
+    model = combine_model_policy({}, _state(_document()))
+    budget = BudgetLimits()
+    a = organisation_permissions(_state(_document()))
+    b = organisation_permissions(_state(_document(permissions={"blocked_write_paths": ["infra/prod/**"]})))
+    assert effective_policy_hash(model, budget, a) != effective_policy_hash(model, budget, b)
 
 
 def test_effective_hash_changes_when_policy_changes() -> None:

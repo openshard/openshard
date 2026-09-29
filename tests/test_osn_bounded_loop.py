@@ -87,6 +87,43 @@ def test_policy_block_is_not_retried_and_not_written(repo):
     assert not (repo / ".env").exists()
 
 
+def test_organisation_path_policy_blocks_before_verification(repo):
+    rec = run_bounded_loop(
+        repo,
+        "t",
+        lambda c: [FileWriteAction("src/generated.py", "x")],
+        CHECK,
+        blocked_write_patterns=("src/**",),
+    )
+    assert rec.status == "blocked"
+    assert rec.attempts[0].blocked == ["src/generated.py"]
+    assert rec.verification_state == "not_run"
+
+
+def test_organisation_command_policy_blocks_before_model_call(repo):
+    calls: list[int] = []
+
+    def provider(ctx):
+        calls.append(ctx.attempt)
+        return [FileWriteAction("out.txt", "ok")]
+
+    rec = run_bounded_loop(
+        repo,
+        "t",
+        provider,
+        ["git", "status"],
+        blocked_command_prefixes=("git status",),
+    )
+    assert rec.status == "blocked"
+    assert rec.stop_reason == "verification_command_policy_block"
+    assert rec.attempts == []
+    assert calls == []
+    assert rec.command_decision == {
+        "scope": "verification:execute",
+        "state": "blocked",
+    }
+
+
 def test_ask_path_without_approver_blocks(repo):
     rec = run_bounded_loop(repo, "t", lambda c: [FileWriteAction("pyproject.toml", "x")], CHECK)
     assert rec.status == "blocked"

@@ -110,6 +110,28 @@ class TestPolicyDecisions:
         assert ev.policy_decisions_block("junk") is None
 
 
+class TestPermissionScopes:
+    def test_projects_only_explicit_fixed_capability_evidence(self):
+        d = _ext(_entry(permission_evidence=[
+            {"scope": "repo:write", "state": "granted"},
+            {"scope": "verification:execute", "state": "granted"},
+            {"scope": "secret:path", "state": "blocked"},
+            {"scope": "repo:read", "state": "invented"},
+        ]))
+        assert d["permissions"] == [
+            {"scope": "repo:write", "state": "granted"},
+            {"scope": "verification:execute", "state": "granted"},
+        ]
+
+    def test_policy_decisions_can_be_compacted_before_recording_permission_evidence(self):
+        permissions = ev.permission_scopes_block([
+            {"action": "file_write", "decision": "allow"},
+            {"action": "file_write", "decision": "ask", "approval_granted": None},
+            {"action": "file_write", "decision": "deny"},
+        ])
+        assert permissions == [{"scope": "repo:write", "state": "blocked"}]
+
+
 class TestApprovalDetail:
     def test_shape_and_provenance_split(self):
         d = _ext(_entry(

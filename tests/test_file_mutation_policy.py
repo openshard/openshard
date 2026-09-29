@@ -36,6 +36,15 @@ def test_evaluate_file_write(rel, expected):
     assert evaluate_file_write(rel).decision == expected
 
 
+def test_organisation_write_rules_only_tighten_builtin_policy():
+    assert evaluate_file_write("src/app.py", blocked_patterns=("src/**",)).decision == "deny"
+    ask = evaluate_file_write("docs/runbook.md", approval_patterns=("docs/**",))
+    assert ask.decision == "ask"
+    assert ask.source == "organisation_policy"
+    # Organisation approval cannot loosen a built-in secret-path deny.
+    assert evaluate_file_write(".env", approval_patterns=(".env",)).decision == "deny"
+
+
 def test_gate_fails_closed_without_approver():
     gate = FileMutationGate()
     assert gate.authorize("src/a.py") is True

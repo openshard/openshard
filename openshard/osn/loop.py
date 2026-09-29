@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from openshard.osn.budget import STATUS_BUDGET_EXHAUSTED, BudgetExhausted, BudgetLedger
+from openshard.policy.command_execution import organisation_command_blocked
 from openshard.policy.decision import PolicyDecision, make_deny
 from openshard.policy.file_mutation import Approver, FileMutationGate
 from openshard.safety.sanitize import sanitize_text
@@ -126,6 +127,9 @@ class LoopReceipt:
     # sha256 of each changed file as verified; in memory only, used to refuse
     # promoting bytes that differ from what was verified.
     verified_file_hashes: dict[str, str] = field(default_factory=dict)
+    # Privacy-safe command decision for the user-supplied verifier. Raw argv is
+    # never stored; this is the same PolicyDecision shape as file mutations.
+    command_decision: dict | None = None
 
     @property
     def verification_state(self) -> str:
@@ -164,6 +168,7 @@ class LoopReceipt:
                 }
                 for a in self.attempts
             ],
+            "command_policy": self.command_decision,
             "evidence": {
                 "actions": "agent_declared",
                 "policy_and_file_effects": "openshard_observed",
@@ -280,11 +285,15 @@ def run_bounded_loop(
     task_id: str | None = None,
     max_attempts: int = 2,
     approver: Approver | None = None,
+    organisation_approver: Approver | None = None,
     verify_timeout: float = 120.0,
     sandbox_path: Path | None = None,
     budget: BudgetLedger | None = None,
     supervisor: Any | None = None,
     progress: ProgressCallback | None = None,
+    blocked_write_patterns: tuple[str, ...] = (),
+    approval_write_patterns: tuple[str, ...] = (),
+    blocked_command_prefixes: tuple[str, ...] = (),
 ) -> LoopReceipt:
     """Run the bounded loop. Never writes to *repo_root*.
 
@@ -313,9 +322,33 @@ def run_bounded_loop(
     prev_actions: str | None = None
 
     _emit_progress(progress, "workspace_ready")
+    command_record: dict | None = None
 
     def _receipt(status: str, reason: str) -> LoopReceipt:
-        return LoopReceipt(task_id, status, reason, attempts, changed, str(sandbox))
+        return LoopReceipt(
+            task_id,
+            status,
+            reason,
+            attempts,
+            changed,
+            str(sandbox),
+            command_decision=command_record,
+        )
+
+    # --verify-cmd is an explicit user choice and historically runs as supplied.
+    # Organisation policy may tighten that boundary with an explicit prefix deny,
+    # but the generic command classifier must not reinterpret existing verifier
+    # forms (for example python -c with punctuation) and break compatibility.
+    command_blocked = organisation_command_blocked(
+        verify_command,
+        blocked_command_prefixes,
+    )
+    command_record = {
+        "scope": "verification:execute",
+        "state": "blocked" if command_blocked else "granted",
+    }
+    if command_blocked:
+        return _receipt("blocked", "verification_command_policy_block")
 
     # An applied supervisor escalation is confirmed only when the next attempt
     # really calls the recommended model; until then the previous attempt's
@@ -382,7 +415,12 @@ def run_bounded_loop(
             return _receipt("failed", "no_progress_identical_actions")
         prev_actions = actions_fp
 
-        gate = FileMutationGate(approver=approver)
+        gate = FileMutationGate(
+            approver=approver,
+            organisation_approver=organisation_approver,
+            blocked_patterns=blocked_write_patterns,
+            approval_patterns=approval_write_patterns,
+        )
         applied: list[str] = []
         blocked: list[str] = []
         attempt_decisions: list[dict] = []  # in the order the model proposed the writes

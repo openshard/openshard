@@ -218,6 +218,7 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
     evidence = receipt.recorded_evidence or {}
     return {
         "policy_decisions": policy_decisions_block(receipt.policy_decisions),
+        "permissions": evidence.get("permissions"),
         "approval_detail": evidence.get("approval_detail"),
         "sandbox_detail": evidence.get("sandbox_detail"),
         "execution_loop": evidence.get("execution_loop"),

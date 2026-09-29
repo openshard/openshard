@@ -47,7 +47,7 @@ CONTRACT_RECEIPT_KEYS = frozenset({
     "cost_provenance", "cost_is_estimate", "tokens_input", "tokens_output", "tokens_cache_read",
     "tokens_cache_creation", "tokens_provenance", "task_title", "verification", "owner",
     # P1 additive optional keys (null when the record carries nothing):
-    "policy_decisions", "approval_detail", "sandbox_detail", "execution_loop", "base_commit",
+    "policy_decisions", "permissions", "approval_detail", "sandbox_detail", "execution_loop", "base_commit",
     "content_hash", "session", "routing", "retry",
     # OSN control evidence (optional; null for records that predate it):
     "agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot", "organisation_policy",
