@@ -510,6 +510,8 @@ def _log_run(
                 "model": sr.model,
                 "duration": round(sr.duration, 2),
                 "cost": sr.cost,
+                **({"prompt_tokens": sr.prompt_tokens} if sr.prompt_tokens is not None else {}),
+                **({"completion_tokens": sr.completion_tokens} if sr.completion_tokens is not None else {}),
             }
             for sr in stage_runs
         ]
