@@ -160,7 +160,7 @@ def _resolve_provider(name: str | None, model: str):
 @click.option("--promote", is_flag=True, default=False,
               help="After verified success, copy changed files into the repo through the policy gate.")
 @click.option("--yes", "assume_yes", is_flag=True, default=False,
-              help="Approve policy 'ask' paths during --promote without prompting.")
+              help="Approve policy 'ask' paths during the OSN run and promotion without prompting.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_attempts, task_id,
             promote, assume_yes, as_json):
@@ -206,6 +206,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         combine_model_policy,
         effective_policy_hash,
         enforce_models_allowed,
+        organisation_permissions,
         repository_override_present,
         resolve_organisation_policy,
     )
@@ -217,6 +218,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         organisation_policy = resolve_organisation_policy()
         model_policy = combine_model_policy(repo_config, organisation_policy)
         effective_limits, local_limits, _org_limits = combine_budget_limits(repo_config, organisation_policy)
+        permissions = organisation_permissions(organisation_policy)
     except PolicyUnavailable as exc:
         raise click.ClickException(
             f"Organisation policy could not be refreshed ({exc}); refusing to start a linked OSN run."
@@ -271,6 +273,17 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         if routing.applied and routing.decision is not None:
             click.echo(f"  Policy  Adaptive Routing V2 · {routing.decision.resolved_class}")
 
+    def run_approver(rel, _decision):
+        if assume_yes:
+            return True, "flag_yes"
+        if as_json:
+            return False, "json_no_prompt"
+        try:
+            granted = click.confirm(f"Policy requires approval to write {rel}. Continue in the isolated workspace?", default=False)
+        except click.Abort:
+            granted = False
+        return granted, "interactive_prompt"
+
     action_provider = ModelActionProvider(
         provider=provider_obj, models=models, repo_root=repo_root, context_files=list(context_files),
         budget=budget,
@@ -283,7 +296,13 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     try:
         receipt = run_bounded_loop(
             repo_root, task, action_provider, argv, task_id=task_id, max_attempts=max_attempts,
-            budget=budget, supervisor=supervisor, progress=progress_renderer,
+            budget=budget,
+            supervisor=supervisor,
+            progress=progress_renderer,
+            approver=run_approver,
+            blocked_write_patterns=permissions.blocked_write_paths,
+            approval_write_patterns=permissions.approval_write_paths,
+            blocked_command_prefixes=permissions.blocked_command_prefixes,
         )
     finally:
         if progress_renderer is not None:
@@ -300,7 +319,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         capability_snapshot=capabilities.to_record(),
         organisation_policy=(
             organisation_policy.receipt_record(
-                effective_policy_hash=effective_policy_hash(model_policy, effective_limits),
+                effective_policy_hash=effective_policy_hash(model_policy, effective_limits, permissions),
                 repository_override_applied=repository_override_present(
                     repo_config, has_config_file=config_path is not None,
                 ),
@@ -326,7 +345,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             if not as_json:
                 click.echo(f"Not promoting: loop status is '{receipt.status}'.")
         else:
-            promoted, skipped = _promote(repo_root, receipt, entry, assume_yes)
+            promoted, skipped = _promote(repo_root, receipt, entry, assume_yes, permissions)
 
     if as_json:
         click.echo(json.dumps({
@@ -529,7 +548,7 @@ def _budget_line(record: dict | None) -> str | None:
     return f"enforced ({limits}); used {used}{tail}"
 
 
-def _promote(repo_root: Path, receipt, entry: dict, assume_yes: bool) -> tuple[list[str], list[str]]:
+def _promote(repo_root: Path, receipt, entry: dict, assume_yes: bool, permissions) -> tuple[list[str], list[str]]:
     from openshard.history.sandbox_apply_receipts import (
         SandboxApplyReceipt,
         log_sandbox_apply_receipt,
@@ -554,6 +573,8 @@ def _promote(repo_root: Path, receipt, entry: dict, assume_yes: bool) -> tuple[l
     result = apply_sandbox_changes(
         repo_root, Path(receipt.sandbox_path), include=None, approver=approver,
         explicit_files=list(receipt.changed_files),
+        blocked_patterns=permissions.blocked_write_paths,
+        approval_patterns=permissions.approval_write_paths,
     )
     log_sandbox_apply_receipt(SandboxApplyReceipt(
         source_run_id=entry.get("timestamp", ""), sandbox_path="",
