@@ -31,8 +31,9 @@ openshard grok-bot report -                        # Record a Bot self-report (J
 
 Import past Claude Code / Codex history (see
 [architecture/historical-ingestion.md](architecture/historical-ingestion.md)).
-Receipts are labelled "Reconstructed from history", are never marked as
-observed live, and stay local (not synced) for now:
+Receipts are labelled "Reconstructed from history" and are never marked as
+observed live. When Platform sync is connected, only the normal scrubbed Receipt
+projection is eligible to sync; raw transcript/import metadata stays local:
 
 ```bash
 openshard ingest sources                           # Detect local history: sessions found, how many belong to this repo
