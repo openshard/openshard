@@ -442,14 +442,25 @@ class TestPrivacy:
         assert [f["path"] for f in rec["files_detail"]] == ["src/app.py"]
         assert "notes.md" not in json.dumps(rec)
 
-    def test_sync_defers_historical_receipts(self, homes, hist_repo):
-        from openshard.sync.envelope import REASON_HISTORICAL_IMPORT_DEFERRED, eligibility
+    def test_sync_allows_only_the_privacy_bounded_historical_projection(self, homes, hist_repo):
+        from openshard.sync.envelope import REASON_RECORD_COMPLETE, build_envelope, eligibility
 
         write_claude(homes, hist_repo)
         _run(hist_repo["repo"], sources=["claude-code"])
         (rec,) = _records(hist_repo["repo"])
         verdict = eligibility(rec)
-        assert not verdict.eligible and verdict.reason == REASON_HISTORICAL_IMPORT_DEFERRED
+        assert verdict.eligible and verdict.reason == REASON_RECORD_COMPLETE
+
+        receipt = build_envelope(rec, 0, core_version="0.5.0")["receipt"]
+        assert receipt["origin"] == "historical_import"
+        assert receipt["capture_depth"] == "partial"
+        assert receipt["verification"]["observation_mode"] == "imported_transcript"
+        assert receipt["verification"]["source"] == "agent_reported"
+        assert receipt["tokens_provenance"] == "imported_transcript"
+        projected = json.dumps(receipt)
+        assert "locator_display" not in projected
+        assert "source_sha256" not in projected
+        assert "locator_hash" not in projected
 
     def test_launch_task_declaration_never_reaches_imported_receipts(self, homes, hist_repo, monkeypatch):
         """``OPENSHARD_TASK_ID`` is launch context for *live* capture only: an import
