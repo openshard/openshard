@@ -47,6 +47,8 @@ class StageRun:
     duration: float
     cost: float | None
     summary: str
+    tokens_input: int | None = None
+    tokens_output: int | None = None
 
 
 # ---------------------------------------------------------------------------
