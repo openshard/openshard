@@ -33,8 +33,8 @@ class TestLifecycleValues(unittest.TestCase):
                 self.assertIsInstance(entry.lifecycle, str)
 
     def test_registry_size_matches_curated_roster(self) -> None:
-        # Two evaluated GPT-5.6 lanes were added; newer provider models stay discovery-only.
-        self.assertEqual(len(_REGISTRY), 45)
+        # Two evaluated GPT-5.6 lanes plus four provider-backed OpenAI watchlist entries.
+        self.assertEqual(len(_REGISTRY), 49)
 
 
 class TestRoutingDefaultEligibility(unittest.TestCase):
@@ -107,6 +107,10 @@ class TestLifecycleClassifications(unittest.TestCase):
             "anthropic/claude-mythos-5": "watchlist",
             "openai/gpt-5.6-luna": "active_default",
             "openai/gpt-5.6-sol": "active_specialist",
+            "openai/gpt-5.6-terra": "watchlist",
+            "openai/gpt-6-astra": "watchlist",
+            "openai/gpt-6-luna": "watchlist",
+            "openai/gpt-6-sol": "watchlist",
             "openai/gpt-5.5": "fallback",
         }
         for model_id, expected in cases.items():
