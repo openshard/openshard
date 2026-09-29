@@ -35,10 +35,6 @@ class TestRegistryCompleteness(unittest.TestCase):
             # OpenAI current family + compatibility
             "openai/gpt-5.6-luna",
             "openai/gpt-5.6-sol",
-            "openai/gpt-5.6-terra",
-            "openai/gpt-6-astra",
-            "openai/gpt-6-luna",
-            "openai/gpt-6-sol",
             "openai/gpt-5.5",
             "openai/gpt-5.5-pro",
             "openai/gpt-5.4",
@@ -108,10 +104,6 @@ class TestExperimentalFlag(unittest.TestCase):
         # OpenAI current family + compatibility
         "openai/gpt-5.6-luna",
         "openai/gpt-5.6-sol",
-        "openai/gpt-5.6-terra",
-        "openai/gpt-6-astra",
-        "openai/gpt-6-luna",
-        "openai/gpt-6-sol",
         "openai/gpt-5.5",
         "openai/gpt-5.5-pro",
         "openai/gpt-5.4",
@@ -450,13 +442,6 @@ class TestOpenAIModelFreshness(unittest.TestCase):
             assert entry is not None
             self.assertEqual(entry.lifecycle, "fallback")
             self.assertNotIn("escalation", entry.roles)
-
-    def test_gpt6_family_is_watchlisted_until_evaluated(self) -> None:
-        for model_id in ("openai/gpt-6-astra", "openai/gpt-6-luna", "openai/gpt-6-sol"):
-            entry = get_model(model_id)
-            assert entry is not None
-            self.assertEqual(entry.lifecycle, "watchlist")
-            self.assertEqual(entry.roles, ())
 
 
 if __name__ == "__main__":
