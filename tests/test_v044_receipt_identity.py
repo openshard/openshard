@@ -140,6 +140,40 @@ class TestRenderingAndCompatibility:
         assert receipt_to_dict(receipt)["receipt_id"] is None
 
 
+class TestRunOwnerProjection:
+    """A recorded run owner rides only the extended hosted projection."""
+
+    def test_extended_export_carries_recorded_owner_without_inference(self):
+        entry = {
+            "schema_version": "1.2",
+            "receipt_id": new_receipt_id(),
+            "timestamp": "2026-09-29T06:55:00Z",
+            "task": "t",
+            "agent": "openshard_native",
+            "owner": "Michael Obasa",
+        }
+        receipt = build_shard_receipt(entry, index=0)
+        assert receipt.owner == "Michael Obasa"
+        assert receipt_to_dict(receipt, extended=True)["owner"] == "Michael Obasa"
+        assert "owner" not in receipt_to_dict(receipt)
+
+    def test_missing_or_malformed_owner_is_none(self):
+        for value in (None, "", 42, {"name": "Michael"}):
+            entry = {
+                "receipt_id": new_receipt_id(),
+                "timestamp": "2026-09-29T06:55:00Z",
+                "task": "t",
+                "agent": "openshard_native",
+            }
+            if value is not None:
+                entry["owner"] = value
+            receipt = build_shard_receipt(entry, index=0)
+            expected = "" if value == "" else None
+            # Core preserves an explicitly recorded string exactly; it never derives one.
+            assert receipt.owner == expected
+            assert receipt_to_dict(receipt, extended=True)["owner"] == expected
+
+
 class TestRepoIdentityProjection:
     """``repo_identity`` (canonical host/owner/repo) rides the extended export
     beside the folder-name ``repo``; the MCP default key set is unchanged."""
