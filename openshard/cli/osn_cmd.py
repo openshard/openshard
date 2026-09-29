@@ -120,10 +120,10 @@ class _OsnProgressRenderer:
             self._stop()
             echo("\nRecovery")
             action = data.get("action")
-            model = data.get("model")
-            if action == "escalate" and model:
+            recovery_model = data.get("model")
+            if action == "escalate" and isinstance(recovery_model, str) and recovery_model:
                 echo("  Verification failure observed")
-                echo(f"  → {_friendly_model(model)}")
+                echo(f"  → {_friendly_model(recovery_model)}")
             else:
                 echo(f"  {action or 'stop'} · {data.get('reason') or 'no reason recorded'}")
         elif event == "budget_stop":
