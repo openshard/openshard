@@ -440,6 +440,7 @@ class ShardReceipt:
     # Concise display title (history/task_title.py) -- display metadata only;
     # task_short/task_full keep the recorded task text unchanged.
     task_title: str = ""
+    human_summary: str | None = None
     owner: str | None = None
     repo: str | None = None
     # Canonical ``host/owner/repo`` from the record's additive ``repo_identity``
@@ -1360,6 +1361,7 @@ def build_shard_receipt(
         approval_reason=_approval_reason,
         cost_display=cost_display,
         result=result,
+        human_summary=entry.get("human_summary") if isinstance(entry.get("human_summary"), str) else None,
         status=status,
         duration_seconds=entry.get("duration_seconds"),
         owner=entry.get("owner") if isinstance(entry.get("owner"), str) else None,
@@ -1636,7 +1638,7 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
     if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
         rows.append(_row(
             "Capture",
-            f"{receipt.shard.capture_depth} {_EM} Openshard did not execute or verify this run",
+            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
         ))
         rows.append(_row("Gaps", gaps_display(block)))
     elif receipt.shard is not None and receipt.shard.origin == ORIGIN_HISTORICAL_IMPORT:
@@ -1648,7 +1650,7 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
 
 
 # Historical Ingestion v1: the "Reconstructed from history" badge.
-_HISTORICAL_CAPTURE_TEXT = "Reconstructed from history; Openshard did not observe this session live"
+_HISTORICAL_CAPTURE_TEXT = "Reconstructed from history; OpenShard did not observe this session live"
 
 _CAPTURE_COL = 15  # the CAPTURE section's labels are longer than the receipt's default gutter
 
@@ -1659,7 +1661,7 @@ def _capture_rows_full(receipt: ShardReceipt) -> list[str]:
     depth = str(block.get("depth") or (receipt.shard.capture_depth if receipt.shard else "unknown"))
     origin = receipt.shard.origin if receipt.shard is not None else None
     if origin == ORIGIN_EXTERNAL_OBSERVED:
-        depth_text = f"{depth} {_EM} Openshard did not execute or verify this run"
+        depth_text = f"{depth} {_EM} OpenShard did not execute or verify this run"
     elif origin == ORIGIN_HISTORICAL_IMPORT:
         depth_text = f"{depth} {_EM} {_HISTORICAL_CAPTURE_TEXT}"
     else:
@@ -1717,7 +1719,7 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
         _SEP,
         f"{_INDENT}{receipt.task_short}",
         "",
-        _row("Agent", receipt.agent),
+        _row("Agent", "Openshard Native (OSN)"),
     ]
     if receipt.repo:
         lines.append(_row("Repo", receipt.repo_identity or receipt.repo))
@@ -1755,7 +1757,7 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
     lines += [
         "",
         f"{_INDENT}WORK",
-        _row("Files modified", str(receipt.files_changed)),
+        _row("Files modified", str(receipt.files_changed), width=16),
     ]
     if receipt.files_touched:
         lines.append(f"{_INDENT}  ↳ " + " · ".join(receipt.files_touched[:5]))
@@ -1789,7 +1791,7 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
     lines += [
         "",
         f"{_INDENT}PROOF",
-        _row("Verification", verified_label(receipt)),
+        _row("Verification", verified_label(receipt), width=14),
         _row("Integrity", receipt.integrity),
     ]
     if is_routing:
@@ -1813,13 +1815,14 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
     else:
         result_label = receipt.status.upper()
 
-    lines += ["", f"{_INDENT}RESULT", f"{_INDENT}{result_label}", f"{_INDENT}{receipt.result}", _SEP]
+    lines += ["", f"{_INDENT}RESULT", f"{_INDENT}{result_label}", f"{_INDENT}{receipt.human_summary or receipt.result}", _SEP]
     return "\n".join(lines)
 
 
 def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     """Render a bordered, column-aligned RECEIPT block. Pure, no I/O."""
-    if receipt.agent == "Openshard Native (OSN)":
+    evidence = receipt.recorded_evidence or {}
+    if isinstance(evidence.get("execution_loop"), dict):
         return _render_osn_compact_receipt(receipt)
 
     model_label, model_value = _models_label_and_value(receipt)
