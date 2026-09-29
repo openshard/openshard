@@ -59,6 +59,21 @@ class TestOldRecords:
         d = _ext(_entry(stage_runs=[{"stage_type": "planning", "model": "anthropic/claude-sonnet-4.6"}]))
         assert d["model_stages"] and all(set(s) == {"stage", "model"} for s in d["model_stages"])
 
+    def test_model_stages_project_recorded_token_split(self):
+        d = _ext(_entry(stage_runs=[{
+            "stage_type": "planning",
+            "model": "anthropic/claude-sonnet-4.6",
+            "duration": 1.0,
+            "cost": 0.1,
+            "prompt_tokens": 120,
+            "completion_tokens": 30,
+        }]))
+        [stage] = d["model_stages"]
+        assert stage["tokens_input"] == 120
+        assert stage["tokens_output"] == 30
+        assert stage["duration_seconds"] == 1.0
+        assert stage["cost_usd"] == 0.1
+
     def test_hand_built_receipt_without_evidence_projects_nulls(self):
         r = ShardReceipt(
             shard_id="s", created_at="2026-01-01T00:00:00Z", task_short="t", task_full="t", agent="a",
