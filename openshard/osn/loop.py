@@ -285,6 +285,7 @@ def run_bounded_loop(
     task_id: str | None = None,
     max_attempts: int = 2,
     approver: Approver | None = None,
+    organisation_approver: Approver | None = None,
     verify_timeout: float = 120.0,
     sandbox_path: Path | None = None,
     budget: BudgetLedger | None = None,
@@ -416,6 +417,7 @@ def run_bounded_loop(
 
         gate = FileMutationGate(
             approver=approver,
+            organisation_approver=organisation_approver,
             blocked_patterns=blocked_write_patterns,
             approval_patterns=approval_write_patterns,
         )
