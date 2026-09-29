@@ -32,7 +32,13 @@ class TestRegistryCompleteness(unittest.TestCase):
             "x-ai/grok-4.3",
             "~anthropic/claude-haiku-latest",
             "x-ai/grok-build-0.1",
-            # OpenRouter expansion — non-experimental
+            # OpenAI current family + compatibility
+            "openai/gpt-5.6-luna",
+            "openai/gpt-5.6-sol",
+            "openai/gpt-5.6-terra",
+            "openai/gpt-6-astra",
+            "openai/gpt-6-luna",
+            "openai/gpt-6-sol",
             "openai/gpt-5.5",
             "openai/gpt-5.5-pro",
             "openai/gpt-5.4",
@@ -99,7 +105,13 @@ class TestExperimentalFlag(unittest.TestCase):
         "qwen/qwen3.7-max",
         "x-ai/grok-4.3",
         "~anthropic/claude-haiku-latest",
-        # OpenRouter expansion
+        # OpenAI current family + compatibility
+        "openai/gpt-5.6-luna",
+        "openai/gpt-5.6-sol",
+        "openai/gpt-5.6-terra",
+        "openai/gpt-6-astra",
+        "openai/gpt-6-luna",
+        "openai/gpt-6-sol",
         "openai/gpt-5.5",
         "openai/gpt-5.5-pro",
         "openai/gpt-5.4",
@@ -420,6 +432,31 @@ class TestCuratedRosterV1(unittest.TestCase):
             entry = get_model(model_id)
             assert entry is not None
             self.assertEqual(entry.input_modalities, ("text", "image"))
+
+
+class TestOpenAIModelFreshness(unittest.TestCase):
+    def test_gpt56_luna_is_stable_and_sol_is_validated(self) -> None:
+        luna = get_model("openai/gpt-5.6-luna")
+        sol = get_model("openai/gpt-5.6-sol")
+        assert luna is not None and sol is not None
+        self.assertEqual(luna.lifecycle, "active_default")
+        self.assertEqual(sol.lifecycle, "active_specialist")
+        self.assertIn("cheap_control", luna.roles)
+        self.assertIn("escalation", sol.roles)
+
+    def test_gpt55_is_compatibility_only(self) -> None:
+        for model_id in ("openai/gpt-5.5", "openai/gpt-5.5-pro"):
+            entry = get_model(model_id)
+            assert entry is not None
+            self.assertEqual(entry.lifecycle, "fallback")
+            self.assertNotIn("escalation", entry.roles)
+
+    def test_gpt6_family_is_watchlisted_until_evaluated(self) -> None:
+        for model_id in ("openai/gpt-6-astra", "openai/gpt-6-luna", "openai/gpt-6-sol"):
+            entry = get_model(model_id)
+            assert entry is not None
+            self.assertEqual(entry.lifecycle, "watchlist")
+            self.assertEqual(entry.roles, ())
 
 
 if __name__ == "__main__":
