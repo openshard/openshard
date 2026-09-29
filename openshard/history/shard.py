@@ -116,7 +116,7 @@ def derive_shard_identity(entry: dict) -> tuple[str, str, str]:
     if executor in HISTORICAL_IMPORT_EXECUTORS:
         return HISTORICAL_IMPORT_LABELS[executor], ORIGIN_HISTORICAL_IMPORT, CAPTURE_PARTIAL
 
-    if workflow == "native" or executor == "native":
+    if workflow in ("native", "osn_loop") or executor in ("native", "osn_loop"):
         return "OpenShard Native", ORIGIN_OPENSHARD_ROUTED, CAPTURE_FULL
 
     if workflow == "opencode" or executor == "opencode" or adapter == "opencode":

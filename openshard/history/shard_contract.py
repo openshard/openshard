@@ -440,6 +440,8 @@ class ShardReceipt:
     # Concise display title (history/task_title.py) -- display metadata only;
     # task_short/task_full keep the recorded task text unchanged.
     task_title: str = ""
+    human_summary: str | None = None
+    owner: str | None = None
     repo: str | None = None
     # Canonical ``host/owner/repo`` from the record's additive ``repo_identity``
     # field (history/repo_identity.py); None for records without one. ``repo``
@@ -1015,7 +1017,7 @@ def build_shard_receipt(
             approval = "Required → Granted"
         else:
             approval = "Required → Denied"
-    elif ff_read_only or write_path == "pipeline":
+    elif ff_read_only or write_path in ("pipeline", "sandbox"):
         approval = "Not required"
     else:
         approval = "Not recorded"
@@ -1359,8 +1361,10 @@ def build_shard_receipt(
         approval_reason=_approval_reason,
         cost_display=cost_display,
         result=result,
+        human_summary=entry.get("human_summary") if isinstance(entry.get("human_summary"), str) else None,
         status=status,
         duration_seconds=entry.get("duration_seconds"),
+        owner=entry.get("owner") if isinstance(entry.get("owner"), str) else None,
         repo=repo,
         repo_identity=_stored_repo_identity(entry),
         branch=entry.get("git_branch") or None,
@@ -1670,8 +1674,160 @@ def _capture_rows_full(receipt: ShardReceipt) -> list[str]:
     ]
 
 
+
+def _display_shard_number(shard_id: str) -> str:
+    """Short human display; the full machine shard_id stays stored unchanged."""
+    m = re.search(r"-(\d{4})$", shard_id or "")
+    return f"#{m.group(1)}" if m else f"#{(shard_id or 'unknown')[-8:].upper()}"
+
+
+def _display_receipt_number(receipt_id: str | None) -> str:
+    """Canonical Receipt display id: no rcpt_ prefix, 12 hex chars like the design."""
+    if not receipt_id:
+        return "#UNKNOWN"
+    value = receipt_id.removeprefix("rcpt_").replace("-", "")
+    return f"#{value[:12].upper()}"
+
+
+def _osn_checks_display(receipt: ShardReceipt, loop: dict) -> str:
+    if receipt.checks_display != "Not run":
+        return checks_label(receipt)
+    reason = loop.get("stop_reason")
+    if reason == "provider_error":
+        return "Not run — provider failed before verification"
+    if reason == "verifier_setup_failed":
+        return "Not run — verifier could not start"
+    if reason == "budget_exhausted":
+        return "Not run — budget stopped the run"
+    return checks_label(receipt)
+
+
+def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
+    """Routing-first OSN Receipt based on the canonical Receipt design."""
+    evidence = receipt.recorded_evidence or {}
+    routing = evidence.get("adaptive_routing") or {}
+    retry = evidence.get("retry") or {}
+    loop = evidence.get("execution_loop") or {}
+    supervisor = evidence.get("supervisor_routing") or {}
+    is_routing = isinstance(routing, dict) and routing.get("applied") is True
+    kind = "ROUTING RECEIPT" if is_routing else "PROOF RECEIPT"
+
+    lines = [
+        _SEP,
+        f"{_INDENT}OPENSHARD · {kind}",
+        f"{_INDENT}SHARD {_display_shard_number(receipt.shard_id)}    RECEIPT {_display_receipt_number(receipt.receipt_id)}",
+        _SEP,
+        f"{_INDENT}{receipt.task_short}",
+        "",
+        _row("Agent", "Openshard Native (OSN)"),
+    ]
+    if receipt.repo:
+        lines.append(_row("Repo", receipt.repo_identity or receipt.repo))
+    if receipt.branch:
+        lines.append(_row("Branch", receipt.branch))
+    if receipt.owner:
+        lines.append(_row("Owner", receipt.owner))
+
+    selected_raw = routing.get("selected_model") if isinstance(routing, dict) else None
+    selected = _display_model_name(selected_raw) if isinstance(selected_raw, str) else receipt.model_display
+    retry_attempts = retry.get("attempts") if isinstance(retry, dict) else None
+    retry_attempts = retry_attempts if isinstance(retry_attempts, list) else []
+    ladder = routing.get("escalation_ladder") if isinstance(routing, dict) else None
+    ladder = ladder if isinstance(ladder, list) else []
+
+    lines += ["", f"{_INDENT}ROUTE", f"{_INDENT}{selected}"]
+    if retry_attempts:
+        for attempt in retry_attempts:
+            model = attempt.get("model") if isinstance(attempt, dict) else None
+            if not isinstance(model, str):
+                continue
+            lines.append(f"{_INDENT}  ↓ verification failed")
+            lines.append(f"{_INDENT}{_display_model_name(model)}")
+        if receipt.verification_status == "passed":
+            lines.append(f"{_INDENT}  ↓ verification passed")
+    elif loop.get("stop_reason") == "provider_error":
+        lines.append(f"{_INDENT}  ↓ provider error")
+        if ladder:
+            lines.append(f"{_INDENT}Fallback planned · {_display_model_name(str(ladder[0]))} · not used")
+    elif receipt.verification_status == "passed":
+        lines.append(f"{_INDENT}  ↓ verification passed")
+    elif receipt.verification_status == "failed":
+        lines.append(f"{_INDENT}  ↓ verification failed")
+
+    lines += [
+        "",
+        f"{_INDENT}WORK",
+        _row("Files modified", str(receipt.files_changed), width=16),
+    ]
+    if receipt.files_touched:
+        lines.append(f"{_INDENT}  ↳ " + " · ".join(receipt.files_touched[:5]))
+    if receipt.duration_seconds is not None:
+        minutes, seconds = divmod(int(round(receipt.duration_seconds)), 60)
+        duration = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+        lines.append(_row("Duration", duration))
+    lines.append(_row("Checks", _osn_checks_display(receipt, loop)))
+
+    lines += ["", f"{_INDENT}COST"]
+    total = receipt.cost_raw
+    retry_costs: list[float] = []
+    for attempt in retry_attempts:
+        if not isinstance(attempt, dict):
+            continue
+        retry_cost = attempt.get("cost_usd")
+        if isinstance(retry_cost, (int, float)) and not isinstance(retry_cost, bool):
+            retry_costs.append(float(retry_cost))
+    first_cost = total
+    if total is not None and retry_attempts and len(retry_costs) == len(retry_attempts):
+        first_cost = max(0.0, total - sum(retry_costs))
+    if first_cost is not None:
+        lines.append(_row(selected, "$" + f"{first_cost:.4f}", width=28))
+    for attempt in retry_attempts:
+        if not isinstance(attempt, dict) or not isinstance(attempt.get("model"), str):
+            continue
+        cost = attempt.get("cost_usd")
+        cost_text = "$" + f"{cost:.4f}" if isinstance(cost, (int, float)) else "not recorded"
+        lines.append(_row(_display_model_name(attempt["model"]), cost_text, width=28))
+    if not retry_attempts and ladder and loop.get("stop_reason") == "provider_error":
+        lines.append(_row(_display_model_name(str(ladder[0])), "not used", width=28))
+    lines.append(_row("Run cost · recorded", receipt.cost_display, width=28))
+
+    lines += [
+        "",
+        f"{_INDENT}PROOF",
+        _row("Verification", verified_label(receipt), width=14),
+        _row("Integrity", receipt.integrity),
+    ]
+    if is_routing:
+        policy = routing.get("policy") or {}
+        version = policy.get("version") if isinstance(policy, dict) else None
+        lines.append(_row("Routing", f"Adaptive V2{f' · v{version}' if version else ''}"))
+    if isinstance(supervisor, dict):
+        decisions = supervisor.get("decisions") or []
+        lines.append(_row("Supervisor", "Used" if decisions else "Not consulted"))
+
+    if receipt.tokens_input is not None or receipt.tokens_output is not None:
+        total_tokens = (receipt.tokens_input or 0) + (receipt.tokens_output or 0)
+        lines.append(_row("Tokens", _format_token_count(total_tokens)))
+
+    if receipt.error_class:
+        result_label = "PROVIDER ERROR" if receipt.error_class == "provider_error" else receipt.error_class.upper()
+    elif receipt.verification_status == "passed":
+        result_label = "VERIFIED"
+    elif receipt.verification_status == "failed":
+        result_label = "FAILED VERIFICATION"
+    else:
+        result_label = receipt.status.upper()
+
+    lines += ["", f"{_INDENT}RESULT", f"{_INDENT}{result_label}", f"{_INDENT}{receipt.human_summary or receipt.result}", _SEP]
+    return "\n".join(lines)
+
+
 def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     """Render a bordered, column-aligned RECEIPT block. Pure, no I/O."""
+    evidence = receipt.recorded_evidence or {}
+    if isinstance(evidence.get("execution_loop"), dict):
+        return _render_osn_compact_receipt(receipt)
+
     model_label, model_value = _models_label_and_value(receipt)
 
     lines = [

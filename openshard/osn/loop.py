@@ -26,6 +26,7 @@ from typing import Any
 from openshard.osn.budget import STATUS_BUDGET_EXHAUSTED, BudgetExhausted, BudgetLedger
 from openshard.policy.decision import PolicyDecision, make_deny
 from openshard.policy.file_mutation import Approver, FileMutationGate
+from openshard.safety.sanitize import sanitize_text
 from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
 from openshard.verification.setup_failure import detect_setup_failure
 
@@ -59,6 +60,22 @@ class LoopContext:
 
 # provider(context) -> proposed actions. In production this wraps a model call.
 ActionProvider = Callable[[LoopContext], list[FileWriteAction]]
+ProgressCallback = Callable[[str, dict[str, Any]], None]
+
+
+def _emit_progress(progress: ProgressCallback | None, event: str, **data: Any) -> None:
+    """Emit bounded run progress without ever letting UI code affect execution."""
+    if progress is None:
+        return
+    try:
+        progress(event, data)
+    except Exception:
+        pass
+
+
+def _safe_error_message(exc: Exception) -> str | None:
+    """A short, secret/path-safe provider error suitable for a Receipt."""
+    return sanitize_text(str(exc), 180)
 
 
 @dataclass
@@ -91,6 +108,9 @@ class AttemptRecord:
     # Supervisor routing: what the supervisor decided after this attempt's
     # observed failure, and whether the loop acted on it.
     supervision: dict | None = None
+    # Safe provider failure detail. Never raw output, stack traces, paths or secrets.
+    error_class: str | None = None
+    error_message: str | None = None
 
 
 @dataclass
@@ -137,6 +157,10 @@ class LoopReceipt:
                     "blocked": [_display_path(p) for p in a.blocked],
                     "policy": _stored_policy(a.policy),
                     "verification": _stored_verification(a.verification),
+                    "error": (
+                        {"class": a.error_class, "message": a.error_message}
+                        if a.error_class else None
+                    ),
                 }
                 for a in self.attempts
             ],
@@ -260,6 +284,7 @@ def run_bounded_loop(
     sandbox_path: Path | None = None,
     budget: BudgetLedger | None = None,
     supervisor: Any | None = None,
+    progress: ProgressCallback | None = None,
 ) -> LoopReceipt:
     """Run the bounded loop. Never writes to *repo_root*.
 
@@ -286,6 +311,8 @@ def run_bounded_loop(
     prev_failure: str | None = None
     blocked_seen: list[str] = []
     prev_actions: str | None = None
+
+    _emit_progress(progress, "workspace_ready")
 
     def _receipt(status: str, reason: str) -> LoopReceipt:
         return LoopReceipt(task_id, status, reason, attempts, changed, str(sandbox))
@@ -314,9 +341,13 @@ def run_bounded_loop(
                 _settle_supervision("run_ended_before_retry")
                 return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         ctx = LoopContext(task, _list_files(sandbox), n, prev_failure, list(blocked_seen))
+        model_getter = getattr(provider, "pending_model_for", None)
+        pending_model = model_getter(n) if callable(model_getter) else None
+        _emit_progress(progress, "attempt_start", attempt=n, model=pending_model)
         try:
             actions = provider(ctx)
         except BudgetExhausted as exc:
+            _emit_progress(progress, "budget_stop", attempt=n, reason=exc.stop_reason)
             # The provider consulted the same ledger before a call and refused
             # it. The attempt had started (an earlier call in it may have been
             # paid for, e.g. before a re-ask), so it is recorded like a
@@ -326,10 +357,21 @@ def run_bounded_loop(
             return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         except Exception as exc:
             _settle_supervision("run_ended_before_retry")
-            attempts.append(AttemptRecord(n, [], [], [], {"provider_error": type(exc).__name__}))
+            error_class = type(exc).__name__
+            error_message = _safe_error_message(exc)
+            attempts.append(AttemptRecord(
+                n, [], [], [], {"provider_error": error_class},
+                error_class=error_class, error_message=error_message,
+            ))
+            _emit_progress(
+                progress, "provider_error", attempt=n, model=pending_model,
+                error_class=error_class, message=error_message,
+            )
             return _receipt("error", "provider_error")
         _settle_supervision(None)  # the recommended model was called
+        _emit_progress(progress, "model_response", attempt=n, model=pending_model, proposed=len(actions))
         if not actions:
+            _emit_progress(progress, "no_actions", attempt=n)
             return _receipt("no_actions", "provider proposed no actions")
 
         actions_fp = hashlib.sha256(
@@ -378,6 +420,9 @@ def run_bounded_loop(
         rec.decisions = attempt_decisions
         attempts.append(rec)
         blocked_seen.extend(p for p in blocked if p not in blocked_seen)
+        _emit_progress(
+            progress, "policy_result", attempt=n, applied=len(applied), blocked=len(blocked),
+        )
 
         if budget_stop is not None:
             return _receipt(STATUS_BUDGET_EXHAUSTED, budget_stop.stop_reason)
@@ -392,8 +437,14 @@ def run_bounded_loop(
             except BudgetExhausted as exc:
                 return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         before = _hash_files(sandbox, changed)
+        _emit_progress(progress, "verification_start", attempt=n)
         result, output = _run_verification(verify_command, sandbox, verify_timeout)
         rec.verification = result
+        _emit_progress(
+            progress, "verification_result", attempt=n,
+            status=("unknown" if result.timed_out else "passed" if result.passed else "failed"),
+            exit_code=result.exit_code, ran=result.ran,
+        )
         after = _hash_files(sandbox, changed)
         if after != before:
             # A pass on files the verifier itself rewrote proves nothing about
@@ -440,6 +491,11 @@ def run_bounded_loop(
                 n, verification_observed=bool(result.observed), loop_max_attempts=max_attempts,
             )
             rec.supervision = decision.to_record()
+            _emit_progress(
+                progress, "recovery_decision", attempt=n, action=decision.action,
+                reason=decision.reason, model=decision.recommended_model,
+                acted_on=decision.acted_on,
+            )
             if decision.acted_on is not False:
                 if decision.action == "stop":
                     return _receipt("failed", f"supervisor_stop:{decision.reason}")

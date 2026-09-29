@@ -38,6 +38,99 @@ def _split_command(text: str) -> list[str]:
     return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p for p in parts]
 
 
+def _friendly_model(model: str | None) -> str:
+    if not model:
+        return "unknown model"
+    from openshard.history.shard_contract import display_model_name
+
+    return display_model_name(model)
+
+
+class _OsnProgressRenderer:
+    """Live, observable OSN progress. Shows actions and outcomes, never model reasoning."""
+
+    def __init__(self) -> None:
+        from openshard.cli.run_output import _Spinner
+
+        self._spinner = _Spinner() if getattr(sys.stdout, "isatty", lambda: False)() else None
+        self._spinning = False
+
+    def _stop(self) -> None:
+        if self._spinner is not None and self._spinning:
+            self._spinner.stop()
+        self._spinning = False
+
+    def _start(self, label: str) -> None:
+        self._stop()
+        if self._spinner is not None:
+            self._spinner.start(label)
+            self._spinning = True
+        else:
+            click.echo(f"  {label}...")
+
+    def close(self) -> None:
+        self._stop()
+
+    def __call__(self, event: str, data: dict) -> None:
+        from openshard.cli.run_output import _safe_console_text
+
+        def echo(text: str) -> None:
+            click.echo(_safe_console_text(text))
+
+        if event == "workspace_ready":
+            echo("  ✓ Isolated workspace ready")
+        elif event == "attempt_start":
+            self._stop()
+            model = _friendly_model(data.get("model"))
+            echo(f"\nAttempt {data.get('attempt')} · {model}")
+            self._start(f"Calling {model}")
+        elif event == "model_response":
+            self._stop()
+            n = data.get("proposed") or 0
+            echo(f"  ✓ Response received · {n} proposed write{'s' if n != 1 else ''}")
+        elif event == "provider_error":
+            self._stop()
+            cls = data.get("error_class") or "provider error"
+            msg = data.get("message")
+            echo(f"  ✗ Provider failed · {cls}" + (f": {msg}" if msg else ""))
+        elif event == "no_actions":
+            self._stop()
+            echo("  ✗ Model returned no usable changes")
+        elif event == "policy_result":
+            applied = data.get("applied") or 0
+            blocked = data.get("blocked") or 0
+            if blocked:
+                echo(f"  ✗ Policy · {blocked} blocked, {applied} applied")
+            else:
+                echo(f"  ✓ Policy allowed · {applied} write{'s' if applied != 1 else ''}")
+        elif event == "verification_start":
+            echo("\nVerification")
+            self._start("Running verification")
+        elif event == "verification_result":
+            self._stop()
+            status = data.get("status")
+            if status == "passed":
+                echo("  ✓ PASSED")
+            elif status == "failed":
+                code = data.get("exit_code")
+                echo("  ✗ FAILED" + (f" · exit {code}" if code is not None else ""))
+            else:
+                echo("  ? UNKNOWN · verification did not produce a verdict")
+        elif event == "recovery_decision":
+            self._stop()
+            echo("\nRecovery")
+            action = data.get("action")
+            recovery_model = data.get("model")
+            if action == "escalate" and isinstance(recovery_model, str) and recovery_model:
+                echo("  Verification failure observed")
+                echo(f"  → {_friendly_model(recovery_model)}")
+            else:
+                echo(f"  {action or 'stop'} · {data.get('reason') or 'no reason recorded'}")
+        elif event == "budget_stop":
+            self._stop()
+            echo(f"  ✗ Budget stopped the run · {data.get('reason') or 'limit reached'}")
+
+
 def _resolve_provider(name: str | None, model: str):
     from openshard.providers.manager import ProviderManager
 
@@ -79,6 +172,18 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     from openshard.osn.run_entry import build_osn_run_entry
 
     repo_root = _repo_root(None, False)
+    if not as_json:
+        click.echo("\nOpenshard Native (OSN)")
+        click.echo(f"  Task    {task}")
+        try:
+            from openshard.analysis.repo_map import collect_git_info
+
+            git = collect_git_info(repo_root)
+            click.echo(f"  Repo    {repo_root.name}")
+            if git.branch:
+                click.echo(f"  Branch  {git.branch}")
+        except Exception:
+            click.echo(f"  Repo    {repo_root.name}")
     argv = _split_command(verify_cmd)
     if not argv:
         raise click.UsageError("--verify-cmd must not be empty")
@@ -123,6 +228,10 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         )
     model = routing.first_model
     models = routing.models
+    if not as_json:
+        click.echo(f"  Route   {' → '.join(_friendly_model(m) for m in models)}")
+        if routing.applied and routing.decision is not None:
+            click.echo(f"  Policy  Adaptive Routing V2 · {routing.decision.resolved_class}")
 
     action_provider = ModelActionProvider(
         provider=provider_obj, models=models, repo_root=repo_root, context_files=list(context_files),
@@ -132,10 +241,15 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
                                      explicit_model=explicit_model)
 
     started = time.monotonic()
-    receipt = run_bounded_loop(
-        repo_root, task, action_provider, argv, task_id=task_id, max_attempts=max_attempts,
-        budget=budget, supervisor=supervisor,
-    )
+    progress_renderer = _OsnProgressRenderer() if not as_json else None
+    try:
+        receipt = run_bounded_loop(
+            repo_root, task, action_provider, argv, task_id=task_id, max_attempts=max_attempts,
+            budget=budget, supervisor=supervisor, progress=progress_renderer,
+        )
+    finally:
+        if progress_renderer is not None:
+            progress_renderer.close()
     duration = time.monotonic() - started
 
     entry = build_osn_run_entry(
@@ -191,7 +305,17 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         click.echo(f"  supervisor: {supervisor_line}")
     for f in receipt.changed_files:
         click.echo(f"  changed: {f}")
-    click.echo("  Changes were made in an isolated copy, verified there by OpenShard.")
+    if receipt.status == "verified":
+        click.echo("  Verified in an isolated workspace.")
+        click.echo("  Real repository unchanged until promotion.")
+    elif not receipt.changed_files:
+        click.echo("  No files changed.")
+        if receipt.verification_state == "not_run":
+            click.echo("  Verification did not run.")
+    else:
+        click.echo("  Changes remain isolated; real repository unchanged.")
+        if receipt.verification_state == "not_run":
+            click.echo("  Verification did not run.")
     if promote and promoted:
         click.echo(f"  Promoted {len(promoted)} file(s) into the repository (not re-verified there).")
     elif receipt.status == "verified":

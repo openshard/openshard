@@ -67,6 +67,10 @@ class ModelActionProvider:
     def model_for(self, attempt: int) -> str:
         return self.models[min(max(attempt, 1), len(self.models)) - 1]
 
+    def pending_model_for(self, attempt: int) -> str:
+        """Return the model the next provider call will use without consuming an override."""
+        return self.next_model_override or self.model_for(attempt)
+
     def set_next_model(self, model: str) -> None:
         self.next_model_override = model
 
