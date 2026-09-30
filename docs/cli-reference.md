@@ -71,6 +71,11 @@ openshard history                                  # Recent receipts for this re
 openshard history --limit 20 --json                # Same, more rows, machine-readable
 openshard context "fix the flaky auth test"        # What relevant_context would give an agent, and why
 openshard context --text "fix the flaky auth test" # Just the block an agent would receive
+openshard learn signals                            # Evidence-backed learning signals for this repo (see learning.md)
+openshard learn signals "update dashboard layout"  # The signals an OSN run would get for a task, and why
+openshard learn inspect ls_9a779064fd35            # One signal: counts, freshness, supporting Receipts
+openshard learn last                               # What learning did on the latest OSN run, and its outcome
+openshard learn impact                             # Outcomes with vs without learning (observational)
 openshard stats                                    # Counts over recorded receipts (agents, models, checks, est. cost)
 openshard stats completeness                       # Receipt completeness heuristic
 openshard stats failures                           # Failure categories over recent runs

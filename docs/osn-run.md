@@ -7,7 +7,7 @@ openshard osn run "Implement slugify in slug.py" \
   --verify-cmd "python -m pytest -q tests" \
   --context-file slug.py --context-file tests/test_slug.py \
   [--model M] [--escalate-model M2 ...] [--max-attempts 2] \
-  [--task-id task_...] [--promote] [--yes] [--json]
+  [--task-id task_...] [--promote] [--yes] [--no-learning] [--json]
 ```
 
 ## Flow
@@ -41,13 +41,26 @@ OpenShard runs `--verify-cmd` -> bounded retry / escalation -> receipt.
 | Policy decisions, file effects | OpenShard-observed; every proposed write is stored as an allow / ask / deny `policy_decisions` entry (with whether an approver granted an ask), and an `approval_receipt` says what approval was needed and whether it was given, so `history`, failure classification and trust scoring treat an OSN policy block as a policy block |
 | Verification (exit code) | OpenShard-observed (`directly_observed` / `openshard_executed`) |
 | Model cost | recorded only when the provider reported it; otherwise unknown |
+| Failing test ids | OpenShard-observed: pytest node ids / jest-vitest test files the verifier named on a failed attempt; identifiers only, never output |
+| Learning (`learning`) | which prior signals were consulted and what they influenced; see [learning.md](learning.md) |
 
 A verifier that cannot be started is recorded as `not_run`, never as a pass or a model failure. A
 verifier that rewrites the files it is checking does not count as a pass. The Shard entry
-(`executor: osn_loop`) stores no task text beyond the usual sanitised task, only the verifier's
-executable name, and a routing provenance block, so `openshard stats routing` includes
-these runs. The model that ran is chosen by you (`--model`) or by keyword routing, unless the
+(`executor: osn_loop`) stores no task text beyond the usual sanitised task. The verifier is
+stored as its executable name, plus, in the `learning` block, a fingerprint and a label that
+shows the arguments only when every token is plain (no quotes, shell syntax, absolute paths or
+secret-like values). A routing provenance block lets `openshard stats routing` include these
+runs. The model that ran is chosen by you (`--model`) or by keyword routing, unless the
 `adaptive_routing` capability applies (next section).
+
+## Learning
+
+Unless `--no-learning` is given, the run first consults evidence-backed learning signals derived
+from this repository's earlier verified runs, and records what it used in a `learning` block. The
+signals reach the model as advisory context, never as instructions. Checks that caught prior
+failures are recommended, never run. With `adaptive_routing` on, Routing V2 prefers
+repository- and task-scoped history when it clears the same sample gate. See
+[learning.md](learning.md).
 
 ## Adaptive routing (experimental)
 
