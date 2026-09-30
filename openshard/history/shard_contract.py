@@ -24,6 +24,7 @@ from openshard.history.shard import (
 from openshard.history.shard_hash import verify_shard_hash
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
+from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE, estimate_usage_cost, single_pricing_model
 from openshard.history.verification import (
     REASON_OUTCOME_NOT_OBSERVED,
     SOURCE_AGENT_REPORTED,
@@ -1052,6 +1053,24 @@ def build_shard_receipt(
         ]
         if _sr_costs:
             cost_raw = sum(_sr_costs)
+
+    # Some agent surfaces expose trustworthy token usage but no dollar total.
+    # In that case price the recorded usage against the exact model's dated
+    # official list rate. Provider/agent-reported cost still wins, unknown or
+    # multi-model usage stays unknown, and no token provenance means no estimate.
+    if cost_raw is None and isinstance(entry.get("tokens_provenance"), str):
+        _pricing_model = single_pricing_model(entry)
+        _cost_estimate = estimate_usage_cost(
+            _pricing_model,
+            input_tokens=entry.get("prompt_tokens"),
+            output_tokens=entry.get("completion_tokens"),
+            cache_read_tokens=entry.get("cache_read_tokens"),
+            cache_write_tokens=entry.get("cache_creation_tokens"),
+        )
+        if _cost_estimate is not None:
+            cost_raw = _cost_estimate.usd
+            cost_provenance = COST_PROVENANCE_OFFICIAL_RATE
+
     if cost_raw is None:
         cost_display = "Not recorded"
     elif cost_provenance:
