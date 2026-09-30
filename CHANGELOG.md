@@ -23,6 +23,13 @@ All notable changes to OpenShard are documented here.
   - `post_session_verify: safe` (opt-in) starts a safe-only `openshard verify`
     when a captured session closes.
 
+- **Later verification evidence syncs to the Platform.** An already-hosted
+  Receipt is never resent; `openshard sync now` and the background sync now
+  also send the attestations recorded after it (`openshard verify`,
+  `openshard verify --ci`) and Core's interpretation of them to the
+  Platform's verification evidence route. Sent once per distinct evidence
+  set; a Platform without the route is skipped quietly.
+
 ### Changed
 
 - The receipt's `Checks` row names each group (`1 passed, 1 failed, 1

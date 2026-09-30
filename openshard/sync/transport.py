@@ -21,6 +21,17 @@ kind            HTTP         meaning for the sender
 ``not_found``   404          no such organisation: pause
 ``unavailable`` 429/5xx/net  try again later (exponential backoff)
 ==============  ===========  =============================================
+
+Later verification evidence (``sync/evidence.py``) goes to a second route,
+``.../receipts/<receipt_id>/verification-evidence``, with the same
+classification except for 404, which there never means "wrong link":
+
+==================  =====================  ================================
+``receipt_pending``  404 receipt_not_found  the Receipt is not hosted yet:
+                                            try again after it has synced
+``unsupported``      any other 404/405      this Platform predates the
+                                            evidence route: skip quietly
+==================  =====================  ================================
 """
 
 from __future__ import annotations
@@ -50,6 +61,9 @@ KIND_UNAUTHORIZED = "unauthorized"
 KIND_FORBIDDEN = "forbidden"
 KIND_NOT_FOUND = "not_found"
 KIND_UNAVAILABLE = "unavailable"
+# Evidence route only (see the module docstring).
+KIND_RECEIPT_PENDING = "receipt_pending"
+KIND_UNSUPPORTED = "unsupported"
 
 ACCEPTED_KINDS: frozenset[str] = frozenset({KIND_CREATED, KIND_DUPLICATE})
 TERMINAL_KINDS: frozenset[str] = frozenset({KIND_CONFLICT, KIND_REJECTED})
@@ -72,15 +86,32 @@ class PlatformTransport(Protocol):
     def send(self, envelope: dict) -> SendResult: ...
 
 
+class EvidenceTransport(Protocol):
+    """A transport that can also send later verification evidence for a hosted Receipt."""
+
+    def send_evidence(self, receipt_id: str, envelope: dict) -> SendResult: ...
+
+
 class RecordingPlatformTransport:
     """Tests: answers from a script (cycled when exhausted) and remembers every envelope."""
 
     name = "recording"
 
-    def __init__(self, results: list[SendResult] | None = None) -> None:
+    def __init__(
+        self, results: list[SendResult] | None = None, *, evidence_results: list[SendResult] | None = None,
+    ) -> None:
         self.results = list(results or [SendResult(KIND_CREATED, 201)])
         self.envelopes: list[dict] = []
         self._calls = 0
+        self.evidence_results = list(evidence_results or [SendResult(KIND_CREATED, 201)])
+        self.evidence_envelopes: list[dict] = []
+        self._evidence_calls = 0
+
+    def send_evidence(self, receipt_id: str, envelope: dict) -> SendResult:
+        self.evidence_envelopes.append(json.loads(json.dumps(envelope)))
+        result = self.evidence_results[min(self._evidence_calls, len(self.evidence_results) - 1)]
+        self._evidence_calls += 1
+        return result
 
     def send(self, envelope: dict) -> SendResult:
         self.envelopes.append(json.loads(json.dumps(envelope)))
@@ -121,6 +152,16 @@ def classify_status(status: int, body: bytes = b"") -> SendResult:
     return SendResult(KIND_UNAVAILABLE, status, code, None)
 
 
+def classify_evidence_status(status: int, body: bytes = b"") -> SendResult:
+    """``classify_status`` for the evidence route: a 404 there is never a link failure."""
+    if status in (404, 405):
+        code, details = _parse_error(body)
+        if status == 404 and code == "receipt_not_found":
+            return SendResult(KIND_RECEIPT_PENDING, status, code, details)
+        return SendResult(KIND_UNSUPPORTED, status, code, None)
+    return classify_status(status, body)
+
+
 class HttpsPlatformTransport:
     name = "https"
 
@@ -131,12 +172,21 @@ class HttpsPlatformTransport:
         self.timeout = timeout
 
     def send(self, envelope: dict) -> SendResult:
+        return self._post(self.url, envelope, classify_status)
+
+    def send_evidence(self, receipt_id: str, envelope: dict) -> SendResult:
+        import urllib.parse
+
+        url = f"{self.url}/{urllib.parse.quote(receipt_id, safe='')}/verification-evidence"
+        return self._post(url, envelope, classify_evidence_status)
+
+    def _post(self, url: str, envelope: dict, classify: Any) -> SendResult:
         import urllib.error
         import urllib.request
 
         body = json.dumps(envelope, separators=(",", ":"), ensure_ascii=True, default=str).encode("utf-8")
         request = urllib.request.Request(
-            self.url,
+            url,
             data=body,
             method="POST",
             headers={
@@ -148,13 +198,13 @@ class HttpsPlatformTransport:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310 - https/loopback only
-                return classify_status(int(response.status))
+                return classify(int(response.status))
         except urllib.error.HTTPError as exc:
             try:
                 raw = exc.read(_MAX_ERROR_BODY_BYTES)
             except Exception:
                 raw = b""
-            return classify_status(int(exc.code), raw)
+            return classify(int(exc.code), raw)
         except Exception:
             return SendResult(KIND_UNAVAILABLE, None)
 

@@ -582,9 +582,11 @@ captured session and for any Receipt with later evidence:
   outcome OpenShard observed itself, and a complete capture does not
   upgrade an agent's claim.
 
-Platform sync still projects the Receipt's own `verification` block only;
-the Platform contract is closed, so later evidence becomes hosted data only
-after that contract defines it.
+Platform sync sends the Receipt with its own `verification` block, once,
+and sends later evidence separately: each attestation plus this same
+interpretation, to the Platform's verification evidence route
+([platform-sync.md](platform-sync.md)). The hosted Receipt therefore shows
+the same current state and the same original as `openshard last`.
 
 ### `openshard verify --ci`: independent CI for the exact commit
 

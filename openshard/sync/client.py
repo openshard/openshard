@@ -11,6 +11,10 @@
   an invalid key pauses the link until ``openshard sync connect`` runs again.
 * An open agent session is left alone until it ends or goes quiet
   (``envelope.eligibility``).
+* A hosted Receipt is never resent. Verification evidence recorded after it
+  synced (``openshard verify``, ``openshard verify --ci``) is sent on its own
+  route, once per distinct evidence set, and only for a Receipt whose hosted
+  copy is still the local one (``sync/evidence.py``).
 
 Callers: ``openshard sync now`` (one repository, foreground), the capture
 service's timer (every known repository, background), and tests through
@@ -217,6 +221,11 @@ class FlushReport:
     in_progress: int = 0
     without_receipt_id: int = 0
     stopped: str | None = None
+    # Later verification evidence for Receipts that are already hosted.
+    evidence_sent: int = 0
+    evidence_recorded: int = 0
+    evidence_not_accepted: int = 0
+    evidence_unsupported: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -270,13 +279,12 @@ def flush(
         report.stale = found.stale
         report.in_progress = found.in_progress
         report.without_receipt_id = found.without_receipt_id
-        if not found.candidates:
-            return report
 
         sender = transport or _transport_override or _transport.HttpsPlatformTransport(
             link, user_agent=f"openshard/{_version()}"
         )
         version = _version()
+        stamp = now.timestamp() if now is not None else None
         for candidate in found.candidates[: max(0, int(limit))]:
             envelope = build_envelope(candidate.entry, candidate.index, core_version=version)
             result = sender.send(envelope)
@@ -320,10 +328,90 @@ def flush(
                 _transport.record_failure(env, now=now.timestamp() if now is not None else None)
                 report.stopped = "paused: unavailable"
                 return report
+        _flush_evidence(root, link, sender, report, env=env, version=version, stamp=stamp, limit=limit)
         return report
     except Exception:
         report.stopped = report.stopped or "error"
         return report
+
+
+def _flush_evidence(
+    root: Path,
+    link: PlatformLink,
+    sender: Any,
+    report: FlushReport,
+    *,
+    env: dict | os._Environ,
+    version: str,
+    stamp: float | None,
+    limit: int,
+) -> None:
+    """Send later verification evidence for Receipts whose hosted copy is the local one.
+
+    Derived like receipts are: every flush compares what this machine would
+    send now (``evidence_hash``) with what the outbox says it last decided
+    with the Platform, so a new attestation is picked up and an unchanged
+    one costs nothing. A Platform without the route is skipped quietly; a
+    Receipt it does not hold yet is tried again next flush.
+    """
+    send_evidence = getattr(sender, "send_evidence", None)
+    if not callable(send_evidence):
+        return
+    from openshard.sync.evidence import build_evidence_envelope, evidence_hash
+    from openshard.verification.post_session import load_attestations
+
+    attestations = load_attestations(root / HISTORY_RELPATH.parent)
+    if not attestations:
+        return
+    records = _outbox.load_outbox(root)
+    entries = load_history(root / HISTORY_RELPATH, coerce=True)
+    budget = max(0, int(limit))
+    for index, entry in enumerate(entries):
+        if budget <= 0:
+            return
+        rid = stored_receipt_id(entry)
+        record = records.get(rid) if rid is not None else None
+        if rid is None or record is None or record.get("state") != _outbox.STATE_SYNCED:
+            continue
+        if not _outbox.matches_link(record, endpoint=link.endpoint, organisation_id=link.organisation_id):
+            continue
+        synced_hash = record.get("record_hash")
+        current_hash = stored_shard_hash(entry)
+        if isinstance(synced_hash, str) and current_hash is not None and current_hash != synced_hash:
+            continue  # changed locally since sync: the hosted Receipt is a different one
+        envelope = build_evidence_envelope(entry, index, attestations, core_version=version)
+        if envelope is None:
+            continue
+        digest = evidence_hash(envelope)
+        if record.get("evidence_hash") == digest:
+            continue  # already decided for exactly this evidence
+        result = send_evidence(rid, envelope)
+        budget -= 1
+        report.evidence_sent += 1
+        if result.accepted:
+            _transport.clear_backoff(env)
+            report.evidence_recorded += 1
+            _outbox.put(root, _outbox.with_evidence(record, _outbox.STATE_SYNCED, evidence_hash=digest))
+        elif result.kind in (_transport.KIND_CONFLICT, _transport.KIND_REJECTED):
+            report.evidence_not_accepted += 1
+            state = _outbox.STATE_CONFLICT if result.kind == _transport.KIND_CONFLICT else _outbox.STATE_REJECTED
+            _outbox.put(root, _outbox.with_evidence(
+                record, state, evidence_hash=digest,
+                status=result.status, code=result.code, details=result.details,
+            ))
+        elif result.kind == _transport.KIND_RECEIPT_PENDING:
+            continue
+        elif result.kind == _transport.KIND_UNSUPPORTED:
+            report.evidence_unsupported = True
+            return
+        elif result.kind in _transport.LINK_KINDS:
+            _transport.record_link_failure(result.kind, env, now=stamp)
+            report.stopped = f"paused: {result.kind}"
+            return
+        else:
+            _transport.record_failure(env, now=stamp)
+            report.stopped = "paused: unavailable"
+            return
 
 
 def status(root: Path, *, env: dict | os._Environ | None = None, now: datetime | None = None) -> dict[str, Any]:

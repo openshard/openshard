@@ -7342,6 +7342,13 @@ def sync_now(limit: int, as_json: bool) -> None:
     if report.stopped and report.sent:
         line += f" Stopped: {report.stopped}."
     click.echo(line)
+    if report.evidence_sent:
+        evidence = f"Verification evidence: {report.evidence_recorded} Receipt(s) updated"
+        if report.evidence_not_accepted:
+            evidence += f", {report.evidence_not_accepted} not accepted (see `openshard sync status --json`)"
+        click.echo(evidence + ".")
+    if report.evidence_unsupported:
+        click.echo("Verification evidence: not sent; this Platform does not accept later evidence yet.")
 
 
 @cli.group("config")
