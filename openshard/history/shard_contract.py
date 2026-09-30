@@ -38,6 +38,7 @@ from openshard.history.verification import (
 )
 from openshard.history.verification_truth import (
     INTEGRITY_NOTE,
+    counts_phrase,
     integrity_label,
     interpret_receipt,
     verification_label,
@@ -676,11 +677,19 @@ def checks_label(receipt: ShardReceipt) -> str:
     later ``openshard verify`` re-run, is the ``Verified`` row (``verified_label``).
     """
     block = receipt.verification if isinstance(receipt.verification, dict) else {}
+    display = receipt.checks_display
+    if block.get("status") in (STATUS_FAILED, STATUS_PARTIAL) and not receipt.check_results:
+        # "19/50 passed" does not say whether the other 31 failed or were
+        # never seen to finish; name each group. The stored/synced
+        # ``checks_display`` string itself is unchanged.
+        display = counts_phrase(
+            block.get("checks_passed"), block.get("checks_failed"), block.get("checks_attempted"),
+        ) or display
     if block.get("source") == SOURCE_AGENT_REPORTED and block.get("status") in (
         STATUS_PASSED, STATUS_FAILED, STATUS_PARTIAL,
     ):
-        return f"{receipt.checks_display} (agent-reported)"
-    return receipt.checks_display
+        return f"{display} (agent-reported)"
+    return display
 
 
 def verified_label(receipt: ShardReceipt) -> str:

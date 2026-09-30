@@ -2,6 +2,37 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Added
+
+- **Verification that can become green for external agents, without rewriting
+  the Receipt.** Later evidence is appended to `.openshard/verifications.jsonl`
+  and joined at read time; the stored Receipt keeps what the session knew.
+  - `openshard verify --ci` attaches the GitHub check-run verdict for the
+    Shard's exact commit as `independently_verified` / `ci_report` evidence.
+    Never for another commit, never for a dirty tree; pending or unavailable
+    CI records nothing.
+  - `verification_truth` now carries `history` (every piece of evidence,
+    oldest first), `artifact_sha`, failed check names, and a `ci` basis. The
+    newest conclusive evidence is the current state; a failure is never
+    hidden by a pass.
+  - `openshard last` shows work, verification, evidence source and capture
+    completeness as four separate facts, with the original session record
+    and the evidence history (`last --json`: `verification_view`).
+  - `post_session_verify: safe` (opt-in) starts a safe-only `openshard verify`
+    when a captured session closes.
+
+### Changed
+
+- The receipt's `Checks` row names each group (`1 passed, 1 failed, 1
+  unknown`) when not everything passed. The stored and synced `checks` string
+  is unchanged.
+- `openshard verify` first closes sessions idle for an hour whose end event
+  never arrived (`session_end_not_observed`).
+- `openshard ci check` reads the current verification state, including a
+  later re-run or CI verdict, like `last`, `proof` and `trust` already did.
+
 ## 0.4.9 - 2026-09-28
 
 ### Changed

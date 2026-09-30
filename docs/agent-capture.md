@@ -396,7 +396,7 @@ The evidence rules stay strict:
 | Interrupted, timed out, denied or backgrounded command | `unknown` (a failed *tool call*, never a failed *check*) | as above |
 | `openshard verify` ran the check and read its exit code | `passed` / `failed` | `directly_observed`, mode `openshard_executed` |
 | ...on a clean commit (same HEAD, no tracked change after) | same, plus `artifact_sha` | `directly_observed`; binding established by git |
-| CI result for the exact artifact | not implemented | would be `independently_verified` |
+| `openshard verify --ci` found GitHub check runs for the exact artifact commit | `passed` / `failed` (cancelled: `unknown` + `ci_cancelled`) | `independently_verified`, mode `ci_report`, always with `artifact_sha` |
 
 A pass is never manufactured: a missing, truncated, conflicting (exit code vs
 event) or undocumented signal leaves the check `unknown`. Receipts label
@@ -420,12 +420,19 @@ so they cannot disagree. It states three things:
 
 Rules, in order:
 
-1. The latest `openshard verify` attestation for the receipt, when it ran at
-   least one check, describes the current state (`basis: post_session`). The
-   session's own claim stays visible as `claim_status` / `claim_source`
-   ("the agent had reported passed"). An attestation that ran nothing
-   overrides nothing; a sidecar block that is not OpenShard-executed is never
-   promoted.
+1. Later evidence attached to the receipt describes the current state. The
+   newest conclusive attestation wins: an `openshard verify` re-run that ran
+   at least one check (`basis: post_session`) or a CI verdict bound to a
+   commit (`basis: ci`, authority `independently_verified`). One refinement:
+   when CI reported on the very commit the newest re-run tested, CI's
+   verdict stands in for that re-run (same artifact, stronger source) unless
+   the re-run *failed*. A failure is never hidden by a pass, and a weaker
+   pass never overrides a CI failure on the same commit. The session's own
+   claim stays visible as `claim_status` / `claim_source` ("the agent had
+   reported passed"), and `history` lists every piece of evidence oldest
+   first. An attestation that concluded nothing (nothing ran, CI cancelled)
+   overrides nothing; a sidecar block of the wrong source or mode, or a CI
+   block with no commit, is never promoted.
 2. An observed outcome (`directly_observed`, `git_verified`,
    `independently_verified`) is reported as it is.
 3. An **agent-reported pass is `unknown`**: shown as
@@ -525,6 +532,122 @@ external agent completes
 * **Evidence, not policy.** `verify` exits 0 whatever the outcome and gates
   nothing. Output streams to the terminal (discarded under `--json`) and is
   never stored.
+
+### Current state versus the original Receipt
+
+A Receipt records what was known when the session ended and is never
+rewritten. Evidence that arrives later is appended to
+`.openshard/verifications.jsonl` and joined at read time, so the same Shard
+can read, over time:
+
+```
+T1  session     agent reported   failed   0 passed, 1 failed
+T2  re-run      OpenShard        passed   8/8 passed @ 1a2b3c4d5e6f
+T3  CI          GitHub checks    passed   5/5 passed @ 1a2b3c4d5e6f
+```
+
+`openshard last` shows the current state and what it replaced as four
+separate facts (`last --json`: `verification_view`), for an externally
+captured session and for any Receipt with later evidence:
+
+```
+  VERIFICATION
+  Work          Completed
+  Verification  VERIFIED (5/5 passed)
+  Evidence      Independent CI, commit 1a2b3c4d5e6f
+  Capture       Partial (session end was not observed)
+  Tool activity 188 call(s), 4 tool failure(s) (not verification)
+  Original      Failed (agent reported: 0 passed, 1 failed)
+  Evidence history (oldest first; nothing here was rewritten)
+    ...
+```
+
+* **Work** is the session state only: `Completed`, `Turn completed (session
+  still open)`, `In progress`, `Session ended (no turn observed)`, or
+  `Session ended without final event` when the stale sweep closed a session
+  whose end event never arrived.
+* **Verification** is the outcome with counts that name each group (`19
+  passed, 4 failed, 27 unknown`, not `19/50 passed`) and the failed check
+  names. Counts are check commands, not individual test cases: command
+  output is never stored. Upper case (`PASSED`, `VERIFIED`, `FAILED`) is
+  reserved for an outcome OpenShard or CI observed; an agent's own account
+  reads `Passed` / `Failed` with `Evidence  Agent reported (not verified by
+  OpenShard)` and still scores as unverified everywhere.
+* **Evidence** is who vouches: `Independent CI`, `OpenShard verified`, or
+  `Agent reported`, with the commit when it is bound to one.
+* **Capture** is how much of the session OpenShard has: `Partial` for a run
+  it only observed through an agent's hooks or one with known gaps,
+  `Complete` only for a run it executed itself with nothing known missing.
+  It is independent of verification: a partial capture does not grey out an
+  outcome OpenShard observed itself, and a complete capture does not
+  upgrade an agent's claim.
+
+Platform sync still projects the Receipt's own `verification` block only;
+the Platform contract is closed, so later evidence becomes hosted data only
+after that contract defines it.
+
+### `openshard verify --ci`: independent CI for the exact commit
+
+```
+openshard verify --ci [--receipt ID] [--dry-run] [--json] [--strict]
+  -> the commit: the one the newest bound `openshard verify` re-run tested,
+     else HEAD when the tree is a clean commit that descends from the
+     session's start commit (and is not that commit while the session
+     changed files)
+  -> gh api repos/{owner}/{repo}/commits/<sha>/check-runs   (read-only)
+  -> only runs whose head_sha is exactly that commit are counted; a re-run
+     check counts by its newest run
+  -> passed / failed / cancelled appended as a `ci_verification` attestation
+```
+
+| Situation | Result |
+|---|---|
+| Dirty working tree, no earlier bound re-run | refused (`dirty_tree`); CI is not queried |
+| HEAD is still the session's start commit but the session changed files | refused (`session_changes_not_committed`) |
+| HEAD does not descend from the session's start commit | refused (`commit_not_descended_from_session`) |
+| HEAD moved after a bound re-run | CI is looked up for the re-run's commit only; re-run `openshard verify` to bind the new one |
+| Pull request head is past the commit | verdict attached for the commit, `ci.pr_head_matches: false`, and said so |
+| CI pending | nothing recorded (`ci_pending`); a failed run is conclusive even while others are still running |
+| CI failed | recorded; current state `FAILED`, `Independent CI`, failed run names listed |
+| CI cancelled or stale | recorded as `unknown` + `ci_cancelled`; changes nothing |
+| No runs, all skipped, only other commits' runs, `gh` missing or without access | nothing recorded (`ci_unavailable`) |
+
+Only run names and conclusions are stored: no logs, no URLs, no token. The
+hook Receipt itself records HEAD at session *start*, never an end commit,
+which is why the artifact commit must come from a clean tree OpenShard saw.
+`--strict` exits 1 on a CI failure and 2 when nothing conclusive could be
+attached. `openshard ci check` reads the current state, so a re-run or CI
+verdict counts there too (in both directions).
+
+### Post-session verification on session close (opt-in)
+
+```yaml
+# .openshard/config.yml
+post_session_verify: safe
+verification_commands:
+  - [python, -m, pytest, -q]
+```
+
+With this set, the capture path starts a detached
+`openshard verify --receipt <id> --json` when a session's Receipt is
+finalised: on the session-end event, or when the stale sweep closes a
+session that never sent one. It never passes `--approve` or
+`--from-observed`, so only checks classed `safe` run; `needs_approval` and
+`blocked` checks are recorded as skipped. It is off by default, off for any
+value other than `safe`, and `OPENSHARD_NO_AUTO_VERIFY=1` disables it for a
+process. The hook does not wait for it and nothing is recorded if it cannot
+start.
+
+### Session finalisation
+
+| How the session ended | What is recorded |
+|---|---|
+| End event received | `capture.session_end_observed: true`, a `run.completed` Event, `Work  Completed` |
+| Terminal closed, crash, hook missing, agent has no end hook | the last snapshot stays; after one idle hour the stale sweep marks `session_end_not_observed` (capture `Partial`, `Work  Session ended without final event`). No end event is fabricated. |
+
+The sweep runs when the next session starts in the repository, before a
+Platform sync, and at the start of `openshard verify`, so a crashed session
+can be closed and independently verified in one step.
 
 ## Codex integration
 

@@ -60,10 +60,12 @@ from openshard.history.verification import (
     CHECK_PASSED,
     CHECK_SKIPPED,
     CHECK_UNKNOWN,
+    MODE_CI_REPORT,
     MODE_OPENSHARD_EXECUTED,
     REASON_ARTIFACT_NOT_BOUND,
     REASON_CHECK_NOT_COMPLETED,
     SOURCE_DIRECTLY_OBSERVED,
+    SOURCE_INDEPENDENTLY_VERIFIED,
     STATUS_NOT_RUN,
     VerificationCheck,
     aggregate_status,
@@ -82,6 +84,13 @@ from openshard.verification.plan import (
 
 ATTESTATIONS_FILENAME = "verifications.jsonl"
 ATTESTATION_VERSION = 1
+# What an attestation line records. A re-run is OpenShard executing checks
+# itself; a CI attestation is an independent CI system's verdict on one exact
+# commit (verification/ci_evidence.py). Both are appended, never rewritten.
+KIND_POST_SESSION = "post_session_verification"
+KIND_CI = "ci_verification"
+ATTESTATION_KINDS: frozenset[str] = frozenset({KIND_POST_SESSION, KIND_CI})
+MAX_EVIDENCE = 20  # newest attestations joined onto one receipt
 MAX_PLANNED_CHECKS = 8
 DEFAULT_TIMEOUT_SECONDS = 600.0
 
@@ -390,7 +399,7 @@ def build_attestation(
     return {
         "version": ATTESTATION_VERSION,
         "attestation_id": f"vat_{uuid.uuid4().hex}",
-        "kind": "post_session_verification",
+        "kind": KIND_POST_SESSION,
         "created_at": completed_at,
         "receipt_id": entry.get("receipt_id") if isinstance(entry.get("receipt_id"), str) else None,
         "run_id": entry.get("run_id") if isinstance(entry.get("run_id"), str) else None,
@@ -448,38 +457,82 @@ def load_attestations(history_dir: Path) -> list[dict]:
                     item = json.loads(raw)
                 except (json.JSONDecodeError, ValueError):
                     continue
-                if isinstance(item, dict) and item.get("kind") == "post_session_verification":
+                if isinstance(item, dict) and item.get("kind") in ATTESTATION_KINDS:
                     out.append(item)
     except OSError:
         return out
     return out
 
 
-def latest_for_entry(entry: dict, attestations: list[dict]) -> dict | None:
-    """The newest attestation naming *entry* (by ``receipt_id``, else ``run_id``), validated."""
+def _names_entry(entry: dict, item: dict) -> bool:
     rid = entry.get("receipt_id") if isinstance(entry.get("receipt_id"), str) else None
     run_id = entry.get("run_id") if isinstance(entry.get("run_id"), str) else None
-    if not rid and not run_id:
+    return bool((rid and item.get("receipt_id") == rid) or (not rid and run_id and item.get("run_id") == run_id))
+
+
+def evidence_for_entry(entry: dict, attestations: list[dict]) -> list[dict]:
+    """Every attestation naming *entry* (by ``receipt_id``, else ``run_id``), oldest first, validated.
+
+    This is the Shard's later-evidence history: each ``openshard verify``
+    re-run and each CI verdict, in the order they were recorded. Nothing is
+    merged or dropped except beyond the newest ``MAX_EVIDENCE``.
+    """
+    matched = [item for item in attestations if isinstance(item, dict) and _names_entry(entry, item)]
+    return [summarize_attestation(item) for item in matched[-MAX_EVIDENCE:]]
+
+
+def latest_for_entry(entry: dict, attestations: list[dict]) -> dict | None:
+    """The later evidence recorded for *entry*, or None when there is none.
+
+    The top-level ``attestation_id`` / ``created_at`` / ``verification`` are
+    the newest OpenShard re-run (None when only CI evidence exists);
+    ``evidence`` is the full history from ``evidence_for_entry``.
+    """
+    evidence = evidence_for_entry(entry, attestations)
+    if not evidence:
         return None
-    for item in reversed(attestations):
-        if (rid and item.get("receipt_id") == rid) or (not rid and run_id and item.get("run_id") == run_id):
-            return summarize_attestation(item)
-    return None
+    reruns = [item for item in evidence if item.get("kind") == KIND_POST_SESSION]
+    latest = reruns[-1] if reruns else {
+        "attestation_id": None, "created_at": None, "kind": None, "verification": None,
+    }
+    return {**latest, "evidence": evidence}
+
+
+_CI_TOKEN_RE = re.compile(r"^[a-z_]{1,48}$")
 
 
 def summarize_attestation(item: dict) -> dict:
     """The receipt-facing projection of an attestation; its block is re-validated on read."""
     ev = parse_verification_block(item.get("verification"))
-    if ev.source != SOURCE_DIRECTLY_OBSERVED or ev.observation_mode != MODE_OPENSHARD_EXECUTED:
+    kind = KIND_CI if item.get("kind") == KIND_CI else KIND_POST_SESSION
+    if kind == KIND_CI:
+        # A CI verdict counts only as an independent report bound to a commit.
+        if (
+            ev.source != SOURCE_INDEPENDENTLY_VERIFIED
+            or ev.observation_mode != MODE_CI_REPORT
+            or not ev.artifact_sha
+        ):
+            ev.status = "unknown"
+            ev.mark_incomplete("malformed_verification_block")
+    elif ev.source != SOURCE_DIRECTLY_OBSERVED or ev.observation_mode != MODE_OPENSHARD_EXECUTED:
         # Only an OpenShard-executed block can be surfaced as a re-run; anything
         # else in this file is unreadable, never promoted.
         ev.status = "unknown"
         ev.mark_incomplete("malformed_verification_block")
-    return {
+    summary: dict[str, Any] = {
         "attestation_id": item.get("attestation_id") if isinstance(item.get("attestation_id"), str) else None,
         "created_at": item.get("created_at") if isinstance(item.get("created_at"), str) else None,
+        "kind": kind,
         "verification": ev.to_dict(),
     }
+    if kind == KIND_CI:
+        raw_ci = item.get("ci")
+        ci: dict = raw_ci if isinstance(raw_ci, dict) else {}
+        summary["ci"] = {
+            key: ci.get(key) if isinstance(ci.get(key), str) and _CI_TOKEN_RE.match(ci[key]) else None
+            for key in ("provider", "binding", "outcome")
+        }
+    return summary
 
 
 def display_line(summary: dict) -> str:
@@ -503,12 +556,16 @@ def display_line(summary: dict) -> str:
 
 __all__ = [
     "ATTESTATIONS_FILENAME",
+    "ATTESTATION_KINDS",
+    "KIND_CI",
+    "KIND_POST_SESSION",
     "CheckRun",
     "PlannedCheck",
     "TreeState",
     "attestations_path",
     "build_attestation",
     "display_line",
+    "evidence_for_entry",
     "latest_for_entry",
     "load_attestations",
     "observed_check_commands",
