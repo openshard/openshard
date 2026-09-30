@@ -184,7 +184,7 @@ def _telemetry_status_for_agents() -> dict:
 
 _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Getting Started", ("setup", "doctor")),
-    ("Receipts", ("last", "history", "report", "context")),
+    ("Receipts", ("last", "history", "report", "context", "learn")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
     ("Integrations", ("mcp", "capture", "sync", "import", "ingest", "wrap", "adapters", "telemetry")),
     # Everything else (run, plan, models, roster, eval, packs, ...) falls
@@ -7627,10 +7627,12 @@ def roster_reset() -> None:
 
 # Historical Ingestion v1 (``openshard ingest``); defined in its own module.
 from openshard.cli.ingest import ingest_group  # noqa: E402
+from openshard.cli.learn_cmd import learn_group  # noqa: E402
 from openshard.cli.osn_cmd import osn_group  # noqa: E402
 
 cli.add_command(ingest_group)
 cli.add_command(osn_group)
+cli.add_command(learn_group)
 
 
 if __name__ == "__main__":

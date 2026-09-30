@@ -661,7 +661,7 @@ def _model_signals(obs: list[Observation], repo: str | None, now: datetime) -> l
             "runs_needing_retry": c.get("needed_retry", 0),
             "cost_per_verified_success_usd": cost,
             "cost_basis": "provider_reported_estimates" if cost is not None else "insufficient_cost_evidence",
-            "median_duration_seconds": _median(durations),
+            "median_duration_seconds": median(durations),
         }
         text = (
             f"{_model_name(model)} passed OpenShard-observed verification on the first attempt in "
@@ -786,7 +786,7 @@ def _policy_signals(obs: list[Observation], repo: str | None, now: datetime) -> 
     return out
 
 
-def _median(values: list[float]) -> float | None:
+def median(values: list[float]) -> float | None:
     if not values:
         return None
     s = sorted(values)
