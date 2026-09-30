@@ -117,6 +117,9 @@ REASON_CHECKS_TRUNCATED = "checks_truncated"
 # to completion (timed out / could not start), so it has no exit code.
 REASON_ARTIFACT_NOT_BOUND = "artifact_not_bound"
 REASON_CHECK_NOT_COMPLETED = "check_not_completed"
+# CI evidence (``openshard verify --ci``): the CI run for the commit was
+# cancelled, so it states no verdict.
+REASON_CI_CANCELLED = "ci_cancelled"
 
 MAX_CHECKS = 20
 MAX_NAME = 120
@@ -724,6 +727,7 @@ __all__ = [
     "MODE_NONE",
     "MODE_NOT_OBSERVABLE",
     "MODE_OPENSHARD_EXECUTED",
+    "REASON_CI_CANCELLED",
     "SOURCES",
     "SOURCE_AGENT_REPORTED",
     "SOURCE_DIRECTLY_OBSERVED",

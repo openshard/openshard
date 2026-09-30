@@ -2034,6 +2034,7 @@ def last(more: bool, full: bool, as_json: bool):
         from openshard.history.shard_quality import build_shard_quality_summary
         from openshard.history.trust_score import evaluate_trust_score
         from openshard.history.verification_truth import interpret_receipt
+        from openshard.history.verification_view import build_verification_view
 
         _ts = evaluate_trust_score(
             entry, receipt,
@@ -2055,6 +2056,7 @@ def last(more: bool, full: bool, as_json: bool):
             proof_contract=build_shard_proof_contract(entry, post_session_verification=_post),
             shard_quality=build_shard_quality_summary(entry, receipt, post_session_verification=_post),
             verification_truth=interpret_receipt(receipt).to_dict(),
+            verification_view=build_verification_view(receipt),
             post_session_verification=_post,
             **_content_hash_fields(entry),
         )
@@ -2074,10 +2076,35 @@ def last(more: bool, full: bool, as_json: bool):
         click.echo(line)
     _post_verification = _post_session_verification_for(entries[-1], log_path)
     _render_log_entry(entries[-1], detail, index=len(entries) - 1, post_session_verification=_post_verification)
-    if _post_verification is not None:
+    _echo_verification_view(entries[-1], len(entries) - 1, _post_verification)
+    if _post_verification is not None and _post_verification.get("verification") is not None:
         from openshard.verification.post_session import display_line
 
         click.echo(f"\nRe-verified: {display_line(_post_verification)}")
+
+
+def _echo_verification_view(entry: dict, index: int | None, post: dict | None) -> None:
+    """Work / verification / evidence / capture as separate facts, with the evidence history.
+
+    Shown for an externally captured session and for any Receipt that later
+    evidence (an ``openshard verify`` re-run, CI) was attached to; a native
+    run with neither already states all of this in its receipt.
+    """
+    try:
+        from openshard.history.shard_contract import build_shard_receipt
+        from openshard.history.verification_view import (
+            build_verification_view,
+            render_verification_view,
+        )
+
+        view = build_verification_view(build_shard_receipt(entry, index, post_session_verification=post))
+        if view.get("work") is None and post is None:
+            return
+        click.echo("")
+        for line in render_verification_view(view):
+            click.echo(line)
+    except Exception:
+        return
 
 
 def _post_session_verification_for(entry: dict, log_path: Path) -> dict | None:
@@ -2118,8 +2145,11 @@ def _select_entry(entries: list[dict], ref: str | None) -> dict | None:
               help="Exit 1 when an executed check fails and 2 when a planned check could not run "
                    "(blocked, needing approval, not found, timed out) or nothing was planned. "
                    "The attestation is recorded either way.")
+@click.option("--ci", "from_ci", is_flag=True, default=False,
+              help="Run nothing locally: attach the GitHub check-run verdict for this Shard's exact commit "
+                   "(needs the gh CLI). Never attaches CI from another commit or to a dirty tree.")
 def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run: bool, timeout: float,
-           as_json: bool, strict: bool) -> None:
+           as_json: bool, strict: bool, from_ci: bool) -> None:
     """Re-run approved checks and record the outcome OpenShard itself observed.
 
     Picks the repository's verification contract (``verification_commands``
@@ -2132,6 +2162,12 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
     default it never blocks anything and exits 0 whatever the checks'
     outcome. With --strict the exit code carries the result (1: a check
     failed; 2: a planned check could not run), for scripts and CI.
+
+    With --ci nothing runs locally. OpenShard asks GitHub for the check runs
+    of the one commit it can tie to this Shard (the commit a clean re-run was
+    bound to, else a clean HEAD that descends from the session's start
+    commit) and appends the verdict as ``independently_verified`` evidence.
+    Pending or unavailable CI records nothing. Earlier evidence is kept.
     """
     from openshard.config.settings import load_config_safe
     from openshard.verification.post_session import (
@@ -2146,6 +2182,15 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
 
     loc = _locate_history()
     repo_root = loc.root
+    # A session whose end event never arrived (closed terminal, crash) is
+    # closed by the stale sweep first, marked ``session_end_not_observed``,
+    # so its Receipt says so before it is verified.
+    try:
+        from openshard.adapters.claude_hooks import sweep_stale_buffers
+
+        sweep_stale_buffers(repo_root)
+    except Exception:
+        pass
     entries = _load_run_entries(loc.runs_path)
     entry = _select_entry(entries, receipt_ref)
     if entry is None:
@@ -2157,9 +2202,13 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
             click.echo(message)
         sys.exit(1)
 
+    receipt_label = entry.get("receipt_id") or entry.get("shard_id") or entry.get("run_id")
+    if from_ci:
+        _verify_from_ci(entry, loc, receipt_label, as_json=as_json, strict=strict, dry_run=dry_run)
+        return
+
     config, _valid, _path = load_config_safe(cwd=repo_root)
     planned = plan_checks(repo_root, config, entry, include_observed=from_observed)
-    receipt_label = entry.get("receipt_id") or entry.get("shard_id") or entry.get("run_id")
 
     if not as_json:
         click.echo(f"Verifying receipt {receipt_label}")
@@ -2211,6 +2260,94 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         click.echo("Strict: a planned check could not run, or nothing was planned (exit 2).")
     if strict_exit:
         sys.exit(strict_exit)
+
+
+def _verify_from_ci(entry: dict, loc, receipt_label, *, as_json: bool, strict: bool, dry_run: bool) -> None:
+    """``openshard verify --ci``: attach the CI verdict for this Shard's exact commit, if there is one."""
+    from openshard.verification import ci_evidence as ci
+    from openshard.verification.post_session import (
+        evidence_for_entry,
+        load_attestations,
+        record_attestation,
+        tree_state,
+    )
+
+    repo_root = loc.root
+    tree = tree_state(repo_root)
+    evidence = evidence_for_entry(entry, load_attestations(loc.runs_path.parent))
+    target = ci.resolve_ci_target(entry, evidence, tree, is_ancestor=ci.git_is_ancestor(repo_root))
+
+    def finish(status: str, message: str, exit_code: int, **fields) -> None:
+        if as_json:
+            click.echo(json.dumps(_machine_envelope(
+                "verify", status, receipt=receipt_label, ci=True, message=message,
+                strict=strict, exit_code=exit_code if strict else 0, **fields,
+            ), indent=2))
+        else:
+            click.echo(message)
+        if strict and exit_code:
+            sys.exit(exit_code)
+
+    if target.sha is None:
+        finish(
+            "not_bound",
+            f"No CI evidence attached to receipt {receipt_label}: {ci.REFUSAL_TEXT[str(target.refusal)]}",
+            2, refusal=target.refusal,
+        )
+        return
+    note = ""
+    if target.head_moved:
+        note = (
+            f" HEAD has moved on since OpenShard verified commit {target.sha[:12]}; CI is looked up for that "
+            "commit only. Run `openshard verify` on a clean tree to bind the new commit."
+        )
+    if dry_run:
+        finish("dry_run", f"Would look up GitHub check runs for commit {target.sha[:12]} ({target.binding}).{note}",
+               0, commit=target.sha, binding=target.binding)
+        return
+
+    runs, error = ci.fetch_github_check_runs(repo_root, target.sha)
+    if runs is None:
+        finish("ci_unavailable", f"CI unavailable for commit {target.sha[:12]}: {error}. Nothing recorded.{note}",
+               2, commit=target.sha, outcome=ci.OUTCOME_UNAVAILABLE)
+        return
+    result = ci.classify_check_runs(runs, target.sha)
+    counts = {state: result.count(state) for state in ("passed", "failed", "pending", "cancelled", "skipped")}
+    if result.outcome not in ci.RECORDED_OUTCOMES:
+        finish(
+            f"ci_{result.outcome}",
+            f"CI {result.outcome} for commit {target.sha[:12]}: {result.detail}. Nothing recorded.{note}",
+            2, commit=target.sha, outcome=result.outcome, runs=counts,
+        )
+        return
+    pr_head = ci.fetch_github_pr_head(repo_root)
+    attestation = ci.build_ci_attestation(entry, result, target, created_at=_utc_stamp(), pr_head=pr_head)
+    if attestation is None:
+        finish("ci_unavailable", "CI verdict could not be recorded.", 2, commit=target.sha)
+        return
+    record_attestation(repo_root, attestation)
+    if pr_head and pr_head != target.sha:
+        note += (
+            f" The pull request head is now {pr_head[:12]}; this verdict is for {target.sha[:12]} "
+            "and says nothing about the newer commit."
+        )
+    lines = [
+        f"CI {result.outcome} for commit {target.sha[:12]}: "
+        f"{counts['passed']} passed, {counts['failed']} failed"
+        + (f", {counts['cancelled']} cancelled" if counts["cancelled"] else "")
+        + (f", {counts['skipped']} skipped" if counts["skipped"] else "") + "."
+    ]
+    failed_names = [r.name for r in result.runs if r.state == "failed"][:5]
+    if failed_names:
+        lines.append("Failed: " + "; ".join(failed_names))
+    lines.append(
+        "Recorded in .openshard/verifications.jsonl (evidence: independently_verified). "
+        "The Receipt and earlier evidence are unchanged." + note
+    )
+    exit_code = {ci.OUTCOME_PASSED: 0, ci.OUTCOME_FAILED: 1}.get(result.outcome, 2)
+    finish("ok", "\n".join(lines), exit_code, commit=target.sha, binding=target.binding,
+           outcome=result.outcome, runs=counts, attestation_id=attestation["attestation_id"],
+           verification=attestation["verification"])
 
 
 def _strict_verify_exit_code(results: list) -> int:
@@ -3799,7 +3936,13 @@ def ci_check(as_json: bool, strict: bool, github_output: bool) -> None:
         sys.exit(0)
 
     entry = entries[-1]
-    receipt = build_shard_receipt(entry, index=len(entries) - 1)
+    # Later evidence (an ``openshard verify`` re-run, CI) is the current
+    # state, as on ``last`` and ``proof``; without it this gate would keep
+    # judging the session's first account.
+    receipt = build_shard_receipt(
+        entry, index=len(entries) - 1,
+        post_session_verification=_post_session_verification_for(entry, log_path),
+    )
     result = evaluate_ci_check(entry, receipt, strict=strict)
 
     if as_json:

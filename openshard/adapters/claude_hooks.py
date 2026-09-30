@@ -2548,7 +2548,8 @@ def sweep_stale_buffers(
                         if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
                             losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
                         buf["capture_losses"] = losses
-                        _fold(buf, repo_root)
+                        swept_entry, _ = _fold(buf, repo_root)
+                        _schedule_post_session_verify(repo_root, swept_entry)
                     path.unlink()
                 folded.append(sid)
             except Exception:
@@ -2968,6 +2969,19 @@ def _mark_applied(buf: dict, dedup_id: str | None) -> None:
     buf["applied_ids"] = applied
 
 
+def _schedule_post_session_verify(repo_root: Path, entry: dict | None) -> None:
+    """Opt-in (``post_session_verify: safe``): start a detached, safe-only
+    ``openshard verify`` for a Receipt whose session just closed, so its
+    verification does not stay at the agent's own account. Off by default;
+    see ``verification/auto.py``. Never raises."""
+    try:
+        from openshard.verification.auto import schedule_post_session_verify
+
+        schedule_post_session_verify(repo_root, entry)
+    except Exception:
+        pass
+
+
 def _emit_receipt_telemetry(entry: dict, action: str) -> None:
     """Telemetry (0.4.2): one ``receipt.created`` when a session's record is
     first written, one ``receipt.completed`` when it is finalized -- counts
@@ -3055,6 +3069,8 @@ def apply_reduced_hook(
             else:
                 action = "record_updated"
             _emit_receipt_telemetry(entry, action)
+            if action == "record_finalized":
+                _schedule_post_session_verify(repo_root, entry)
         else:
             action = "buffered" if not should_delete else "ignored"
         return HookOutcome(

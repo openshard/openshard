@@ -118,6 +118,7 @@ INVARIANT_TEST_FILES: tuple[str, ...] = (
     "tests/test_verification_evidence.py",
     "tests/test_verification_contract_result.py",
     "tests/test_verification_v2.py",
+    "tests/test_verification_hardening.py",
     "tests/test_history_amend_integrity.py",
     "tests/test_jsonl_store.py",
     "tests/test_event_receipt_wiring.py",
