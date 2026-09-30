@@ -158,7 +158,8 @@ def single_pricing_model(entry: dict) -> str | None:
         unique = list(dict.fromkeys(stage_models))
         return unique[0] if len(unique) == 1 else None
 
-    capture = entry.get("capture") if isinstance(entry.get("capture"), dict) else {}
+    capture_raw = entry.get("capture")
+    capture: dict = capture_raw if isinstance(capture_raw, dict) else {}
     seen = [m for m in (capture.get("models_seen") or []) if isinstance(m, str) and m]
     if seen:
         unique = list(dict.fromkeys(seen))
