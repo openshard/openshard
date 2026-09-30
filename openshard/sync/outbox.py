@@ -20,6 +20,12 @@ replay of an already-synced receipt is free (the Platform answers
               and field paths are kept, the payload is not; never retried
 ============  ==============================================================
 
+Later verification evidence (``sync/evidence.py``) rides on the same line:
+``evidence_hash`` is the hash of the evidence + state last decided with the
+Platform and ``evidence_state`` how that went (``synced`` / ``conflict`` /
+``rejected``). A new attestation changes the hash, so it is sent again;
+the same hash is never sent twice.
+
 A record keyed to a different endpoint or organisation than the current
 link is treated as unsynced for the current link, so reconnecting to a
 new organisation resends everything there without touching the old state.
@@ -46,6 +52,8 @@ STATE_CONFLICT = "conflict"
 STATE_REJECTED = "rejected"
 STATES: frozenset[str] = frozenset({STATE_SYNCED, STATE_STALE, STATE_CONFLICT, STATE_REJECTED})
 TERMINAL_STATES: frozenset[str] = frozenset({STATE_CONFLICT, STATE_REJECTED})
+
+EVIDENCE_KEYS: tuple[str, ...] = ("evidence_hash", "evidence_state", "evidence_at", "evidence_error")
 
 _LOCK_TIMEOUT_SECONDS = 5.0
 _MAX_DETAIL_ITEMS = 20
@@ -148,6 +156,11 @@ def make_record(
         "record_hash": prev.get("record_hash") if isinstance(prev.get("record_hash"), str) else None,
         "last_error": None,
     }
+    # Evidence bookkeeping belongs to the hosted copy it was sent for.
+    if prev.get("endpoint") == endpoint and prev.get("organisation_id") == organisation_id:
+        for key in EVIDENCE_KEYS:
+            if key in prev:
+                record[key] = prev[key]
     if state == STATE_SYNCED:
         record["synced_at"] = now
         record["synced_hash"] = payload_hash
@@ -157,6 +170,30 @@ def make_record(
     if state in (STATE_CONFLICT, STATE_REJECTED):
         record["last_error"] = {"status": status, "code": code, "details": _bounded_details(details), "at": now}
     return record
+
+
+def with_evidence(
+    record: dict,
+    state: str,
+    *,
+    evidence_hash: str,
+    status: int | None = None,
+    code: str | None = None,
+    details: object = None,
+) -> dict[str, Any]:
+    """*record* with the outcome of sending its later verification evidence. The receipt's own state is untouched."""
+    if state not in (STATE_SYNCED, STATE_CONFLICT, STATE_REJECTED):
+        raise ValueError(f"unknown evidence state: {state!r}")
+    now = _now()
+    out = dict(record)
+    out["evidence_hash"] = evidence_hash
+    out["evidence_state"] = state
+    out["evidence_at"] = now
+    out["evidence_error"] = (
+        None if state == STATE_SYNCED
+        else {"status": status, "code": code, "details": _bounded_details(details), "at": now}
+    )
+    return out
 
 
 def put(root: Path, record: dict) -> str:
