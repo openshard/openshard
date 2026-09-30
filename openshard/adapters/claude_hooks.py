@@ -2969,6 +2969,40 @@ def _mark_applied(buf: dict, dedup_id: str | None) -> None:
     buf["applied_ids"] = applied
 
 
+def _remote_capture_new_events(buf: dict) -> list[dict] | None:
+    """The Events this hook added that remote capture has not spooled yet, or None when not attached.
+
+    Remote capture (``openshard/remote``) streams a session's Events out of
+    an ephemeral runtime while it runs. The buffer remembers how many of its
+    Events were handed over (``remote_spooled``), so each is spooled once.
+    Called under the buffer lock; does no I/O beyond one ``os.path.exists``.
+    """
+    try:
+        from openshard.remote.config import attached_hint
+
+        if not attached_hint():
+            return None
+        events = [e for e in buf.get("events") or [] if isinstance(e, dict)]
+        done = buf.get("remote_spooled")
+        start = done if isinstance(done, int) and 0 <= done <= len(events) else 0
+        buf["remote_spooled"] = len(events)
+        return events[start:]
+    except Exception:
+        return None
+
+
+def _remote_capture_record(
+    repo_root: Path, events: list[dict], record: dict, entry: dict | None, *, finalized: bool,
+) -> None:
+    """Hand a hook's new Events to the remote-capture spool (local append only). Never raises."""
+    try:
+        from openshard.remote.collector import record as remote_record
+
+        remote_record(repo_root, events, record=record, entry=entry, finalized=finalized)
+    except Exception:
+        pass
+
+
 def _schedule_post_session_verify(repo_root: Path, entry: dict | None) -> None:
     """Opt-in (``post_session_verify: safe``): start a detached, safe-only
     ``openshard verify`` for a Receipt whose session just closed, so its
@@ -3028,6 +3062,7 @@ def apply_reduced_hook(
                                    repo_root=repo_root, detail="duplicate event id")
             detail, should_fold, should_delete = _apply(payload, buf, repo_root, now=now)
             _mark_applied(buf, dedup_id)
+            remote_events = _remote_capture_new_events(buf)
             if buf.get("ended") and _has_activity(buf):
                 # A hook arriving after SessionEnd (a background Stop that
                 # finished late, or a resume of an ended session): snapshot
@@ -3073,6 +3108,8 @@ def apply_reduced_hook(
                 _schedule_post_session_verify(repo_root, entry)
         else:
             action = "buffered" if not should_delete else "ignored"
+        if remote_events is not None:
+            _remote_capture_record(repo_root, remote_events, record, entry, finalized=action == "record_finalized")
         return HookOutcome(
             event=payload.event, action=action, session_id=payload.session_id, repo_root=repo_root,
             shard_id=record.get("shard_id"), run_id=record.get("run_id"), detail=detail,

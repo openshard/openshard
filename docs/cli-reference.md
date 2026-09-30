@@ -68,6 +68,10 @@ openshard verify --dry-run                         # Show which checks would run
 openshard verify --from-observed --approve         # Also re-run the agent's observed checks; allow needs-approval commands
 openshard verify --strict                          # Same, but exit 1 when a check failed and 2 when a planned check could not run
 openshard verify --ci                              # Attach the GitHub check-run verdict for this Shard's exact commit (independent evidence; needs gh)
+openshard remote create --agent codex              # Open a hosted remote capture for a cloud agent environment; prints its short-lived token (trusted machine)
+openshard remote attach                            # In the environment: attach to the capture named by $OPENSHARD_REMOTE_CAPTURE_URL / $OPENSHARD_REMOTE_TOKEN
+openshard remote status | flush | detach           # What is attached and queued; send now; forget
+openshard remote list | revoke <id>                # The organisation's captures; close a token early (trusted machine)
 openshard history                                  # Recent receipts for this repo, newest first
 openshard history --limit 20 --json                # Same, more rows, machine-readable
 openshard context "fix the flaky auth test"        # What relevant_context would give an agent, and why
