@@ -18,8 +18,8 @@ Google: https://ai.google.dev/gemini-api/docs/pricing
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 
 PRICING_SNAPSHOT_DATE = "2026-10-01"
