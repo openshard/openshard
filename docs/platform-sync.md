@@ -117,6 +117,45 @@ resent in this version, because the Platform keeps the first copy it
 accepted and treats different content under the same `receipt_id` as a
 conflict. Hosted receipt revisions are the next Platform step.
 
+## Verification evidence that arrives after sync
+
+A hosted Receipt is never resent, and verification can get stronger after
+it synced: `openshard verify` re-runs the checks, `openshard verify --ci`
+attaches the CI verdict for the exact commit (see
+[agent-capture.md](agent-capture.md)). That evidence is sent on its own
+route, beside the Receipt, not inside it:
+
+```
+POST <endpoint>/v1/orgs/<org>/receipts/<receipt_id>/verification-evidence
+```
+
+| Sent | From |
+|---|---|
+| `evidence[]` | each attestation in `.openshard/verifications.jsonl` that names the Receipt: id, time, kind, the verification block, and for CI the provider / binding / outcome tokens |
+| `state` | `verification_truth` over the Receipt's own record plus that evidence: current outcome, who vouches for it, the commit, grouped counts, failed check names, and the history |
+
+The Receipt payload does not change: its `verification` block stays what
+the session recorded, and the Platform refuses a state that says
+otherwise. No command output, log, URL or path is sent.
+
+`openshard sync now` and the background sync pick this up on their own:
+every flush compares the evidence this machine would send with what it last
+decided with the Platform, so a new attestation is sent once and an
+unchanged one costs nothing. The outcome is kept on the Receipt's outbox
+line (`evidence_hash`, `evidence_state`).
+
+| Answer | Meaning here |
+|---|---|
+| 201 / 200 | recorded / already held |
+| 404 `receipt_not_found` | the Receipt is not hosted yet; tried again next flush |
+| other 404 / 405 | this Platform predates the route; skipped quietly, Receipts keep syncing |
+| 409 / 400 / 422 | recorded once for this evidence set, not retried until the evidence changes |
+| 401 / 403 | the link is paused, as for Receipts |
+| 429 / 5xx / network | backoff, as for Receipts |
+
+Evidence is sent only for a Receipt whose hosted copy is still the local
+one: a Receipt that is "changed locally" (below) gets none.
+
 ## Capabilities (experimental features the Platform has switched on)
 
 The Platform can enable private, experimental capabilities per organisation (all off by default).
