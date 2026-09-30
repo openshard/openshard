@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import click
 
 if TYPE_CHECKING:
+    from openshard.learning.retrieval import LearningContext
     from openshard.osn.budget import BudgetLedger, BudgetLimits
     from openshard.osn.routing import OsnRouting
     from openshard.sync.capabilities import LazyCapabilities
@@ -161,9 +162,11 @@ def _resolve_provider(name: str | None, model: str):
               help="After verified success, copy changed files into the repo through the policy gate.")
 @click.option("--yes", "assume_yes", is_flag=True, default=False,
               help="Approve policy 'ask' paths during the OSN run and promotion without prompting.")
+@click.option("--no-learning", "no_learning", is_flag=True, default=False,
+              help="Do not consult learning signals from this repository's prior OpenShard runs.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_attempts, task_id,
-            promote, assume_yes, as_json):
+            promote, assume_yes, no_learning, as_json):
     """Run TASK through the bounded OSN loop."""
     from openshard.cli.ingest import _repo_root
     from openshard.history.jsonl_store import append_jsonl
@@ -240,10 +243,15 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     attempts_allowed = max_attempts
     if budget is not None and budget.limits.max_attempts is not None:
         attempts_allowed = min(attempts_allowed, budget.limits.max_attempts)
+    from openshard.learning.record import check_identity
+
+    check = check_identity(argv)
+    learning = None if no_learning else _consult_learning(task, repo_root, check)
     routing = _resolve_routing(task, repo_root, explicit_model=model, escalate=list(escalate),
                                capabilities=capabilities, model_policy=model_policy,
                                max_attempts=attempts_allowed,
-                               cost_budget_usd=budget.limits.max_spend_usd if budget is not None else None)
+                               cost_budget_usd=budget.limits.max_spend_usd if budget is not None else None,
+                               learning=learning)
     try:
         enforce_models_allowed(routing.models, model_policy)
     except ValueError as exc:
@@ -272,6 +280,8 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         click.echo(f"  Route   {' → '.join(_friendly_model(m) for m in models)}")
         if routing.applied and routing.decision is not None:
             click.echo(f"  Policy  Adaptive Routing V2 · {routing.decision.resolved_class}")
+        for line in _learning_preamble(learning):
+            click.echo(line)
 
     def run_approver(rel, _decision):
         if assume_yes:
@@ -287,6 +297,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     action_provider = ModelActionProvider(
         provider=provider_obj, models=models, repo_root=repo_root, context_files=list(context_files),
         budget=budget,
+        learning_context=learning.prompt_text if learning is not None else None,
     )
     supervisor = _resolve_supervisor(routing, budget, action_provider, capabilities, user_ladder=list(escalate),
                                      explicit_model=explicit_model)
@@ -309,6 +320,15 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             progress_renderer.close()
     duration = time.monotonic() - started
 
+    from openshard.learning.record import build_learning_record
+
+    learning_record = build_learning_record(
+        learning,
+        check=check,
+        attempt_models=_attempt_models(action_provider.usage),
+        context_supplied=action_provider.learning_supplied,
+        routing_record=routing.record,
+    )
     entry = build_osn_run_entry(
         receipt, task=task, usage=action_provider.usage, duration_seconds=duration,
         repo_path=repo_root, task_id=task_id,
@@ -326,9 +346,10 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             )
             if organisation_policy is not None else None
         ),
+        learning_record=learning_record,
     )
-    # Only present when a budget was configured / a capability was looked up:
-    # the machine output is otherwise byte-for-byte what it was before.
+    # Only present when a budget was configured / a capability was looked up.
+    # The machine output otherwise gained only the compact ``learning`` summary.
     budget_output = {
         k: entry[k]
         for k in ("agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot", "organisation_policy")
@@ -356,6 +377,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "changed_files": receipt.changed_files, "promoted": promoted, "skipped": skipped,
             "sandbox_path": receipt.sandbox_path,
             **budget_output,
+            "learning": _learning_json(entry.get("learning")),
         }, indent=2))
         return
     click.echo(f"OSN loop: {receipt.status} ({receipt.stop_reason}); verification {receipt.verification_state}")
@@ -369,6 +391,8 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     supervisor_line = _supervisor_line(entry.get("supervisor_routing"))
     if supervisor_line:
         click.echo(f"  supervisor: {supervisor_line}")
+    for line in _learning_summary(entry.get("learning")):
+        click.echo(line)
     for f in receipt.changed_files:
         click.echo(f"  changed: {f}")
     if receipt.status == "verified":
@@ -390,11 +414,91 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         click.echo(f"  Blocked by policy/skipped: {', '.join(skipped)}")
 
 
+def _consult_learning(task: str, repo_root: Path, check: dict | None) -> LearningContext:
+    """Learning signals for this task from this repository's history. Never raises:
+    learning that cannot be read is recorded as such and the run goes ahead."""
+    from openshard.learning.retrieval import STATUS_ERROR, LearningContext, consult
+    from openshard.learning.signals import load_learning_index, repo_key
+
+    try:
+        repo = repo_key(repo_root)
+        index = load_learning_index(repo_root, repo=repo)
+        return consult(task, index, repo=repo,
+                       current_check_fingerprint=(check or {}).get("fingerprint"))
+    except Exception as exc:
+        return LearningContext(STATUS_ERROR, None, error=type(exc).__name__)
+
+
+def _attempt_models(usage) -> list[tuple[int, str]]:
+    """The model each attempt requested (its last call), for later learning."""
+    by_attempt: dict[int, str] = {}
+    for u in usage:
+        model = u.requested_model or u.model
+        if model:
+            by_attempt[u.attempt] = model
+    return sorted(by_attempt.items())
+
+
+def _learning_preamble(learning: LearningContext | None) -> list[str]:
+    """What learning found, shown before the run starts. Advisory wording only."""
+    if learning is None:
+        return ["  Learning  off (--no-learning)"]
+    if not learning.used:
+        reason = {
+            "no_history": "no prior verified evidence in this repository",
+            "no_relevant_signals": f"{learning.signals_considered} signal(s) known, none relevant to this task",
+            "error": "history could not be read; continuing without it",
+        }.get(learning.status, learning.status)
+        return [f"  Learning  {reason}"]
+    lines = [
+        f"  Learning  {len(learning.retrieved)} prior signal(s) considered · "
+        f"{len(learning.supporting_receipt_ids)} supporting Receipt(s) · advisory"
+    ]
+    for r in learning.retrieved:
+        lines.append(f"    - {r.signal.summary}")
+    for rec in learning.recommended_checks:
+        lines.append(f"    ! History suggests also verifying with `{rec.label}` (not run automatically)")
+    return lines
+
+
+def _learning_summary(record: dict | None) -> list[str]:
+    if not isinstance(record, dict) or not record.get("used"):
+        return []
+    routing = record.get("routing") or {}
+    verification = record.get("verification") or {}
+    return [
+        f"  learning: {record.get('signals_used', 0)} prior signal(s) considered; "
+        f"context supplied: {'yes' if record.get('context_supplied') else 'no'}; "
+        f"routing influenced: {'yes' if routing.get('influenced') else 'no'}; "
+        f"verification influenced: {'yes' if verification.get('influenced') else 'no (advisory only)'}"
+    ]
+
+
+def _learning_json(record: dict | None) -> dict | None:
+    if not isinstance(record, dict):
+        return None
+    return {
+        "status": record.get("status"),
+        "signals_used": record.get("signals_used", 0),
+        "signal_ids": list(record.get("signal_ids") or []),
+        "context_supplied": bool(record.get("context_supplied")),
+        "routing_influenced": bool((record.get("routing") or {}).get("influenced")),
+        "verification_influenced": bool((record.get("verification") or {}).get("influenced")),
+        "recommended_checks": [
+            c.get("label") for c in (record.get("verification") or {}).get("recommended_checks") or []
+        ],
+    }
+
+
 def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, escalate: list[str],
                      capabilities: LazyCapabilities, model_policy, max_attempts: int | None = None,
-                     cost_budget_usd: float | None = None) -> OsnRouting:
+                     cost_budget_usd: float | None = None,
+                     learning: LearningContext | None = None) -> OsnRouting:
     """First model and escalation ladder: the user's choice, else Routing V2 when
-    the ``adaptive_routing`` capability is on, else the keyword router as before."""
+    the ``adaptive_routing`` capability is on, else the keyword router as before.
+
+    With learning on, Routing V2 first tries history from this repository and
+    task category, under the same sample gate, before the harness-wide history."""
     from openshard.osn.routing import CAPABILITY as ROUTING_CAPABILITY
     from openshard.osn.routing import HARNESS, resolve_osn_routing
     from openshard.routing.engine import route
@@ -403,9 +507,15 @@ def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, 
         return model_policy
 
     def history_loader():
+        runs = repo_root / ".openshard" / "runs.jsonl"
+        shape = learning.shape if learning is not None else None
+        if shape is not None:
+            from openshard.learning.routing import load_scoped_history
+
+            return load_scoped_history(runs, harness=HARNESS, repo=shape.repo, task_category=shape.task_category)
         from openshard.routing.adaptive.history_evidence import load_history_evidence
 
-        return load_history_evidence(repo_root / ".openshard" / "runs.jsonl", harness=HARNESS)
+        return load_history_evidence(runs, harness=HARNESS)
 
     return resolve_osn_routing(
         task,
