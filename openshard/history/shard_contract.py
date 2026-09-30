@@ -24,7 +24,6 @@ from openshard.history.shard import (
 from openshard.history.shard_hash import verify_shard_hash
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
-from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE, estimate_usage_cost, single_pricing_model
 from openshard.history.verification import (
     REASON_OUTCOME_NOT_OBSERVED,
     SOURCE_AGENT_REPORTED,
@@ -43,6 +42,11 @@ from openshard.history.verification_truth import (
     integrity_label,
     interpret_receipt,
     verification_label,
+)
+from openshard.models.pricing import (
+    COST_PROVENANCE_OFFICIAL_RATE,
+    estimate_usage_cost,
+    single_pricing_model,
 )
 from openshard.run.timeline import normalize_timeline
 
