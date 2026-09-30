@@ -6,6 +6,16 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- **Remote capture: evidence leaves an ephemeral agent environment while
+  the agent works.** `openshard remote create --agent <agent>` (on a trusted
+  machine) opens a hosted remote capture and prints a short-lived token
+  scoped to it; `openshard remote attach` (in the environment) connects to
+  it. From then on every hook adapter's Events are spooled locally first
+  and streamed to the Platform in small batches seconds later, the session's
+  Receipt and later verification evidence are delivered through the same
+  token, and a runtime that is destroyed without a session-end event leaves
+  a capture that reads Partial with exactly the Events that made it out. The
+  environment never holds an organisation API key. See docs/remote-capture.md.
 - **Verification that can become green for external agents, without rewriting
   the Receipt.** Later evidence is appended to `.openshard/verifications.jsonl`
   and joined at read time; the stored Receipt keeps what the session knew.
