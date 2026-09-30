@@ -72,6 +72,10 @@ class PlatformLink:
         """The current organisation policy; the linked key can read only its organisation."""
         return f"{self.endpoint}/v1/orgs/{self.organisation_id}/policy"
 
+    def connected_capture_url(self) -> str:
+        """Account-connected Event ingestion: one linked account, many agent sessions."""
+        return f"{self.endpoint}/v1/orgs/{self.organisation_id}/connected-captures/events"
+
     def to_public_dict(self) -> dict:
         """Everything but the secret."""
         return {
@@ -133,6 +137,23 @@ def _parse(data: object, *, source: str) -> PlatformLink | None:
         linked_at=linked_at if isinstance(linked_at, str) else None,
         source=source,
     )
+
+
+def linked_hint(env: dict | os._Environ | None = None) -> bool:
+    """Cheap local hint that a Platform link may exist.
+
+    Used on hook paths before doing the full parse/network work. Environment
+    links are true only when all three variables are present; file links use
+    one exists() check. The real sender still validates the link before any
+    request and a malformed file therefore only causes a harmless no-op.
+    """
+    source = os.environ if env is None else env
+    if source.get(ENDPOINT_ENV) and source.get(ORG_ENV) and source.get(API_KEY_ENV):
+        return True
+    try:
+        return config_path(source).is_file()
+    except Exception:
+        return False
 
 
 def load_link(env: dict | os._Environ | None = None) -> PlatformLink | None:
