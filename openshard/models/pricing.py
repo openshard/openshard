@@ -21,7 +21,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-
 PRICING_SNAPSHOT_DATE = "2026-10-01"
 COST_PROVENANCE_OFFICIAL_RATE = "official_rate_estimate"
 
