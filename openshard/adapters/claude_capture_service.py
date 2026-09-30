@@ -1346,6 +1346,19 @@ def serve(
     except Exception:
         pass
 
+    # Remote capture: when this runtime is attached to one (an ephemeral
+    # cloud environment), the same process streams the spool out a few
+    # seconds after each Event. A no-op (one ``exists`` per tick) otherwise.
+    try:
+        from openshard.remote.collector import flush_periodically as remote_flush_periodically
+
+        threading.Thread(
+            target=remote_flush_periodically, args=(server.shutdown_requested,), kwargs={"env": env},
+            name="openshard-remote-capture-flush", daemon=True,
+        ).start()
+    except Exception:
+        pass
+
     def _idle_watch() -> None:
         while not server.shutdown_requested.wait(_IDLE_CHECK_SECONDS):
             if idle_timeout > 0 and server.idle_seconds() >= idle_timeout and recorder.pending == 0:

@@ -113,6 +113,13 @@ def _try_fast_path(argv: list[str]) -> bool:
         from openshard.adapters.claude_capture_service import serve
 
         raise SystemExit(serve(env=os.environ))
+    if argv == ["remote", "flush", "--background"]:
+        # The detached remote-capture flusher, started from the hook path:
+        # skip the full CLI import so it costs little and drains quickly.
+        from openshard.remote.collector import run_background_flusher
+
+        run_background_flusher()
+        return True
     if argv[0] != "hooks":
         return False
     sub, rest = argv[1], argv[2:]

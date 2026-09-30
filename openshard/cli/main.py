@@ -186,7 +186,7 @@ _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Getting Started", ("setup", "doctor")),
     ("Receipts", ("last", "history", "report", "context")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
-    ("Integrations", ("mcp", "capture", "sync", "import", "ingest", "wrap", "adapters", "telemetry")),
+    ("Integrations", ("mcp", "capture", "sync", "remote", "import", "ingest", "wrap", "adapters", "telemetry")),
     # Everything else (run, plan, models, roster, eval, packs, ...) falls
     # into "Advanced" below rather than needing to be named here.
 ]
@@ -2236,6 +2236,7 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         entry, results, before=before, after=after, started_at=started_at, completed_at=_utc_stamp(),
     )
     record_attestation(repo_root, attestation)
+    _remote_request_delivery(repo_root)
     summary = summarize_attestation(attestation)
     strict_exit = _strict_verify_exit_code(results) if strict else 0
 
@@ -2326,6 +2327,7 @@ def _verify_from_ci(entry: dict, loc, receipt_label, *, as_json: bool, strict: b
         finish("ci_unavailable", "CI verdict could not be recorded.", 2, commit=target.sha)
         return
     record_attestation(repo_root, attestation)
+    _remote_request_delivery(repo_root)
     if pr_head and pr_head != target.sha:
         note += (
             f" The pull request head is now {pr_head[:12]}; this verdict is for {target.sha[:12]} "
@@ -2348,6 +2350,16 @@ def _verify_from_ci(entry: dict, loc, receipt_label, *, as_json: bool, strict: b
     finish("ok", "\n".join(lines), exit_code, commit=target.sha, binding=target.binding,
            outcome=result.outcome, runs=counts, attestation_id=attestation["attestation_id"],
            verification=attestation["verification"])
+
+
+def _remote_request_delivery(repo_root: Path) -> None:
+    """When this environment is attached to a remote capture, have the new attestation leave it promptly."""
+    try:
+        from openshard.remote.collector import request_delivery
+
+        request_delivery(repo_root=repo_root)
+    except Exception:
+        pass
 
 
 def _strict_verify_exit_code(results: list) -> int:
@@ -7349,6 +7361,291 @@ def sync_now(limit: int, as_json: bool) -> None:
         click.echo(evidence + ".")
     if report.evidence_unsupported:
         click.echo("Verification evidence: not sent; this Platform does not accept later evidence yet.")
+
+
+# ---------------------------------------------------------------------------
+# Remote capture: evidence leaves an ephemeral agent runtime while it runs
+# ---------------------------------------------------------------------------
+
+_REMOTE_PROVIDERS = {
+    "claude-code": "anthropic", "claude": "anthropic", "codex": "openai", "cursor": "cursor",
+}
+
+
+@cli.group("remote")
+def remote_group() -> None:
+    """Remote capture: keep evidence from a cloud agent environment that will be destroyed.
+
+    A cloud coding task runs in a VM or container that disappears when it
+    ends. `openshard remote create` (on a machine you trust) opens a hosted
+    remote capture and prints a short-lived token scoped to it. Inside the
+    environment, `openshard remote attach` connects to it; from then on the
+    Events OpenShard observes are streamed out in small batches while the
+    agent works, so what left the environment before it was destroyed is
+    kept. The token can write to that one capture and nothing else. See
+    docs/remote-capture.md.
+    """
+
+
+def _remote_setup_lines(agent: str, capture_url: str) -> list[str]:
+    """How to configure the environment for *agent*. Says what is not supported instead of guessing."""
+    common = [
+        "  Environment variables for the cloud environment:",
+        f"    OPENSHARD_REMOTE_CAPTURE_URL={capture_url}",
+        "    OPENSHARD_REMOTE_TOKEN=<the token above>",
+        "  Allow outbound HTTPS to the Platform host in the environment's network settings.",
+        "  Setup script (runs when the environment is built):",
+        "    pip install openshard && openshard remote attach",
+    ]
+    if agent in ("claude-code", "claude"):
+        return common + [
+            "  Claude Code cloud sessions load hooks from the repository's .claude/settings.json",
+            "  (single-repository sessions). Commit OpenShard's hooks there, or run",
+            "  `openshard setup --yes` in the setup script so they exist before Claude Code starts.",
+            "  No session-end event is guaranteed when the VM is reclaimed: the capture then ends as Partial.",
+        ]
+    if agent == "cursor":
+        return common + [
+            "  Cursor cloud agents run command hooks from the repository's .cursor/hooks.json.",
+            "  Commit them with `openshard capture install cursor`. sessionStart/sessionEnd do not",
+            "  fire in cloud agents, so a capture ends as Partial unless a Receipt is delivered.",
+        ]
+    if agent == "codex":
+        return common + [
+            "  Codex cloud does not document running repository hooks in cloud tasks, so tool-level",
+            "  capture may not be available there. What remains observable is the branch/PR and its",
+            "  CI: run `openshard verify --ci` against the resulting commit from a trusted machine.",
+        ]
+    return common + ["  Install this agent's OpenShard hooks in the environment (`openshard capture install <agent>`)."]
+
+
+@remote_group.command("create")
+@click.option("--agent", required=True, help="The agent that will run: codex, claude-code, cursor, ...")
+@click.option("--provider", default=None, help="Who runs the environment (openai, anthropic, cursor, docker, ...).")
+@click.option("--ttl", "ttl_minutes", default=480, show_default=True, type=click.IntRange(min=5, max=1440),
+              help="Minutes until the capture token expires.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output (includes the token).")
+@_telemetry_command("remote.create")
+def remote_create(agent: str, provider: str | None, ttl_minutes: int, as_json: bool) -> None:
+    """Open a remote capture and print its short-lived token (run this on a machine you trust).
+
+    Uses the Platform link from `openshard sync connect`. The token is shown
+    once: it can append evidence to this capture and deliver its Receipt,
+    and nothing else, until it expires or you revoke it.
+    """
+    from openshard.history.repo_identity import capture_repo_identity
+    from openshard.remote import admin
+    from openshard.sync.config import resolve_link
+    from openshard.util.git import run_git
+
+    link = resolve_link()
+    if link is None:
+        raise click.ClickException("Not connected. Run `openshard sync connect --endpoint ... --org ... --api-key ...` first.")
+    root = _locate_history().root
+    agent = agent.strip().lower()
+    branch = (run_git(root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip() or None
+    ok, payload = admin.create_capture(
+        link, agent=agent, provider=provider or _REMOTE_PROVIDERS.get(agent),
+        repo_identity=capture_repo_identity(root), repo=root.name, branch=None if branch == "HEAD" else branch,
+        ttl_minutes=ttl_minutes,
+    )
+    if not ok:
+        code = payload.get("code")
+        if as_json:
+            click.echo(json.dumps(_machine_envelope("remote.create", "error", error=payload), indent=2))
+            sys.exit(1)
+        if code == "remote_capture_unsupported":
+            raise click.ClickException("This Platform does not support remote capture yet.")
+        raise click.ClickException(f"The Platform refused ({code}, HTTP {payload.get('status')}).")
+    capture = payload["remote_capture"]
+    if as_json:
+        click.echo(json.dumps(_machine_envelope(
+            "remote.create", "ok", remote_capture=capture, capture_url=payload["capture_url"], token=payload["token"],
+        ), indent=2))
+        return
+    click.echo("Remote capture created")
+    click.echo(f"  Agent:       {capture['agent']}")
+    click.echo(f"  Repository:  {capture.get('repo_identity') or capture.get('repo') or 'not identified'}")
+    click.echo(f"  Expires:     {capture['expires_at']}  ({ttl_minutes} min)")
+    click.echo(f"  Capture:     {payload['capture_url']}")
+    click.echo(f"  Token:       {payload['token']}")
+    click.echo("               shown once; it can write to this capture only. Revoke: "
+               f"openshard remote revoke {capture['id']}")
+    click.echo("")
+    for line in _remote_setup_lines(agent, payload["capture_url"]):
+        click.echo(line)
+
+
+@remote_group.command("attach")
+@click.option("--url", "capture_url", default=None, help="Capture URL (default: $OPENSHARD_REMOTE_CAPTURE_URL).")
+@click.option("--token", default=None, help="Capture token (default: $OPENSHARD_REMOTE_TOKEN; omit to keep it out of shell history).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("remote.attach")
+def remote_attach(capture_url: str | None, token: str | None, as_json: bool) -> None:
+    """Attach this environment to a remote capture (run inside the cloud environment).
+
+    Checks the token against the Platform and stores the attachment under
+    the OpenShard home (mode 0600), so hooks that fire later can use it even
+    when the environment's secrets are only visible during setup. From then
+    on captured Events are streamed to the capture as they happen.
+    """
+    from openshard.remote import config as rconfig
+    from openshard.remote.transport import RemoteCaptureClient
+
+    capture_url = capture_url or os.environ.get(rconfig.URL_ENV)
+    token = token or os.environ.get(rconfig.TOKEN_ENV)
+    if not capture_url or not token:
+        raise click.UsageError(f"Set {rconfig.URL_ENV} and {rconfig.TOKEN_ENV}, or pass --url and --token.")
+    try:
+        url = rconfig.normalize_capture_url(capture_url)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
+    if not rconfig.valid_token(token):
+        raise click.UsageError("The token does not look like a remote capture token (osr_...).")
+    probe = rconfig.Attachment(capture_url=url, token=token.strip(), source=rconfig.SOURCE_ENV)
+    result, status = RemoteCaptureClient(probe, user_agent="openshard/attach").status()
+    if not result.accepted or status is None:
+        reason = {
+            "unauthorized": "the token is not valid for this capture (expired, revoked or mistyped)",
+            "unavailable": "the Platform could not be reached (is outbound HTTPS to it allowed from here?)",
+        }.get(result.kind, f"the Platform answered {result.status}")
+        if as_json:
+            click.echo(json.dumps(_machine_envelope("remote.attach", "error", reason=result.kind), indent=2))
+            sys.exit(1)
+        raise click.ClickException(f"Not attached: {reason}.")
+    attachment = rconfig.save_attachment(
+        capture_url=url, token=token, organisation_id=status.get("organisation_id"),
+        agent=status.get("agent"), expires_at=status.get("expires_at"),
+    )
+    if as_json:
+        click.echo(json.dumps(_machine_envelope("remote.attach", "ok", attachment=attachment.to_public_dict(),
+                                                state=status.get("state")), indent=2))
+        return
+    click.echo(f"Attached to remote capture {attachment.capture_id} ({status.get('agent')}, {status.get('state')}).")
+    click.echo(f"  Token {attachment.token_prefix}… expires {status.get('expires_at')}.")
+    click.echo("  Evidence captured in this environment is now streamed out as it happens.")
+
+
+@remote_group.command("detach")
+@_telemetry_command("remote.detach")
+def remote_detach() -> None:
+    """Forget the stored attachment. Nothing more is sent; what the capture already holds stays."""
+    from openshard.remote.config import clear_attachment
+
+    click.echo("Detached." if clear_attachment() else "Not attached.")
+
+
+@remote_group.command("flush")
+@click.option("--background", is_flag=True, default=False, hidden=True,
+              help="The detached flusher: wait for a burst to settle, drain, exit quietly.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def remote_flush(background: bool, as_json: bool) -> None:
+    """Send everything still in the local spool now, and deliver finished Receipts (safe to repeat)."""
+    from openshard.remote import collector
+
+    if background:
+        collector.run_background_flusher()
+        return
+    report = collector.flush(deliver=True)
+    if as_json:
+        click.echo(json.dumps(_machine_envelope("remote.flush", "ok" if report.attached else "not_attached",
+                                                **report.to_dict()), indent=2))
+        return
+    if not report.attached:
+        click.echo("Not attached to a remote capture. Run `openshard remote attach` in the environment first.")
+        return
+    line = f"Sent {report.events_sent} event(s) in {report.batches} batch(es); {report.pending} still queued."
+    if report.events_rejected:
+        line += f" {report.events_rejected} refused by the Platform and dropped."
+    if report.receipts and (report.receipts.get("created") or report.receipts.get("duplicate")):
+        line += f" Receipts delivered: {report.receipts['created']} new, {report.receipts['duplicate']} already hosted."
+    if report.receipts and report.receipts.get("evidence_recorded"):
+        line += f" Verification evidence updated for {report.receipts['evidence_recorded']} Receipt(s)."
+    if report.stopped:
+        line += f" Stopped: {report.stopped}."
+    click.echo(line)
+
+
+@remote_group.command("status")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def remote_status(as_json: bool) -> None:
+    """Show what this environment is attached to and what is still queued locally."""
+    from openshard.remote import spool
+    from openshard.remote.config import resolve_attachment
+    from openshard.remote.transport import RemoteCaptureClient
+
+    attachment = resolve_attachment()
+    state = spool.read_state() or {}
+    local = {key: state.get(key) for key in ("collector_id", "spooled", "sent", "rejected", "dropped", "stopped",
+                                             "last_contact_at", "last_attempt_at")}
+    local["pending"] = spool.pending_count()
+    hosted = None
+    if attachment is not None:
+        result, hosted = RemoteCaptureClient(attachment, user_agent="openshard/status").status()
+        if hosted is None:
+            hosted = {"unreachable": result.kind}
+    if as_json:
+        click.echo(json.dumps(_machine_envelope(
+            "remote.status", "attached" if attachment else "not_attached",
+            attachment=attachment.to_public_dict() if attachment else None, local=local, hosted=hosted,
+        ), indent=2))
+        return
+    if attachment is None:
+        click.echo("Remote capture: not attached  (openshard remote attach)")
+        return
+    hosted = hosted or {}
+    click.echo(f"Remote capture: {attachment.capture_id}")
+    click.echo(f"  token:     {attachment.token_prefix}…  (from {attachment.source})")
+    click.echo(f"  hosted:    {hosted.get('state', hosted.get('unreachable'))}, {hosted.get('event_count', '?')} event(s) preserved"
+               + (f", expires {hosted['expires_at']}" if hosted.get("expires_at") else ""))
+    click.echo(f"  local:     {local['spooled'] or 0} captured, {local['sent'] or 0} sent, {local['pending']} queued"
+               + (f", {local['rejected']} refused" if local.get("rejected") else "")
+               + (f", {local['dropped']} over the limit" if local.get("dropped") else ""))
+    if local.get("stopped"):
+        click.echo(f"  stopped:   {local['stopped']}")
+
+
+@remote_group.command("list")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def remote_list(as_json: bool) -> None:
+    """List this organisation's remote captures (trusted machine; uses the Platform link)."""
+    from openshard.remote import admin
+    from openshard.sync.config import resolve_link
+
+    link = resolve_link()
+    if link is None:
+        raise click.ClickException("Not connected. Run `openshard sync connect` first.")
+    ok, payload = admin.list_captures(link)
+    if not ok:
+        raise click.ClickException(f"The Platform refused ({payload.get('code')}, HTTP {payload.get('status')}).")
+    captures = payload.get("remote_captures") or []
+    if as_json:
+        click.echo(json.dumps(_machine_envelope("remote.list", "ok", remote_captures=captures), indent=2))
+        return
+    if not captures:
+        click.echo("No remote captures.")
+        return
+    for c in captures:
+        receipt = "receipt " + c["receipts"][0]["receipt_id"] if c.get("receipts") else "no receipt"
+        reason = f" ({c['reason']})" if c.get("reason") else ""
+        click.echo(f"{c['id']}  {c['state'].upper():<9}{reason}  {c['agent']}  {c['event_count']} event(s)  {receipt}")
+
+
+@remote_group.command("revoke")
+@click.argument("capture_id")
+def remote_revoke(capture_id: str) -> None:
+    """Revoke a capture's token now (trusted machine). What it already delivered stays."""
+    from openshard.remote import admin
+    from openshard.sync.config import resolve_link
+
+    link = resolve_link()
+    if link is None:
+        raise click.ClickException("Not connected. Run `openshard sync connect` first.")
+    ok, payload = admin.revoke_capture(link, capture_id)
+    if not ok:
+        raise click.ClickException(f"The Platform refused ({payload.get('code')}, HTTP {payload.get('status')}).")
+    click.echo(f"Revoked. Capture {payload['id']} is {payload['state']} with {payload['event_count']} event(s) preserved.")
+
 
 
 @cli.group("config")
