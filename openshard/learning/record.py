@@ -10,7 +10,8 @@ re-derivable from history with ``openshard learn inspect <signal_id>``.
 "Influenced" is claimed only when it happened:
 
 * ``context_supplied`` is True when the advisory block was actually put in
-  front of the model (a model call was made with it);
+  front of the model (a model call was made with it); ``context_files_added``
+  names any repository files learning showed the model alongside it;
 * ``routing.influenced`` is True only when Adaptive Routing V2 applied its
   decision *and* that decision used history evidence. Otherwise history did
   not choose the model, whatever the advisory text said;
@@ -96,6 +97,7 @@ def build_learning_record(
     attempt_models: list[tuple[int, str]] | None = None,
     context_supplied: bool = False,
     routing_record: dict[str, Any] | None = None,
+    context_files_added: list[str] | None = None,
 ) -> dict[str, Any]:
     """The ``learning`` block for one OSN Receipt. Never raises on odd input."""
     record: dict[str, Any] = {"version": LEARNING_RECORD_VERSION}
@@ -116,6 +118,9 @@ def build_learning_record(
         if ctx.error:
             record["error"] = ctx.error
     record["context_supplied"] = bool(context_supplied and record.get("used"))
+    if record["context_supplied"] and context_files_added:
+        # Repo files learning put in front of the model (tests that failed on similar work).
+        record["context_files_added"] = list(context_files_added)[:2]
     record["routing"] = routing_influence(routing_record)
     recs = ctx.recommended_checks if ctx is not None and ctx.used else []
     record["verification"] = {

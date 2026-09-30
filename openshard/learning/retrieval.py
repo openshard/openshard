@@ -32,6 +32,7 @@ from openshard.learning.signals import (
     KIND_MODEL_OUTCOMES,
     KIND_POLICY,
     KIND_RECOVERY,
+    KIND_TEST,
     STRENGTH_MODERATE,
     STRENGTH_STRONG,
     LearningIndex,
@@ -52,7 +53,8 @@ W_AREA = 2
 W_STRENGTH = {STRENGTH_STRONG: 2, STRENGTH_MODERATE: 1}
 W_RECENT = 1
 # Failures and caught checks are what a starting agent most needs to know.
-W_KIND = {KIND_CHECK: 2, KIND_FAILURE: 1, KIND_RECOVERY: 1, KIND_MODEL_OUTCOMES: 0, KIND_POLICY: 0}
+W_KIND = {KIND_CHECK: 2, KIND_TEST: 2, KIND_FAILURE: 1, KIND_RECOVERY: 1, KIND_MODEL_OUTCOMES: 0, KIND_POLICY: 0}
+MAX_CONTEXT_FILES = 2
 
 STATUS_USED = "used"
 STATUS_NO_RELEVANT = "no_relevant_signals"
@@ -215,6 +217,25 @@ class LearningContext:
         for r in self.retrieved:
             out.extend(x for x in r.signal.receipt_ids if x not in out)
         return out[:20]
+
+    @property
+    def suggested_context_files(self) -> list[str]:
+        """Test files that repeatedly failed on similar work, for the model to read.
+
+        Repo-relative ids from retrieved ``recurring_test_failure`` signals only,
+        at most ``MAX_CONTEXT_FILES``. The caller checks each one exists in the
+        repository before showing it, and shows it as untrusted content.
+        """
+        if not self.used:
+            return []
+        out: list[str] = []
+        for r in self.retrieved:
+            test = r.signal.subject.get("test") if r.signal.kind == KIND_TEST else None
+            if isinstance(test, str):
+                f = test.split("::", 1)[0]
+                if f not in out:
+                    out.append(f)
+        return out[:MAX_CONTEXT_FILES]
 
     @property
     def prompt_text(self) -> str | None:

@@ -40,7 +40,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,9 +52,10 @@ LEARNING_SIGNAL_VERSION = 1
 KIND_MODEL_OUTCOMES = "model_task_outcomes"
 KIND_RECOVERY = "recovery_path"
 KIND_CHECK = "recurring_check_failure"
+KIND_TEST = "recurring_test_failure"
 KIND_FAILURE = "recurring_failure"
 KIND_POLICY = "policy_boundary"
-KINDS = (KIND_MODEL_OUTCOMES, KIND_RECOVERY, KIND_CHECK, KIND_FAILURE, KIND_POLICY)
+KINDS = (KIND_MODEL_OUTCOMES, KIND_RECOVERY, KIND_CHECK, KIND_TEST, KIND_FAILURE, KIND_POLICY)
 
 STRENGTH_ANECDOTAL = "anecdotal"  # one Receipt: never surfaced
 STRENGTH_WEAK = "weak"
@@ -116,6 +117,7 @@ class AttemptObservation:
     n: int
     model: str | None
     state: str | None  # passed | failed | unknown | not_run | None (nothing recorded)
+    failed_tests: tuple[str, ...] = ()  # test ids the verifier named, failed attempts only
 
 
 @dataclass(frozen=True)
@@ -285,6 +287,21 @@ def _attempt_state(v: object) -> str | None:
     return "passed" if passed is True else "failed" if passed is False else None
 
 
+def _failed_tests(v: object) -> tuple[str, ...]:
+    from openshard.verification.failed_tests import MAX_FAILED_TESTS, safe_test_id
+
+    raw = v.get("failed_tests") if isinstance(v, dict) else None
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    for t in raw:
+        # Re-checked on read: a stored id is only trusted if it is still a safe, relative id.
+        clean = safe_test_id(t)
+        if clean and clean not in out:
+            out.append(clean)
+    return tuple(out[:MAX_FAILED_TESTS])
+
+
 def _osn_attempts(entry: dict) -> tuple[AttemptObservation, ...]:
     """Per-attempt models and verification states of an OSN run.
 
@@ -321,7 +338,8 @@ def _osn_attempts(entry: dict) -> tuple[AttemptObservation, ...]:
         model = recorded.get(n)
         if model is None:
             model = first if n == 1 else (_str(retries[n - 2].get("model")) if 0 <= n - 2 < len(retries) else None)
-        out.append(AttemptObservation(n, model, _attempt_state(a.get("verification"))))
+        state = _attempt_state(a.get("verification"))
+        out.append(AttemptObservation(n, model, state, _failed_tests(a.get("verification")) if state == "failed" else ()))
     return tuple(out)
 
 
@@ -743,6 +761,55 @@ def _check_signals(obs: list[Observation], repo: str | None, now: datetime) -> l
     return out
 
 
+_TEST_WORD = re.compile(r"[a-z][a-z0-9]{2,23}")
+
+
+def _test_terms(test_id: str) -> list[str]:
+    """Words from a test's name, so "mobile layout" work can find ``test_mobile_viewport``."""
+    name = test_id.rsplit("::", 1)[-1].lower().removeprefix("test_")
+    return [w for w in _TEST_WORD.findall(name.replace("_", " ")) if w not in ("test", "tests")]
+
+
+def _test_signals(obs: list[Observation], repo: str | None, now: datetime) -> list[LearningSignal]:
+    """Per (category, test id): runs in which OpenShard saw that test fail."""
+    accs: dict[tuple, _Acc] = {}
+    for o in obs:
+        failed_in: dict[str, int] = {}
+        first: set[str] = set()
+        for a in o.attempts:
+            for t in a.failed_tests:
+                failed_in[t] = failed_in.get(t, 0) + 1
+                if a.n == 1:
+                    first.add(t)
+        for t, n in failed_in.items():
+            accs.setdefault((o.task_category, t), _Acc()).add(
+                o, failed_attempts=n, first_attempt=1 if t in first else 0,
+                fixed_later=1 if o.verified_success else 0,
+            )
+    out = []
+    for (category, test), acc in accs.items():
+        n = len(acc.obs)
+        fixed = acc.counts.get("fixed_later", 0)
+        text = (
+            f"`{test}` failed OpenShard-run verification in {_plural(n, 'recorded run')} on "
+            f"{_category_phrase(category)}"
+            + (f" ({acc.counts.get('first_attempt', 0)} on the first attempt)" if acc.counts.get("first_attempt") else "")
+            + (f"; {fixed} of those runs later passed" if fixed else "")
+            + "."
+        )
+        stats = {"runs_failed": n, "failed_attempts": acc.counts.get("failed_attempts", 0),
+                 "first_attempt_failures": acc.counts.get("first_attempt", 0), "runs_fixed_later": fixed}
+        signal = _build(KIND_TEST, repo, category, {"test": test}, acc, stats, text, now)
+        extra = [w for w in _test_terms(test) if w not in signal.terms]
+        area = path_area(test.split("::", 1)[0])
+        out.append(replace(
+            signal,
+            terms=(*signal.terms, *extra)[:MAX_TERMS + 4],
+            areas=tuple(dict.fromkeys([*( [area] if area else []), *signal.areas]))[:MAX_AREAS],
+        ))
+    return out
+
+
 def _failure_signals(obs: list[Observation], repo: str | None, now: datetime) -> list[LearningSignal]:
     totals: dict[str | None, int] = {}
     accs: dict[tuple, _Acc] = {}
@@ -850,7 +917,8 @@ def derive_signals(
         if o.excluded_reason:
             excluded[o.excluded_reason] = excluded.get(o.excluded_reason, 0) + 1
     signals: list[LearningSignal] = []
-    for builder in (_model_signals, _recovery_signals, _check_signals, _failure_signals, _policy_signals):
+    for builder in (_model_signals, _recovery_signals, _check_signals, _test_signals, _failure_signals,
+                    _policy_signals):
         try:
             signals.extend(builder(obs, repo, now))
         except Exception:
@@ -918,6 +986,7 @@ __all__ = [
     "KIND_MODEL_OUTCOMES",
     "KIND_POLICY",
     "KIND_RECOVERY",
+    "KIND_TEST",
     "LEARNING_SIGNAL_VERSION",
     "LearningIndex",
     "LearningSignal",

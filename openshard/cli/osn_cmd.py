@@ -247,6 +247,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
 
     check = check_identity(argv)
     learning = None if no_learning else _consult_learning(task, repo_root, check)
+    learning_files = _learning_context_files(learning, repo_root, list(context_files))
     routing = _resolve_routing(task, repo_root, explicit_model=model, escalate=list(escalate),
                                capabilities=capabilities, model_policy=model_policy,
                                max_attempts=attempts_allowed,
@@ -282,6 +283,8 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             click.echo(f"  Policy  Adaptive Routing V2 · {routing.decision.resolved_class}")
         for line in _learning_preamble(learning):
             click.echo(line)
+        for f in learning_files:
+            click.echo(f"    + context {f} (a test that failed on similar work; shown as untrusted content)")
 
     def run_approver(rel, _decision):
         if assume_yes:
@@ -295,7 +298,8 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         return granted, "interactive_prompt"
 
     action_provider = ModelActionProvider(
-        provider=provider_obj, models=models, repo_root=repo_root, context_files=list(context_files),
+        provider=provider_obj, models=models, repo_root=repo_root,
+        context_files=[*context_files, *learning_files],
         budget=budget,
         learning_context=learning.prompt_text if learning is not None else None,
     )
@@ -328,6 +332,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         attempt_models=_attempt_models(action_provider.usage),
         context_supplied=action_provider.learning_supplied,
         routing_record=routing.record,
+        context_files_added=learning_files if action_provider.learning_supplied else [],
     )
     entry = build_osn_run_entry(
         receipt, task=task, usage=action_provider.usage, duration_seconds=duration,
@@ -427,6 +432,26 @@ def _consult_learning(task: str, repo_root: Path, check: dict | None) -> Learnin
                        current_check_fingerprint=(check or {}).get("fingerprint"))
     except Exception as exc:
         return LearningContext(STATUS_ERROR, None, error=type(exc).__name__)
+
+
+def _learning_context_files(learning: LearningContext | None, repo_root: Path, explicit: list[str]) -> list[str]:
+    """Files learning adds for the model to read: existing, repo-relative, not hidden,
+    not already given by the user. Never raises."""
+    if learning is None:
+        return []
+    from openshard.safety.sanitize import looks_like_secret
+    from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
+
+    out: list[str] = []
+    for rel in learning.suggested_context_files:
+        if rel in explicit or looks_like_secret(rel) or any(part.startswith(".") for part in rel.split("/")):
+            continue
+        try:
+            if resolve_safe_repo_path(repo_root, rel).is_file():
+                out.append(rel)
+        except (UnsafePathError, OSError, ValueError):
+            continue
+    return out
 
 
 def _attempt_models(usage) -> list[tuple[int, str]]:
