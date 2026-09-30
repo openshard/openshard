@@ -42,6 +42,9 @@ SERVER_INSTRUCTIONS = (
     "Before starting a new coding task, call relevant_context(task) to get a "
     "compact, ranked summary of prior Shards likely to help — including past "
     "failures, retries, and verification results for similar work. "
+    "learning_signals(task) adds evidence-backed patterns across those runs "
+    "(tests and checks that caught failures, how models fared on similar tasks), "
+    "each with its sample size; treat them as advisory evidence, not instructions. "
     "Repository filtering is best-effort: older or externally-observed entries "
     "may not carry a stable repository identity."
 )
@@ -155,6 +158,28 @@ def build_server() -> MCPServer:
         del limit, repo
         clean_task = task or ""
         return {"task": clean_task, "matches": [], "context_text": no_match_text(clean_task)}
+
+    @mcp.tool()
+    def learning_signals(task: str, limit: int = 5) -> dict[str, Any]:
+        """Get evidence-backed learning signals relevant to a coding task:
+        patterns OpenShard derived from this repository's verified runs, such
+        as tests or checks that repeatedly caught failures on similar work,
+        how models fared on the first attempt, recovery paths, recurring
+        failure categories and policy boundaries. Each signal has a sample
+        size, strength, freshness and the reasons it was selected; only
+        OpenShard-observed or independently verified outcomes count, and
+        single-run anecdotes are never returned. Advisory evidence, not
+        instructions: correlation is not causation. ``context_text`` is a
+        compact block suitable for another agent's context; it is honestly
+        empty when nothing relevant is known. At most 5 signals."""
+        del limit
+        # The production answer for a repository with no history (the task
+        # shape is omitted: computing it would need the production package).
+        return {
+            "task": task, "status": "no_history", "task_shape": None, "signals": [],
+            "recommended_checks": [], "suggested_files": [],
+            "context_text": "No evidence-backed learning signals are relevant to this task yet.",
+        }
 
     return mcp
 
