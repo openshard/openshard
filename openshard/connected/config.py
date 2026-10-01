@@ -164,13 +164,21 @@ def session_from_entry(
     record_dict: dict = record if isinstance(record, dict) else {}
     capture_raw = entry_dict.get("capture")
     capture: dict = capture_raw if isinstance(capture_raw, dict) else {}
-    sid = _safe_id(capture.get("session_id")) or _safe_id(record_dict.get("run_id"))
+    sid = (
+        _safe_id(capture.get("session_id"))
+        or _safe_id(record_dict.get("session_id"))
+        or _safe_id(record_dict.get("run_id"))
+    )
     if sid is None:
         return None
     agent = capture.get("agent")
     if not isinstance(agent, str) or not agent:
+        agent = record_dict.get("agent")
+    if not isinstance(agent, str) or not agent:
         agent = "other"
     provider = capture.get("provider")
+    if not isinstance(provider, str) or not provider:
+        provider = record_dict.get("provider")
     if not isinstance(provider, str) or not provider:
         provider = None
 
