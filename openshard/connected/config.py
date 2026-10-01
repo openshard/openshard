@@ -120,8 +120,9 @@ def available_hint(env: dict | os._Environ | None = None) -> bool:
     if source.get(ENDPOINT_ENV) and source.get(ORG_ENV) and source.get(TOKEN_ENV):
         return True
     try:
-        from openshard.sync.config import API_KEY_ENV, ENDPOINT_ENV as PLATFORM_ENDPOINT_ENV
-        from openshard.sync.config import ORG_ENV as PLATFORM_ORG_ENV, config_path
+        from openshard.sync.config import API_KEY_ENV, config_path
+        from openshard.sync.config import ENDPOINT_ENV as PLATFORM_ENDPOINT_ENV
+        from openshard.sync.config import ORG_ENV as PLATFORM_ORG_ENV
 
         if source.get(PLATFORM_ENDPOINT_ENV) and source.get(PLATFORM_ORG_ENV) and source.get(API_KEY_ENV):
             return True
