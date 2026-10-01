@@ -30,7 +30,7 @@ from openshard.sync.config import (
     PlatformLink,
     resolve_link,
 )
-from openshard.sync.transport import LINK_KINDS, KIND_REJECTED, KIND_UNAVAILABLE
+from openshard.sync.transport import KIND_REJECTED, KIND_UNAVAILABLE, LINK_KINDS
 
 SOURCE_PRODUCT = "openshard-connected"
 SURFACE_ENV = "OPENSHARD_CAPTURE_SURFACE"
