@@ -159,7 +159,9 @@ def request_delivery(env: dict | os._Environ | None = None, *, repo_root: Path |
     try:
         attachment = resolve_attachment(env)
         if attachment is None:
-            return False
+            from openshard.connected.collector import request_delivery as connected_request_delivery
+
+            return connected_request_delivery(env, repo_root=repo_root)
         if repo_root is not None:
             spool.append(env, attachment.capture_id, [], repo_root=repo_root)
         spool.update_state(env, attachment.capture_id, deliver=True)
