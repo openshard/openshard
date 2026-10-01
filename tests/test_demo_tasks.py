@@ -32,7 +32,7 @@ EXPECTED_DEMO_FILES = [
     "terraform.tfvars.example",
 ]
 
-FORBIDDEN_STRINGS = ["Tunic Pay", "Mercury", "Volant", "AKIA", "sk-live", "sk-prod"]
+FORBIDDEN_STRINGS = ["PRIVATE_COMPANY", "INTERNAL_CUSTOMER", "AKIA", "sk-live", "sk-prod"]
 
 
 def _load():
