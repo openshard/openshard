@@ -25,6 +25,9 @@ ENDPOINT = "https://platform.example.test"
 OSC = "osc_AbCd1234_" + "c" * 43
 OSK = "osk_AbCd1234_" + "k" * 43
 OSR = "osr_AbCd1234_" + "r" * 43
+OSA = "osa_AbCd1234_" + "a" * 43
+OSM = "osm_AbCd1234_" + "m" * 43
+OSF = "osf_AbCd1234_" + "f" * 43
 CAPTURE_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 SID = "12121212-3434-4565-8787-909090909090"
 
@@ -189,7 +192,8 @@ class TestConnectedCollector:
         assert state["capture_id"] == CAPTURE_ID
         assert "connected" not in state
 
-    def test_connected_secret_is_withheld_before_spooling(self, home):
+    @pytest.mark.parametrize("secret", [OSC, OSA, OSM, OSF])
+    def test_openshard_secret_is_withheld_before_spooling(self, home, secret):
         event = {
             "schema_version": 1,
             "event_id": "evt-connected-secret",
@@ -200,7 +204,7 @@ class TestConnectedCollector:
             "attempt_number": 1,
             "actor": "codex_hooks",
             "source": "codex_hooks",
-            "action": f"Bash: Authorization: Bearer {OSC}",
+            "action": f"Bash used {secret}",
             "target": "python",
             "status": "unknown",
             "evidence": "agent_reported",
@@ -210,4 +214,4 @@ class TestConnectedCollector:
         wire = spool.wire_event(event)
         assert wire is not None
         assert wire["action"] == "[withheld]"
-        assert OSC not in json.dumps(wire)
+        assert secret not in json.dumps(wire)

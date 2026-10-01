@@ -80,7 +80,7 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"xox[abpr]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"\bos[krs]_[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\bos[acfkmrs]_[A-Za-z0-9_-]{20,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*\S+", re.IGNORECASE),
     re.compile(r"\bbearer\s+\S+", re.IGNORECASE),
