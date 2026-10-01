@@ -634,7 +634,7 @@ async def test_packs_output_no_forbidden_strings(tmp_path):
         ta.load_text("/packs")
         await pilot.press("enter")
         text = _text(app.query_one("#output-content", Static))
-        for forbidden in ("Tunic Pay", "Mercury", "Volant", "AKIA"):
+        for forbidden in ("PRIVATE_COMPANY", "INTERNAL_CUSTOMER", "AKIA"):
             assert forbidden not in text
 
 
