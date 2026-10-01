@@ -1197,3 +1197,37 @@ cursor_action_recording`. Every other plan can only use the self-report skill
 (`openshard grok-bot skill` / `report`), whose facts are all
 `agent_reported`. See [Grok Bot](grok-bot.md) for the evidence comparison and
 the limits.
+
+
+## GitHub fallback metadata for cloud agents
+
+The GitHub fallback is provider-neutral. A captured cloud commit must name the
+agent explicitly with commit trailers; Openshard does not guess Codex, Claude
+Code, Cursor or any other harness from GitHub alone.
+
+```text
+Openshard-Agent: Claude Code
+Openshard-Model: claude-sonnet-5.5
+Openshard-Provider: Anthropic
+Openshard-Surface: Claude cloud
+Openshard-Owner: Michael Obasa
+```
+
+When the runtime exposes usage, it can also attach:
+
+```text
+Openshard-Tokens-Input: 12000
+Openshard-Tokens-Output: 2400
+Openshard-Tokens-Cache-Read: 8000
+Openshard-Tokens-Cache-Creation: 1000
+Openshard-Cost-USD: 0.1234
+```
+
+A provider-reported dollar amount wins. If only trustworthy token counters are
+available, Core can calculate a dated official-list-rate estimate for an exact
+supported model and marks it as estimated. Missing usage remains unknown, never
+zero.
+
+This fallback still records `capture_depth: partial`: GitHub and CI can prove
+repository state and verification, but they cannot claim runtime events they
+did not observe.

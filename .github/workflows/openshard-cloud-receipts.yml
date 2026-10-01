@@ -98,9 +98,11 @@ jobs:
             tokens_cache_creation=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Cache-Creation:[[:space:]]*//Ip' | tail -1)
 
             [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
-            [[ -n "$agent" ]] || agent="Codex"
-            [[ -n "$provider" ]] || provider="OpenAI"
-            [[ -n "$surface" ]] || surface="ChatGPT Work"
+            if [[ -z "$agent" ]]; then
+              echo "::warning::Skipping $sha because Openshard-Agent is empty."
+              echo "::endgroup::"
+              continue
+            fi
 
             cost_provenance=""
             cost_is_estimate=false
