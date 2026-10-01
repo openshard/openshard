@@ -5,7 +5,12 @@ import json
 from typing import Any
 
 from openshard.connected.config import ConnectedConnection, ConnectedSession
-from openshard.sync.transport import KIND_UNAVAILABLE, SendResult, classify_evidence_status, classify_status
+from openshard.sync.transport import (
+    KIND_UNAVAILABLE,
+    SendResult,
+    classify_evidence_status,
+    classify_status,
+)
 
 TOTAL_TIMEOUT_SECONDS = 10.0
 _MAX_BODY_BYTES = 64 * 1024
