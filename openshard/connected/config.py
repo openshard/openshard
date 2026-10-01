@@ -107,6 +107,29 @@ def resolve_connection(env: dict | os._Environ | None = None) -> ConnectedConnec
     return ConnectedConnection(link.endpoint, link.organisation_id, link.api_key, "platform_link")
 
 
+def available_hint(env: dict | os._Environ | None = None) -> bool:
+    """Cheap hook-path check: could persistent connected capture be available?
+
+    This intentionally avoids parsing either credential file on every hook.
+    A false positive is harmless because the collector resolves and validates
+    the connection before spooling; a false negative would lose streaming.
+    """
+    source = os.environ if env is None else env
+    if disabled(source):
+        return False
+    if source.get(ENDPOINT_ENV) and source.get(ORG_ENV) and source.get(TOKEN_ENV):
+        return True
+    try:
+        from openshard.sync.config import API_KEY_ENV, ENDPOINT_ENV as PLATFORM_ENDPOINT_ENV
+        from openshard.sync.config import ORG_ENV as PLATFORM_ORG_ENV, config_path
+
+        if source.get(PLATFORM_ENDPOINT_ENV) and source.get(PLATFORM_ORG_ENV) and source.get(API_KEY_ENV):
+            return True
+        return config_path(source).exists()
+    except OSError:
+        return False
+
+
 def _safe_id(value: object) -> str | None:
     if not isinstance(value, str) or not value:
         return None
@@ -171,5 +194,5 @@ def sink_id(connection: ConnectedConnection, session: ConnectedSession) -> str:
 
 __all__ = [
     "ConnectedConnection", "ConnectedSession", "DISABLE_ENV", "ENDPOINT_ENV", "ORG_ENV",
-    "SURFACE_ENV", "TOKEN_ENV", "disabled", "resolve_connection", "session_from_entry", "sink_id",
+    "SURFACE_ENV", "TOKEN_ENV", "available_hint", "disabled", "resolve_connection", "session_from_entry", "sink_id",
 ]
