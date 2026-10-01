@@ -218,3 +218,178 @@ def _read_state(env: dict | os._Environ | None) -> dict[str, Any] | None:
         data = json.loads(_state_path(env).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return data if isinstance(data, dict) and isinstance(data.get("collector_id"), str) else None
+
+
+def _write_state(env: dict | os._Environ | None, state: dict[str, Any]) -> None:
+    path = _state_path(env)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(state), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _state_for(env: dict | os._Environ | None, capture_id: str) -> dict[str, Any]:
+    """The state for *capture_id*; a spool left by another capture is discarded, never resent elsewhere."""
+    state = _read_state(env)
+    if state is None or state.get("capture_id") != capture_id:
+        try:
+            _spool_path(env).unlink()
+        except OSError:
+            pass
+        state = _new_state(capture_id)
+        _write_state(env, state)
+    return state
+
+
+def read_state(env: dict | os._Environ | None = None) -> dict[str, Any] | None:
+    """The spool state as last written (no lock, read-only). None when there is no spool."""
+    return _read_state(env)
+
+
+def _lock(env: dict | os._Environ | None):
+    spool_dir(env).mkdir(parents=True, exist_ok=True)
+    return history_file_lock(_spool_path(env), timeout=_LOCK_TIMEOUT_SECONDS)
+
+
+def update_state(env: dict | os._Environ | None, capture_id: str, **fields: Any) -> dict[str, Any]:
+    """Merge *fields* into the state under the lock. Returns the new state."""
+    with _lock(env):
+        state = _state_for(env, capture_id)
+        state.update(fields)
+        _write_state(env, state)
+        return state
+
+
+# ---------------------------------------------------------------------------
+# Append / read / acknowledge
+# ---------------------------------------------------------------------------
+
+
+def append(
+    env: dict | os._Environ | None,
+    capture_id: str,
+    events: list[dict],
+    *,
+    link: dict | None = None,
+    repo_root: Path | None = None,
+    file_events: list[dict] | None = None,
+) -> int:
+    """Append *events* (and unseen *file_events*) to the spool. Returns how many were written.
+
+    *file_events* carry stable ids and are re-derived at every fold, so only
+    ids this spool has not written before are appended.
+    """
+    wire = [w for w in (wire_event(e) for e in events) if w is not None]
+    with _lock(env):
+        state = _state_for(env, capture_id)
+        file_ids = [i for i in (state.get("file_event_ids") or []) if isinstance(i, str)]
+        seen = set(file_ids)
+        for raw in file_events or []:
+            w = wire_event(raw)
+            if w is None or w["event_id"] in seen:
+                continue
+            seen.add(w["event_id"])
+            file_ids.append(w["event_id"])
+            wire.append(w)
+        state["file_event_ids"] = file_ids[-_MAX_FILE_EVENT_IDS:]
+
+        wire_link_value = wire_link(link)
+        links = [item for item in (state.get("links") or []) if isinstance(item, dict)]
+        if wire_link_value and all(item.get("receipt_id") != wire_link_value["receipt_id"] for item in links):
+            if len(links) < MAX_LINKS:
+                links.append(wire_link_value)
+        state["links"] = links
+        if repo_root is not None:
+            repos = [r for r in (state.get("repos") or []) if isinstance(r, str)]
+            text = str(repo_root)
+            if text not in repos:
+                repos = (repos + [text])[-_MAX_REPOS:]
+            state["repos"] = repos
+
+        room = MAX_SPOOLED_EVENTS - int(state.get("spooled") or 0)
+        if len(wire) > room:
+            state["dropped"] = int(state.get("dropped") or 0) + len(wire) - max(room, 0)
+            wire = wire[: max(room, 0)]
+        if wire:
+            seq = int(state.get("next_seq") or 1)
+            with _spool_path(env).open("a", encoding="utf-8") as fh:
+                for w in wire:
+                    fh.write(json.dumps({"seq": seq, "event": w}, separators=(",", ":")) + "\n")
+                    seq += 1
+                fh.flush()
+                os.fsync(fh.fileno())
+            state["next_seq"] = seq
+            state["spooled"] = int(state.get("spooled") or 0) + len(wire)
+        _write_state(env, state)
+        return len(wire)
+
+
+def _read_lines(env: dict | os._Environ | None) -> list[dict]:
+    try:
+        text = _spool_path(env).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out: list[dict] = []
+    for line in text.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue  # a torn final line from a killed writer: the Event was never acknowledged as spooled
+        if isinstance(item, dict) and isinstance(item.get("seq"), int) and isinstance(item.get("event"), dict):
+            out.append(item)
+    return out
+
+
+def pending(env: dict | os._Environ | None, capture_id: str, *, limit: int = BATCH_EVENTS) -> tuple[list[dict], dict[str, Any]]:
+    """The next unacknowledged Events as wire Events (each with ``seq``), and the state."""
+    with _lock(env):
+        state = _state_for(env, capture_id)
+        acked = int(state.get("acked_seq") or 0)
+        items = [item for item in _read_lines(env) if item["seq"] > acked]
+        items.sort(key=lambda item: item["seq"])
+        return [{"seq": item["seq"], **item["event"]} for item in items[:limit]], state
+
+
+def pending_count(env: dict | os._Environ | None = None) -> int:
+    state = _read_state(env)
+    if state is None:
+        return 0
+    return max(int(state.get("next_seq") or 1) - 1 - int(state.get("acked_seq") or 0), 0)
+
+
+def acknowledge(
+    env: dict | os._Environ | None, capture_id: str, upto_seq: int, *, sent: int = 0, rejected: int = 0,
+) -> dict[str, Any]:
+    """Mark every Event up to *upto_seq* as settled (accepted, or refused for good) and compact when drained."""
+    with _lock(env):
+        state = _state_for(env, capture_id)
+        state["acked_seq"] = max(int(state.get("acked_seq") or 0), int(upto_seq))
+        state["sent"] = int(state.get("sent") or 0) + sent
+        state["rejected"] = int(state.get("rejected") or 0) + rejected
+        state["failures"] = 0
+        state["backoff_until"] = None
+        state["last_contact_at"] = now_stamp()
+        if state["acked_seq"] >= int(state.get("next_seq") or 1) - 1:
+            try:
+                _spool_path(env).write_text("", encoding="utf-8")
+            except OSError:
+                pass
+        _write_state(env, state)
+        return state
+
+
+__all__ = [
+    "BATCH_EVENTS",
+    "MAX_SPOOLED_EVENTS",
+    "acknowledge",
+    "append",
+    "now_stamp",
+    "pending",
+    "pending_count",
+    "read_state",
+    "spool_dir",
+    "update_state",
+    "wire_event",
+    "wire_link",
+]
