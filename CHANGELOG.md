@@ -6,6 +6,25 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- **Learning Loop V1** ([docs/learning.md](docs/learning.md)). OpenShard derives evidence-backed
+  learning signals from verified OSN outcomes in a repository: model outcomes by task
+  category, recovery paths, checks and tests that caught failures, recurring failure
+  categories and policy boundaries. Each signal carries its sample size, freshness and
+  supporting Receipt ids. Only OpenShard-observed or independently verified outcomes count;
+  missing cost stays unknown and single Receipts are never surfaced.
+  - `openshard osn run` supplies up to 5 relevant signals to the model as an advisory
+    `<openshard_history>` block (never instructions), with up to 2 test files that failed on
+    similar work. It recommends, never runs, checks that caught prior failures, and records
+    a compact `learning` block on the Receipt. `--no-learning` turns it off.
+  - With `adaptive_routing` on, Routing V2 first tries repository- and task-scoped verified
+    history under the same sample gate, else the unchanged harness-wide history.
+  - OSN verification records the failing test ids it observed (identifiers only).
+  - The local MCP server gains `learning_signals(task)`, so Claude Code, Codex and other MCP
+    clients get the same advisory signals; nothing is claimed about whether they used them.
+  - `openshard learn signals | inspect | last | impact` inspects learning and compares
+    outcomes of runs with and without it (observational, no causal claim). Hosted sync stays
+    bounded to the current Platform contract until the learning projection is added there.
+
 - **Remote capture: evidence leaves an ephemeral agent environment while
   the agent works.** `openshard remote create --agent <agent>` (on a trusted
   machine) opens a hosted remote capture and prints a short-lived token

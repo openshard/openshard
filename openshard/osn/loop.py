@@ -29,6 +29,7 @@ from openshard.policy.decision import PolicyDecision, make_deny
 from openshard.policy.file_mutation import Approver, FileMutationGate
 from openshard.safety.sanitize import sanitize_text
 from openshard.security.paths import UnsafePathError, resolve_safe_repo_path
+from openshard.verification.failed_tests import failing_test_ids
 from openshard.verification.setup_failure import detect_setup_failure
 
 SCHEMA_VERSION = 1
@@ -93,6 +94,9 @@ class VerificationResult:
     # Set when the output shows the verifier itself could not run (missing module,
     # command not found): an environment problem, no verdict on the change.
     setup_failure: str | None = None
+    # Failing test ids read from the verifier's output (repo-relative
+    # identifiers only, never the output itself); empty when none were named.
+    failed_tests: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -511,6 +515,7 @@ def run_bounded_loop(
             result.passed = False
             return _receipt("error", "verifier_setup_failed")
 
+        result.failed_tests = failing_test_ids(output)
         fingerprint = result.output_sha256
         if fingerprint == prev_fingerprint:
             return _receipt("failed", "no_progress_identical_failure")

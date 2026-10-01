@@ -2453,6 +2453,28 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append(_row("Enabled", ", ".join(_on) if _on else "none"))
         lines.append("")
 
+    _learn = (receipt.recorded_evidence or {}).get("learning")
+    if isinstance(_learn, dict):
+        lines.append(f"{_INDENT}LEARNING")
+        if _learn.get("used"):
+            _considered = _learn.get("signals_considered")
+            lines.append(_row("Signals", f"{_learn.get('signals_used') or 0} prior verified signal(s) considered"
+                              + (f" (of {_considered})" if _considered else "")))
+            _ctx = "supplied to the model" if _learn.get("context_supplied") else "not supplied"
+            _files = _learn.get("context_files_added") or []
+            lines.append(_row("Context", _ctx + (f" (+ {', '.join(_files)})" if _files else "")))
+        else:
+            _why = {"disabled": "not consulted (--no-learning)", "no_history": "no prior verified evidence",
+                    "no_relevant_signals": "no relevant signals", "error": "history could not be read"}
+            lines.append(_row("Signals", _why.get(str(_learn.get("status")), str(_learn.get("status")))))
+        _rr = f" ({_learn['routing_reason']})" if _learn.get("routing_reason") else ""
+        lines.append(_row("Routing", f"influenced: {'yes' if _learn.get('routing_influenced') else 'no'}{_rr}"))
+        lines.append(_row("Verification", "influenced: " + ("yes" if _learn.get("verification_influenced")
+                                                             else "no (recommendations are advisory)")))
+        for _label in _learn.get("recommended_checks") or []:
+            lines.append(_row("Suggested", f"`{_label}` (not run)"))
+        lines.append("")
+
     if receipt.execution_spans:
         lines.append(f"{_INDENT}EXECUTION SPANS")
         _es_cap = 10
