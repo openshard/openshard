@@ -107,20 +107,7 @@ jobs:
             if [[ -n "$cost" ]]; then
               cost_provenance="cloud_runtime_reported"
             elif [[ -n "$model" && ( -n "$tokens_in" || -n "$tokens_out" || -n "$tokens_cache_read" || -n "$tokens_cache_creation" ) ]]; then
-              estimated_cost=$(MODEL="$model" TOKENS_IN="${tokens_in:-0}" TOKENS_OUT="${tokens_out:-0}" TOKENS_CACHE_READ="${tokens_cache_read:-0}" TOKENS_CACHE_CREATION="${tokens_cache_creation:-0}" python - <<'PY'
-import os
-from openshard.models.pricing import estimate_usage_cost
-
-estimate = estimate_usage_cost(
-    os.environ.get("MODEL"),
-    input_tokens=int(os.environ.get("TOKENS_IN") or 0),
-    output_tokens=int(os.environ.get("TOKENS_OUT") or 0),
-    cache_read_tokens=int(os.environ.get("TOKENS_CACHE_READ") or 0),
-    cache_write_tokens=int(os.environ.get("TOKENS_CACHE_CREATION") or 0),
-)
-print("" if estimate is None else f"{estimate.usd:.12f}")
-PY
-)
+              estimated_cost=$(MODEL="$model" TOKENS_IN="${tokens_in:-0}" TOKENS_OUT="${tokens_out:-0}" TOKENS_CACHE_READ="${tokens_cache_read:-0}" TOKENS_CACHE_CREATION="${tokens_cache_creation:-0}" python -c 'import os; from openshard.models.pricing import estimate_usage_cost; e=estimate_usage_cost(os.environ.get("MODEL"), input_tokens=int(os.environ.get("TOKENS_IN") or 0), output_tokens=int(os.environ.get("TOKENS_OUT") or 0), cache_read_tokens=int(os.environ.get("TOKENS_CACHE_READ") or 0), cache_write_tokens=int(os.environ.get("TOKENS_CACHE_CREATION") or 0)); print("" if e is None else f"{e.usd:.12f}")')
               if [[ -n "$estimated_cost" ]]; then
                 cost="$estimated_cost"
                 cost_provenance="official_rate_estimate"
