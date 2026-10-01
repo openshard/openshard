@@ -62,7 +62,7 @@ class ReceiptWarehouse:
     def close(self) -> None:
         self.conn.close()
 
-    def __enter__(self) -> "ReceiptWarehouse":
+    def __enter__(self) -> ReceiptWarehouse:
         return self
 
     def __exit__(self, *_exc: object) -> None:
