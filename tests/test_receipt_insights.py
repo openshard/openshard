@@ -86,9 +86,10 @@ def test_plain_english_question_returns_supporting_rows(tmp_path):
         answer = answer_question(warehouse, "Which model performs best?")
 
     assert answer.intent == "model_performance"
-    assert "model/a" in answer.summary
+    assert "not enough repeated observed runs" in answer.summary
     assert answer.data[0]["observed"] == 1
     assert answer.caveat is not None
+    assert "One Receipt" in answer.caveat
 
 
 def test_insights_cli_json(tmp_path, monkeypatch):
