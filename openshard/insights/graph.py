@@ -15,7 +15,7 @@ from openshard.insights.warehouse import ReceiptWarehouse
 
 
 def _node_id(kind: str, label: str) -> str:
-    digest = hashlib.sha256(f"{kind}\0{label}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{kind}\0{label}".encode()).hexdigest()[:16]
     return f"{kind}:{digest}"
 
 
@@ -67,7 +67,7 @@ class ReceiptGraph:
             and (not needle or needle in node.label.lower() or needle in node.id.lower())
         ]
 
-    def neighborhood(self, node_id: str, *, depth: int = 1, limit: int = 100) -> "ReceiptGraph":
+    def neighborhood(self, node_id: str, *, depth: int = 1, limit: int = 100) -> ReceiptGraph:
         if depth < 0:
             raise ValueError("depth must be >= 0")
         adjacency: dict[str, list[GraphEdge]] = {}
