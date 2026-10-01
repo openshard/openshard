@@ -184,7 +184,7 @@ def _telemetry_status_for_agents() -> dict:
 
 _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Getting Started", ("setup", "doctor")),
-    ("Receipts", ("last", "history", "report", "context", "learn")),
+    ("Receipts", ("last", "history", "report", "context", "learn", "insights")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
     ("Integrations", ("mcp", "capture", "sync", "remote", "import", "ingest", "wrap", "adapters", "telemetry")),
     # Everything else (run, plan, models, roster, eval, packs, ...) falls
