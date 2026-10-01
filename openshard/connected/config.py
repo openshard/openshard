@@ -57,7 +57,7 @@ class ConnectedSession:
         }
 
     @classmethod
-    def from_state(cls, value: object) -> "ConnectedSession | None":
+    def from_state(cls, value: object) -> ConnectedSession | None:
         if not isinstance(value, dict):
             return None
         surface = value.get("surface")
