@@ -47,10 +47,10 @@ from openshard.connected.config import (
     ConnectedSession,
     resolve_connection,
     session_from_entry,
-    sink_id as connected_sink_id,
 )
+from openshard.connected.config import sink_id as connected_sink_id
 from openshard.remote import spool
-from openshard.remote.config import Attachment, resolve_attachment
+from openshard.remote.config import resolve_attachment
 
 CONTRACT = "openshard.remote-capture"
 CONTRACT_VERSION = "1"
