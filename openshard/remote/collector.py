@@ -101,6 +101,8 @@ def record(
     record: dict | None = None,
     entry: dict | None = None,
     finalized: bool = False,
+    session_id: str | None = None,
+    agent: str | None = None,
     env: dict | os._Environ | None = None,
 ) -> int:
     """Spool the Events a hook just produced. Returns how many were spooled (0 when not attached). Never raises.
@@ -114,7 +116,25 @@ def record(
     try:
         attachment = resolve_attachment(env)
         if attachment is None:
-            return 0
+            # Normal linked-account UX: no per-run remote token. Manual
+            # Remote Capture remains the explicit override when attached.
+            from openshard.connected.collector import record as connected_record
+
+            captured_agent = agent
+            if captured_agent is None and isinstance(entry, dict):
+                capture = entry.get("capture")
+                if isinstance(capture, dict) and isinstance(capture.get("agent"), str):
+                    captured_agent = capture["agent"]
+            return connected_record(
+                repo_root,
+                events,
+                record=record,
+                entry=entry,
+                finalized=finalized,
+                session_id=session_id,
+                agent=captured_agent or "other",
+                env=env,
+            )
         file_events: list[dict] = []
         if isinstance(entry, dict):
             file_events = [
