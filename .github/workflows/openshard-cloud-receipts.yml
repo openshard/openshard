@@ -1,0 +1,97 @@
+name: Openshard Cloud Receipts
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  capture:
+    name: Capture cloud-agent commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Create hosted Receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENSHARD_API_BASE: https://api.openshard.dev
+          OPENSHARD_OIDC_AUDIENCE: openshard-cloud-capture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            shas=$(jq -cn --arg sha "$GITHUB_SHA" '[$sha]')
+          else
+            shas=$(jq -c '[.commits[]? | select((.message // "") | test("(?im)^Openshard-Agent:[[:space:]]*")) | .id]' "$GITHUB_EVENT_PATH")
+          fi
+
+          if [[ "$(jq 'length' <<<"$shas")" -eq 0 ]]; then
+            echo "No tagged cloud-agent commits in this push."
+            exit 0
+          fi
+
+          oidc_response=$(curl -fsSL \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENSHARD_OIDC_AUDIENCE}")
+          oidc_token=$(jq -r '.value' <<<"$oidc_response")
+          [[ -n "$oidc_token" && "$oidc_token" != "null" ]]
+
+          while IFS= read -r sha; do
+            commit=$(curl -fsSL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}")
+
+            task_title=$(jq -r '.commit.message | split("\n")[0]' <<<"$commit")
+            created_at=$(jq -r '.commit.committer.date // .commit.author.date' <<<"$commit")
+            parent=$(jq -r '.parents[0].sha // empty' <<<"$commit")
+            file_count=$(jq '.files | length' <<<"$commit")
+            files=$(jq -c '[.files[:50][] | {
+              path: .filename,
+              change_type: (
+                if .status == "added" then "create"
+                elif .status == "removed" then "delete"
+                else "update"
+                end
+              ),
+              additions: (.additions // 0),
+              deletions: (.deletions // 0)
+            }]' <<<"$commit")
+            added=$(jq '.stats.additions // 0' <<<"$commit")
+            removed=$(jq '.stats.deletions // 0' <<<"$commit")
+
+            payload=$(jq -cn \
+              --arg head_sha "$sha" \
+              --arg before_sha "$parent" \
+              --arg created_at "$created_at" \
+              --arg task_title "$task_title" \
+              --arg branch "$GITHUB_REF_NAME" \
+              --argjson files "$files" \
+              --argjson files_truncated "$([[ "$file_count" -gt 50 ]] && echo true || echo false)" \
+              --argjson diff_added "$added" \
+              --argjson diff_removed "$removed" \
+              '{
+                head_sha: $head_sha,
+                before_sha: (if $before_sha == "" then null else $before_sha end),
+                created_at: $created_at,
+                task_title: $task_title,
+                branch: $branch,
+                files: $files,
+                files_truncated: $files_truncated,
+                diff_added: $diff_added,
+                diff_removed: $diff_removed
+              }')
+
+            response=$(curl -fsSL \
+              -X POST "${OPENSHARD_API_BASE}/v1/cloud/github/receipts" \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H "Content-Type: application/json" \
+              --data "$payload")
+
+            echo "Captured $(jq -r '.receipt_id' <<<"$response") for $sha"
+          done < <(jq -r '.[]' <<<"$shas")
