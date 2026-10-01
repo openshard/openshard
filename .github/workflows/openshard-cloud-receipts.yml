@@ -1,0 +1,79 @@
+name: Openshard cloud Receipts
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: openshard-cloud-receipts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Capture GitHub-observed work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENSHARD_API: https://api.openshard.dev
+          OPENSHARD_AUDIENCE: openshard-cloud-capture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          oidc_json="$(curl --fail --silent --show-error             -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENSHARD_AUDIENCE}")"
+          oidc_token="$(jq -er '.value' <<<"${oidc_json}")"
+
+          mapfile -t commits < <(jq -r '.commits[]?.id // empty' "${GITHUB_EVENT_PATH}")
+          if [ "${#commits[@]}" -eq 0 ]; then
+            commits=("${GITHUB_SHA}")
+          fi
+
+          for sha in "${commits[@]}"; do
+            commit_json="$(curl --fail --silent --show-error               -H "Authorization: Bearer ${GH_TOKEN}"               -H "Accept: application/vnd.github+json"               -H "X-GitHub-Api-Version: 2022-11-28"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}")"
+
+            created_at="$(jq -er '.commit.committer.date // .commit.author.date' <<<"${commit_json}")"
+            title="$(jq -r '.commit.message | split("\n")[0] | .[0:200]' <<<"${commit_json}")"
+            before_sha="$(jq -r '.parents[0].sha // empty' <<<"${commit_json}")"
+            file_count="$(jq '.files | length' <<<"${commit_json}")"
+            files_truncated=false
+            if [ "${file_count}" -gt 50 ]; then files_truncated=true; fi
+
+            files="$(jq '[.files[:50][] | {
+              path: .filename,
+              change_type: .status,
+              additions: (.additions // 0),
+              deletions: (.deletions // 0)
+            }]' <<<"${commit_json}")"
+            added="$(jq -r '.stats.additions // 0' <<<"${commit_json}")"
+            removed="$(jq -r '.stats.deletions // 0' <<<"${commit_json}")"
+
+            payload="$(jq -n               --arg head_sha "${sha}"               --arg before_sha "${before_sha}"               --arg created_at "${created_at}"               --arg task_title "${title}"               --arg branch "${GITHUB_REF_NAME}"               --argjson files "${files}"               --argjson files_truncated "${files_truncated}"               --argjson diff_added "${added}"               --argjson diff_removed "${removed}"               '{
+                head_sha: $head_sha,
+                before_sha: (if $before_sha == "" then null else $before_sha end),
+                created_at: $created_at,
+                task_title: (if $task_title == "" then null else $task_title end),
+                branch: (if $branch == "" then null else $branch end),
+                files: $files,
+                files_truncated: $files_truncated,
+                diff_added: $diff_added,
+                diff_removed: $diff_removed
+              }')"
+
+            response_file="$(mktemp)"
+            status="$(curl --silent --show-error               --output "${response_file}"               --write-out '%{http_code}'               --request POST "${OPENSHARD_API}/v1/cloud/github/receipts"               -H "Authorization: Bearer ${oidc_token}"               -H "Content-Type: application/json"               --data-binary "${payload}")"
+
+            if [ "${status}" != "200" ] && [ "${status}" != "201" ]; then
+              echo "Openshard cloud Receipt capture failed with HTTP ${status}."
+              cat "${response_file}"
+              exit 1
+            fi
+
+            jq -r '"Openshard Receipt " + .receipt_id + " (" + .outcome + ")"' "${response_file}"
+            rm -f "${response_file}"
+          done
