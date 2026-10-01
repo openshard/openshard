@@ -116,17 +116,17 @@ def _try_fast_path(argv: list[str]) -> bool:
     if argv == ["remote", "flush", "--background"]:
         # The detached remote-capture flusher, started from the hook path:
         # skip the full CLI import so it costs little and drains quickly.
-        from openshard.remote.collector import run_background_flusher
+        from openshard.remote.collector import run_background_flusher as remote_background_flusher
 
-        run_background_flusher()
+        remote_background_flusher()
         return True
     if argv == ["connected", "flush", "--background"]:
         # The normal linked-account flusher. Each child receives a scoped
         # OPENSHARD_HOME for one external session plus the existing Platform
         # link in environment variables.
-        from openshard.connected.collector import run_background_flusher
+        from openshard.connected.collector import run_background_flusher as connected_background_flusher
 
-        run_background_flusher()
+        connected_background_flusher()
         return True
     if argv[0] != "hooks":
         return False
