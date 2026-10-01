@@ -22,6 +22,7 @@ SECRET_PATTERNS = (
     re.compile(r"AKIA[0-9A-Z]{8,}"),                          # AWS access key id
     re.compile(r"(?i)\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*\S+"),
     re.compile(r"(?i)\bbearer\s+\S+"),                        # bearer tokens
+    re.compile(r"\bos[acfkmrs]_[A-Za-z0-9_-]{20,}"),          # Openshard bearer secrets
     re.compile(r"[A-Za-z0-9_\-+/]{32,}"),                    # long opaque key-like run
 )
 
