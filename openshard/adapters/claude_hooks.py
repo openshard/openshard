@@ -2978,9 +2978,10 @@ def _remote_capture_new_events(buf: dict) -> list[dict] | None:
     Called under the buffer lock; does no I/O beyond one ``os.path.exists``.
     """
     try:
+        from openshard.connected.config import available_hint as connected_hint
         from openshard.remote.config import attached_hint
 
-        if not attached_hint():
+        if not attached_hint() and not connected_hint():
             return None
         events = [e for e in buf.get("events") or [] if isinstance(e, dict)]
         done = buf.get("remote_spooled")
