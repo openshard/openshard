@@ -379,6 +379,48 @@ def _deliver(
     return totals
 
 
+def request_delivery(
+    env: dict | os._Environ | None = None,
+    *,
+    repo_root: Path | None = None,
+) -> bool:
+    """Wake every connected session that can strengthen this repository.
+
+    Post-session verification may happen after the agent process is gone, so
+    there is no session id to address directly. The bounded session directory
+    is scanned for spools that saw this repository; each is marked for normal
+    Receipt/evidence sync and flushed asynchronously.
+    """
+    try:
+        link = resolve_link(env)
+        if link is None or repo_root is None:
+            return False
+        source = dict(os.environ if env is None else env)
+        base = Path(capture_home(source)) / _SCOPE_DIR
+        if not base.is_dir():
+            return False
+        wanted = str(Path(repo_root))
+        found = False
+        for child in base.iterdir():
+            if not child.is_dir():
+                continue
+            scoped = dict(source)
+            scoped["OPENSHARD_HOME"] = str(child)
+            state = spool.read_state(scoped)
+            if not isinstance(state, dict):
+                continue
+            repos = [r for r in (state.get("repos") or []) if isinstance(r, str)]
+            capture_key = state.get("capture_id")
+            if wanted not in repos or not isinstance(capture_key, str):
+                continue
+            spool.update_state(scoped, capture_key, deliver=True)
+            notify(scoped, link)
+            found = True
+        return found
+    except Exception:
+        return False
+
+
 def flush(
     env: dict | os._Environ | None = None,
     *,
@@ -559,5 +601,6 @@ __all__ = [
     "flush",
     "notify",
     "record",
+    "request_delivery",
     "run_background_flusher",
 ]
