@@ -94,7 +94,7 @@ def test_plain_english_question_returns_supporting_rows(tmp_path):
 
 def test_insights_cli_json(tmp_path, monkeypatch):
     _write_history(tmp_path)
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("openshard.cli.insights_cmd._root", lambda: tmp_path)
     result = CliRunner().invoke(cli, ["insights", "overview", "--json"])
 
     assert result.exit_code == 0, result.output
