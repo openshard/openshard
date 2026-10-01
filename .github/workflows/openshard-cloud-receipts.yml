@@ -94,11 +94,40 @@ jobs:
             cost=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Cost-USD:[[:space:]]*//Ip' | tail -1)
             tokens_in=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Input:[[:space:]]*//Ip' | tail -1)
             tokens_out=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Output:[[:space:]]*//Ip' | tail -1)
+            tokens_cache_read=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Cache-Read:[[:space:]]*//Ip' | tail -1)
+            tokens_cache_creation=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Cache-Creation:[[:space:]]*//Ip' | tail -1)
 
             [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
             [[ -n "$agent" ]] || agent="Codex"
             [[ -n "$provider" ]] || provider="OpenAI"
             [[ -n "$surface" ]] || surface="ChatGPT Work"
+
+            cost_provenance=""
+            cost_is_estimate=false
+            if [[ -n "$cost" ]]; then
+              cost_provenance="cloud_runtime_reported"
+            elif [[ -n "$model" && ( -n "$tokens_in" || -n "$tokens_out" || -n "$tokens_cache_read" || -n "$tokens_cache_creation" ) ]]; then
+              estimated_cost=$(MODEL="$model" TOKENS_IN="${tokens_in:-0}" TOKENS_OUT="${tokens_out:-0}" TOKENS_CACHE_READ="${tokens_cache_read:-0}" TOKENS_CACHE_CREATION="${tokens_cache_creation:-0}" python - <<'PY'
+import os
+from openshard.models.pricing import estimate_usage_cost
+
+estimate = estimate_usage_cost(
+    os.environ.get("MODEL"),
+    input_tokens=int(os.environ.get("TOKENS_IN") or 0),
+    output_tokens=int(os.environ.get("TOKENS_OUT") or 0),
+    cache_read_tokens=int(os.environ.get("TOKENS_CACHE_READ") or 0),
+    cache_write_tokens=int(os.environ.get("TOKENS_CACHE_CREATION") or 0),
+)
+print("" if estimate is None else f"{estimate.usd:.12f}")
+PY
+)
+              if [[ -n "$estimated_cost" ]]; then
+                cost="$estimated_cost"
+                cost_provenance="official_rate_estimate"
+                cost_is_estimate=true
+              fi
+            fi
+            [[ -n "$cost_provenance" ]] || cost_provenance="not_exposed_by_cloud_runtime"
 
             prs=$(curl -fsSL               -H "Authorization: Bearer $GH_TOKEN"               -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" || echo '[]')
             pr_url=$(jq -r '.[0].html_url // empty' <<<"$prs")
@@ -141,7 +170,7 @@ jobs:
             files_truncated=false
             [[ "$file_count" -gt 50 ]] && files_truncated=true
 
-            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg agent "$agent"               --arg model "$model"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               '{
+            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               '{
                 head_sha: $head_sha,
                 before_sha: (if $before_sha == "" then null else $before_sha end),
                 created_at: $created_at,
@@ -154,10 +183,13 @@ jobs:
                 surface: (if $surface == "" then null else $surface end),
                 pr_url: (if $pr_url == "" then null else $pr_url end),
                 cost_usd: (if $cost == "" then null else ($cost | tonumber) end),
-                cost_provenance: (if $cost == "" then "not_exposed_by_cloud_runtime" else "cloud_runtime_reported" end),
+                cost_provenance: $cost_provenance,
+                cost_is_estimate: $cost_is_estimate,
                 tokens_input: (if $tokens_in == "" then null else ($tokens_in | tonumber) end),
                 tokens_output: (if $tokens_out == "" then null else ($tokens_out | tonumber) end),
-                tokens_provenance: (if ($tokens_in == "" and $tokens_out == "") then "not_exposed_by_cloud_runtime" else "cloud_runtime_reported" end),
+                tokens_cache_read: (if $tokens_cache_read == "" then null else ($tokens_cache_read | tonumber) end),
+                tokens_cache_creation: (if $tokens_cache_creation == "" then null else ($tokens_cache_creation | tonumber) end),
+                tokens_provenance: (if ($tokens_in == "" and $tokens_out == "" and $tokens_cache_read == "" and $tokens_cache_creation == "") then "not_exposed_by_cloud_runtime" else "cloud_runtime_reported" end),
                 verification: {
                   status: $verification_status,
                   started_at: $verify_started,
