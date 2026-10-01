@@ -43,7 +43,8 @@ def answer_question(warehouse: ReceiptWarehouse, question: str) -> InsightAnswer
     if any(term in q for term in ("model", "models")) and any(
         term in q for term in ("best", "perform", "pass", "reliable", "work")
     ):
-        rows = warehouse.models()
+        category = next((c for c in warehouse.task_categories() if c.lower() in q), None)
+        rows = warehouse.models(task_category=category)
         observed = [row for row in rows if (row.get("observed") or 0) > 0]
         if not observed:
             return InsightAnswer(
@@ -53,14 +54,30 @@ def answer_question(warehouse: ReceiptWarehouse, question: str) -> InsightAnswer
                 rows,
                 "Agent-reported success is intentionally excluded from the pass rate.",
             )
-        top = observed[0]
+        repeated = [row for row in observed if (row.get("observed") or 0) >= 2]
+        if not repeated:
+            return InsightAnswer(
+                question,
+                "model_performance",
+                "There is model evidence, but not enough repeated observed runs to call a leader yet.",
+                rows,
+                "One Receipt is treated as an anecdote, not a model-performance rule.",
+            )
+        top = max(
+            repeated,
+            key=lambda row: (
+                float(row.get("pass_rate") or 0),
+                int(row.get("observed") or 0),
+            ),
+        )
+        scope = f" for {category} tasks" if category else ""
         return InsightAnswer(
             question,
             "model_performance",
-            f"{top['model']} has {_pct(top.get('pass_rate'))} observed verification pass rate "
-            f"across {top.get('observed', 0)} observed run(s).",
+            f"{top['model']} has the highest observed pass rate{scope}: "
+            f"{_pct(top.get('pass_rate'))} across {top.get('observed', 0)} observed run(s).",
             rows,
-            "This is historical correlation, not a claim that the model will outperform alternatives.",
+            "This is historical correlation, not a guarantee of future performance.",
         )
 
     if any(term in q for term in ("agent", "agents")) and any(
@@ -75,11 +92,26 @@ def answer_question(warehouse: ReceiptWarehouse, question: str) -> InsightAnswer
                 "No agent has independently observed pass/fail evidence yet.",
                 rows,
             )
-        top = observed[0]
+        repeated = [row for row in observed if (row.get("observed") or 0) >= 2]
+        if not repeated:
+            return InsightAnswer(
+                question,
+                "agent_failures",
+                "There is agent evidence, but not enough repeated observed runs to identify a recurring failure pattern yet.",
+                rows,
+                "One Receipt is treated as an anecdote, not an agent reliability rule.",
+            )
+        top = max(
+            repeated,
+            key=lambda row: (
+                float(row.get("failure_rate") or 0),
+                int(row.get("observed") or 0),
+            ),
+        )
         return InsightAnswer(
             question,
             "agent_failures",
-            f"{top['agent']} has {_pct(top.get('failure_rate'))} observed failure rate "
+            f"{top['agent']} has the highest observed failure rate: {_pct(top.get('failure_rate'))} "
             f"across {top.get('observed', 0)} observed run(s).",
             rows,
             "Rates only use Receipts with independently observed pass/fail evidence.",
