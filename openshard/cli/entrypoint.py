@@ -120,6 +120,14 @@ def _try_fast_path(argv: list[str]) -> bool:
 
         run_background_flusher()
         return True
+    if argv == ["connected", "flush", "--background"]:
+        # The normal linked-account flusher. Each child receives a scoped
+        # OPENSHARD_HOME for one external session plus the existing Platform
+        # link in environment variables.
+        from openshard.connected.collector import run_background_flusher
+
+        run_background_flusher()
+        return True
     if argv[0] != "hooks":
         return False
     sub, rest = argv[1], argv[2:]
