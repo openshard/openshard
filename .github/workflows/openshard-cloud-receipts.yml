@@ -90,13 +90,15 @@ jobs:
             agent=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Agent:[[:space:]]*//Ip' | tail -1)
             model=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Model:[[:space:]]*//Ip' | tail -1)
             provider=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Provider:[[:space:]]*//Ip' | tail -1)
+            surface=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Surface:[[:space:]]*//Ip' | tail -1)
             cost=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Cost-USD:[[:space:]]*//Ip' | tail -1)
             tokens_in=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Input:[[:space:]]*//Ip' | tail -1)
             tokens_out=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Output:[[:space:]]*//Ip' | tail -1)
 
             [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
-            [[ -n "$agent" ]] || agent="ChatGPT"
+            [[ -n "$agent" ]] || agent="Codex"
             [[ -n "$provider" ]] || provider="OpenAI"
+            [[ -n "$surface" ]] || surface="ChatGPT Work"
 
             prs=$(curl -fsSL               -H "Authorization: Bearer $GH_TOKEN"               -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" || echo '[]')
             pr_url=$(jq -r '.[0].html_url // empty' <<<"$prs")
@@ -149,6 +151,7 @@ jobs:
                 agent: $agent,
                 model: (if $model == "" then null else $model end),
                 provider: (if $provider == "" then null else $provider end),
+                surface: (if $surface == "" then null else $surface end),
                 pr_url: (if $pr_url == "" then null else $pr_url end),
                 cost_usd: (if $cost == "" then null else ($cost | tonumber) end),
                 cost_provenance: (if $cost == "" then "not_exposed_by_cloud_runtime" else "cloud_runtime_reported" end),
