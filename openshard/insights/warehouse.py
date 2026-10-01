@@ -210,7 +210,7 @@ class ReceiptWarehouse:
                 if not isinstance(policy, dict):
                     continue
                 decision = _text(policy.get("decision"))
-                area = _text(policy.get("area")) or _text(policy.get("scope"))
+                area = _text(policy.get("action"))
                 if rid and decision:
                     policy_rows.append((rid, decision, area))
 
@@ -238,7 +238,9 @@ class ReceiptWarehouse:
                 sum(cost_usd) FILTER (WHERE cost_usd IS NOT NULL) AS known_cost_usd,
                 count(DISTINCT agent) FILTER (WHERE agent IS NOT NULL)::BIGINT AS agents,
                 count(DISTINCT model) FILTER (WHERE model IS NOT NULL)::BIGINT AS models,
-                count(DISTINCT repo_identity) FILTER (WHERE repo_identity IS NOT NULL)::BIGINT AS repositories
+                count(DISTINCT coalesce(repo_identity, repo)) FILTER (
+                    WHERE coalesce(repo_identity, repo) IS NOT NULL
+                )::BIGINT AS repositories
             FROM receipts
             """
         ).fetchone()
