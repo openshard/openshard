@@ -81,6 +81,11 @@ openshard learn signals "update dashboard layout"  # The signals an OSN run woul
 openshard learn inspect ls_9a779064fd35            # One signal: counts, freshness, supporting Receipts
 openshard learn last                               # What learning did on the latest OSN run, and its outcome
 openshard learn impact                             # Outcomes with vs without learning (observational)
+openshard insights overview                        # Fast evidence-backed analytics over local Receipts
+openshard insights models --task visual            # Model outcomes for one recorded task class
+openshard insights costs --by agent                # Known cost only; unknown is never treated as $0
+openshard insights graph --find rcpt_...            # Receipt relationship neighborhood
+openshard insights ask "Which model performs best?" # Plain-English query with conservative evidence rules
 openshard stats                                    # Counts over recorded receipts (agents, models, checks, est. cost)
 openshard stats completeness                       # Receipt completeness heuristic
 openshard stats failures                           # Failure categories over recent runs
