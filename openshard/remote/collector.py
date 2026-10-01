@@ -155,15 +155,17 @@ def request_delivery(env: dict | os._Environ | None = None, *, repo_root: Path |
     try:
         attachment = resolve_attachment(env)
         state = spool.read_state(env) or {}
+        capture_id: str
         if attachment is not None:
             capture_id = attachment.capture_id
         else:
             connected = ConnectedSession.from_state(state.get("connected"))
             if resolve_connection(env) is None or connected is None:
                 return False
-            capture_id = state.get("capture_id")
-            if not isinstance(capture_id, str) or not capture_id:
+            raw_capture_id = state.get("capture_id")
+            if not isinstance(raw_capture_id, str) or not raw_capture_id:
                 return False
+            capture_id = raw_capture_id
         if repo_root is not None:
             spool.append(env, capture_id, [], repo_root=repo_root)
         spool.update_state(env, capture_id, deliver=True)
@@ -231,15 +233,17 @@ def flush(
         state_before = spool.read_state(env) or {}
         connection = None
         connected = None
+        capture_id: str
         if attachment is not None:
             capture_id = attachment.capture_id
         else:
             connection = resolve_connection(env)
             connected = ConnectedSession.from_state(state_before.get("connected"))
-            capture_id = state_before.get("capture_id")
-            if connection is None or connected is None or not isinstance(capture_id, str) or not capture_id:
+            raw_capture_id = state_before.get("capture_id")
+            if connection is None or connected is None or not isinstance(raw_capture_id, str) or not raw_capture_id:
                 report.stopped = "not_attached"
                 return report
+            capture_id = raw_capture_id
         report.attached = True
         current = now if now is not None else time.time()
 
@@ -274,6 +278,7 @@ def flush(
                 else:
                     from openshard.connected.transport import ConnectedCaptureClient
 
+                    assert connection is not None and connected is not None
                     client = ConnectedCaptureClient(connection, connected, user_agent=f"openshard/{_version()}")
 
             contacted = False
@@ -312,6 +317,7 @@ def flush(
                         source=SOURCE_ENV,
                     )
                 else:
+                    assert connection is not None
                     delivery_link = PlatformLink(
                         endpoint=connection.endpoint,
                         organisation_id=connection.organisation_id,
@@ -408,14 +414,16 @@ def notify(env: dict | os._Environ | None = None) -> None:
         if isinstance(last, (int, float)) and current - last < FLUSH_INTERVAL_SECONDS:
             return
         attachment = resolve_attachment(env)
+        capture_id: str
         if attachment is not None:
             capture_id = attachment.capture_id
         else:
             connected = ConnectedSession.from_state(state.get("connected"))
             connection = resolve_connection(env)
-            capture_id = state.get("capture_id")
-            if connection is None or connected is None or not isinstance(capture_id, str) or not capture_id:
+            raw_capture_id = state.get("capture_id")
+            if connection is None or connected is None or not isinstance(raw_capture_id, str) or not raw_capture_id:
                 return
+            capture_id = raw_capture_id
         spool.update_state(env, capture_id, last_spawn_at=current)
         _spawn_detached_flusher(env)
     except Exception:
