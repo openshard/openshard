@@ -136,8 +136,11 @@ def session_from_entry(
     env: dict | os._Environ | None = None,
 ) -> ConnectedSession | None:
     source = os.environ if env is None else env
-    capture = entry.get("capture") if isinstance(entry, dict) and isinstance(entry.get("capture"), dict) else {}
-    sid = _safe_id(capture.get("session_id")) or _safe_id((record or {}).get("run_id"))
+    entry_dict: dict = entry if isinstance(entry, dict) else {}
+    record_dict: dict = record if isinstance(record, dict) else {}
+    capture_raw = entry_dict.get("capture")
+    capture: dict = capture_raw if isinstance(capture_raw, dict) else {}
+    sid = _safe_id(capture.get("session_id")) or _safe_id(record_dict.get("run_id"))
     if sid is None:
         return None
     agent = capture.get("agent")
@@ -155,9 +158,9 @@ def session_from_entry(
         external_session_id=sid,
         agent=agent[:80],
         provider=opt(provider, 80),
-        repo_identity=opt(entry.get("repo_identity") if isinstance(entry, dict) else None),
-        repo=opt(entry.get("repo") if isinstance(entry, dict) else None),
-        branch=opt(entry.get("branch") if isinstance(entry, dict) else None),
+        repo_identity=opt(entry_dict.get("repo_identity")),
+        repo=opt(entry_dict.get("repo")),
+        branch=opt(entry_dict.get("branch")),
     )
 
 
