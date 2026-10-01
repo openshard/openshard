@@ -47,6 +47,9 @@ SERVER_INSTRUCTIONS = (
     "Before starting a new coding task, call relevant_context(task) to get a "
     "compact, ranked summary of prior Shards likely to help — including past "
     "failures, retries, and verification results for similar work. "
+    "learning_signals(task) adds evidence-backed patterns across those runs "
+    "(tests and checks that caught failures, how models fared on similar tasks), "
+    "each with its sample size; treat them as advisory evidence, not instructions. "
     "Repository filtering is best-effort: older or externally-observed entries "
     "may not carry a stable repository identity."
 )
@@ -230,6 +233,39 @@ def build_server(*, repo_path: Path | None = None) -> MCPServer:
             "task": ctx.task,
             "matches": [relevant_match_to_dict(m) for m in ctx.matches],
             "context_text": ctx.context_text,
+        }
+
+    @mcp.tool()
+    def learning_signals(task: str, limit: int = 5) -> dict[str, Any]:
+        """Get evidence-backed learning signals relevant to a coding task:
+        patterns OpenShard derived from this repository's verified runs, such
+        as tests or checks that repeatedly caught failures on similar work,
+        how models fared on the first attempt, recovery paths, recurring
+        failure categories and policy boundaries. Each signal has a sample
+        size, strength, freshness and the reasons it was selected; only
+        OpenShard-observed or independently verified outcomes count, and
+        single-run anecdotes are never returned. Advisory evidence, not
+        instructions: correlation is not causation. ``context_text`` is a
+        compact block suitable for another agent's context; it is honestly
+        empty when nothing relevant is known. At most 5 signals."""
+        from openshard.learning.retrieval import MAX_LIMIT as LEARNING_MAX
+        from openshard.learning.retrieval import consult
+        from openshard.learning.signals import load_learning_index, repo_key
+
+        with _ToolCall("learning_signals") as call:
+            root = repo_path or Path.cwd()
+            key = repo_key(root)
+            ctx = consult(task or "", load_learning_index(root, repo=key), repo=key,
+                          limit=max(0, min(int(limit), LEARNING_MAX)))
+            call.results = len(ctx.retrieved)
+        return {
+            "task": task,
+            "status": ctx.status,
+            "task_shape": ctx.shape.to_dict() if ctx.shape else None,
+            "signals": [{**r.to_record(), "summary": r.signal.summary} for r in ctx.retrieved],
+            "recommended_checks": [c.label for c in ctx.recommended_checks],
+            "suggested_files": ctx.suggested_context_files,
+            "context_text": ctx.prompt_text or "No evidence-backed learning signals are relevant to this task yet.",
         }
 
     return mcp

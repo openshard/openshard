@@ -99,7 +99,7 @@ class TestToolRegistration:
         names = {t.name for t in tools}
         assert names == {
             "recent_shards", "get_shard", "get_receipt", "get_receipts_by_task",
-            "search_history", "relevant_context",
+            "search_history", "relevant_context", "learning_signals",
         }
 
     def test_each_tool_has_a_description(self, server):

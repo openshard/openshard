@@ -44,6 +44,7 @@ MCP_TOOLS: tuple[str, ...] = (
     "get_receipts_by_task",
     "search_history",
     "relevant_context",
+    "learning_signals",
 )
 
 _CLAUDE_TIMEOUT_SECONDS = 15.0

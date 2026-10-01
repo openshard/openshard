@@ -421,6 +421,45 @@ def organisation_policy_block(entry: dict) -> dict[str, Any] | None:
     }
 
 
+_LEARNING_STATUSES = frozenset({"used", "no_relevant_signals", "no_history", "disabled", "error"})
+
+
+def learning_block(entry: dict) -> dict[str, Any] | None:
+    """Learning Loop V1: whether prior signals were consulted and what they influenced.
+
+    Local Receipt surfaces only. The hosted contract is a strict object that
+    does not (yet) define this block, so ``views`` deliberately leaves it out
+    of the sync projection rather than have every OSN Receipt rejected.
+    """
+    raw = _dict(entry.get("learning"))
+    status = raw.get("status")
+    if not raw or status not in _LEARNING_STATUSES:
+        return None
+    routing = _dict(raw.get("routing"))
+    verification = _dict(raw.get("verification"))
+    checks = verification.get("recommended_checks")
+    files = raw.get("context_files_added")
+    ids = raw.get("signal_ids")
+    return {
+        "status": status,
+        "used": raw.get("used") is True,
+        "signals_used": _count(raw.get("signals_used")),
+        "signals_considered": _count(raw.get("signals_considered")),
+        "signal_ids": [_text(i, 32) for i in ids[:5] if isinstance(i, str)] if isinstance(ids, list) else [],
+        "context_supplied": raw.get("context_supplied") is True,
+        "context_files_added": (
+            [f for f in (_text(x, 160) for x in files[:2] if isinstance(x, str)) if f]
+            if isinstance(files, list) else []
+        ),
+        "routing_influenced": routing.get("influenced") is True,
+        "routing_reason": _text(routing.get("reason"), 64),
+        "verification_influenced": verification.get("influenced") is True,
+        "recommended_checks": [
+            label for label in (_text(_dict(c).get("label"), 120) for c in checks[:3]) if label
+        ] if isinstance(checks, list) else [],
+    }
+
+
 MAX_SUPERVISOR_DECISIONS = 8
 _SUPERVISOR_ACTIONS = frozenset({"escalate", "stop"})
 
@@ -608,6 +647,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "supervisor_routing": supervisor_routing_block,
         "capability_snapshot": capability_snapshot_block,
         "organisation_policy": organisation_policy_block,
+        "learning": learning_block,
         "permissions": permission_evidence_block,
         "base_commit": base_commit_value,
         "content_hash": content_hash_value,
@@ -633,6 +673,7 @@ __all__ = [
     "base_commit_value",
     "content_hash_value",
     "execution_loop_block",
+    "learning_block",
     "organisation_policy_block",
     "permission_evidence_block",
     "permission_scopes_block",

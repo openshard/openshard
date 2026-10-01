@@ -276,6 +276,7 @@ def build_osn_run_entry(
     supervisor_record: dict | None = None,
     capability_snapshot: dict | None = None,
     organisation_policy: dict | None = None,
+    learning_record: dict | None = None,
 ) -> dict:
     from openshard.adapters.claude_code_import import _sanitize_model, _sanitize_task
     from openshard.history.receipt_identity import ensure_receipt_id
@@ -435,6 +436,11 @@ def build_osn_run_entry(
     if organisation_policy:
         # Policy identity only. The full organisation document never enters the Receipt.
         entry["organisation_policy"] = dict(organisation_policy)
+    if learning_record:
+        # Learning Loop V1: which prior signals this run consulted, whether they
+        # reached the model, routing or verification, and what later runs can
+        # learn from this one. Compact; the signals themselves stay re-derivable.
+        entry["learning"] = dict(learning_record)
 
     try:
         from openshard.history.repo_identity import REPO_IDENTITY_FIELD, capture_repo_identity
