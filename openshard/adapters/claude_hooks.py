@@ -2978,9 +2978,10 @@ def _remote_capture_new_events(buf: dict) -> list[dict] | None:
     Called under the buffer lock; does no I/O beyond one ``os.path.exists``.
     """
     try:
+        from openshard.connected.config import available_hint as connected_hint
         from openshard.remote.config import attached_hint
 
-        if not attached_hint():
+        if not attached_hint() and not connected_hint():
             return None
         events = [e for e in buf.get("events") or [] if isinstance(e, dict)]
         done = buf.get("remote_spooled")
@@ -3109,7 +3110,19 @@ def apply_reduced_hook(
         else:
             action = "buffered" if not should_delete else "ignored"
         if remote_events is not None:
-            _remote_capture_record(repo_root, remote_events, record, entry, finalized=action == "record_finalized")
+            remote_record = dict(record)
+            remote_record["session_id"] = payload.session_id
+            remote_record["agent"] = payload.agent
+            provider = buf.get("provider_current")
+            if isinstance(provider, str) and provider:
+                remote_record["provider"] = provider
+            _remote_capture_record(
+                repo_root,
+                remote_events,
+                remote_record,
+                entry,
+                finalized=action == "record_finalized",
+            )
         return HookOutcome(
             event=payload.event, action=action, session_id=payload.session_id, repo_root=repo_root,
             shard_id=record.get("shard_id"), run_id=record.get("run_id"), detail=detail,

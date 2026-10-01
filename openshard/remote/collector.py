@@ -43,8 +43,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from openshard.connected.config import (
+    ConnectedSession,
+    resolve_connection,
+    session_from_entry,
+)
+from openshard.connected.config import sink_id as connected_sink_id
 from openshard.remote import spool
-from openshard.remote.config import Attachment, resolve_attachment
+from openshard.remote.config import resolve_attachment
 
 CONTRACT = "openshard.remote-capture"
 CONTRACT_VERSION = "1"
@@ -113,8 +119,16 @@ def record(
     """
     try:
         attachment = resolve_attachment(env)
-        if attachment is None:
-            return 0
+        connection = None
+        connected = None
+        if attachment is not None:
+            capture_id = attachment.capture_id
+        else:
+            connection = resolve_connection(env)
+            connected = session_from_entry(entry, record, env=env)
+            if connection is None or connected is None:
+                return 0
+            capture_id = connected_sink_id(connection, connected)
         file_events: list[dict] = []
         if isinstance(entry, dict):
             file_events = [
@@ -122,11 +136,13 @@ def record(
                 if isinstance(e, dict) and e.get("event_type") == "file.changed"
             ]
         count = spool.append(
-            env, attachment.capture_id, [e for e in events if isinstance(e, dict)],
+            env, capture_id, [e for e in events if isinstance(e, dict)],
             link=record if isinstance(record, dict) else None, repo_root=repo_root, file_events=file_events,
         )
+        if connected is not None:
+            spool.update_state(env, capture_id, connected=connected.to_state())
         if finalized:
-            spool.update_state(env, attachment.capture_id, deliver=True)
+            spool.update_state(env, capture_id, deliver=True)
         if count or finalized:
             notify(env)
         return count
@@ -138,11 +154,21 @@ def request_delivery(env: dict | os._Environ | None = None, *, repo_root: Path |
     """Ask the next flush to deliver Receipts and verification evidence (after ``openshard verify``). Never raises."""
     try:
         attachment = resolve_attachment(env)
-        if attachment is None:
-            return False
+        state = spool.read_state(env) or {}
+        capture_id: str
+        if attachment is not None:
+            capture_id = attachment.capture_id
+        else:
+            connected = ConnectedSession.from_state(state.get("connected"))
+            if resolve_connection(env) is None or connected is None:
+                return False
+            raw_capture_id = state.get("capture_id")
+            if not isinstance(raw_capture_id, str) or not raw_capture_id:
+                return False
+            capture_id = raw_capture_id
         if repo_root is not None:
-            spool.append(env, attachment.capture_id, [], repo_root=repo_root)
-        spool.update_state(env, attachment.capture_id, deliver=True)
+            spool.append(env, capture_id, [], repo_root=repo_root)
+        spool.update_state(env, capture_id, deliver=True)
         notify(env)
         return True
     except Exception:
@@ -171,16 +197,9 @@ def _backoff(env: dict | os._Environ | None, capture_id: str, state: dict, now: 
     spool.update_state(env, capture_id, failures=failures, backoff_until=now + wait)
 
 
-def _deliver(env: dict | os._Environ | None, attachment: Attachment, client: Any, state: dict) -> dict[str, Any] | None:
-    """Deliver finalised Receipts and their verification evidence through the capture (the ordinary sync flush)."""
+def _deliver(env: dict | os._Environ | None, link: Any, client: Any, state: dict) -> dict[str, Any] | None:
+    """Deliver finalised Receipts and later verification through the selected capture transport."""
     from openshard.sync import client as sync_client
-    from openshard.sync.config import SOURCE_ENV, PlatformLink
-
-    link = PlatformLink(
-        endpoint=attachment.capture_url,
-        organisation_id=attachment.organisation_id or f"remote-capture:{attachment.capture_id}",
-        api_key=attachment.token, linked_at=None, source=SOURCE_ENV,
-    )
     totals: dict[str, Any] = {"sent": 0, "created": 0, "duplicate": 0, "conflict": 0, "rejected": 0, "pending": 0,
                               "in_progress": 0, "evidence_recorded": 0, "stopped": None}
     for repo in [r for r in (state.get("repos") or []) if isinstance(r, str)]:
@@ -211,11 +230,21 @@ def flush(
     report = RemoteFlushReport()
     try:
         attachment = resolve_attachment(env)
-        if attachment is None:
-            report.stopped = "not_attached"
-            return report
+        state_before = spool.read_state(env) or {}
+        connection = None
+        connected = None
+        capture_id: str
+        if attachment is not None:
+            capture_id = attachment.capture_id
+        else:
+            connection = resolve_connection(env)
+            connected = ConnectedSession.from_state(state_before.get("connected"))
+            raw_capture_id = state_before.get("capture_id")
+            if connection is None or connected is None or not isinstance(raw_capture_id, str) or not raw_capture_id:
+                report.stopped = "not_attached"
+                return report
+            capture_id = raw_capture_id
         report.attached = True
-        capture_id = attachment.capture_id
         current = now if now is not None else time.time()
 
         from openshard.history.jsonl_store import LockTimeoutError, history_file_lock
@@ -242,9 +271,15 @@ def flush(
                 report.pending = spool.pending_count(env)
                 return report
             if client is None:
-                from openshard.remote.transport import RemoteCaptureClient
+                if attachment is not None:
+                    from openshard.remote.transport import RemoteCaptureClient
 
-                client = RemoteCaptureClient(attachment, user_agent=f"openshard/{_version()}")
+                    client = RemoteCaptureClient(attachment, user_agent=f"openshard/{_version()}")
+                else:
+                    from openshard.connected.transport import ConnectedCaptureClient
+
+                    assert connection is not None and connected is not None
+                    client = ConnectedCaptureClient(connection, connected, user_agent=f"openshard/{_version()}")
 
             contacted = False
             while report.batches < _MAX_BATCHES_PER_FLUSH and state.get("stopped") != STOP_FULL:
@@ -271,7 +306,26 @@ def flush(
             state = spool.read_state(env) or state
             wants = bool(state.get("deliver")) if deliver is None else deliver
             if wants and report.stopped in (None, STOP_FULL):
-                report.receipts = _deliver(env, attachment, client, state)
+                from openshard.sync.config import SOURCE_ENV, PlatformLink
+
+                if attachment is not None:
+                    delivery_link = PlatformLink(
+                        endpoint=attachment.capture_url,
+                        organisation_id=attachment.organisation_id or f"remote-capture:{attachment.capture_id}",
+                        api_key=attachment.token,
+                        linked_at=None,
+                        source=SOURCE_ENV,
+                    )
+                else:
+                    assert connection is not None
+                    delivery_link = PlatformLink(
+                        endpoint=connection.endpoint,
+                        organisation_id=connection.organisation_id,
+                        api_key=connection.token,
+                        linked_at=None,
+                        source=SOURCE_ENV,
+                    )
+                report.receipts = _deliver(env, delivery_link, client, state)
                 settled = report.receipts is not None and not report.receipts.get("stopped") and not report.receipts.get("pending")
                 if settled and state.get("deliver"):
                     spool.update_state(env, capture_id, deliver=False)
@@ -360,9 +414,17 @@ def notify(env: dict | os._Environ | None = None) -> None:
         if isinstance(last, (int, float)) and current - last < FLUSH_INTERVAL_SECONDS:
             return
         attachment = resolve_attachment(env)
-        if attachment is None:
-            return
-        spool.update_state(env, attachment.capture_id, last_spawn_at=current)
+        capture_id: str
+        if attachment is not None:
+            capture_id = attachment.capture_id
+        else:
+            connected = ConnectedSession.from_state(state.get("connected"))
+            connection = resolve_connection(env)
+            raw_capture_id = state.get("capture_id")
+            if connection is None or connected is None or not isinstance(raw_capture_id, str) or not raw_capture_id:
+                return
+            capture_id = raw_capture_id
+        spool.update_state(env, capture_id, last_spawn_at=current)
         _spawn_detached_flusher(env)
     except Exception:
         return
@@ -394,7 +456,9 @@ def flush_periodically(stop: threading.Event, *, env: dict | os._Environ | None 
                 # Let the burst that woke us finish arriving.
                 stop.wait(min(1.0, FLUSH_INTERVAL_SECONDS))
             if resolve_attachment(env) is None:
-                continue
+                state = spool.read_state(env) or {}
+                if resolve_connection(env) is None or ConnectedSession.from_state(state.get("connected")) is None:
+                    continue
             idle_for = time.time() - last_contact
             if spool.pending_count(env) or woke or idle_for >= HEARTBEAT_SECONDS:
                 report = flush(env, heartbeat=idle_for >= HEARTBEAT_SECONDS)

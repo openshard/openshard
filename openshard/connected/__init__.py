@@ -1,0 +1,1 @@
+"""Persistent account-connected capture."""
