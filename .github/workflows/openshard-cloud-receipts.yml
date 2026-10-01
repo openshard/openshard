@@ -6,23 +6,44 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
   id-token: write
+
+env:
+  PYTHON_VERSION: "3.12"
+  UV_SYSTEM_PYTHON: "1"
 
 jobs:
   capture:
-    name: Capture cloud-agent commits
+    name: Verify and capture cloud-agent commits
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
 
     steps:
-      - name: Create hosted Receipts
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install
+        run: uv pip install -e ".[dev]"
+
+      - name: Verify and create hosted Receipts
         env:
           GH_TOKEN: ${{ github.token }}
           OPENSHARD_API_BASE: https://api.openshard.dev
           OPENSHARD_OIDC_AUDIENCE: openshard-cloud-capture
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
             shas=$(jq -cn --arg sha "$GITHUB_SHA" '[$sha]')
@@ -35,18 +56,18 @@ jobs:
             exit 0
           fi
 
-          oidc_response=$(curl -fsSL \
-            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENSHARD_OIDC_AUDIENCE}")
+          oidc_response=$(curl -fsSL             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENSHARD_OIDC_AUDIENCE}")
           oidc_token=$(jq -r '.value' <<<"$oidc_response")
-          [[ -n "$oidc_token" && "$oidc_token" != "null" ]]
+          [[ -n "$oidc_token" && "$oidc_token" != "null" ]] || exit 1
+
+          overall_failed=0
 
           while IFS= read -r sha; do
-            commit=$(curl -fsSL \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}")
+            echo "::group::Cloud Receipt $sha"
 
+            commit=$(curl -fsSL               -H "Authorization: Bearer $GH_TOKEN"               -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}")
+
+            message=$(jq -r '.commit.message' <<<"$commit")
             task_title=$(jq -r '.commit.message | split("\n")[0]' <<<"$commit")
             created_at=$(jq -r '.commit.committer.date // .commit.author.date' <<<"$commit")
             parent=$(jq -r '.parents[0].sha // empty' <<<"$commit")
@@ -65,33 +86,86 @@ jobs:
             added=$(jq '.stats.additions // 0' <<<"$commit")
             removed=$(jq '.stats.deletions // 0' <<<"$commit")
 
-            payload=$(jq -cn \
-              --arg head_sha "$sha" \
-              --arg before_sha "$parent" \
-              --arg created_at "$created_at" \
-              --arg task_title "$task_title" \
-              --arg branch "$GITHUB_REF_NAME" \
-              --argjson files "$files" \
-              --argjson files_truncated "$([[ "$file_count" -gt 50 ]] && echo true || echo false)" \
-              --argjson diff_added "$added" \
-              --argjson diff_removed "$removed" \
-              '{
+            agent=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Agent:[[:space:]]*//Ip' | tail -1)
+            model=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Model:[[:space:]]*//Ip' | tail -1)
+            cost=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Cost-USD:[[:space:]]*//Ip' | tail -1)
+            tokens_in=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Input:[[:space:]]*//Ip' | tail -1)
+            tokens_out=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Output:[[:space:]]*//Ip' | tail -1)
+
+            [[ -n "$agent" ]] || agent="ChatGPT Cloud"
+
+            prs=$(curl -fsSL               -H "Authorization: Bearer $GH_TOKEN"               -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" || echo '[]')
+            pr_url=$(jq -r '.[0].html_url // empty' <<<"$prs")
+
+            git checkout --force "$sha" >/dev/null 2>&1
+
+            verify_started=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            start_epoch=$(date +%s)
+
+            checks='[]'
+            failed=0
+
+            run_check() {
+              local name="$1"
+              local kind="$2"
+              shift 2
+              echo "Running $name..."
+              "$@"
+              local rc=$?
+              local status="passed"
+              if [[ $rc -ne 0 ]]; then
+                status="failed"
+                failed=1
+              fi
+              checks=$(jq -c                 --arg name "$name"                 --arg kind "$kind"                 --arg status "$status"                 --argjson rc "$rc"                 '. + [{name:$name,kind:$kind,status:$status,exit_code:$rc}]' <<<"$checks")
+            }
+
+            run_check "Ruff" "lint" python -m ruff check .
+            run_check "mypy" "typecheck" python -m mypy openshard/ --ignore-missing-imports
+            run_check "pytest" "test" python -m pytest -n auto --durations=15
+
+            verify_completed=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            duration=$(( $(date +%s) - start_epoch ))
+            verification_status="passed"
+            if [[ $failed -ne 0 ]]; then
+              verification_status="failed"
+              overall_failed=1
+            fi
+
+            files_truncated=false
+            [[ "$file_count" -gt 50 ]] && files_truncated=true
+
+            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg agent "$agent"               --arg model "$model"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               '{
                 head_sha: $head_sha,
                 before_sha: (if $before_sha == "" then null else $before_sha end),
                 created_at: $created_at,
                 task_title: $task_title,
                 branch: $branch,
+                agent: $agent,
+                model: (if $model == "" then null else $model end),
+                pr_url: (if $pr_url == "" then null else $pr_url end),
+                cost_usd: (if $cost == "" then null else ($cost | tonumber) end),
+                cost_provenance: (if $cost == "" then "not_exposed_by_cloud_runtime" else "cloud_runtime_reported" end),
+                tokens_input: (if $tokens_in == "" then null else ($tokens_in | tonumber) end),
+                tokens_output: (if $tokens_out == "" then null else ($tokens_out | tonumber) end),
+                tokens_provenance: (if ($tokens_in == "" and $tokens_out == "") then "not_exposed_by_cloud_runtime" else "cloud_runtime_reported" end),
+                verification: {
+                  status: $verification_status,
+                  started_at: $verify_started,
+                  completed_at: $verify_completed,
+                  duration_seconds: $duration,
+                  checks: $checks
+                },
                 files: $files,
                 files_truncated: $files_truncated,
                 diff_added: $diff_added,
                 diff_removed: $diff_removed
               }')
 
-            response=$(curl -fsSL \
-              -X POST "${OPENSHARD_API_BASE}/v1/cloud/github/receipts" \
-              -H "Authorization: Bearer ${oidc_token}" \
-              -H "Content-Type: application/json" \
-              --data "$payload")
+            response=$(curl -fsSL               -X POST "${OPENSHARD_API_BASE}/v1/cloud/github/receipts"               -H "Authorization: Bearer ${oidc_token}"               -H "Content-Type: application/json"               --data "$payload")
 
-            echo "Captured $(jq -r '.receipt_id' <<<"$response") for $sha"
+            echo "Captured $(jq -r '.receipt_id' <<<"$response") for $sha ($verification_status)"
+            echo "::endgroup::"
           done < <(jq -r '.[]' <<<"$shas")
+
+          exit "$overall_failed"
