@@ -7,7 +7,7 @@ from click.testing import CliRunner
 from openshard.cli.main import cli
 from openshard.workflow_packs.packs import REQUIRED_FIELDS, get_pack, load_packs
 
-FORBIDDEN_STRINGS = ["Tunic Pay", "Mercury", "Volant", "AKIA", "sk-live", "sk-prod"]
+FORBIDDEN_STRINGS = ["PRIVATE_COMPANY", "INTERNAL_CUSTOMER", "AKIA", "sk-live", "sk-prod"]
 
 
 class TestWorkflowPacksLoad(unittest.TestCase):
