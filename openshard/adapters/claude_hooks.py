@@ -2979,8 +2979,12 @@ def _remote_capture_new_events(buf: dict) -> list[dict] | None:
     """
     try:
         from openshard.remote.config import attached_hint
+        from openshard.sync.config import linked_hint
 
-        if not attached_hint():
+        # Manual Remote Capture and the normal linked-account path share the
+        # same hook delta. The collector chooses the explicit remote token
+        # first and falls back to connected capture only when none is attached.
+        if not attached_hint() and not linked_hint():
             return None
         events = [e for e in buf.get("events") or [] if isinstance(e, dict)]
         done = buf.get("remote_spooled")
@@ -2992,13 +2996,28 @@ def _remote_capture_new_events(buf: dict) -> list[dict] | None:
 
 
 def _remote_capture_record(
-    repo_root: Path, events: list[dict], record: dict, entry: dict | None, *, finalized: bool,
+    repo_root: Path,
+    events: list[dict],
+    record: dict,
+    entry: dict | None,
+    *,
+    finalized: bool,
+    session_id: str | None,
+    agent: str,
 ) -> None:
-    """Hand a hook's new Events to the remote-capture spool (local append only). Never raises."""
+    """Hand new Events to explicit Remote Capture or linked connected capture."""
     try:
         from openshard.remote.collector import record as remote_record
 
-        remote_record(repo_root, events, record=record, entry=entry, finalized=finalized)
+        remote_record(
+            repo_root,
+            events,
+            record=record,
+            entry=entry,
+            finalized=finalized,
+            session_id=session_id,
+            agent=agent,
+        )
     except Exception:
         pass
 
@@ -3109,7 +3128,15 @@ def apply_reduced_hook(
         else:
             action = "buffered" if not should_delete else "ignored"
         if remote_events is not None:
-            _remote_capture_record(repo_root, remote_events, record, entry, finalized=action == "record_finalized")
+            _remote_capture_record(
+                repo_root,
+                remote_events,
+                record,
+                entry,
+                finalized=action == "record_finalized",
+                session_id=payload.session_id,
+                agent=_buffer_profile(buf).key,
+            )
         return HookOutcome(
             event=payload.event, action=action, session_id=payload.session_id, repo_root=repo_root,
             shard_id=record.get("shard_id"), run_id=record.get("run_id"), detail=detail,
