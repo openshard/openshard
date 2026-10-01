@@ -1,0 +1,212 @@
+name: Openshard Cloud Receipts
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+
+env:
+  PYTHON_VERSION: "3.12"
+  UV_SYSTEM_PYTHON: "1"
+
+jobs:
+  capture:
+    name: Verify and capture cloud-agent commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install
+        run: uv pip install -e ".[dev]"
+
+      - name: Verify and create hosted Receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENSHARD_API_BASE: https://api.openshard.dev
+          OPENSHARD_OIDC_AUDIENCE: openshard-cloud-capture
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            shas=$(jq -cn --arg sha "$GITHUB_SHA" '[$sha]')
+          else
+            shas=$(jq -c '[.commits[]? | select((.message // "") | test("(?im)^Openshard-Agent:[[:space:]]*")) | .id]' "$GITHUB_EVENT_PATH")
+          fi
+
+          if [[ "$(jq 'length' <<<"$shas")" -eq 0 ]]; then
+            echo "No tagged cloud-agent commits in this push."
+            exit 0
+          fi
+
+          oidc_response=$(curl -fsSL             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENSHARD_OIDC_AUDIENCE}")
+          oidc_token=$(jq -r '.value' <<<"$oidc_response")
+          [[ -n "$oidc_token" && "$oidc_token" != "null" ]] || exit 1
+
+          overall_failed=0
+
+          while IFS= read -r sha; do
+            echo "::group::Cloud Receipt $sha"
+
+            commit=$(curl -fsSL               -H "Authorization: Bearer $GH_TOKEN"               -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}")
+
+            message=$(jq -r '.commit.message' <<<"$commit")
+            task_title=$(jq -r '.commit.message | split("\n")[0]' <<<"$commit")
+            created_at=$(jq -r '.commit.committer.date // .commit.author.date' <<<"$commit")
+            parent=$(jq -r '.parents[0].sha // empty' <<<"$commit")
+            file_count=$(jq '.files | length' <<<"$commit")
+            files=$(jq -c '[.files[:50][] | {
+              path: .filename,
+              change_type: (
+                if .status == "added" then "create"
+                elif .status == "removed" then "delete"
+                else "update"
+                end
+              ),
+              additions: (.additions // 0),
+              deletions: (.deletions // 0)
+            }]' <<<"$commit")
+            added=$(jq '.stats.additions // 0' <<<"$commit")
+            removed=$(jq '.stats.deletions // 0' <<<"$commit")
+
+            owner=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Owner:[[:space:]]*//Ip' | tail -1)
+            agent=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Agent:[[:space:]]*//Ip' | tail -1)
+            model=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Model:[[:space:]]*//Ip' | tail -1)
+            provider=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Provider:[[:space:]]*//Ip' | tail -1)
+            surface=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Surface:[[:space:]]*//Ip' | tail -1)
+            cost=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Cost-USD:[[:space:]]*//Ip' | tail -1)
+            tokens_in=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Input:[[:space:]]*//Ip' | tail -1)
+            tokens_out=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Output:[[:space:]]*//Ip' | tail -1)
+            tokens_cache_read=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Cache-Read:[[:space:]]*//Ip' | tail -1)
+            tokens_cache_creation=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Cache-Creation:[[:space:]]*//Ip' | tail -1)
+
+            [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
+            [[ -n "$agent" ]] || agent="Codex"
+            [[ -n "$provider" ]] || provider="OpenAI"
+            [[ -n "$surface" ]] || surface="ChatGPT Work"
+
+            cost_provenance=""
+            cost_is_estimate=false
+            if [[ -n "$cost" ]]; then
+              cost_provenance="cloud_runtime_reported"
+            elif [[ -n "$model" && ( -n "$tokens_in" || -n "$tokens_out" || -n "$tokens_cache_read" || -n "$tokens_cache_creation" ) ]]; then
+              estimated_cost=$(MODEL="$model" TOKENS_IN="${tokens_in:-0}" TOKENS_OUT="${tokens_out:-0}" TOKENS_CACHE_READ="${tokens_cache_read:-0}" TOKENS_CACHE_CREATION="${tokens_cache_creation:-0}" python - <<'PY'
+import os
+from openshard.models.pricing import estimate_usage_cost
+
+estimate = estimate_usage_cost(
+    os.environ.get("MODEL"),
+    input_tokens=int(os.environ.get("TOKENS_IN") or 0),
+    output_tokens=int(os.environ.get("TOKENS_OUT") or 0),
+    cache_read_tokens=int(os.environ.get("TOKENS_CACHE_READ") or 0),
+    cache_write_tokens=int(os.environ.get("TOKENS_CACHE_CREATION") or 0),
+)
+print("" if estimate is None else f"{estimate.usd:.12f}")
+PY
+)
+              if [[ -n "$estimated_cost" ]]; then
+                cost="$estimated_cost"
+                cost_provenance="official_rate_estimate"
+                cost_is_estimate=true
+              fi
+            fi
+            [[ -n "$cost_provenance" ]] || cost_provenance="not_exposed_by_cloud_runtime"
+
+            prs=$(curl -fsSL               -H "Authorization: Bearer $GH_TOKEN"               -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" || echo '[]')
+            pr_url=$(jq -r '.[0].html_url // empty' <<<"$prs")
+
+            git checkout --force "$sha" >/dev/null 2>&1
+
+            verify_started=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            start_epoch=$(date +%s)
+
+            checks='[]'
+            failed=0
+
+            run_check() {
+              local name="$1"
+              local kind="$2"
+              shift 2
+              echo "Running $name..."
+              "$@"
+              local rc=$?
+              local status="passed"
+              if [[ $rc -ne 0 ]]; then
+                status="failed"
+                failed=1
+              fi
+              checks=$(jq -c                 --arg name "$name"                 --arg kind "$kind"                 --arg status "$status"                 --argjson rc "$rc"                 '. + [{name:$name,kind:$kind,status:$status,exit_code:$rc}]' <<<"$checks")
+            }
+
+            run_check "Ruff" "lint" python -m ruff check .
+            run_check "mypy" "typecheck" python -m mypy openshard/ --ignore-missing-imports
+            run_check "pytest" "test" python -m pytest -n auto --durations=15
+
+            verify_completed=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            duration=$(( $(date +%s) - start_epoch ))
+            verification_status="passed"
+            if [[ $failed -ne 0 ]]; then
+              verification_status="failed"
+              overall_failed=1
+            fi
+
+            files_truncated=false
+            [[ "$file_count" -gt 50 ]] && files_truncated=true
+
+            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               '{
+                head_sha: $head_sha,
+                before_sha: (if $before_sha == "" then null else $before_sha end),
+                created_at: $created_at,
+                task_title: $task_title,
+                branch: $branch,
+                owner: (if $owner == "" then null else $owner end),
+                agent: $agent,
+                model: (if $model == "" then null else $model end),
+                provider: (if $provider == "" then null else $provider end),
+                surface: (if $surface == "" then null else $surface end),
+                pr_url: (if $pr_url == "" then null else $pr_url end),
+                cost_usd: (if $cost == "" then null else ($cost | tonumber) end),
+                cost_provenance: $cost_provenance,
+                cost_is_estimate: $cost_is_estimate,
+                tokens_input: (if $tokens_in == "" then null else ($tokens_in | tonumber) end),
+                tokens_output: (if $tokens_out == "" then null else ($tokens_out | tonumber) end),
+                tokens_cache_read: (if $tokens_cache_read == "" then null else ($tokens_cache_read | tonumber) end),
+                tokens_cache_creation: (if $tokens_cache_creation == "" then null else ($tokens_cache_creation | tonumber) end),
+                tokens_provenance: (if ($tokens_in == "" and $tokens_out == "" and $tokens_cache_read == "" and $tokens_cache_creation == "") then "not_exposed_by_cloud_runtime" else "cloud_runtime_reported" end),
+                verification: {
+                  status: $verification_status,
+                  started_at: $verify_started,
+                  completed_at: $verify_completed,
+                  duration_seconds: $duration,
+                  checks: $checks
+                },
+                files: $files,
+                files_truncated: $files_truncated,
+                diff_added: $diff_added,
+                diff_removed: $diff_removed
+              }')
+
+            response=$(curl -fsSL               -X POST "${OPENSHARD_API_BASE}/v1/cloud/github/receipts"               -H "Authorization: Bearer ${oidc_token}"               -H "Content-Type: application/json"               --data "$payload")
+
+            echo "Captured $(jq -r '.receipt_id' <<<"$response") for $sha ($verification_status)"
+            echo "::endgroup::"
+          done < <(jq -r '.[]' <<<"$shas")
+
+          exit "$overall_failed"

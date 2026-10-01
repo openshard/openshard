@@ -56,7 +56,7 @@ _ANTHROPIC = "https://platform.claude.com/docs/en/build-with-claude/prompt-cachi
 _GOOGLE = "https://ai.google.dev/gemini-api/docs/pricing"
 
 _RATES: tuple[OfficialRate, ...] = (
-    OfficialRate("openai", "gpt-5.6-sol", 4.0, 20.0, 0.40, 5.0, _OPENAI, aliases=("openai/gpt-5.6-sol",)),
+    OfficialRate("openai", "gpt-5.6-sol", 4.0, 20.0, 0.40, 5.0, _OPENAI, aliases=("openai/gpt-5.6-sol", "GPT-5.6 Sol")),
     OfficialRate("openai", "gpt-5.6-terra", 2.0, 12.0, 0.20, 2.50, _OPENAI, aliases=("openai/gpt-5.6-terra",)),
     OfficialRate("openai", "gpt-5.6-luna", 0.20, 1.20, 0.02, 0.25, _OPENAI, aliases=("openai/gpt-5.6-luna",)),
     OfficialRate("openai", "gpt-6-astra", 10.0, 50.0, 1.0, 12.50, _OPENAI, aliases=("openai/gpt-6-astra",)),
