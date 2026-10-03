@@ -407,7 +407,7 @@ def test_a_copy_restarts_when_history_is_replaced_between_chunks(tmp_path, monke
 
 def test_a_snapshot_that_cannot_fit_even_without_signals_is_a_truthful_marker(tmp_path, monkeypatch):
     repo = _seeded(tmp_path)
-    monkeypatch.setattr(snap, "MAX_SNAPSHOT_BYTES", 1000)  # less than the routing history alone
+    monkeypatch.setattr(snap, "MAX_SNAPSHOT_BYTES", 64)  # below any snapshot, even one with no signals
     worker.refresh_snapshot(_runs_path(repo))
     assert _published(repo)["availability"] == "oversized"
     assert _lookup(repo).status == "oversized"
