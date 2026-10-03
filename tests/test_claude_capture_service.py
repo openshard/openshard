@@ -368,7 +368,10 @@ def _stable_view(entry: dict) -> dict:
                                  # the inline path never does (dedup_id=None throughout),
                                  # so its applied_event_ids stays empty. Not a correctness
                                  # difference -- see build_hook_entry/apply_reduced_hook.
-                                 "applied_event_ids")},
+                                 "applied_event_ids",
+                                 # Read from the hook process environment: the inline path
+                                 # has it, a raw HTTP POST (no command client) carries none.
+                                 "provider", "provider_source", "surface")},
         "events": [{k: e.get(k) for k in _STABLE_EVENT_KEYS} for e in entry["events"]],
         "verification_attempted": entry["verification_attempted"],
         "verification_passed": entry["verification_passed"],

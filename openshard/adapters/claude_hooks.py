@@ -440,6 +440,12 @@ class HookPayload:
     # usage; the transcript's content and the path itself never reach
     # ``runs.jsonl``.
     transcript_path: str | None = None
+    # Where the agent runs, read by the capture client / in-process hook from
+    # the environment Claude Code gives its hook processes (never from the
+    # payload): the model provider its configuration selects and the raw
+    # ``CLAUDE_CODE_ENTRYPOINT`` surface. See ``claude_agent_env``.
+    agent_provider: str | None = None
+    agent_surface: str | None = None
 
 
 OUTCOME_PASSED = "passed"
@@ -654,6 +660,108 @@ def _claude_command_outcome(
         if _CLAUDE_TIMEOUT_LINE_RE.match(first):
             return OUTCOME_NOT_COMPLETED, None
     return None, None
+
+
+# ---------------------------------------------------------------------------
+# Agent environment -- provider and surface. Claude Code hands its hook
+# processes its own environment, which is where its provider selection
+# lives (``CLAUDE_CODE_USE_BEDROCK`` / ``_VERTEX`` / ``_FOUNDRY``; otherwise
+# the Anthropic API unless ``ANTHROPIC_BASE_URL`` routes it elsewhere) and
+# how it was launched (``CLAUDE_CODE_ENTRYPOINT``). Only these derived
+# tokens are recorded, never an environment value beyond the entrypoint name.
+# ---------------------------------------------------------------------------
+
+PROVIDER_SOURCE_AGENT_ENV = "agent_env"
+_CLAUDE_PROVIDER_FLAGS: tuple[tuple[str, str], ...] = (
+    ("CLAUDE_CODE_USE_BEDROCK", "amazon_bedrock"),
+    ("CLAUDE_CODE_USE_VERTEX", "google_vertex"),
+    ("CLAUDE_CODE_USE_FOUNDRY", "microsoft_foundry"),
+)
+_CLAUDE_PROVIDERS = frozenset({"anthropic", *(p for _, p in _CLAUDE_PROVIDER_FLAGS)})
+_SURFACE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,40}$")
+
+
+def _agent_provider_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value in _CLAUDE_PROVIDERS else None
+
+
+def _agent_surface_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if _SURFACE_RE.match(value) else None
+
+
+def _env_flag(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def claude_agent_env(env: Mapping[str, str] | None) -> dict[str, str]:
+    """``{"provider", "surface"}`` (each only when known) from Claude Code's hook environment.
+
+    Exactly one ``CLAUDE_CODE_USE_*`` flag names its cloud provider; none
+    set means the Anthropic API -- unless ``ANTHROPIC_BASE_URL`` points
+    Claude Code at a custom gateway, whose provider OpenShard cannot know
+    (left unknown, as are conflicting flags). ``surface`` is the raw,
+    validated ``CLAUDE_CODE_ENTRYPOINT`` (``cli``, ``sdk-cli``,
+    ``claude-vscode`` ...). Never raises.
+    """
+    out: dict[str, str] = {}
+    if not isinstance(env, Mapping):
+        return out
+    try:
+        flagged = [provider for var, provider in _CLAUDE_PROVIDER_FLAGS if _env_flag(env.get(var))]
+        if len(flagged) == 1:
+            out["provider"] = flagged[0]
+        elif not flagged and not str(env.get("ANTHROPIC_BASE_URL") or "").strip():
+            out["provider"] = "anthropic"
+        surface = _agent_surface_or_none(env.get("CLAUDE_CODE_ENTRYPOINT"))
+        if surface:
+            out["surface"] = surface
+    except Exception:
+        return {}
+    return out
+
+
+def format_agent_env(agent_env: Mapping[str, str] | None) -> str | None:
+    """Header form of :func:`claude_agent_env` (``provider=anthropic;surface=cli``), or None when empty."""
+    if not agent_env:
+        return None
+    parts = []
+    provider = _agent_provider_or_none(agent_env.get("provider"))
+    surface = _agent_surface_or_none(agent_env.get("surface"))
+    if provider:
+        parts.append(f"provider={provider}")
+    if surface:
+        parts.append(f"surface={surface}")
+    return ";".join(parts) or None
+
+
+def parse_agent_env(value: object) -> dict[str, str]:
+    """Inverse of :func:`format_agent_env`; anything malformed is dropped, never repaired."""
+    out: dict[str, str] = {}
+    if not isinstance(value, str) or len(value) > 200:
+        return out
+    for part in value.split(";"):
+        key, _, raw = part.partition("=")
+        key = key.strip()
+        if key == "provider":
+            provider = _agent_provider_or_none(raw.strip())
+            if provider:
+                out["provider"] = provider
+        elif key == "surface":
+            surface = _agent_surface_or_none(raw)
+            if surface:
+                out["surface"] = surface
+    return out
+
+
+def apply_agent_env(payload: HookPayload, agent_env: Mapping[str, str] | None) -> None:
+    """Attach a validated agent environment to a Claude Code *payload* (other agents: untouched)."""
+    if not agent_env or payload.agent != AGENT_CLAUDE_CODE:
+        return
+    payload.agent_provider = _agent_provider_or_none(agent_env.get("provider"))
+    payload.agent_surface = _agent_surface_or_none(agent_env.get("surface"))
 
 
 # ---------------------------------------------------------------------------
@@ -1117,6 +1225,8 @@ class ReducedHookPayload:
     command_exit_code: int | None = None
     task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
     transcript_path: str | None = None  # see HookPayload.transcript_path
+    agent_provider: str | None = None  # see HookPayload.agent_provider
+    agent_surface: str | None = None
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {
@@ -1155,6 +1265,10 @@ class ReducedHookPayload:
             data["task_id"] = self.task_id
         if self.transcript_path is not None:
             data["transcript_path"] = self.transcript_path
+        if self.agent_provider is not None:
+            data["agent_provider"] = self.agent_provider
+        if self.agent_surface is not None:
+            data["agent_surface"] = self.agent_surface
         return data
 
     @classmethod
@@ -1214,6 +1328,8 @@ class ReducedHookPayload:
             command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
             task_id=stored_task_id(data),
             transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
+            agent_provider=_agent_provider_or_none(data.get("agent_provider")),
+            agent_surface=_agent_surface_or_none(data.get("agent_surface")),
         )
 
 
@@ -1266,6 +1382,8 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         attrs=_clean_attrs(payload.attrs),
         task_id=payload.task_id if is_task_id(payload.task_id) else None,
         transcript_path=_valid_transcript_path(payload.transcript_path, payload.session_id),
+        agent_provider=_agent_provider_or_none(payload.agent_provider),
+        agent_surface=_agent_surface_or_none(payload.agent_surface),
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
@@ -1618,6 +1736,8 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         ),
         "model_source": capture.get("model_source") if capture.get("model_source") != "not_captured" else None,
         "provider_current": capture.get("provider") if isinstance(capture.get("provider"), str) else None,
+        "provider_source": capture.get("provider_source") if isinstance(capture.get("provider_source"), str) else None,
+        "surface": _agent_surface_or_none(capture.get("surface")),
         "usage_by_key": usage_by_key,
         "usage_provenance": next(
             (v for v in (entry.get("tokens_provenance"), entry.get("cost_provenance")) if isinstance(v, str)),
@@ -2483,8 +2603,11 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     task = buf.get("task") if isinstance(buf.get("task"), str) and buf.get("task") else None
 
     # Model/cost/tokens -- opportunistically populated by the Claude Code
-    # status line (handle_claude_status) or by what another agent's own hook
-    # stream reports (PR12), never guessed from names/env vars. Absent
+    # status line (handle_claude_status), the session transcript's usage
+    # (tokens) or by what another agent's own hook stream reports (PR12),
+    # never guessed from names. The provider is the one the agent reports, or
+    # for Claude Code the one its own environment selects (provider_source
+    # ``agent_env``; see claude_agent_env) -- never guessed from the model. Absent
     # entirely (not merely None) when never observed, so old readers and
     # the "verification never fabricated" contract both stay honest.
     models_seen = [m for m in (buf.get("models_seen") or []) if isinstance(m, str)][:5]
@@ -2664,6 +2787,12 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             # Delegation / approval-gate facts the agent reported (Hermes);
             # absent for agents whose hooks expose none.
             entry["capture"][count_key] = {n: int(raw_counts.get(n) or 0) for n in count_names}
+    if isinstance(buf.get("provider_source"), str) and provider_current:
+        entry["capture"]["provider_source"] = buf["provider_source"]
+    surface = _agent_surface_or_none(buf.get("surface"))
+    if surface:
+        # How the agent was launched (Claude Code: CLAUDE_CODE_ENTRYPOINT, raw).
+        entry["capture"]["surface"] = surface
     if raw_usage:
         # Per-message usage memory (OpenCode), bounded; lets a buffer rebuilt
         # from this record keep deduplicating re-reported messages.
@@ -2821,6 +2950,12 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     if payload.transcript_path:
         # Transient: read at fold for token usage only (see _transcript_usage).
         buf["transcript_path"] = payload.transcript_path
+    if payload.agent_provider and not buf.get("provider_current"):
+        # First observation wins: a session's environment does not change.
+        buf["provider_current"] = payload.agent_provider
+        buf["provider_source"] = PROVIDER_SOURCE_AGENT_ENV
+    if payload.agent_surface and not buf.get("surface"):
+        buf["surface"] = payload.agent_surface
     if payload.model_id:
         # The agent's own hook stream names the model (Codex: every payload;
         # OpenCode: the user message's selected model). Recorded as observed.
@@ -3454,6 +3589,7 @@ def handle_hook(
     event_override: str | None = None,
     agent: str = AGENT_CLAUDE_CODE,
     task_id: str | None = None,
+    agent_env: Mapping[str, str] | None = None,
 ) -> HookOutcome:
     """Process one decoded hook payload from *agent* synchronously. Never raises.
 
@@ -3483,6 +3619,7 @@ def handle_hook(
                                session_id=payload.session_id, repo_root=repo_root,
                                detail="usage recorded" if recorded else "no session buffer yet")
         payload.task_id = task_id if is_task_id(task_id) else None
+        apply_agent_env(payload, agent_env)
         reduced = reduce_hook_payload(payload, repo_root)
         if reduced is None:
             return HookOutcome(event=payload.event, action="ignored", detail="missing or invalid session_id")
@@ -3505,6 +3642,7 @@ def handle_claude_hook(
         event_override=event_override,
         agent=AGENT_CLAUDE_CODE,
         task_id=launch_task_id(env),
+        agent_env=claude_agent_env(env if env is not None else os.environ),
     )
 
 

@@ -223,6 +223,10 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
         "sandbox_detail": evidence.get("sandbox_detail"),
         "execution_loop": evidence.get("execution_loop"),
         "base_commit": evidence.get("base_commit"),
+        # Where the agent ran: provider recorded by capture (never guessed from
+        # the model) and the raw launch surface. None when not recorded.
+        "provider": evidence.get("provider"),
+        "surface": evidence.get("surface"),
         "content_hash": evidence.get("content_hash"),
         "session": evidence.get("session"),
         "routing": evidence.get("routing"),
