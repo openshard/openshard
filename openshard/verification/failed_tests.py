@@ -23,6 +23,9 @@ MAX_ID_CHARS = 160
 
 _PYTEST = re.compile(r"^(?:FAILED|ERROR)\s+([\w./\\-]+\.py)((?:::[A-Za-z_]\w*)+)(?:\[[^\]\n]*\])?", re.M)
 _JS = re.compile(r"^\s*(?:FAIL|×|✕)\s+([\w./\\-]+\.(?:test|spec)\.[cm]?[jt]sx?)\b", re.M)
+# Colour (FORCE_COLOR) output: OSC sequences such as hyperlinks (ESC]...BEL or
+# ESC]...ESC\), CSI sequences (ESC[ params final-byte) and other two-byte escapes.
+_ANSI = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
 
 
 def _safe_path(path: str) -> str | None:
@@ -54,6 +57,7 @@ def failing_test_ids(output: str | None) -> list[str]:
         return []
     found: list[tuple[int, str]] = []
     try:
+        output = _ANSI.sub("", output)
         for m in _PYTEST.finditer(output):
             path = _safe_path(m.group(1))
             if path:

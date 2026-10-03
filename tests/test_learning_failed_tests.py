@@ -46,6 +46,24 @@ class TestParser:
         out = " FAIL  src/dashboard/layout.test.tsx\n  ✕ renders one column\n FAIL src\\ui\\grid.spec.ts > grid"
         assert failing_test_ids(out) == ["src/dashboard/layout.test.tsx", "src/ui/grid.spec.ts"]
 
+    def test_coloured_pytest_output(self):
+        out = ("\x1b[31mFAILED\x1b[0m \x1b[1mtests/test_layout.py::test_mobile\x1b[0m - assert 1 == 2\n"
+               "\x1b[31mERROR\x1b[0m tests/test_db.py::TestDb::test_connect\x1b[0m - OSError\n"
+               "\x1b[31mFAILED\x1b[0m \x1b[1mC:/Users/me/abs/test_x.py::test_abs\x1b[0m - boom\n"
+               "\x1b[31m\x1b[1m2 failed\x1b[0m\x1b[31m in 0.10s\x1b[0m\n")
+        assert failing_test_ids(out) == ["tests/test_layout.py::test_mobile", "tests/test_db.py::TestDb::test_connect"]
+
+    def test_coloured_js_output(self):
+        out = (" \x1b[31mFAIL\x1b[39m  \x1b[2msrc/dashboard/\x1b[22mlayout.test.tsx\x1b[2m > renders\x1b[22m\n"
+               "\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m \x1b]8;;file:///repo/src/ui/grid.spec.ts\x1b\\"
+               "src/ui/grid.spec.ts\x1b]8;;\x1b\\\n"
+               "   \x1b[31m×\x1b[39m src/a.test.js\x07\n")
+        assert failing_test_ids(out) == ["src/dashboard/layout.test.tsx", "src/ui/grid.spec.ts", "src/a.test.js"]
+
+    def test_uncoloured_output_unchanged_and_bad_escapes_never_raise(self):
+        assert failing_test_ids(PYTEST_OUTPUT) == failing_test_ids(PYTEST_OUTPUT.replace("FAILED", "\x1b[31mFAILED\x1b[0m"))
+        assert failing_test_ids("\x1b[\x1b]8;;\x1b\nFAILED tests/test_a.py::test_b") == ["tests/test_a.py::test_b"]
+
     def test_bounded_and_empty(self):
         many = "\n".join(f"FAILED tests/test_a.py::test_{i}" for i in range(20))
         assert len(failing_test_ids(many)) == MAX_FAILED_TESTS

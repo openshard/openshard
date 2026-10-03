@@ -111,6 +111,12 @@ All notable changes to OpenShard are documented here.
 - `openshard ci check` reads the current verification state, including a
   later re-run or CI verdict, like `last`, `proof` and `trust` already did.
 
+### Fixed
+
+- OSN verification recorded no failing test ids when pytest, jest or vitest
+  printed in colour (e.g. `FORCE_COLOR=3`): ANSI escape sequences are now
+  stripped before parsing. Only identifiers are kept, as before.
+
 ## 0.4.9 - 2026-09-28
 
 ### Changed
