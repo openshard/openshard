@@ -305,14 +305,22 @@ def evaluate_expected_evidence(spec: ExpectedEvidence, workspace: Path, evaluati
     }
 
 
+_RUNTIME_STATE = shutil.ignore_patterns("*.lock", "learning.dirty", "learning.launch", "learning-cache")
+
+
 def snapshot_history(workspace: Path, dest: Path) -> dict[str, Any]:
-    """Copy ``<workspace>/.openshard`` into the results directory for the record."""
+    """Copy ``<workspace>/.openshard`` into the results directory for the record.
+
+    Runtime state is left out: lock files (which a live learning worker may
+    hold -- a byte-range-locked file cannot be read on Windows), the learning
+    dirty/launch markers and the derived learning cache. History is copied.
+    """
     src = workspace / ".openshard"
     if not src.is_dir():
         raise BenchmarkError("history_missing", f"no .openshard/ under {workspace}")
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(src, dest)
+    shutil.copytree(src, dest, ignore=_RUNTIME_STATE)
     runs = dest / "runs.jsonl"
     return {"path": str(dest), "runs_lines": len(runs.read_text(encoding="utf-8").splitlines()) if runs.exists() else 0}
 
