@@ -144,6 +144,31 @@ def _status(repo: Path, session_id: str = SID, **kwargs) -> str:
     return handle_claude_status(_status_payload(repo, session_id, **kwargs), env={"CLAUDE_PROJECT_DIR": str(repo)})
 
 
+def _assistant_line(
+    message_id: str, *, input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0,
+    cache_creation: int = 0, model: str = "claude-opus-5-5", at: str = "2099-01-01T00:00:00.000Z",
+) -> dict:
+    """One assistant transcript record, shaped like Claude Code 2.x writes it."""
+    return {
+        "type": "assistant", "sessionId": SID, "timestamp": at,
+        "message": {
+            "id": message_id, "model": model, "role": "assistant",
+            "content": [{"type": "text", "text": "RAW ASSISTANT TEXT"}],
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                      "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": cache_creation},
+        },
+    }
+
+
+def _transcript(repo: Path, records: list[dict], session_id: str = SID) -> Path:
+    """A transcript file named like Claude Code's (``<session_id>.jsonl``), outside the repository."""
+    directory = repo.parent / "claude-projects"
+    directory.mkdir(exist_ok=True)
+    path = directory / f"{session_id}.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return path
+
+
 def _runs_lines(repo: Path) -> list[dict]:
     path = repo / ".openshard" / "runs.jsonl"
     if not path.exists():
@@ -214,7 +239,8 @@ class TestParsing:
         assert p.file_path == "x.py"
         assert not hasattr(p, "brand_new_field")
         assert not hasattr(p, "tool_response")
-        assert not hasattr(p, "transcript_path")
+        # Kept only as this session's own transcript path (never content); this one is not.
+        assert p.transcript_path is None
 
     def test_unsupported_event_is_rejected(self, repo: Path):
         assert extract_hook_payload(_payload("PreCompact", repo)) is None
@@ -824,7 +850,9 @@ class TestPrivacy:
     def test_no_transcript_file_content_or_assistant_text_stored(self, repo: Path):
         _session(repo)
         raw = _raw(repo)
-        for needle in ("RAW FILE CONTENT", "RAW STDOUT", "RAW ASSISTANT TEXT", "transcript"):
+        # The transcript's path is transient (staging buffer only), never on the record.
+        for needle in ("RAW FILE CONTENT", "RAW STDOUT", "RAW ASSISTANT TEXT", "transcript_path",
+                       "transcript.jsonl", ".claude/projects"):
             assert needle not in raw, needle
         entry = _runs_lines(repo)[0]
         for blocked in ("raw_prompt", "prompt_text", "transcript", "raw_transcript", "model_output",
@@ -1255,10 +1283,25 @@ class TestModelTokenCostCapture:
         assert "Models" in out
         assert "→" in out
 
-    def test_token_usage_captured_with_provenance(self, repo: Path):
+    def test_status_line_last_call_tokens_are_never_recorded_as_session_totals(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")
         _status(repo, tokens_input=14000, tokens_output=2000, cache_read=500)
         _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        # ``context_window.current_usage`` is the last API call only: unknown
+        # (with the reason) rather than an undercount labelled as the session.
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "tokens_provenance"):
+            assert key not in entry
+        assert entry["capture"]["tokens_not_recorded_reason"] == "transcript_unavailable"
+
+    def test_token_usage_captured_with_provenance(self, repo: Path):
+        transcript = _transcript(repo, [
+            _assistant_line("msg_1", input_tokens=10000, output_tokens=1500, cache_read=500),
+            _assistant_line("msg_2", input_tokens=4000, output_tokens=500),
+        ])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _status(repo, tokens_input=1, tokens_output=1, cache_read=1)  # last call only: ignored
+        _run(repo, "Stop", transcript_path=str(transcript))
         entry = _runs_lines(repo)[0]
         assert entry["prompt_tokens"] == 14000
         assert entry["completion_tokens"] == 2000
@@ -1270,6 +1313,58 @@ class TestModelTokenCostCapture:
         assert "Tokens" in out
         assert "14k input" in out
         assert "2k output" in out
+
+    def test_transcript_usage_counts_each_message_id_once_and_breaks_down_by_model(self, repo: Path):
+        # Claude Code writes one streamed API message over several lines that
+        # all repeat the same message id and usage: counted once.
+        streamed = _assistant_line("msg_a", input_tokens=3, output_tokens=700, cache_read=90_000,
+                                   cache_creation=4_000)
+        transcript = _transcript(repo, [
+            streamed, streamed, streamed,
+            {"type": "user", "timestamp": "2099-01-01T00:00:01.000Z", "message": {"content": "hi"}},
+            _assistant_line("msg_b", input_tokens=2, output_tokens=300, cache_read=10_000,
+                            model="claude-sonnet-5-5"),
+            _assistant_line("msg_c", model="<synthetic>"),
+        ])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        entry = _runs_lines(repo)[0]
+        assert (entry["prompt_tokens"], entry["completion_tokens"]) == (5, 1_000)
+        assert (entry["cache_read_tokens"], entry["cache_creation_tokens"]) == (100_000, 4_000)
+        assert entry["total_tokens"] == 1_005  # input + output (existing convention)
+        capture = entry["capture"]
+        assert capture["tokens_source"] == "transcript"
+        assert capture["usage_messages"] == 3
+        assert capture["usage_by_model"]["claude-opus-5-5"]["output"] == 700
+        assert capture["usage_by_model"]["claude-sonnet-5-5"]["messages"] == 1
+        raw = _raw(repo)
+        assert str(transcript.parent) not in raw.replace("\\\\", "\\")
+        assert "RAW ASSISTANT TEXT" not in raw
+
+    def test_transcript_usage_before_the_receipt_window_is_excluded(self, repo: Path):
+        transcript = _transcript(repo, [
+            _assistant_line("old", output_tokens=999_999, at="2000-01-01T00:00:00.000Z"),
+            _assistant_line("new", output_tokens=42),
+        ])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 42
+
+    def test_subagent_transcripts_are_included(self, repo: Path):
+        transcript = _transcript(repo, [_assistant_line("main", output_tokens=10)])
+        sub = transcript.with_suffix("") / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-1.jsonl").write_text(
+            json.dumps(_assistant_line("child", output_tokens=5, model="claude-haiku-5")) + "\n", encoding="utf-8")
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 15
+
+    def test_a_transcript_path_for_another_session_is_never_read(self, repo: Path):
+        other = _transcript(repo, [_assistant_line("x", output_tokens=7)], session_id=SID2)
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(other))
+        _run(repo, "Stop", transcript_path=str(other))
+        assert "completion_tokens" not in _runs_lines(repo)[0]
 
     def test_cost_is_delta_from_baseline_not_raw_cumulative_total(self, repo: Path):
         _run(repo, "SessionStart", source="startup")
@@ -1473,12 +1568,12 @@ class TestStatusLineFastPath:
         _run(repo, "UserPromptSubmit", prompt="task")  # first prompt already folds once
         before = _raw(repo)
         for i in range(10):
-            _status(repo, tokens_input=1000 + i, cost_total=0.01 * i)
+            _status(repo, tokens_input=1000 + i, cost_total=0.01 * (i + 1))
         assert _raw(repo) == before  # status pings alone never rewrite runs.jsonl
         _run(repo, "Stop")
         assert len(_runs_lines(repo)) == 1
         entry = _runs_lines(repo)[0]
-        assert entry["prompt_tokens"] == 1009  # last-observed value still reaches the fold
+        assert entry["estimated_cost"] == pytest.approx(0.09)  # last-observed value still reaches the fold
 
 
 class TestRepoIdentityCaching:

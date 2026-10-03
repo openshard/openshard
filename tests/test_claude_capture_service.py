@@ -418,7 +418,8 @@ class TestEventualConsistency:
         assert entry["execution_model"] == "claude-sonnet-5"
         assert entry["cost_provenance"] == "provider_reported"
         assert entry["estimated_cost"] == pytest.approx(0.25)
-        assert entry["tokens_provenance"] == "provider_reported"
+        # The status line's tokens are the last API call only: never session totals.
+        assert "tokens_provenance" not in entry
 
     def test_project_dir_header_anchors_the_repo_when_cwd_is_elsewhere(self, service, repo, tmp_path):
         elsewhere = tmp_path / "somewhere else"

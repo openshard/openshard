@@ -56,7 +56,10 @@ names, tool names, repo-relative file paths, a secret-scrubbed bounded
 excerpt of the *first* user prompt as the Shard task (the same thing
 ``import claude --task`` asks the user to type), a scrubbed bounded Bash
 command summary, prompt/tool/turn counts, git branch/HEAD/dirty state.
-Never stored: transcripts or ``transcript_path``, full prompts, later
+Never stored: transcripts or ``transcript_path`` (the path is held only on
+the transient staging buffer / capture queue, so the fold can sum the
+token usage Claude Code recorded there -- see ``read_transcript_usage``;
+nothing else in the transcript is read), full prompts, later
 prompts, assistant messages (``last_assistant_message``), tool responses
 and tool error text (only a shell command's exit code is kept), file contents, environment variables, absolute paths, or
 anything matching the secret scrubber.
@@ -431,6 +434,12 @@ class HookPayload:
     # header -- never by a translator, never read out of the agent's own
     # payload (which is untrusted for this). See ``_bind_task_context``.
     task_id: str | None = None
+    # Claude Code's ``transcript_path``, kept only when it names this
+    # session's own transcript file (see ``_valid_transcript_path``). Held on
+    # the transient staging buffer so the fold can sum the session's token
+    # usage; the transcript's content and the path itself never reach
+    # ``runs.jsonl``.
+    transcript_path: str | None = None
 
 
 OUTCOME_PASSED = "passed"
@@ -542,7 +551,9 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     """Pick the supported fields out of a decoded hook payload.
 
     Unknown keys are ignored. Returns None when no supported event name can
-    be determined. ``transcript_path``, ``tool_result``,
+    be determined. ``transcript_path`` is kept as a path only (validated by
+    ``_valid_transcript_path``; read at fold time for token usage alone).
+    ``tool_result``,
     ``last_assistant_message`` and every other field are never read; for a
     shell tool only the documented outcome markers are (see
     ``_claude_command_outcome``: two booleans in ``tool_response``, the
@@ -594,6 +605,7 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
         tool_success=True if event == EVENT_POST_TOOL_USE else None,
         command_outcome=command_outcome,
         command_exit_code=command_exit_code,
+        transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
     )
 
 
@@ -749,6 +761,146 @@ def extract_status_payload(data: Mapping[str, Any]) -> StatusPayload | None:
         tokens_cache_creation=_int_or_none(usage.get("cache_creation_input_tokens")),
         tokens_cache_read=_int_or_none(usage.get("cache_read_input_tokens")),
     )
+
+
+# ---------------------------------------------------------------------------
+# Session token usage from the Claude Code transcript. The status line's
+# ``context_window.current_usage`` is the *last* API call only, so it is
+# never recorded as a session total. At fold time the transcript Claude Code
+# itself writes is scanned for assistant ``message.usage`` -- the API
+# response's own usage, counted once per ``message.id`` (Claude Code writes
+# one streamed message over several lines) -- and summed over this
+# receipt's window. Only token counts and model ids are kept; nothing else
+# in the transcript is read, and neither its content nor its path is stored.
+# ---------------------------------------------------------------------------
+
+_TRANSCRIPT_MAX_FILES = 50  # main transcript + subagent transcripts scanned per fold
+_MAX_USAGE_MODELS = 10
+TOKENS_SOURCE_TRANSCRIPT = "transcript"
+TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE = "transcript_unavailable"
+
+
+def _valid_transcript_path(raw: object, session_id: str | None) -> str | None:
+    """*raw* when it is an absolute path to this session's own ``<session_id>.jsonl``, else None."""
+    if not isinstance(raw, str) or not raw or len(raw) > 2_000 or not isinstance(session_id, str) or not session_id:
+        return None
+    try:
+        path = Path(raw)
+        if not path.is_absolute() or path.name != f"{session_id}.jsonl":
+            return None
+    except (ValueError, OSError):
+        return None
+    return raw
+
+
+def _transcript_files(path: Path) -> list[Path]:
+    """The session transcript plus its subagent transcripts (``<session>/subagents/*.jsonl``)."""
+    files = [path]
+    try:
+        sub = path.with_suffix("") / "subagents"
+        if sub.is_dir():
+            files.extend(sorted(p for p in sub.glob("*.jsonl") if p.is_file())[: _TRANSCRIPT_MAX_FILES - 1])
+    except OSError:
+        pass
+    return files
+
+
+def _parse_utc(stamp: object) -> datetime | None:
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else None
+
+
+def read_transcript_usage(path: Path, *, since: datetime | None = None) -> dict | None:
+    """Token usage summed from a Claude Code transcript, de-duplicated per message id.
+
+    Returns ``{"messages", "totals": {input, output, cache_read,
+    cache_creation}, "by_model": {model: {..., "messages"}}}`` or None when
+    the main transcript cannot be read or records no usage in the window
+    (*since*: assistant records stamped before it belong to an earlier
+    receipt of a resumed session). A streamed message repeated over several
+    lines counts once (its last line wins). Never raises.
+    """
+    from openshard.adapters.claude_code_import import _sanitize_model
+    from openshard.ingest.parsers.claude_code import _sum_usage
+
+    by_msg: dict[str, tuple[str | None, dict]] = {}
+    for index, file in enumerate(_transcript_files(path)):
+        try:
+            with file.open("rb") as fh:
+                for raw in fh:
+                    if b'"usage"' not in raw or b'"assistant"' not in raw:
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                    except (ValueError, RecursionError):
+                        continue
+                    if not isinstance(rec, dict) or rec.get("type") != "assistant":
+                        continue
+                    msg = rec.get("message")
+                    if not isinstance(msg, dict):
+                        continue
+                    mid, usage = msg.get("id"), msg.get("usage")
+                    if not isinstance(mid, str) or not mid or not isinstance(usage, dict):
+                        continue
+                    if since is not None:
+                        at = _parse_utc(rec.get("timestamp"))
+                        if at is None or at < since:
+                            continue
+                    model = msg.get("model")
+                    by_msg[mid] = (model if isinstance(model, str) and model != "<synthetic>" else None, usage)
+        except OSError:
+            if index == 0:
+                return None
+            continue
+    if not by_msg:
+        return None
+    names = ("input", "output", "cache_read", "cache_creation")
+
+    def _totals(usages: list[dict]) -> dict:
+        summed = _sum_usage(usages)
+        return {n: int(summed.get(n, 0)) for n in names}
+
+    grouped: dict[str, list[dict]] = {}
+    for model, usage in by_msg.values():
+        safe = _sanitize_model(model) if model else "unknown"
+        grouped.setdefault(safe, []).append(usage)
+    by_model = {
+        m: {**_totals(us), "messages": len(us)}
+        for m, us in sorted(grouped.items(), key=lambda kv: -len(kv[1]))[:_MAX_USAGE_MODELS]
+    }
+    return {"messages": len(by_msg), "totals": _totals([u for _, u in by_msg.values()]), "by_model": by_model}
+
+
+def _transcript_usage(buf: dict) -> dict | None:
+    """This receipt's transcript usage, re-read only when a transcript file changed. Never raises.
+
+    Cached on the buffer by the transcript files' size/mtime; when the
+    transcript cannot be read now, the last good reading (if any) stands.
+    """
+    cached = buf.get("transcript_usage") if isinstance(buf.get("transcript_usage"), dict) else None
+    raw = _valid_transcript_path(buf.get("transcript_path"), buf.get("session_id"))
+    if raw is None:
+        return cached
+    try:
+        path = Path(raw)
+        signature = [[f.name, f.stat().st_size, f.stat().st_mtime_ns] for f in _transcript_files(path)]
+    except OSError:
+        return cached
+    since_stamp = buf.get("started_at")
+    if cached and cached.get("sig") == signature and cached.get("since") == since_stamp:
+        return cached
+    usage = read_transcript_usage(path, since=_parse_utc(since_stamp))
+    if usage is None:
+        return cached
+    usage["sig"] = signature
+    usage["since"] = since_stamp
+    buf["transcript_usage"] = usage
+    return usage
 
 
 def _status_line_text(data: Mapping[str, Any]) -> str:
@@ -964,6 +1116,7 @@ class ReducedHookPayload:
     command_outcome: str | None = None  # see HookPayload.command_outcome
     command_exit_code: int | None = None
     task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
+    transcript_path: str | None = None  # see HookPayload.transcript_path
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {
@@ -1000,6 +1153,8 @@ class ReducedHookPayload:
         # Only when declared, so queue lines of an undeclared session keep their shape.
         if self.task_id is not None:
             data["task_id"] = self.task_id
+        if self.transcript_path is not None:
+            data["transcript_path"] = self.transcript_path
         return data
 
     @classmethod
@@ -1058,6 +1213,7 @@ class ReducedHookPayload:
             command_outcome=_command_outcome_or_none(data.get("command_outcome")),
             command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
             task_id=stored_task_id(data),
+            transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
         )
 
 
@@ -1109,6 +1265,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         tool_success=payload.tool_success if isinstance(payload.tool_success, bool) else None,
         attrs=_clean_attrs(payload.attrs),
         task_id=payload.task_id if is_task_id(payload.task_id) else None,
+        transcript_path=_valid_transcript_path(payload.transcript_path, payload.session_id),
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
@@ -1449,6 +1606,16 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
             else None
         ),
         "status_last_seen_at": capture.get("last_status_ping_at"),
+        # Transcript usage this record already carries stands until the
+        # transcript is read again. Claude Code tokens recorded any other way
+        # (pre-transcript records: the status line's last call) are never
+        # carried forward as session totals.
+        "transcript_usage": _stored_transcript_usage(entry, capture),
+        "tokens_scope": (
+            "last_call"
+            if entry.get("executor") == EXECUTOR and capture.get("tokens_source") != TOKENS_SOURCE_TRANSCRIPT
+            else None
+        ),
         "model_source": capture.get("model_source") if capture.get("model_source") != "not_captured" else None,
         "provider_current": capture.get("provider") if isinstance(capture.get("provider"), str) else None,
         "usage_by_key": usage_by_key,
@@ -1463,6 +1630,25 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "baseline": _stored_baseline(entry, capture),
         "task_context": _stored_task_context(entry, capture),
         "task_context_conflicts": _stored_count(capture.get("task_context_conflicts")),
+    }
+
+
+def _stored_transcript_usage(entry: dict, capture: dict) -> dict | None:
+    """The transcript usage a persisted record carries (``capture.tokens_source == transcript``), or None."""
+    if capture.get("tokens_source") != TOKENS_SOURCE_TRANSCRIPT:
+        return None
+    names = {"input": "prompt_tokens", "output": "completion_tokens",
+             "cache_read": "cache_read_tokens", "cache_creation": "cache_creation_tokens"}
+    totals = {k: entry.get(v) for k, v in names.items()}
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in totals.values()):
+        return None
+    by_model = capture.get("usage_by_model")
+    return {
+        "messages": _stored_count(capture.get("usage_messages")),
+        "totals": totals,
+        "by_model": by_model if isinstance(by_model, dict) else {},
+        "sig": None,  # re-read at the next fold whenever the transcript is available
+        "since": capture.get("started_at"),
     }
 
 
@@ -2326,6 +2512,18 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     prompt_tokens = completion_tokens = total_tokens = None
     cache_creation_tokens = cache_read_tokens = None
     tokens_provenance: str | None = None
+    tokens_source: str | None = None
+    tokens_not_recorded: str | None = None
+    transcript_usage = _transcript_usage(buf)
+    if transcript_usage:
+        # Session totals from the transcript (the API responses' own usage).
+        tokens_current = dict(transcript_usage.get("totals") or {})
+        tokens_source = TOKENS_SOURCE_TRANSCRIPT
+    elif buf.get("tokens_scope") == "last_call":
+        # Only the status line's last-call figures are known: never recorded
+        # as session totals. Unknown, with the reason, beats an undercount.
+        tokens_current = None
+        tokens_not_recorded = TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE
     if tokens_current:
         prompt_tokens = int(tokens_current.get("input") or 0)
         completion_tokens = int(tokens_current.get("output") or 0)
@@ -2468,6 +2666,14 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         entry["cache_creation_tokens"] = cache_creation_tokens
         entry["cache_read_tokens"] = cache_read_tokens
         entry["tokens_provenance"] = tokens_provenance
+    if tokens_source is not None and transcript_usage:
+        entry["capture"]["tokens_source"] = tokens_source
+        entry["capture"]["usage_messages"] = int(transcript_usage.get("messages") or 0)
+        if transcript_usage.get("by_model"):
+            # Local per-model breakdown; the synced fields stay the totals above.
+            entry["capture"]["usage_by_model"] = transcript_usage["by_model"]
+    elif tokens_not_recorded is not None:
+        entry["capture"]["tokens_not_recorded_reason"] = tokens_not_recorded
     if duration_seconds is not None:
         entry["duration_seconds"] = duration_seconds
     try:
@@ -2600,6 +2806,9 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     event = payload.event
     profile = _buffer_profile(buf)
     _bind_task_context(buf, payload, now=now)
+    if payload.transcript_path:
+        # Transient: read at fold for token usage only (see _transcript_usage).
+        buf["transcript_path"] = payload.transcript_path
     if payload.model_id:
         # The agent's own hook stream names the model (Codex: every payload;
         # OpenCode: the user message's selected model). Recorded as observed.
@@ -3389,6 +3598,10 @@ def _apply_status(payload: StatusPayload, buf: dict, *, now: str | None = None) 
             changed = True
 
     if payload.tokens_input is not None or payload.tokens_output is not None:
+        # Claude Code's ``context_window.current_usage``: the last API call
+        # only. Kept on the buffer, never recorded as the session's totals
+        # (those come from the transcript; see _transcript_usage).
+        buf["tokens_scope"] = "last_call"
         tokens = {
             "input": payload.tokens_input or 0,
             "output": payload.tokens_output or 0,

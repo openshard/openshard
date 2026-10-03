@@ -79,8 +79,9 @@ CLAUDE_CODE_PROFILE = AgentProfile(
     import_note=(
         "Captured automatically from Claude Code lifecycle hooks. "
         "Tool/file facts are as reported by Claude Code; files are inferred from git diff. "
-        "Model/cost/tokens are read from Claude Code's status line when one is configured "
-        "(see `openshard mcp install claude`); otherwise they stay Unknown/Not recorded. "
+        "Model/cost are read from Claude Code's status line when one is configured "
+        "(see `openshard mcp install claude`); token counts are summed from the API usage "
+        "Claude Code records in its session transcript. Otherwise they stay Unknown/Not recorded. "
         "OpenShard does not run checks for this capture path: any check outcome here is the "
         "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
