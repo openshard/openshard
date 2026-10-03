@@ -123,3 +123,39 @@ def test_static_anthropic_pricing_matches_official_list_prices() -> None:
     assert MODEL_PRICING["anthropic/claude-opus-4.7"] == (5.00, 25.00)
     assert MODEL_PRICING["anthropic/claude-opus-5.5"] == (4.00, 20.00)
     assert MODEL_PRICING["anthropic/claude-fable-5.1"] == (10.00, 50.00)
+
+
+def test_policy_allow_watchlist_readmits_watchlist_models() -> None:
+    from openshard.routing.model_policy import ModelPolicyConfig, eligible_lifecycles
+
+    entries = [_inv("anthropic/claude-opus-4.8"), _inv("anthropic/claude-opus-5.5")]
+    default = filter_unpromoted(entries, eligible=eligible_lifecycles(ModelPolicyConfig()))
+    assert [e.model.id for e in default] == ["anthropic/claude-opus-4.8"]
+    opted_in = filter_unpromoted(
+        entries, eligible=eligible_lifecycles(ModelPolicyConfig(allow_watchlist=True))
+    )
+    assert [e.model.id for e in opted_in] == ["anthropic/claude-opus-4.8", "anthropic/claude-opus-5.5"]
+
+
+def test_gated_only_inventory_does_not_bypass_the_gate() -> None:
+    # Only watchlist curated entries plus an unknown one: the liveness fallback
+    # keeps the uncurated entry but never the gated watchlist models.
+    entries = [_inv("anthropic/claude-opus-5.5"), _inv("claude-sonnet-5-5"), _inv("vendor/model-a")]
+    assert [e.model.id for e in filter_unpromoted(entries)] == ["vendor/model-a"]
+    only_gated = [_inv("anthropic/claude-opus-5.5"), _inv("x-ai/grok-4.7")]
+    assert filter_unpromoted(only_gated) == []
+
+
+def test_uncurated_inventory_is_still_returned_unchanged() -> None:
+    unknown = [_inv("vendor/model-a"), _inv("vendor/model-b")]
+    assert filter_unpromoted(unknown) == unknown
+
+
+def test_advisory_lists_watchlist_only_when_asked() -> None:
+    from openshard.models.advisory import recommend_models
+
+    default_ids = {a.model.id for a in recommend_models(limit=100)}
+    with_watch = {a.model.id for a in recommend_models(include_watchlist=True, limit=100)}
+    assert "anthropic/claude-opus-5.5" not in default_ids
+    assert "anthropic/claude-opus-5.5" in with_watch
+    assert "minimax/m2.7" not in with_watch  # deprecated is never recommended

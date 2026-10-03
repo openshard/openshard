@@ -1078,13 +1078,15 @@ _REGISTRY: list[ModelEntry] = [
         input_modalities=("text", "image"),
         supports_tools=True,
         supports_structured_outputs=True,
-        supports_reasoning=False,
+        supports_reasoning=True,
         supports_multimodal=True,
         latency_class="slow",
         cost_class="expensive",
         notes=(
             "API id claude-fable-5-1. Successor to Fable 5 at the same per-token price; "
-            "adaptive thinking always on, 128k max output, forced tool_choice rejected. "
+            "adaptive thinking always on (so supports_reasoning=True; Fable 5 keeps its "
+            "older curated False because it feeds routing-class tags), 128k max output, "
+            "forced tool_choice rejected. "
             "Watchlist until Openshard evaluation."
         ),
     ),

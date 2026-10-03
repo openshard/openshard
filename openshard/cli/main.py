@@ -1052,6 +1052,13 @@ _VALID_COST_CLASSES = ("free", "tiny", "cheap", "mid", "expensive")
     help="Maximum cost class.",
 )
 @click.option("--include-experimental", "include_experimental", is_flag=True, default=False)
+@click.option(
+    "--include-watchlist",
+    "include_watchlist",
+    is_flag=True,
+    default=False,
+    help="Also list catalogued models not yet evaluated (watchlist).",
+)
 @click.option("--limit", default=5, show_default=True, type=click.IntRange(min=1))
 def models_recommend(
     role: str | None,
@@ -1059,6 +1066,7 @@ def models_recommend(
     capabilities: tuple[str, ...],
     max_cost_class: str | None,
     include_experimental: bool,
+    include_watchlist: bool,
     limit: int,
 ) -> None:
     """Recommend advisory models for a use case (does not change routing)."""
@@ -1079,6 +1087,7 @@ def models_recommend(
         required_capabilities=tuple(capabilities),
         max_cost_class=max_cost_class,
         include_experimental=include_experimental,
+        include_watchlist=include_watchlist,
         limit=limit,
     )
 
