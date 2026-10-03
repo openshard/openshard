@@ -1079,6 +1079,31 @@ def sanitize_task_excerpt(prompt: str | None) -> str | None:
     return text or None
 
 
+def _scrubbed_command(command: str) -> str:
+    """*command* (first 1,000 chars) secret-scrubbed, redacted and whitespace-collapsed."""
+    from openshard.security.redaction import redact_sensitive_text
+    from openshard.security.secret_scan import scrub_text_for_secrets
+
+    scrubbed, _ = scrub_text_for_secrets(command[:1_000], source_label="<hook-command>")
+    scrubbed, _kinds = redact_sensitive_text(scrubbed)
+    return " ".join(scrubbed.split())
+
+
+def _command_key(scrubbed: str) -> str | None:
+    """A short stable key for "the same command run again" (red-then-green check loops).
+
+    The hash of the *scrubbed*, whitespace-normalised command (see
+    ``_scrubbed_command``) -- never of the raw text, so no secret is ever
+    under it -- truncated to 16 hex chars. Distinguishes commands whose
+    displayed text was redacted alike. None for an empty command.
+    """
+    if not scrubbed:
+        return None
+    import hashlib
+
+    return hashlib.sha256(scrubbed.encode("utf-8")).hexdigest()[:16]
+
+
 def summarize_command(command: str | None, label: str = "Bash") -> tuple[str, str | None, str]:
     """Return ``(action_text, target_program, command_kind)`` for a shell command.
 
@@ -1090,23 +1115,25 @@ def summarize_command(command: str | None, label: str = "Bash") -> tuple[str, st
     never as a verification result. *label* is the tool's own name
     (``Bash`` for Claude Code/Codex, ``bash`` for OpenCode).
     """
+    action, target, kind, _key = _summarize_command(command, label)
+    return action, target, kind
+
+
+def _summarize_command(command: str | None, label: str) -> tuple[str, str | None, str, str | None]:
+    """``summarize_command`` plus the command's ``_command_key`` (one scrub for both)."""
     from openshard.safety.sanitize import sanitize_text
-    from openshard.security.secret_scan import scrub_text_for_secrets
 
     if not isinstance(command, str) or not command.strip():
-        return f"{label} command", None, "other"
-    from openshard.security.redaction import redact_sensitive_text
+        return f"{label} command", None, "other", None
 
     kind = "test" if _TEST_COMMAND_RE.search(command) else ("lint" if _LINT_COMMAND_RE.search(command) else "other")
-    scrubbed, _ = scrub_text_for_secrets(command[:1_000], source_label="<hook-command>")
-    scrubbed, _kinds = redact_sensitive_text(scrubbed)
-    collapsed = " ".join(scrubbed.split())
+    collapsed = _scrubbed_command(command)
     safe = sanitize_text(collapsed, _COMMAND_CAP)
     first = collapsed.split(" ", 1)[0] if collapsed else ""
     target = first if _FIRST_TOKEN_RE.match(first) else None
     if not safe:
-        return f"{label} command (redacted)", target, kind
-    return f"{label}: {safe}", target, kind
+        return f"{label} command (redacted)", target, kind, _command_key(collapsed)
+    return f"{label}: {safe}", target, kind, _command_key(collapsed)
 
 
 # ---------------------------------------------------------------------------
@@ -1151,6 +1178,7 @@ class ReducedHookPayload:
     command_safety: str | None = None
     command_outcome: str | None = None  # see HookPayload.command_outcome
     command_exit_code: int | None = None
+    command_key: str | None = None  # see _command_key(): same check command -> same key
     task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
     transcript_path: str | None = None  # see HookPayload.transcript_path
     agent_provider: str | None = None  # see HookPayload.agent_provider
@@ -1188,6 +1216,8 @@ class ReducedHookPayload:
             data["command_outcome"] = self.command_outcome
         if self.command_exit_code is not None:
             data["command_exit_code"] = self.command_exit_code
+        if self.command_key is not None:
+            data["command_key"] = self.command_key
         # Only when declared, so queue lines of an undeclared session keep their shape.
         if self.task_id is not None:
             data["task_id"] = self.task_id
@@ -1254,11 +1284,19 @@ class ReducedHookPayload:
             command_safety=_command_safety_or_none(data.get("command_safety")),
             command_outcome=_command_outcome_or_none(data.get("command_outcome")),
             command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
+            command_key=_command_key_or_none(data.get("command_key")),
             task_id=stored_task_id(data),
             transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
             agent_provider=_agent_provider_or_none(data.get("agent_provider")),
             agent_surface=_agent_surface_or_none(data.get("agent_surface")),
         )
+
+
+_COMMAND_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _command_key_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and _COMMAND_KEY_RE.match(value) else None
 
 
 def _valid_baseline(raw: object) -> dict | None:
@@ -1333,8 +1371,10 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
             if reduced.file_target is None and reduced.file_targets:
                 reduced.file_target = reduced.file_targets[0]["path"]
         elif kind == TOOL_KIND_COMMAND:
-            action, target, ckind = summarize_command(payload.command, label=tool)
+            action, target, ckind, key = _summarize_command(payload.command, tool)
             reduced.command_action, reduced.command_target, reduced.command_kind = action, target, ckind
+            if ckind in ("test", "lint"):
+                reduced.command_key = key  # only check-shaped commands need one (see _record_check)
             reduced.command_outcome = _command_outcome_or_none(payload.command_outcome)
             reduced.command_exit_code = _exit_code_or_none(payload.command_exit_code)
             reduced.command_safety = classify_command_text(payload.command)
@@ -1678,6 +1718,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "applied_ids": [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)],
         "check_command_seen": bool(entry.get("verification_attempted")),
         **_stored_checks(entry),
+        **_stored_check_latest(entry, capture),
         "capture_losses": _stored_losses(capture),
         "baseline": _stored_baseline(entry, capture),
         "task_context": _stored_task_context(entry, capture),
@@ -1760,6 +1801,21 @@ def _stored_checks(entry: dict) -> dict:
     if checks and isinstance(block.get("started_at"), str):
         checks[0]["at"] = block["started_at"]
     return {"checks": checks, "checks_total": max(total, len(checks))}
+
+
+def _stored_check_latest(entry: dict, capture: dict) -> dict:
+    """The per-command latest outcomes and per-run counts a persisted record carries (empty when none)."""
+    raw = capture.get("check_latest")
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    latest = {k: v for k, v in raw.items() if isinstance(k, str) and v in ("passed", "failed", "unknown")}
+    runs = capture.get("check_runs") if isinstance(capture.get("check_runs"), dict) else {}
+    return {
+        "check_latest": latest,
+        "check_latest_overflow": bool(capture.get("check_latest_overflow")),
+        "checks_passed_runs": _stored_count(runs.get("passed")),
+        "checks_failed_runs": _stored_count(runs.get("failed")),
+    }
 
 
 def _stored_baseline(entry: dict, capture: dict) -> dict:
@@ -2268,12 +2324,35 @@ def _command_status(payload: ReducedHookPayload, failed_event: bool) -> str:
     return outcome if outcome in (OUTCOME_PASSED, OUTCOME_FAILED) else "unknown"
 
 
+_MAX_CHECK_KEYS = 100  # distinct check commands whose latest outcome is tracked
+
+
 def _record_check(
     buf: dict, name: str, kind: str, *, status: str, at: str, exit_code: int | None = None,
+    key: str | None = None,
 ) -> None:
     """Remember one hook-observed check command with the outcome its hook reported
-    (``unknown`` when the hook reported none)."""
+    (``unknown`` when the hook reported none).
+
+    Every run counts (``checks_total``, ``checks_passed_runs`` /
+    ``checks_failed_runs``), and the *latest* outcome per command
+    (``check_latest``, keyed by ``command_key``) is what the verification
+    status is computed from -- a check that failed and then passed on a
+    re-run is passed; the earlier failed run stays listed and counted.
+    """
     buf["checks_total"] = int(buf.get("checks_total") or 0) + 1
+    if status in ("passed", "failed"):
+        counter = f"checks_{status}_runs"
+        buf[counter] = int(buf.get(counter) or 0) + 1
+    latest = buf.get("check_latest")
+    if not isinstance(latest, dict):
+        latest = buf["check_latest"] = {}
+    slot = key or f"name:{name}"
+    if slot in latest or len(latest) < _MAX_CHECK_KEYS:
+        latest.pop(slot, None)  # re-insert: most recently run last
+        latest[slot] = status
+    else:
+        buf["check_latest_overflow"] = True
     checks = buf.get("checks")
     if not isinstance(checks, list):
         checks = buf["checks"] = []
@@ -2332,29 +2411,49 @@ def _hook_verification(buf: dict) -> dict:
             source=SOURCE_DIRECTLY_OBSERVED, observation_mode=MODE_HOOK_TOOL_EVENT, checks_attempted=0,
             reason="No check command observed in the agent's tool events.",
         )
-    failed = sum(1 for c in checks if c.get("status") == "failed")
-    passed = sum(1 for c in checks if c.get("status") == "passed")
     stamps = [c["at"] for c in checks if isinstance(c.get("at"), str)]
     truncated = total > len(checks)
     if truncated:
         incomplete.append(REASON_CHECKS_TRUNCATED)
-    # Checks past the buffer bound have no recorded outcome, so they count as unknown.
-    unknown = total - passed - failed
-    if failed:
+    latest = buf.get("check_latest") if isinstance(buf.get("check_latest"), dict) else None
+    superseded = 0
+    if latest:
+        # The status follows each command's *latest* reported outcome, so a
+        # red-then-green loop ends green. ``checks_attempted`` counts every
+        # run; ``checks_passed`` / ``checks_failed`` count commands by their
+        # latest outcome (a passed status with a failed count is inconsistent
+        # by contract). Earlier failed runs stay in ``checks`` and the reason.
+        outcomes = list(latest.values())
+        latest_failed = outcomes.count("failed")
+        latest_passed = outcomes.count("passed")
+        passed, failed = latest_passed, latest_failed
+        unknown = len(outcomes) - latest_failed - latest_passed + (1 if buf.get("check_latest_overflow") else 0)
+        superseded = _stored_count(buf.get("checks_failed_runs")) if not latest_failed else 0
+    else:
+        # A buffer rebuilt from an older record: outcomes per run only.
+        failed = sum(1 for c in checks if c.get("status") == "failed")
+        passed = sum(1 for c in checks if c.get("status") == "passed")
+        latest_failed, latest_passed = failed, passed
+        # Checks past the buffer bound have no recorded outcome, so they count as unknown.
+        unknown = total - passed - failed
+    if latest_failed:
         status = STATUS_FAILED
-    elif passed and not unknown:
+    elif latest_passed and not unknown:
         status = STATUS_PASSED
-    elif passed:
+    elif latest_passed:
         status = STATUS_PARTIAL
     else:
         status = STATUS_UNKNOWN
     if unknown:
         incomplete.append(REASON_OUTCOME_NOT_OBSERVED)
-    if failed:
+    if latest_failed:
         reason = "The agent's hook reported a check command as failed; OpenShard did not run it."
-    elif passed and not unknown:
+    elif superseded and latest_passed and not unknown:
+        reason = (f"The agent's hook reported {superseded} failed check run(s) that passed on a later re-run; "
+                  "OpenShard did not run them.")
+    elif latest_passed and not unknown:
         reason = "The agent's hook reported the check command outcome(s); OpenShard did not run them."
-    elif passed:
+    elif latest_passed:
         reason = "The agent's hook reported some check outcomes; the rest were not observed."
     else:
         reason = "Check command(s) observed through agent hooks; outcome not observed."
@@ -2874,6 +2973,17 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         entry["receipt_id"] = record["receipt_id"]
     _stamp_task_context(entry, buf)
     _stamp_git_outcome(entry, buf)
+    check_latest = buf.get("check_latest")
+    if isinstance(check_latest, dict) and check_latest:
+        # Latest outcome per check command (keys are hashes, never command
+        # text), so a buffer rebuilt from this record keeps the same status.
+        entry["capture"]["check_latest"] = dict(list(check_latest.items())[-_MAX_CHECK_KEYS:])
+        entry["capture"]["check_runs"] = {
+            "passed": _stored_count(buf.get("checks_passed_runs")),
+            "failed": _stored_count(buf.get("checks_failed_runs")),
+        }
+        if buf.get("check_latest_overflow"):
+            entry["capture"]["check_latest_overflow"] = True
     invocation_count = int(buf.get("invocation_count") or 0)
     if invocation_count:
         # Model invocations observed (Antigravity PreInvocation); absent for
@@ -3272,7 +3382,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
                 buf["check_command_seen"] = True
                 _record_check(
                     buf, action, payload.command_kind, status=outcome, at=now,
-                    exit_code=payload.command_exit_code,
+                    exit_code=payload.command_exit_code, key=payload.command_key,
                 )
         _append_event(
             buf, event_type="tool.invoked", action=action, target=target,
