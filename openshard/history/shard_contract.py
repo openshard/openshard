@@ -432,14 +432,25 @@ def _format_model_slug_shard(name: str) -> str:
             tagged.append(("version", part))
         else:
             tagged.append(("word", part.capitalize()))
+    def _digit(j: int) -> bool:
+        return tagged[j][0] == "version" and len(tagged[j][1]) == 1 and tagged[j][1].isdigit()
+
     out = ""
+    joined = False
     for i, (kind, text) in enumerate(tagged):
         if i == 0:
             out = text
+        elif _digit(i) and _digit(i - 1) and not joined:
+            # Two single-digit parts are one version: "claude-opus-5-5" ->
+            # "Claude Opus 5.5". Dated parts ("2024-08-06") never match.
+            out += "." + text
+            joined = True
+            continue
         elif kind == "version" and tagged[i - 1][0] == "abbrev":
             out += "-" + text
         else:
             out += " " + text
+        joined = False
     return out
 
 
