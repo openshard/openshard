@@ -32,6 +32,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     work = tmp_path / "work"
     work.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=work, check=True, capture_output=True)
     monkeypatch.chdir(work)
     return work
 
@@ -63,12 +64,25 @@ class TestSetOwnerCommand:
         assert _yaml(workdir / ".openshard" / "config.yml") == {"identity": {"owner": "Repo Person"}}
         assert recorded_owner(workdir) == "Repo Person"
 
-    def test_repo_flag_updates_the_config_already_in_use(self, home: Path, workdir: Path):
-        # A repository using ./config.yml must not be shadowed by a new .openshard/config.yml.
+    def test_repo_flag_never_shadows_a_root_config_yml(self, home: Path, workdir: Path):
+        # A new .openshard/config.yml would replace ./config.yml for every setting: refused.
         (workdir / "config.yml").write_text("executor: direct\n", encoding="utf-8")
-        assert _invoke("--repo", "Repo Person").exit_code == 0
-        assert _yaml(workdir / "config.yml") == {"executor": "direct", "identity": {"owner": "Repo Person"}}
+        result = _invoke("--repo", "Repo Person")
+        assert result.exit_code != 0 and "config.yml" in result.output
+        assert _yaml(workdir / "config.yml") == {"executor": "direct"}
         assert not (workdir / ".openshard").exists()
+
+    def test_repo_flag_outside_a_repository_is_refused(self, home: Path, tmp_path: Path, monkeypatch):
+        import openshard.adapters.claude_mcp_install as mcp_install
+
+        monkeypatch.setattr(mcp_install, "find_repo_root", lambda start: None)
+        result = _invoke("--repo", "Repo Person")
+        assert result.exit_code != 0 and "repository" in result.output
+
+    def test_rewriting_an_existing_file_warns_that_comments_are_lost(self, home: Path, workdir: Path):
+        assert _invoke("Ada").exit_code == 0
+        result = _invoke("Grace")
+        assert result.exit_code == 0 and "comments" in result.output
 
     def test_clear_removes_only_the_owner(self, home: Path, workdir: Path):
         assert _invoke("Ada").exit_code == 0

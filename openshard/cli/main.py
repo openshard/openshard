@@ -7695,10 +7695,10 @@ def config_set_owner(owner: str | None, clear: bool, repo_scope: bool) -> None:
     config with --repo (a repository value wins). Never inferred from git or
     organisation metadata; Receipts already recorded keep their owner.
     """
+    from openshard.adapters.claude_mcp_install import find_repo_root
     from openshard.config.settings import (
         clean_owner,
         config_search_path,
-        find_config_path,
         user_config_path,
         write_identity_owner,
     )
@@ -7710,7 +7710,21 @@ def config_set_owner(owner: str | None, clear: bool, repo_scope: bool) -> None:
         value = clean_owner(owner)
         if value is None or value != " ".join(str(owner).split()):
             raise click.UsageError("Owner must be plain text up to 120 characters (no paths or secret-like values).")
-    path = (find_config_path() or config_search_path()) if repo_scope else user_config_path()
+    if repo_scope:
+        root = find_repo_root(Path.cwd())
+        home = Path.home().resolve()
+        if root is None or home == root.resolve() or home.is_relative_to(root.resolve()):
+            # Never the home directory (or above it), even when that is itself a git repository.
+            raise click.UsageError("--repo needs to run inside a project repository.")
+        path = config_search_path(root)
+        if not path.exists() and (root / "config.yml").exists():
+            raise click.UsageError(
+                f"{root / 'config.yml'} is this repository's config; a new {path} would replace it. "
+                "Add identity.owner to config.yml by hand, or set the owner user-globally (no --repo).")
+    else:
+        path = user_config_path()
+    if path.exists():
+        click.echo(f"Note: {path} is rewritten; YAML comments in it are not preserved.", err=True)
     try:
         written = write_identity_owner(path, value)
     except (OSError, ValueError) as exc:
