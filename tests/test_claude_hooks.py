@@ -1266,6 +1266,113 @@ class TestStatusPayloadParsing:
 
 
 # ---------------------------------------------------------------------------
+# Session git outcome: end HEAD, session-created commits, their PR
+# ---------------------------------------------------------------------------
+
+
+def _head(repo: Path) -> str:
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def _projected(entry: dict) -> dict:
+    return receipt_to_dict(build_shard_receipt(entry), extended=True)
+
+
+class TestSessionGitOutcome:
+    def _commit_mid_session(self, repo: Path) -> str:
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="add feature and commit")
+        (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        _git(repo, "add", "feature.py")
+        _git(repo, "commit", "-q", "-m", "feature")
+        _run(repo, "Stop")
+        return _head(repo)
+
+    def test_session_created_commit_is_the_projected_commit(self, repo: Path):
+        start = _head(repo)
+        head = self._commit_mid_session(repo)
+        stopped = _runs_lines(repo)[0]
+        # Not on an ordinary turn: the git outcome is a finalisation step only.
+        assert "git_end_head" not in stopped and _projected(stopped)["commit"] is None
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert entry["git_head_commit_hash"] == start
+        assert entry["git_end_head"] == head
+        assert entry["session_commits"] == {"source": "git_observed", "shas": [head], "truncated": False}
+        projected = _projected(entry)
+        assert projected["commit"] == head and projected["base_commit"] == start
+        assert projected["pr_url"] is None  # no PR lookup in the test suite (OPENSHARD_PR_LOOKUP=off)
+
+    def test_no_commit_means_no_projected_commit(self, repo: Path):
+        entry = _session(repo)
+        assert entry["git_end_head"] == entry["git_head_commit_hash"]
+        assert entry["session_commits"]["shas"] == []
+        assert _projected(entry)["commit"] is None
+
+    def test_a_head_that_only_moved_is_never_the_result(self, repo: Path):
+        start = _head(repo)
+        _git(repo, "checkout", "-q", "-b", "other")
+        (repo / "old.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "old.py")
+        _git(repo, "commit", "-q", "-m", "pre-existing work", "--date=2000-01-01T00:00:00Z")
+        subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--amend",
+                        "--no-edit"], cwd=repo, check=True, capture_output=True,
+                       env={**os.environ, "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        old = _head(repo)
+        _git(repo, "checkout", "-q", "-")
+        assert _head(repo) == start
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="look at the other branch")
+        _git(repo, "checkout", "-q", "other")  # HEAD moves to a commit older than the session
+        _run(repo, "Stop")
+        _run(repo, "SessionEnd", reason="other")
+        entry = _runs_lines(repo)[0]
+        assert entry["git_end_head"] == old
+        assert entry["session_commits"]["shas"] == []
+        assert _projected(entry)["commit"] is None
+
+    def test_pr_url_only_when_its_head_is_a_session_commit(self, repo: Path, monkeypatch):
+        monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "on")
+        calls: list[tuple] = []
+
+        def fake_pr(root, branch, commits):
+            calls.append((branch, set(commits)))
+            head = next(iter(commits))
+            return {"url": "https://github.com/acme/widget/pull/7", "number": 7, "head": head, "source": "gh_observed"}
+
+        monkeypatch.setattr(ch, "_gh_pull_request", fake_pr)
+        head = self._commit_mid_session(repo)
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert calls and calls[0][1] == {head}
+        assert entry["pull_request"]["head"] == head and entry["pull_request"]["source"] == "gh_observed"
+        assert _projected(entry)["pr_url"] == "https://github.com/acme/widget/pull/7"
+
+    def test_gh_lookup_matches_head_ref_oid_and_fails_closed(self, repo: Path, monkeypatch):
+        import shutil
+
+        head = "a" * 40
+        rows = [{"number": 3, "url": "https://github.com/acme/widget/pull/3", "headRefOid": "b" * 40},
+                {"number": 4, "url": "https://github.com/acme/widget/pull/4", "headRefOid": head}]
+
+        class _Proc:
+            def __init__(self, code: int, out: str):
+                self.returncode, self.stdout = code, out
+
+        monkeypatch.setattr(shutil, "which", lambda name: "gh")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(0, json.dumps(rows)))
+        pr = ch._gh_pull_request(repo, "feature", {head})
+        assert pr == {"url": "https://github.com/acme/widget/pull/4", "number": 4, "head": head,
+                      "source": "gh_observed"}
+        assert ch._gh_pull_request(repo, "feature", {"c" * 40}) is None
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(1, ""))
+        assert ch._gh_pull_request(repo, "feature", {head}) is None
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        assert ch._gh_pull_request(repo, "feature", {head}) is None
+
+
+# ---------------------------------------------------------------------------
 # PR6: model / token / cost capture via the status line
 # ---------------------------------------------------------------------------
 

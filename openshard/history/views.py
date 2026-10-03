@@ -227,6 +227,11 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
         # the model) and the raw launch surface. None when not recorded.
         "provider": evidence.get("provider"),
         "surface": evidence.get("surface"),
+        # The commit the session created and ended on, and its PR -- only when
+        # git (and the hosting provider, for the PR) observed them. Never the
+        # base commit, never a HEAD that merely moved.
+        "commit": evidence.get("commit"),
+        "pr_url": evidence.get("pr_url"),
         "content_hash": evidence.get("content_hash"),
         "session": evidence.get("session"),
         "routing": evidence.get("routing"),

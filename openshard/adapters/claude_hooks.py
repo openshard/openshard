@@ -1668,6 +1668,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "baseline": _stored_baseline(entry, capture),
         "task_context": _stored_task_context(entry, capture),
         "task_context_conflicts": _stored_count(capture.get("task_context_conflicts")),
+        "git_outcome": _stored_git_outcome(entry),
         # The owner the record was created with; never re-resolved or back-filled.
         "owner": entry.get("owner") if isinstance(entry.get("owner"), str) else None,
     }
@@ -2470,6 +2471,135 @@ def _stamp_task_context(entry: dict, buf: dict) -> None:
         entry["capture"]["task_context_conflicts"] = conflicts
 
 
+# ---------------------------------------------------------------------------
+# Session outcome in git (finalisation only): the HEAD the session ended on,
+# the commits created during it, and the pull request that carries one.
+# ---------------------------------------------------------------------------
+
+_MAX_SESSION_COMMITS = 50
+_GH_TIMEOUT_SECONDS = 5.0
+PR_LOOKUP_ENV = "OPENSHARD_PR_LOOKUP"  # "off" disables the ``gh`` pull-request lookup
+_SHA_RE = re.compile(r"^[0-9a-f]{40,64}$")
+
+
+def _sha_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    return value if _SHA_RE.match(value) else None
+
+
+def _session_git_outcome(buf: dict, repo_root: Path) -> dict | None:
+    """``git_observed`` end state of the session, or None when git cannot say. Never raises.
+
+    ``commits`` are those reachable from the end HEAD but not from the HEAD
+    snapshotted at session start, *and* committed at or after the session
+    started -- the commits created while this receipt's session ran (newest
+    first). None (not ``[]``) when there is no start HEAD to compare with.
+    """
+    try:
+        end = _sha_or_none(run_git(repo_root, ["rev-parse", "HEAD"]))
+        if end is None:
+            return None
+        outcome: dict[str, Any] = {"source": ATTR_GIT_OBSERVED, "end_head": end, "commits": None, "truncated": False}
+        start = _sha_or_none(buf.get("git_head_commit_hash"))
+        started = _parse_utc(buf.get("started_at"))
+        if start is not None and started is not None:
+            log = run_git(repo_root, [
+                "log", f"--max-count={_MAX_SESSION_COMMITS + 1}", "--format=%H %ct", f"{start}..{end}",
+            ])
+            if log is not None:
+                commits: list[str] = []
+                rows = [r.split() for r in log.splitlines() if r.strip()]
+                for row in rows[:_MAX_SESSION_COMMITS]:
+                    sha = _sha_or_none(row[0]) if row else None
+                    if sha and len(row) > 1 and row[1].isdigit() and int(row[1]) >= int(started.timestamp()):
+                        commits.append(sha)
+                outcome["commits"] = commits
+                outcome["truncated"] = len(rows) > _MAX_SESSION_COMMITS
+        branch = (run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip()
+        if outcome["commits"] and branch and branch != "HEAD" and os.environ.get(PR_LOOKUP_ENV, "").lower() != "off":
+            pr = _gh_pull_request(repo_root, branch, set(outcome["commits"]))
+            if pr is not None:
+                outcome["pull_request"] = pr
+        return outcome
+    except Exception:
+        return None
+
+
+def _gh_pull_request(repo_root: Path, branch: str, session_commits: set[str]) -> dict | None:
+    """The pull request whose head is one of *session_commits*, as the GitHub CLI reports it.
+
+    One read-only ``gh pr list --head <branch>`` with a short timeout; only
+    a PR whose ``headRefOid`` *is* a commit this session created counts.
+    No ``gh``, no auth, no network, no match -> None. Never raises.
+    """
+    import shutil
+    import subprocess
+
+    from openshard.util.git import NO_WINDOW_KW
+
+    try:
+        exe = shutil.which("gh")
+        if exe is None:
+            return None
+        proc = subprocess.run(
+            [exe, "pr", "list", "--head", branch, "--state", "all",
+             "--json", "number,url,headRefOid", "--limit", "5"],
+            cwd=str(repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_GH_TIMEOUT_SECONDS, check=False, **NO_WINDOW_KW,
+        )
+        if proc.returncode != 0:
+            return None
+        rows = json.loads(proc.stdout or "")
+    except Exception:
+        return None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        head, url, number = _sha_or_none(row.get("headRefOid")), row.get("url"), row.get("number")
+        if head in session_commits and isinstance(url, str) and re.match(r"^https://[^\s]{1,2040}$", url):
+            return {
+                "url": url, "number": number if isinstance(number, int) and not isinstance(number, bool) else None,
+                "head": head, "source": "gh_observed",
+            }
+    return None
+
+
+def _stamp_git_outcome(entry: dict, buf: dict) -> None:
+    """Persist the finalisation-time git outcome (``_session_git_outcome``) on *entry*."""
+    outcome = buf.get("git_outcome")
+    if not isinstance(outcome, dict) or _sha_or_none(outcome.get("end_head")) is None:
+        return
+    entry["git_end_head"] = outcome["end_head"]
+    commits = outcome.get("commits")
+    if isinstance(commits, list):
+        entry["session_commits"] = {
+            "source": ATTR_GIT_OBSERVED,
+            "shas": [c for c in commits if _sha_or_none(c)][:_MAX_SESSION_COMMITS],
+            "truncated": bool(outcome.get("truncated")),
+        }
+    pr = outcome.get("pull_request")
+    if isinstance(pr, dict) and isinstance(pr.get("url"), str):
+        entry["pull_request"] = {k: pr.get(k) for k in ("url", "number", "head", "source")}
+
+
+def _stored_git_outcome(entry: dict) -> dict | None:
+    """The git outcome a persisted record carries (rebuilt buffers keep it until re-finalised)."""
+    end = _sha_or_none(entry.get("git_end_head"))
+    if end is None:
+        return None
+    outcome: dict[str, Any] = {"source": ATTR_GIT_OBSERVED, "end_head": end, "commits": None, "truncated": False}
+    block = entry.get("session_commits")
+    if isinstance(block, dict) and isinstance(block.get("shas"), list):
+        outcome["commits"] = [c for c in block["shas"] if _sha_or_none(c)]
+        outcome["truncated"] = bool(block.get("truncated"))
+    pr = entry.get("pull_request")
+    if isinstance(pr, dict) and isinstance(pr.get("url"), str):
+        outcome["pull_request"] = dict(pr)
+    return outcome
+
+
 def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     """Build the coerced runs.jsonl record for a session's current state.
 
@@ -2729,6 +2859,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
     _stamp_task_context(entry, buf)
+    _stamp_git_outcome(entry, buf)
     invocation_count = int(buf.get("invocation_count") or 0)
     if invocation_count:
         # Model invocations observed (Antigravity PreInvocation); absent for
@@ -2795,10 +2926,20 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     return coerce_shard_entry(entry)
 
 
-def _fold(buf: dict, repo_root: Path) -> tuple[dict, str]:
-    """Snapshot the session into runs.jsonl (replace this session's line or append)."""
+def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, str]:
+    """Snapshot the session into runs.jsonl (replace this session's line or append).
+
+    *finalize* (SessionEnd, or the idle sweep closing a session) also records
+    the session's git outcome -- end HEAD, commits created, their PR -- which
+    costs a few git calls and possibly one ``gh`` call, so it never runs on
+    an ordinary turn or tool snapshot.
+    """
     from openshard.history.jsonl_store import upsert_jsonl
 
+    if finalize:
+        outcome = _session_git_outcome(buf, repo_root)
+        if outcome is not None:
+            buf["git_outcome"] = outcome
     entry = build_hook_entry(buf, repo_root)
     session_id = str(buf.get("session_id"))
     executor = _buffer_profile(buf).executor
@@ -2869,7 +3010,7 @@ def sweep_stale_buffers(
                         if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
                             losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
                         buf["capture_losses"] = losses
-                        swept_entry, _ = _fold(buf, repo_root)
+                        swept_entry, _ = _fold(buf, repo_root, finalize=True)
                         _schedule_post_session_verify(repo_root, swept_entry)
                     path.unlink()
                 folded.append(sid)
@@ -3402,7 +3543,7 @@ def apply_reduced_hook(
             entry: dict | None = None
             outcome = ""
             if should_fold:
-                entry, outcome = _fold(buf, repo_root)
+                entry, outcome = _fold(buf, repo_root, finalize=bool(buf.get("ended")))
             if should_delete:
                 try:
                     if path.exists():
