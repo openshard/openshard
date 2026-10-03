@@ -153,3 +153,17 @@ def _default_pipeline_provider():
     """
     with patch("openshard.run.pipeline.detect_provider", return_value="openrouter"):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _pr_lookup_off_by_default(monkeypatch):
+    """Start every test as an in-process hook, not the capture service.
+
+    ``enable_pr_lookup()`` flips a process-global when a test starts the
+    service in-process; without this reset it leaks into later tests on the
+    same xdist worker, which would then run service-only git/``gh`` work.
+    Tests that need the service behaviour set it explicitly.
+    """
+    from openshard.adapters import claude_hooks
+
+    monkeypatch.setattr(claude_hooks, "_PR_LOOKUP_ENABLED", False)
