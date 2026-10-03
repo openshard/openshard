@@ -1809,7 +1809,8 @@ def _stored_check_latest(entry: dict, capture: dict) -> dict:
     if not isinstance(raw, dict) or not raw:
         return {}
     latest = {k: v for k, v in raw.items() if isinstance(k, str) and v in ("passed", "failed", "unknown")}
-    runs = capture.get("check_runs") if isinstance(capture.get("check_runs"), dict) else {}
+    raw_runs = capture.get("check_runs")
+    runs: dict = raw_runs if isinstance(raw_runs, dict) else {}
     return {
         "check_latest": latest,
         "check_latest_overflow": bool(capture.get("check_latest_overflow")),
@@ -1903,7 +1904,8 @@ def _resumed_segment(
     previous = persisted.get("receipt_id")
     if isinstance(previous, str) and previous:
         buf["resumed_from_receipt_id"] = previous
-    capture = persisted.get("capture") if isinstance(persisted.get("capture"), dict) else {}
+    raw_capture = persisted.get("capture")
+    capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
     buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
     return buf
 
@@ -3061,9 +3063,9 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
     from openshard.history.jsonl_store import upsert_jsonl
 
     if finalize:
-        outcome = _session_git_outcome(buf, repo_root)
-        if outcome is not None:
-            buf["git_outcome"] = outcome
+        git_outcome = _session_git_outcome(buf, repo_root)
+        if git_outcome is not None:
+            buf["git_outcome"] = git_outcome
     entry = build_hook_entry(buf, repo_root)
     session_id = str(buf.get("session_id"))
     executor = _buffer_profile(buf).executor
