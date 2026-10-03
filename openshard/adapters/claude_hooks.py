@@ -3934,8 +3934,11 @@ def apply_reduced_hook(
                 baseline=payload.baseline,
             )
             if loaded is None:
+                ended = _find_persisted_entry(repo_root, payload.session_id, profile_for(payload.agent).executor)
+                applied = ((ended or {}).get("capture") or {}).get("applied_event_ids") or []
+                detail = "duplicate event id" if dedup_id and dedup_id in applied else "late hook for an ended session"
                 return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
-                                   repo_root=repo_root, detail="late hook for an ended session")
+                                   repo_root=repo_root, detail=detail)
             buf = loaded
             if _already_applied(buf, dedup_id):
                 return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
