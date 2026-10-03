@@ -89,9 +89,23 @@ _MODEL_FRIENDLY_NAMES: dict[str, str] = {
     "claude-opus-4.7": "Claude Opus 4.7",
     "claude-haiku-4-5": "Claude Haiku 4.5",
     "claude-haiku-4.5": "Claude Haiku 4.5",
+    # Current Claude models (platform.claude.com models overview, 2026-10-03).
+    # Direct API ids use dashes, OpenRouter slugs use dots; without these the
+    # slug formatter would render "claude-opus-5-5" as "Claude Opus 5 5".
+    "claude-fable-5-1": "Claude Fable 5.1",
+    "claude-fable-5.1": "Claude Fable 5.1",
+    "claude-opus-5-5": "Claude Opus 5.5",
+    "claude-opus-5.5": "Claude Opus 5.5",
+    "claude-sonnet-5-5": "Claude Sonnet 5.5",
+    "claude-sonnet-5.5": "Claude Sonnet 5.5",
+    "claude-opus-4-8": "Claude Opus 4.8",
+    "claude-opus-4.8": "Claude Opus 4.8",
     "openai/gpt-5.5": "GPT-5.5",
     "z-ai/glm-5.1": "GLM-5.1",
 }
+
+# Trailing -YYYYMMDD snapshot date on a provider model id.
+_DATE_SUFFIX_RE = re.compile(r"-20\d{6}$")
 
 # Words rendered in ALL CAPS in model names (abbreviations and well-known initialisms).
 _ABBREV_WORDS: frozenset[str] = frozenset({"gpt", "llm", "ai", "api", "url", "id", "ui", "ml", "glm"})
@@ -385,6 +399,10 @@ def _display_model_name(slug: str) -> str:
     name_key = key.split("/", 1)[-1]
     if name_key in _MODEL_FRIENDLY_NAMES:
         return _MODEL_FRIENDLY_NAMES[name_key]
+    # Dated snapshot ids (claude-haiku-4-5-20251001) name the same model.
+    undated = _DATE_SUFFIX_RE.sub("", name_key)
+    if undated != name_key and undated in _MODEL_FRIENDLY_NAMES:
+        return _MODEL_FRIENDLY_NAMES[undated]
     # Fall back to centralized registry for models not in the local table.
     from openshard.models.registry import display_name_for as _reg_display
     reg_name = _reg_display(slug)

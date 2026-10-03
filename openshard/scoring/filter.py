@@ -112,10 +112,20 @@ def filter_deprecated(
     return result
 
 
+# Curated lifecycles that record a model without promoting it: catalogued
+# (watchlist) or retired (deprecated). Being in the registry under one of these
+# must not let a model into scored routing, or adding a newly released model to
+# the catalog would make it the "newest version" the shortlist prefers. The
+# organisation's model policy can re-admit them (allow_watchlist /
+# allow_deprecated) via the ``eligible`` lifecycle set.
+_UNPROMOTED_CURATED_LIFECYCLES: frozenset[str] = frozenset({"watchlist", "deprecated"})
+
+
 def filter_unpromoted(
     entries: list[InventoryEntry],
     *,
     allow: frozenset[str] = frozenset(),
+    eligible: frozenset[str] = frozenset(),
     registry_fn: Callable[[str], str | None] | None = None,
 ) -> list[InventoryEntry]:
     """Drop uncurated models from an inventory that contains curated ones.
@@ -129,13 +139,20 @@ def filter_unpromoted(
 
     Curated means a registry id, or (without *registry_fn*) an alias the
     curated catalog resolves, so direct-provider ids such as
-    ``claude-sonnet-4-6`` count as ``anthropic/claude-sonnet-4.6``.
+    ``claude-sonnet-4-6`` count as ``anthropic/claude-sonnet-4.6``. Watchlist
+    and deprecated entries are catalogued, not curated for routing, unless
+    *eligible* (the policy's ``eligible_lifecycles``) admits their lifecycle.
+
     Like ``build_shortlist``, an inventory with no curated (or allowed) entry
-    at all is returned unchanged rather than emptied.
+    is not emptied for liveness: its uncurated entries are returned. Gated
+    entries (watchlist/deprecated not admitted by policy) are never part of
+    that fallback, so an inventory whose only curated models are gated cannot
+    route to them; scored selection then falls back to keyword routing.
 
     Args:
         entries: provider inventory entries
         allow: explicitly selected ids that pass regardless of curation
+        eligible: lifecycles the model policy admits; re-admits gated ones
         registry_fn: optional override for ``lifecycle_for`` (injectable for tests)
     """
     try:
@@ -153,16 +170,39 @@ def filter_unpromoted(
         except Exception:
             resolve = None
 
-    def _curated(mid: str) -> bool:
+    gated_lifecycles = _UNPROMOTED_CURATED_LIFECYCLES - eligible
+
+    def _lifecycle(mid: str) -> str | None:
+        """The curated lifecycle *mid* names (directly or via alias), else None."""
         try:
-            if _lc_fn(mid) is not None:
-                return True
+            lc = _lc_fn(mid)
+            if lc is not None:
+                return lc
         except Exception:
             pass
-        return resolve is not None and resolve(mid) is not None
+        if resolve is None:
+            return None
+        canonical = resolve(mid)
+        if canonical is None:
+            return None
+        try:
+            return _lc_fn(canonical) or "curated"
+        except Exception:
+            return "curated"
+
+    lifecycles = {e.model.id: _lifecycle(e.model.id) for e in entries}
+
+    def _curated(mid: str) -> bool:
+        lc = lifecycles[mid]
+        return lc is not None and lc not in gated_lifecycles
+
+    def _gated(mid: str) -> bool:
+        return lifecycles[mid] in gated_lifecycles and mid not in allow
 
     kept = [e for e in entries if e.model.id in allow or _curated(e.model.id)]
-    return kept if kept else list(entries)
+    if kept:
+        return kept
+    return [e for e in entries if not _gated(e.model.id)]
 
 
 def prefilter_coding(entries: list[InventoryEntry]) -> list[InventoryEntry]:

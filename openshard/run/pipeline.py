@@ -91,6 +91,7 @@ from openshard.routing.engine import (
 )
 from openshard.routing.form_factor_policy import ExecutionFormFactorDecision, select_form_factor
 from openshard.routing.model_policy import (
+    eligible_lifecycles,
     explicit_selection_ids,
     model_policy_from_config,
 )
@@ -685,6 +686,7 @@ class RunPipeline:
                 _entries = filter_unpromoted(
                     [e for e in _inv.models if e.provider == _provider_name],
                     allow=explicit_selection_ids(_model_policy),
+                    eligible=eligible_lifecycles(_model_policy),
                 )
                 _hist_adjustments: dict[str, float] | None = None
                 _hist_reasons: dict[str, str] = {}

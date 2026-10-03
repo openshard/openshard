@@ -70,12 +70,16 @@ class RateLimitError(ProviderRateLimitError, OpenRouterError):
 # fails the test. Do not add further unregistered IDs here.
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     # Anthropic
-    "anthropic/claude-haiku-4.5":           (0.80,   4.00),
-    "anthropic/claude-haiku-4.5-20251001":  (0.80,   4.00),
+    # Verified 2026-10-03 against https://platform.claude.com/docs/en/about-claude/pricing
+    # and the 2026-09-25 OpenRouter snapshot (they agree).
+    "anthropic/claude-haiku-4.5":           (1.00,   5.00),
+    "anthropic/claude-haiku-4.5-20251001":  (1.00,   5.00),
     "anthropic/claude-sonnet-4.6":          (3.00,  15.00),
-    "anthropic/claude-opus-4.6":            (15.00, 75.00),
-    "anthropic/claude-opus-4.7":            (15.00, 75.00),   # ~est
+    "anthropic/claude-opus-4.6":            (5.00,  25.00),
+    "anthropic/claude-opus-4.7":            (5.00,  25.00),
     "anthropic/claude-opus-4.8":            (5.00,  25.00),
+    "anthropic/claude-opus-5.5":            (4.00,  20.00),
+    "anthropic/claude-fable-5.1":           (10.00, 50.00),
     # Main worker
     "z-ai/glm-5.1":                         (0.10,   0.10),   # ~est
     # Cheap coding

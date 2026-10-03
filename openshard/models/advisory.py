@@ -13,6 +13,11 @@ _COST_ORDER: dict[str, int] = {
     "unknown": 5,
 }
 
+# Catalogued-but-unevaluated (watchlist) and retired (deprecated) models are
+# not recommended by default: catalog presence alone must not surface a model.
+# ``include_watchlist`` lists watchlist entries on request; deprecated never.
+_NOT_RECOMMENDED_LIFECYCLES: frozenset[str] = frozenset({"watchlist", "deprecated"})
+
 _HIGH_RISK_TIERS: frozenset[str] = frozenset({"strong", "frontier"})
 _LOW_RISK_COSTS: frozenset[str] = frozenset({"free", "tiny", "cheap"})
 
@@ -32,13 +37,15 @@ def recommend_models(
     required_capabilities: tuple[str, ...] = (),
     max_cost_class: str | None = None,
     include_experimental: bool = False,
+    include_watchlist: bool = False,
     limit: int = 5,
 ) -> list[ModelAdvisory]:
     for cap in required_capabilities:
         if cap not in _CAPABILITY_ATTRS:
             return []
 
-    candidates = all_models()
+    excluded = _NOT_RECOMMENDED_LIFECYCLES - ({"watchlist"} if include_watchlist else set())
+    candidates = [m for m in all_models() if m.lifecycle not in excluded]
 
     if role is not None:
         candidates = [m for m in candidates if role in m.roles]
