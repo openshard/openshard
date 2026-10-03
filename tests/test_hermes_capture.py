@@ -513,12 +513,15 @@ class TestCanonicalRecord:
         cap = _lines(repo)[0]["capture"]
         assert "subagents" not in cap and "approvals" not in cap
 
-    def test_counts_survive_a_late_hook_after_session_end(self, repo):
+    def test_a_late_hook_after_session_end_leaves_the_ended_receipt_unchanged(self, repo):
         _drive_inline(repo)
+        ended = _lines(repo)[0]
         _run(_doc(repo, "subagent_stop", child_status="completed"))  # arrives after finalize
-        cap = _lines(repo)[0]["capture"]
-        assert cap["subagents"]["stopped"] == 2 and cap["approvals"]["granted"] == 1
-        assert len(_lines(repo)) == 1
+        # The ended receipt is immutable (it may already be synced); a late
+        # hook with no work opens an empty segment that records nothing.
+        assert _lines(repo) == [ended]
+        cap = ended["capture"]
+        assert cap["subagents"]["stopped"] == 1 and cap["approvals"]["granted"] == 1
 
     def test_interrupt_and_idle_are_not_completed_turns(self, repo):
         _run(_doc(repo, "on_session_start", model=MODEL))

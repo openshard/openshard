@@ -522,18 +522,45 @@ class TestLifecycle:
         assert "Claude Code session resumed" in acts
         assert lines[0]["capture"]["session_end_observed"] is False
 
-    def test_resume_after_end_snapshots_same_record_and_keeps_ended_state(self, repo: Path):
-        _session(repo)
+    def test_resume_after_end_opens_a_new_receipt_and_leaves_the_ended_one_unchanged(self, repo: Path):
+        ended = _session(repo)
+        before = _raw(repo)
         out = _run(repo, "SessionStart", source="resume")
-        # The session already ended: the rebuilt buffer is folded and dropped again.
-        assert out.action == "record_updated"
-        assert not buffer_path(repo.resolve(), SID).exists()
-        lines = _runs_lines(repo)
-        assert len(lines) == 1
-        acts = [e["action"] for e in _events(lines[0], EVENT_SESSION_ACTIVITY)]
+        assert out.action == "buffered"
+        assert _raw(repo) == before  # nothing written until the resumed segment shows work
+        _run(repo, "UserPromptSubmit", prompt="Now add subtraction")
+        _run(repo, "Stop")
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        first, second = _runs_lines(repo)
+        # The ended (possibly already synced) receipt is byte-for-byte what it was.
+        assert json.dumps(first) == json.dumps(ended)
+        assert second["receipt_id"] != ended["receipt_id"]
+        assert second["run_id"] != ended["run_id"]
+        assert second["capture"]["session_id"] == SID
+        assert second["capture"]["start_source"] == "resume"
+        assert second["capture"]["resumed_from_receipt_id"] == ended["receipt_id"]
+        assert second["capture"]["session_end_observed"] is True
+        assert second["capture"]["prompt_count"] == 1
+        assert second["task"] == "Now add subtraction"
+        acts = [e["action"] for e in _events(second, EVENT_SESSION_ACTIVITY)]
         assert "Claude Code session resumed" in acts
-        # Ended state is preserved, not reset, by a post-end resume.
-        assert lines[0]["capture"]["session_end_observed"] is True
+
+    def test_resumed_segment_baseline_excludes_the_ended_segments_changes(self, repo: Path):
+        _session(repo)  # leaves calc.py / README.md changed in the working tree
+        _run(repo, "SessionStart", source="resume")
+        _run(repo, "UserPromptSubmit", prompt="tweak")
+        (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+        _run(repo, "Stop")
+        second = _runs_lines(repo)[1]
+        counted = {f["path"] for f in second["files_detail"] if f.get("attribution") == "git_observed"}
+        assert counted == {"new.py"}
+
+    def test_status_ping_after_end_never_touches_the_ended_receipt(self, repo: Path):
+        _session(repo)
+        before = _raw(repo)
+        _status(repo, cost_total=9.0)
+        assert _raw(repo) == before
+        assert not buffer_path(repo.resolve(), SID).exists()
 
     def test_session_end_without_any_work_records_nothing(self, repo: Path):
         _run(repo, "SessionStart", source="startup")
@@ -935,23 +962,16 @@ class TestRobustness:
         _run(repo, "SessionEnd", reason="prompt_input_exit")
         assert len(_runs_lines(repo)) == 1
 
-    def test_late_stop_after_session_end_rebuilds_from_record(self, repo: Path):
+    def test_late_stop_after_session_end_never_mutates_the_ended_receipt(self, repo: Path):
         entry = _session(repo)
-        before = len(entry["events"])
+        before = _raw(repo)
         out = _run(repo, "Stop")  # a background Stop finishing after SessionEnd
-        assert out.action == "record_updated"
-        assert not buffer_path(repo.resolve(), SID).exists()  # not left behind
-        lines = _runs_lines(repo)
-        assert len(lines) == 1
-        after = lines[0]
-        assert len(after["events"]) == before + 1
-        assert len(_events(after, EVENT_TOOL_INVOKED)) == 3
-        assert after["task"] == entry["task"]
-        assert after["shard_id"] == entry["shard_id"]
-        assert after["capture"]["session_end_observed"] is True
-        git_ids_before = {e["event_id"] for e in _events(entry, EVENT_FILE_CHANGED)}
-        git_ids_after = {e["event_id"] for e in _events(after, EVENT_FILE_CHANGED)}
-        assert git_ids_before == git_ids_after  # stable across folds
+        # The ended receipt is immutable (it may already be synced); a hook
+        # with no work after the end opens an empty segment that records nothing.
+        assert out.action == "buffered"
+        assert _raw(repo) == before
+        assert len(_runs_lines(repo)) == 1
+        assert _runs_lines(repo)[0]["receipt_id"] == entry["receipt_id"]
 
     def test_duplicate_tool_payload_counts_twice_but_one_record(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")

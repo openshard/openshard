@@ -7359,7 +7359,8 @@ def sync_now(limit: int, as_json: bool) -> None:
     if report.in_progress:
         line += f" {report.in_progress} session(s) in progress, left alone."
     if report.stale:
-        line += f" {report.stale} changed locally since sync."
+        line += (f" {report.stale} changed locally after it was synced and was not re-sent "
+                 "(hosted Receipts are immutable; see `openshard sync status`).")
     if report.stopped and report.sent:
         line += f" Stopped: {report.stopped}."
     click.echo(line)

@@ -1536,10 +1536,11 @@ def _write_buffer(path: Path, buf: dict) -> None:
 def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
     """Rebuild a staging buffer from an already-persisted record.
 
-    Used when a hook arrives for a session whose buffer is gone (resumed
-    after SessionEnd, or a background Stop hook finishing after SessionEnd
-    deleted it) so no later hook can ever overwrite the record with an
-    empty snapshot.
+    Used when a hook arrives for a session whose buffer is gone but whose
+    record has not ended (the idle sweep folded and removed it) so no later
+    hook can ever overwrite the record with an empty snapshot. A record whose
+    session *ended* is never rebuilt: later hooks open a new segment instead
+    (see ``_resumed_segment``).
     """
     capture = entry.get("capture")
     if not isinstance(capture, dict):
@@ -1586,6 +1587,9 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "started_at": capture.get("started_at") or entry.get("timestamp") or _now(),
         "last_activity_at": capture.get("last_activity_at") or _now(),
         "start_source": capture.get("start_source"),
+        "resumed_from_receipt_id": (
+            capture.get("resumed_from_receipt_id") if isinstance(capture.get("resumed_from_receipt_id"), str) else None
+        ),
         "git_branch": entry.get("git_branch"),
         "git_head_commit_hash": entry.get("git_head_commit_hash"),
         "git_dirty": entry.get("git_dirty"),
@@ -1778,10 +1782,15 @@ def _is_session_entry(entry: dict, session_id: str, executor: str = EXECUTOR) ->
 
 
 def _find_persisted_entry(repo_root: Path, session_id: str, executor: str = EXECUTOR) -> dict | None:
-    """One raw scan of runs.jsonl for this session's record (no coercion)."""
+    """One raw scan of runs.jsonl for this session's latest record (no coercion).
+
+    A resumed session can have several receipts (one per segment, see
+    ``_resumed_segment``); the last one written is the live candidate.
+    """
     path = repo_root / ".openshard" / "runs.jsonl"
     if not path.exists():
         return None
+    found: dict | None = None
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -1792,10 +1801,40 @@ def _find_persisted_entry(repo_root: Path, session_id: str, executor: str = EXEC
             except json.JSONDecodeError:
                 continue
             if isinstance(d, dict) and _is_session_entry(d, session_id, executor):
-                return d
+                found = d
     except OSError:
         return None
-    return None
+    return found
+
+
+def _entry_ended(entry: dict) -> bool:
+    capture = entry.get("capture")
+    return isinstance(capture, dict) and capture.get("session_end_observed") is True
+
+
+def _resumed_segment(
+    persisted: dict, repo_root: Path, session_id: str, first_hook: str, *, now: str | None,
+    agent: str, baseline: dict | None,
+) -> dict:
+    """A fresh buffer for hooks arriving after this session's receipt already ended.
+
+    A receipt is immutable once its session ended: it may already be synced,
+    and the Platform keeps the first copy it accepted per ``receipt_id``.
+    Hooks for the same agent session id after that -- a ``claude --resume``,
+    or a late background hook -- start a new receipt segment instead: new
+    run/receipt identity at its first work, ``start_source: resume``, a
+    baseline and HEAD taken now, and a link back to the ended receipt. The
+    ended receipt's dedup ids are carried over, so a replayed queue line it
+    already applied is still recognised as a duplicate.
+    """
+    buf = _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline)
+    buf["start_source"] = "resume"
+    previous = persisted.get("receipt_id")
+    if isinstance(previous, str) and previous:
+        buf["resumed_from_receipt_id"] = previous
+    capture = persisted.get("capture") if isinstance(persisted.get("capture"), dict) else {}
+    buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
+    return buf
 
 
 def _load_or_create_buffer(
@@ -1808,6 +1847,10 @@ def _load_or_create_buffer(
         return buf
     persisted = _find_persisted_entry(repo_root, session_id, profile_for(agent).executor)
     if persisted is not None:
+        if _entry_ended(persisted):
+            return _resumed_segment(
+                persisted, repo_root, session_id, first_hook, now=now, agent=agent, baseline=baseline,
+            )
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
             return rebuilt
@@ -1831,6 +1874,10 @@ def _load_buffer_light(repo_root: Path, session_id: str, agent: str = AGENT_CLAU
     if path.exists():
         return _read_buffer(path)
     persisted = _find_persisted_entry(repo_root, session_id, profile_for(agent).executor) or {}
+    if _entry_ended(persisted):
+        # The ended receipt is immutable; the next real hook opens a new
+        # segment (see _resumed_segment) and later pings feed that one.
+        return None
     return _buffer_from_entry(persisted, session_id) or None
 
 
@@ -2701,6 +2748,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             # Delegation / approval-gate facts the agent reported (Hermes);
             # absent for agents whose hooks expose none.
             entry["capture"][count_key] = {n: int(raw_counts.get(n) or 0) for n in count_names}
+    if isinstance(buf.get("resumed_from_receipt_id"), str):
+        # This receipt continues an agent session whose earlier receipt had
+        # already ended (see _resumed_segment); that receipt is left as it was.
+        entry["capture"]["resumed_from_receipt_id"] = buf["resumed_from_receipt_id"]
     if isinstance(buf.get("provider_source"), str) and provider_current:
         entry["capture"]["provider_source"] = buf["provider_source"]
     surface = _agent_surface_or_none(buf.get("surface"))
@@ -2751,10 +2802,19 @@ def _fold(buf: dict, repo_root: Path) -> tuple[dict, str]:
     entry = build_hook_entry(buf, repo_root)
     session_id = str(buf.get("session_id"))
     executor = _buffer_profile(buf).executor
+    receipt_id = (buf.get("record") or {}).get("receipt_id")
+    if isinstance(receipt_id, str) and receipt_id:
+        # One line per receipt: a resumed session's segments share the agent
+        # session id, so the receipt identity is what selects the line.
+        def match(e: dict) -> bool:
+            return e.get("receipt_id") == receipt_id
+    else:  # a record rebuilt from pre-0.4.4 history has no receipt_id
+        def match(e: dict) -> bool:
+            return _is_session_entry(e, session_id, executor)
     outcome = upsert_jsonl(
         repo_root / ".openshard" / "runs.jsonl",
         entry,
-        lambda e: _is_session_entry(e, session_id, executor),
+        match,
         timeout=_LOCK_TIMEOUT_SECONDS,
     )
     buf["last_fold_at"] = _now()
@@ -3335,9 +3395,9 @@ def apply_reduced_hook(
             _mark_applied(buf, dedup_id)
             remote_events = _remote_capture_new_events(buf)
             if buf.get("ended") and _has_activity(buf):
-                # A hook arriving after SessionEnd (a background Stop that
-                # finished late, or a resume of an ended session): snapshot
-                # and drop the rebuilt buffer again rather than leave it behind.
+                # An ended buffer (this SessionEnd, or a buffer an older
+                # version left behind): snapshot and drop it rather than
+                # leave it behind. Hooks after the end open a new segment.
                 should_fold, should_delete = True, True
             entry: dict | None = None
             outcome = ""

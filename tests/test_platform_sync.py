@@ -566,6 +566,23 @@ class TestFlush:
         assert client.status(repo, env=env)["stale"] == 1
         assert client.flush(repo, env=env).sent == 0  # stays stale, still not resent
 
+    def test_resuming_a_synced_session_syncs_a_new_receipt_and_never_stales_the_first(
+        self, repo, env, link, recording,
+    ):
+        # The audited failure: a session ended, its Receipt synced, then the
+        # same Claude session id was resumed and later hooks mutated it.
+        _session(repo, _sid(1))
+        assert client.flush(repo, env=env).created == 1
+        _hook(repo, _sid(1), "SessionStart", source="resume")
+        _hook(repo, _sid(1), "UserPromptSubmit", prompt="one more thing")
+        _hook(repo, _sid(1), "Stop")
+        _hook(repo, _sid(1), "SessionEnd", reason="prompt_input_exit")
+        report = client.flush(repo, env=env)
+        assert (report.created, report.stale) == (1, 0)
+        first, second = _entries(repo)
+        assert [e["receipt"]["receipt_id"] for e in recording.envelopes] == [first["receipt_id"], second["receipt_id"]]
+        assert recording.envelopes[1]["receipt"]["session"]["start_source"] == "resume"
+
     def test_a_new_organisation_gets_everything_again(self, repo, env, link, recording):
         _session(repo, _sid(1))
         assert client.flush(repo, env=env).created == 1
