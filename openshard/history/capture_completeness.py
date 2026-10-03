@@ -29,6 +29,9 @@ Reasons (``kind`` values) and what produces them:
   were counted but not staged (``capture.hook_events_dropped``).
 * ``session_end_not_observed`` -- the session went idle for so long that
   its buffer was swept without a SessionEnd; a later hook may still arrive.
+* ``git_outcome_unavailable`` -- the session's end-of-session git state
+  (end HEAD, commits it created, their pull request) could not be read
+  when it was finalised, so the commit is unknown -- never "no commit".
 * ``integration_limitation`` -- the agent integration cannot deliver a
   kind of evidence at all (documented per agent).
 
@@ -58,13 +61,14 @@ REASON_CORRUPT_QUEUED_EVENT = "corrupt_queued_event"
 REASON_DROPPED_HOOK_EVENTS = "dropped_hook_events"
 REASON_SESSION_END_NOT_OBSERVED = "session_end_not_observed"
 REASON_INTEGRATION_LIMITATION = "integration_limitation"
+REASON_GIT_OUTCOME_UNAVAILABLE = "git_outcome_unavailable"
 # Historical Ingestion v1: source records the parser could not read
 # (malformed, oversized or of an unknown type), counted, never guessed at.
 REASON_UNPARSED_SOURCE_RECORDS = "unparsed_source_records"
 VALID_REASONS = frozenset({
     REASON_CORRUPT_QUEUED_EVENT, REASON_DROPPED_HOOK_EVENTS,
     REASON_SESSION_END_NOT_OBSERVED, REASON_INTEGRATION_LIMITATION,
-    REASON_UNPARSED_SOURCE_RECORDS,
+    REASON_UNPARSED_SOURCE_RECORDS, REASON_GIT_OUTCOME_UNAVAILABLE,
 })
 
 _MAX_REASONS = 8
@@ -85,6 +89,8 @@ def reason_detail(kind: str, count: int) -> str:
         return "session end was not observed"
     if kind == REASON_INTEGRATION_LIMITATION:
         return "the integration cannot deliver some evidence"
+    if kind == REASON_GIT_OUTCOME_UNAVAILABLE:
+        return "end-of-session git state (commits, pull request) could not be read"
     if kind == REASON_UNPARSED_SOURCE_RECORDS:
         return f"{count} source {_plural(count, 'record', 'records')} could not be parsed"
     return kind

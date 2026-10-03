@@ -185,6 +185,7 @@ from openshard.adapters.capture_agents import (
     profile_for,
 )
 from openshard.history.capture_completeness import (
+    REASON_GIT_OUTCOME_UNAVAILABLE,
     REASON_SESSION_END_NOT_OBSERVED,
     build_completeness,
     make_reason,
@@ -806,6 +807,10 @@ _TRANSCRIPT_RECENT_IDS = 16  # message ids per file kept open for re-reported st
 _TRANSCRIPT_MAX_CLOSED_IDS = 20_000  # closed message ids remembered for de-duplication across files
 _MAX_USAGE_MODELS = 10
 TOKENS_SOURCE_TRANSCRIPT = "transcript"
+# The model ids the API reported in the transcript's assistant messages: the
+# receipt's model when nothing else names one (headless ``claude -p`` has no
+# status line). Provider-reported, never guessed; a status-line model wins.
+MODEL_SOURCE_TRANSCRIPT = "transcript"
 TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE = "transcript_unavailable"
 TOKENS_INCOMPLETE_FILES_CAPPED = "transcript_files_capped"
 # One message's usage: input, output, cache_read, cache_creation (total),
@@ -1073,6 +1078,23 @@ def _transcript_usage(buf: dict) -> dict | None:
         return cached
     buf["transcript_usage"] = usage
     return usage
+
+
+def _transcript_models(usage: Mapping[str, Any]) -> list[str]:
+    """API-reported model ids in transcript *usage*, most output tokens first (sanitized)."""
+    by_model = usage.get("by_model")
+    if not isinstance(by_model, Mapping):
+        return []
+    ranked = sorted(
+        ((m, row) for m, row in by_model.items() if isinstance(m, str) and isinstance(row, Mapping)),
+        key=lambda kv: -_count(kv[1].get("output")),
+    )
+    models: list[str] = []
+    for raw, _row in ranked:
+        safe = _sanitize_model_id(raw)
+        if safe and not safe.startswith("<") and safe not in models:
+            models.append(safe)
+    return models
 
 
 def _transcript_cost(usage: Mapping[str, Any]) -> float | None:
@@ -1865,8 +1887,18 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
             entry.get("execution_model") if entry.get("execution_model") not in (None, "unknown") else None
         ),
         "last_idle_at": capture.get("last_idle_at") if isinstance(capture.get("last_idle_at"), str) else None,
-        "model_current": entry.get("execution_model") if entry.get("execution_model") not in (None, "unknown") else None,
-        "models_seen": [m for m in (capture.get("models_seen") or []) if isinstance(m, str)],
+        # A transcript-derived model is re-derived at the next fold, never
+        # pinned as if the agent had reported it.
+        "model_current": (
+            entry.get("execution_model")
+            if entry.get("execution_model") not in (None, "unknown")
+            and capture.get("model_source") != MODEL_SOURCE_TRANSCRIPT
+            else None
+        ),
+        "models_seen": (
+            [m for m in (capture.get("models_seen") or []) if isinstance(m, str)]
+            if capture.get("model_source") != MODEL_SOURCE_TRANSCRIPT else []
+        ),
         "cost_total_usd": capture.get("cost_total_usd") if isinstance(capture.get("cost_total_usd"), (int, float)) else None,
         "cost_baseline_usd": (
             capture.get("cost_baseline_usd") if isinstance(capture.get("cost_baseline_usd"), (int, float)) else None
@@ -1892,7 +1924,10 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
             if entry.get("executor") == EXECUTOR and capture.get("tokens_source") != TOKENS_SOURCE_TRANSCRIPT
             else None
         ),
-        "model_source": capture.get("model_source") if capture.get("model_source") != "not_captured" else None,
+        "model_source": (
+            capture.get("model_source")
+            if capture.get("model_source") not in ("not_captured", MODEL_SOURCE_TRANSCRIPT) else None
+        ),
         "provider_current": capture.get("provider") if isinstance(capture.get("provider"), str) else None,
         "provider_source": capture.get("provider_source") if isinstance(capture.get("provider_source"), str) else None,
         "surface": _agent_surface_or_none(capture.get("surface")),
@@ -2873,7 +2908,7 @@ def _reflog_created(repo_root: Path) -> dict[str, int] | None:
     return created
 
 
-def _session_git_outcome(buf: dict, repo_root: Path) -> dict | None:
+def _session_git_outcome(buf: dict, repo_root: Path, previous: dict | None = None) -> dict | None:
     """``git_observed`` end state of the session, or None when git cannot say. Never raises.
 
     A commit counts as created by this session only when all of these hold:
@@ -2888,6 +2923,9 @@ def _session_git_outcome(buf: dict, repo_root: Path) -> dict | None:
     teammate's commits pulled in, commits made by hand after the session
     went idle and another session's commits therefore do not count.
     ``commits`` is None (unknown) without a start HEAD or a reflog.
+    *previous* (an outcome computed earlier for this session) lets the
+    ``gh`` lookup be skipped when the commit set is unchanged and that
+    lookup already found the pull request.
     """
     try:
         end = _sha_or_none(run_git(repo_root, ["rev-parse", "HEAD"]))
@@ -2919,6 +2957,14 @@ def _session_git_outcome(buf: dict, repo_root: Path) -> dict | None:
                     commits.append(sha)
                 outcome["commits"] = commits
                 outcome["truncated"] = len(rows) > _MAX_SESSION_COMMITS
+        prev_pr = previous.get("pull_request") if isinstance(previous, dict) else None
+        if (
+            previous is not None and outcome["commits"] and isinstance(prev_pr, dict)
+            and isinstance(prev_pr.get("url"), str) and prev_pr.get("head") in outcome["commits"]
+            and set(previous.get("commits") or []) == set(outcome["commits"])
+        ):
+            outcome["pull_request"] = dict(prev_pr)  # same commits, PR already found: no second gh call
+            return outcome
         branch = (run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip()
         if (
             outcome["commits"] and branch and branch != "HEAD" and _PR_LOOKUP_ENABLED
@@ -2969,6 +3015,64 @@ def _gh_pull_request(repo_root: Path, branch: str, session_commits: set[str]) ->
                 "head": head, "source": "gh_observed",
             }
     return None
+
+
+def _merge_git_outcome(fresh: dict | None, stored: object) -> dict | None:
+    """*fresh* with what an earlier outcome for this session already established.
+
+    A failed git read (*fresh* None -- e.g. Claude Code tearing the session
+    down at SessionEnd) keeps the stored outcome instead of dropping it; an
+    unknown commit set at the same end HEAD keeps the stored one; a pull
+    request found earlier for a commit still in the session's set is kept
+    when this lookup found none (``gh`` failing, offline). Never invents a
+    commit or a PR the earlier, attributed outcome did not hold.
+    """
+    prior = stored if isinstance(stored, dict) and _sha_or_none(stored.get("end_head")) else None
+    if fresh is None:
+        return dict(prior) if prior is not None else None
+    if prior is None:
+        return fresh
+    merged = dict(fresh)
+    if merged.get("commits") is None and isinstance(prior.get("commits"), list) and (
+        prior.get("end_head") == merged.get("end_head")
+    ):
+        merged["commits"] = list(prior["commits"])
+        merged["truncated"] = bool(prior.get("truncated"))
+    prior_pr = prior.get("pull_request")
+    if (
+        "pull_request" not in merged and isinstance(prior_pr, dict) and isinstance(prior_pr.get("url"), str)
+        and prior_pr.get("head") in (merged.get("commits") or [])
+    ):
+        merged["pull_request"] = dict(prior_pr)
+    return merged
+
+
+def _refresh_git_outcome_on_stop(buf: dict, repo_root: Path) -> None:
+    """Capture-service only: record the session's git outcome at a completed turn.
+
+    SessionEnd may never reach the service (headless ``claude -p``), or reach
+    it while git/``gh`` cannot run, so the outcome is kept current at each
+    Stop -- recomputed only when HEAD moved since the last computed outcome,
+    or when that outcome has session commits but no pull request yet (a PR
+    opened in a later turn). At most one bounded ``gh`` call per Stop. The
+    attribution rules are ``_session_git_outcome``'s, unchanged. An inline
+    hook process (no service) never runs this: Claude Code is waiting on it.
+    """
+    if not _PR_LOOKUP_ENABLED:
+        return
+    try:
+        stored = buf.get("git_outcome") if isinstance(buf.get("git_outcome"), dict) else None
+        if stored is not None:
+            head = _sha_or_none(run_git(repo_root, ["rev-parse", "HEAD"]))
+            if head is None:
+                return
+            if head == stored.get("end_head") and (not stored.get("commits") or stored.get("pull_request")):
+                return
+        merged = _merge_git_outcome(_session_git_outcome(buf, repo_root, previous=stored), stored)
+        if merged is not None:
+            buf["git_outcome"] = merged
+    except Exception:
+        pass
 
 
 def _stamp_git_outcome(entry: dict, buf: dict) -> None:
@@ -3108,8 +3212,17 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     # the "verification never fabricated" contract both stay honest.
     models_seen = [m for m in (buf.get("models_seen") or []) if isinstance(m, str)][:5]
     model_current = buf.get("model_current") if isinstance(buf.get("model_current"), str) else None
-    execution_model = model_current or "unknown"
     model_source = buf.get("model_source") if isinstance(buf.get("model_source"), str) else None
+    transcript_usage = _transcript_usage(buf)
+    if model_current is None and transcript_usage:
+        # No status line / agent-reported model (headless ``claude -p``): the
+        # model ids the API itself reported in the transcript, the one with
+        # the most output tokens first. Never overrides a reported model.
+        transcript_models = _transcript_models(transcript_usage)
+        if transcript_models:
+            model_current, model_source = transcript_models[0], MODEL_SOURCE_TRANSCRIPT
+            models_seen = transcript_models[:5]
+    execution_model = model_current or "unknown"
     provider_current = buf.get("provider_current") if isinstance(buf.get("provider_current"), str) else None
     usage_provenance = (
         buf.get("usage_provenance") if isinstance(buf.get("usage_provenance"), str) else profile.usage_provenance
@@ -3137,7 +3250,6 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     tokens_provenance: str | None = None
     tokens_source: str | None = None
     tokens_not_recorded: str | None = None
-    transcript_usage = _transcript_usage(buf)
     if transcript_usage:
         # Session totals from the transcript (the API responses' own usage).
         tokens_current = dict(transcript_usage.get("totals") or {})
@@ -3377,9 +3489,17 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
     from openshard.history.jsonl_store import upsert_jsonl
 
     if finalize:
-        git_outcome = _session_git_outcome(buf, repo_root)
+        stored = buf.get("git_outcome") if isinstance(buf.get("git_outcome"), dict) else None
+        git_outcome = _merge_git_outcome(_session_git_outcome(buf, repo_root, previous=stored), stored)
         if git_outcome is not None:
             buf["git_outcome"] = git_outcome
+        elif _sha_or_none(buf.get("git_head_commit_hash")) is not None:
+            # Git was readable at the start but not now, and no earlier
+            # outcome exists: the commit is unknown -- say so, never "none".
+            losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
+            if not any(r.get("kind") == REASON_GIT_OUTCOME_UNAVAILABLE for r in losses):
+                losses.append(make_reason(REASON_GIT_OUTCOME_UNAVAILABLE))
+            buf["capture_losses"] = losses
     entry = build_hook_entry(buf, repo_root)
     session_id = str(buf.get("session_id"))
     executor = _buffer_profile(buf).executor
@@ -4000,6 +4120,8 @@ def apply_reduced_hook(
                 should_fold, should_delete = True, True
             entry: dict | None = None
             outcome = ""
+            if should_fold and payload.event == EVENT_STOP and not buf.get("ended"):
+                _refresh_git_outcome_on_stop(buf, repo_root)
             if should_fold:
                 entry, outcome = _fold(buf, repo_root, finalize=bool(buf.get("ended")))
             if should_delete:

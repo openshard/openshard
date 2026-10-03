@@ -1555,6 +1555,93 @@ class TestSessionGitOutcome:
         monkeypatch.setattr(shutil, "which", lambda name: None)
         assert ch._gh_pull_request(repo, "feature", {head}) is None
 
+    # -- headless robustness: SessionEnd may never arrive, or arrive while git/gh cannot run --
+
+    def _service_mode(self, monkeypatch, prs: list) -> list:
+        """Run as the capture service worker; ``gh`` answers from *prs* in turn (last one repeats)."""
+        monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "on")
+        monkeypatch.setattr(ch, "_PR_LOOKUP_ENABLED", True)
+        calls: list[set] = []
+
+        def fake_pr(root, branch, commits):
+            calls.append(set(commits))
+            number = prs[min(len(calls), len(prs)) - 1]
+            if number is None:
+                return None
+            return {"url": f"https://github.com/acme/widget/pull/{number}", "number": number,
+                    "head": next(iter(commits)), "source": "gh_observed"}
+
+        monkeypatch.setattr(ch, "_gh_pull_request", fake_pr)
+        return calls
+
+    def test_service_stop_stamps_commit_and_pr_without_session_end(self, repo: Path, monkeypatch):
+        calls = self._service_mode(monkeypatch, [401])
+        head = self._commit_mid_session(repo)  # ends with a Stop; no SessionEnd ever arrives
+        entry = _runs_lines(repo)[0]
+        assert entry["capture"]["session_end_observed"] is False
+        assert entry["git_end_head"] == head and entry["session_commits"]["shas"] == [head]
+        assert entry["pull_request"]["number"] == 401 and entry["pull_request"]["head"] == head
+        assert _projected(entry)["commit"] == head
+        _run(repo, "UserPromptSubmit", prompt="anything else?")
+        _run(repo, "Stop")  # HEAD unchanged and the PR already found: no git outcome, no gh call
+        assert len(calls) == 1
+        assert _runs_lines(repo)[0]["pull_request"]["number"] == 401
+
+    def test_service_stop_retries_the_pr_lookup_until_found(self, repo: Path, monkeypatch):
+        calls = self._service_mode(monkeypatch, [None, 402])
+        head = self._commit_mid_session(repo)
+        assert "pull_request" not in _runs_lines(repo)[0]
+        _run(repo, "UserPromptSubmit", prompt="open a PR")
+        _run(repo, "Stop")  # PR opened in a later turn (HEAD did not move)
+        assert len(calls) == 2
+        entry = _runs_lines(repo)[0]
+        assert entry["pull_request"]["number"] == 402 and entry["pull_request"]["head"] == head
+
+    def test_finalize_with_git_failing_keeps_the_stored_outcome(self, repo: Path, monkeypatch):
+        self._service_mode(monkeypatch, [401])
+        head = self._commit_mid_session(repo)
+        monkeypatch.setattr(ch, "run_git", lambda *a, **k: None)  # Claude Code tearing the session down
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert entry["capture"]["session_end_observed"] is True
+        assert entry["git_end_head"] == head and entry["session_commits"]["shas"] == [head]
+        assert entry["pull_request"]["number"] == 401
+        kinds = [r["kind"] for r in entry["capture"]["completeness"]["reasons"]]
+        assert "git_outcome_unavailable" not in kinds
+
+    def test_merge_keeps_an_earlier_pr_for_a_still_present_commit(self):
+        a, b, c = "a" * 40, "b" * 40, "c" * 40
+        pr = {"url": "https://github.com/acme/widget/pull/9", "number": 9, "head": a, "source": "gh_observed"}
+        stored = {"source": "git_observed", "end_head": a, "commits": [a], "truncated": False, "pull_request": pr}
+        fresh = {"source": "git_observed", "end_head": b, "commits": [a, b], "truncated": False}
+        assert ch._merge_git_outcome(fresh, stored)["pull_request"] == pr  # gh failed this time
+        gone = {"source": "git_observed", "end_head": c, "commits": [c], "truncated": False}
+        assert "pull_request" not in ch._merge_git_outcome(gone, stored)  # its commit is no longer the session's
+        unknown = {"source": "git_observed", "end_head": a, "commits": None, "truncated": False}
+        assert ch._merge_git_outcome(unknown, stored)["commits"] == [a]
+        assert ch._merge_git_outcome(None, stored) == stored
+        assert ch._merge_git_outcome(None, None) is None
+
+    def test_inline_stop_runs_no_git_outcome(self, repo: Path, monkeypatch):
+        monkeypatch.setattr(ch, "_PR_LOOKUP_ENABLED", False)  # an in-process hook, not the service
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="work")
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "git commit -m x"})
+        monkeypatch.setattr(ch, "_session_git_outcome", lambda *a, **k: pytest.fail("git outcome on inline Stop"))
+        _run(repo, "Stop")
+        assert "git_end_head" not in _runs_lines(repo)[0]
+
+    def test_unavailable_git_outcome_is_a_recorded_reason(self, repo: Path, monkeypatch):
+        self._commit_mid_session(repo)  # inline: nothing stored before the end
+        monkeypatch.setattr(ch, "run_git", lambda *a, **k: None)
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert "git_end_head" not in entry and "session_commits" not in entry
+        completeness = entry["capture"]["completeness"]
+        assert completeness["status"] == "incomplete"
+        assert [r["kind"] for r in completeness["reasons"]] == ["git_outcome_unavailable"]
+        assert _projected(entry)["commit"] is None
+
 
 # ---------------------------------------------------------------------------
 # PR6: model / token / cost capture via the status line
@@ -1579,6 +1666,33 @@ class TestModelTokenCostCapture:
         assert entry["capture"]["model_source"] == "status_line"
         receipt = build_shard_receipt(entry)
         assert receipt.model_display == "Claude Sonnet 5"
+
+    def test_headless_model_comes_from_the_transcript(self, repo: Path):
+        transcript = _transcript(repo, [
+            _assistant_line("msg_1", output_tokens=900),
+            _assistant_line("msg_2", output_tokens=40, model="claude-haiku-5"),
+            _assistant_line("msg_3", output_tokens=50, model="claude-haiku-5"),
+            _assistant_line("msg_4", model="<synthetic>"),
+        ])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))  # no status line (claude -p)
+        entry = _runs_lines(repo)[0]
+        assert entry["execution_model"] == "claude-opus-5-5"  # most output tokens, not most messages
+        assert entry["capture"]["model_source"] == "transcript"
+        assert entry["capture"]["models_seen"] == ["claude-opus-5-5", "claude-haiku-5"]
+        assert build_shard_receipt(entry).model_display == "Claude Opus 5.5"
+        assert _projected(entry)["model"] == "Claude Opus 5.5"
+        _run(repo, "SessionEnd", reason="other")  # rebuilt/finalised: still the transcript's model
+        assert _runs_lines(repo)[0]["execution_model"] == "claude-opus-5-5"
+
+    def test_transcript_model_never_overrides_the_status_line(self, repo: Path):
+        transcript = _transcript(repo, [_assistant_line("msg_1", output_tokens=900)])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _status(repo, model_id="claude-sonnet-5")
+        _run(repo, "Stop", transcript_path=str(transcript))
+        entry = _runs_lines(repo)[0]
+        assert entry["execution_model"] == "claude-sonnet-5"
+        assert entry["capture"]["model_source"] == "status_line"
 
     def test_model_switch_is_not_flattened_to_one_model(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")
