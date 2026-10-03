@@ -266,10 +266,12 @@ class TestCapturePaths:
         assert block["source"] == "directly_observed"
 
     def test_check_evidence_survives_a_buffer_rebuild(self, repo):
+        from openshard.adapters.claude_hooks import sweep_stale_buffers
+
         _hook(repo, "UserPromptSubmit", prompt="task")
         _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "pytest"})
         _hook(repo, "Stop")
-        _hook(repo, "SessionEnd", reason="clear")  # buffer deleted
+        assert sweep_stale_buffers(repo, max_age_seconds=0)  # idle sweep: buffer folded and deleted
         _hook(repo, "UserPromptSubmit", prompt="resume")  # rebuilt from runs.jsonl
         _hook(repo, "PostToolUseFailure", tool_name="Bash", tool_input={"command": "go test ./..."},
               error="Exit code 2\nFAIL pkg")
@@ -280,6 +282,52 @@ class TestCapturePaths:
         assert [(c["status"], c["exit_code"]) for c in block["checks"]] == [("passed", None), ("failed", 2)]
         assert block["status"] == "failed" and block["source"] == "agent_reported"
         assert block["checks_passed"] == 1 and block["checks_failed"] == 1
+
+    def test_red_then_green_check_loop_ends_passed_with_truthful_counts(self, repo):
+        _hook(repo, "UserPromptSubmit", prompt="task")
+        _hook(repo, "PostToolUseFailure", tool_name="Bash", tool_input={"command": "python -m pytest -q"},
+              error="Exit code 1\nFAILED test_x")
+        _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "python  -m pytest -q"})  # re-run
+        _hook(repo, "Stop")
+        entry = _runs(repo)[-1]
+        block = entry["verification"]
+        assert block["status"] == "passed" and block["source"] == "agent_reported"
+        # Every run is attempted; passed/failed count commands by their latest outcome.
+        assert (block["checks_attempted"], block["checks_passed"], block["checks_failed"]) == (2, 1, 0)
+        assert [c["status"] for c in block["checks"]] == ["failed", "passed"]  # the red run stays listed
+        assert entry["capture"]["check_runs"] == {"passed": 1, "failed": 1}
+        assert "1 failed check run(s) that passed on a later re-run" in block["reason"]
+        assert "pytest" not in json.dumps(entry["capture"]["check_latest"])  # keys are hashes, never text
+
+    def test_a_different_command_still_failing_keeps_the_status_failed(self, repo):
+        _hook(repo, "UserPromptSubmit", prompt="task")
+        _hook(repo, "PostToolUseFailure", tool_name="Bash", tool_input={"command": "ruff check ."},
+              error="Exit code 1")
+        _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"})
+        _hook(repo, "Stop")
+        assert _runs(repo)[-1]["verification"]["status"] == "failed"
+
+    def test_green_then_red_ends_failed(self, repo):
+        _hook(repo, "UserPromptSubmit", prompt="task")
+        _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "pytest"})
+        _hook(repo, "PostToolUseFailure", tool_name="Bash", tool_input={"command": "pytest"}, error="Exit code 1")
+        _hook(repo, "Stop")
+        block = _runs(repo)[-1]["verification"]
+        assert block["status"] == "failed" and block["checks_passed"] == 0 and block["checks_failed"] == 1
+
+    def test_latest_outcomes_survive_a_buffer_rebuild(self, repo):
+        from openshard.adapters.claude_hooks import sweep_stale_buffers
+
+        _hook(repo, "UserPromptSubmit", prompt="task")
+        _hook(repo, "PostToolUseFailure", tool_name="Bash", tool_input={"command": "pytest"}, error="Exit code 1")
+        _hook(repo, "Stop")
+        assert sweep_stale_buffers(repo, max_age_seconds=0)
+        _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "pytest"})
+        _hook(repo, "Stop")
+        entry = _runs(repo)[-1]
+        block = entry["verification"]
+        assert block["status"] == "passed" and (block["checks_passed"], block["checks_failed"]) == (1, 0)
+        assert entry["capture"]["check_runs"] == {"passed": 1, "failed": 1}
 
     def test_import_is_not_observable_not_no_checks_run(self, repo):
         from openshard.adapters.claude_code_import import build_claude_code_import_entry

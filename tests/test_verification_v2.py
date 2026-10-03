@@ -371,7 +371,12 @@ class TestBackwardCompatibility:
         path.parent.mkdir(parents=True, exist_ok=True)
         _claude(repo, "UserPromptSubmit", prompt="t")
         _claude(repo, "PostToolUse", **_bash("pytest", tool_input={"run_in_background": True}))
-        _claude(repo, "SessionEnd", reason="clear")
+        _claude(repo, "Stop")
+        # The idle sweep folds and drops the buffer (an *ended* session would
+        # open a new receipt instead); the next hook rebuilds it from the record.
+        from openshard.adapters.claude_hooks import sweep_stale_buffers
+
+        assert sweep_stale_buffers(repo, max_age_seconds=0)
         _claude(repo, "UserPromptSubmit", prompt="again")
         _claude(repo, "PostToolUse", **_bash("pytest -q"))
         _claude(repo, "Stop")

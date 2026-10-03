@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -68,6 +69,7 @@ from openshard.history.shard_contract import (
     render_compact_shard_receipt,
     render_full_shard_receipt,
 )
+from openshard.history.views import receipt_to_dict
 
 SID ="0f1e2d3c-4b5a-4697-8877-665544332211"
 SID2 = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -144,6 +146,49 @@ def _status(repo: Path, session_id: str = SID, **kwargs) -> str:
     return handle_claude_status(_status_payload(repo, session_id, **kwargs), env={"CLAUDE_PROJECT_DIR": str(repo)})
 
 
+def _assistant_line(
+    message_id: str, *, input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0,
+    cache_creation: int = 0, model: str = "claude-opus-5-5", at: str = "2099-01-01T00:00:00.000Z",
+    cache_5m: int | None = None, cache_1h: int | None = None,
+) -> dict:
+    """One assistant transcript record, shaped like Claude Code 2.x writes it.
+
+    With *cache_5m* / *cache_1h* the usage carries the ``cache_creation`` TTL
+    split Claude Code writes (and ``cache_creation_input_tokens`` is their sum).
+    """
+    usage: dict = {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                   "cache_read_input_tokens": cache_read, "cache_creation_input_tokens": cache_creation}
+    if cache_5m is not None or cache_1h is not None:
+        usage["cache_creation"] = {"ephemeral_5m_input_tokens": cache_5m or 0,
+                                   "ephemeral_1h_input_tokens": cache_1h or 0}
+        usage["cache_creation_input_tokens"] = (cache_5m or 0) + (cache_1h or 0)
+    return {
+        "type": "assistant", "sessionId": SID, "timestamp": at,
+        "message": {
+            "id": message_id, "model": model, "role": "assistant",
+            "content": [{"type": "text", "text": "RAW ASSISTANT TEXT"}],
+            "usage": usage,
+        },
+    }
+
+
+@pytest.fixture(autouse=True)
+def _claude_config_dir(tmp_path: Path, monkeypatch) -> Path:
+    """Claude Code's config dir for this test: transcripts are only read under ``<it>/projects``."""
+    config = tmp_path / "claude-config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    return config
+
+
+def _transcript(repo: Path, records: list[dict], session_id: str = SID) -> Path:
+    """A transcript file where Claude Code writes it (``$CLAUDE_CONFIG_DIR/projects/<slug>/<sid>.jsonl``)."""
+    directory = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "c--work-my-repo"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{session_id}.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return path
+
+
 def _runs_lines(repo: Path) -> list[dict]:
     path = repo / ".openshard" / "runs.jsonl"
     if not path.exists():
@@ -214,7 +259,8 @@ class TestParsing:
         assert p.file_path == "x.py"
         assert not hasattr(p, "brand_new_field")
         assert not hasattr(p, "tool_response")
-        assert not hasattr(p, "transcript_path")
+        # Kept only as this session's own transcript path (never content); this one is not.
+        assert p.transcript_path is None
 
     def test_unsupported_event_is_rejected(self, repo: Path):
         assert extract_hook_payload(_payload("PreCompact", repo)) is None
@@ -495,18 +541,58 @@ class TestLifecycle:
         assert "Claude Code session resumed" in acts
         assert lines[0]["capture"]["session_end_observed"] is False
 
-    def test_resume_after_end_snapshots_same_record_and_keeps_ended_state(self, repo: Path):
-        _session(repo)
+    def test_resume_within_the_same_second_still_gets_its_own_run_id(self, repo: Path):
+        at = "2030-01-01T00:00:00Z"  # end and resume observed in the same second
+        root = repo.resolve()
+        for event, extra in (("UserPromptSubmit", {"task_excerpt": "one"}), ("Stop", {}),
+                             ("SessionEnd", {"reason": "prompt_input_exit"}),
+                             ("SessionStart", {"source": "resume"}),
+                             ("UserPromptSubmit", {"task_excerpt": "two"}), ("Stop", {})):
+            ch.apply_reduced_hook(ch.ReducedHookPayload(event=event, session_id=SID, **extra), root, at=at)
+        first, second = _runs_lines(repo)
+        assert first["timestamp"] == second["timestamp"] == at
+        assert second["run_id"] != first["run_id"]
+        assert second["receipt_id"] != first["receipt_id"]
+
+    def test_resume_after_end_opens_a_new_receipt_and_leaves_the_ended_one_unchanged(self, repo: Path):
+        ended = _session(repo)
+        before = _raw(repo)
         out = _run(repo, "SessionStart", source="resume")
-        # The session already ended: the rebuilt buffer is folded and dropped again.
-        assert out.action == "record_updated"
-        assert not buffer_path(repo.resolve(), SID).exists()
-        lines = _runs_lines(repo)
-        assert len(lines) == 1
-        acts = [e["action"] for e in _events(lines[0], EVENT_SESSION_ACTIVITY)]
+        assert out.action == "buffered"
+        assert _raw(repo) == before  # nothing written until the resumed segment shows work
+        _run(repo, "UserPromptSubmit", prompt="Now add subtraction")
+        _run(repo, "Stop")
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        first, second = _runs_lines(repo)
+        # The ended (possibly already synced) receipt is byte-for-byte what it was.
+        assert json.dumps(first) == json.dumps(ended)
+        assert second["receipt_id"] != ended["receipt_id"]
+        assert second["run_id"] != ended["run_id"]
+        assert second["capture"]["session_id"] == SID
+        assert second["capture"]["start_source"] == "resume"
+        assert second["capture"]["resumed_from_receipt_id"] == ended["receipt_id"]
+        assert second["capture"]["session_end_observed"] is True
+        assert second["capture"]["prompt_count"] == 1
+        assert second["task"] == "Now add subtraction"
+        acts = [e["action"] for e in _events(second, EVENT_SESSION_ACTIVITY)]
         assert "Claude Code session resumed" in acts
-        # Ended state is preserved, not reset, by a post-end resume.
-        assert lines[0]["capture"]["session_end_observed"] is True
+
+    def test_resumed_segment_baseline_excludes_the_ended_segments_changes(self, repo: Path):
+        _session(repo)  # leaves calc.py / README.md changed in the working tree
+        _run(repo, "SessionStart", source="resume")
+        _run(repo, "UserPromptSubmit", prompt="tweak")
+        (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+        _run(repo, "Stop")
+        second = _runs_lines(repo)[1]
+        counted = {f["path"] for f in second["files_detail"] if f.get("attribution") == "git_observed"}
+        assert counted == {"new.py"}
+
+    def test_status_ping_after_end_never_touches_the_ended_receipt(self, repo: Path):
+        _session(repo)
+        before = _raw(repo)
+        _status(repo, cost_total=9.0)
+        assert _raw(repo) == before
+        assert not buffer_path(repo.resolve(), SID).exists()
 
     def test_session_end_without_any_work_records_nothing(self, repo: Path):
         _run(repo, "SessionStart", source="startup")
@@ -824,7 +910,9 @@ class TestPrivacy:
     def test_no_transcript_file_content_or_assistant_text_stored(self, repo: Path):
         _session(repo)
         raw = _raw(repo)
-        for needle in ("RAW FILE CONTENT", "RAW STDOUT", "RAW ASSISTANT TEXT", "transcript"):
+        # The transcript's path is transient (staging buffer only), never on the record.
+        for needle in ("RAW FILE CONTENT", "RAW STDOUT", "RAW ASSISTANT TEXT", "transcript_path",
+                       "transcript.jsonl", ".claude/projects"):
             assert needle not in raw, needle
         entry = _runs_lines(repo)[0]
         for blocked in ("raw_prompt", "prompt_text", "transcript", "raw_transcript", "model_output",
@@ -857,6 +945,17 @@ class TestPrivacy:
         raw = _raw(repo)
         assert "topsecretvalue123" not in raw
         assert "MY_API_KEY" not in raw
+
+    def test_pasted_content_wrapper_is_not_part_of_the_task(self, repo: Path):
+        prompt = '<pasted_content id="7ef4"> Act as an independent reviewer.\nDo not modify files.</pasted_content>'
+        assert sanitize_task_excerpt(prompt) == "Act as an independent reviewer. Do not modify files."
+        # Only a *leading* wrapper is transport; a tag quoted mid-prompt is text.
+        assert sanitize_task_excerpt("explain <pasted_content> tags") == "explain <pasted_content> tags"
+        _run(repo, "UserPromptSubmit", prompt=prompt)
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["task"].startswith("Act as an independent reviewer.")
+        assert "pasted_content" not in entry["task"] and "pasted_content" not in entry["task_title"]
 
     def test_task_excerpt_helper(self):
         assert sanitize_task_excerpt(None) is None
@@ -906,23 +1005,27 @@ class TestRobustness:
         _run(repo, "SessionEnd", reason="prompt_input_exit")
         assert len(_runs_lines(repo)) == 1
 
-    def test_late_stop_after_session_end_rebuilds_from_record(self, repo: Path):
+    def test_late_stop_after_session_end_never_mutates_the_ended_receipt(self, repo: Path):
         entry = _session(repo)
-        before = len(entry["events"])
+        before = _raw(repo)
         out = _run(repo, "Stop")  # a background Stop finishing after SessionEnd
-        assert out.action == "record_updated"
-        assert not buffer_path(repo.resolve(), SID).exists()  # not left behind
-        lines = _runs_lines(repo)
-        assert len(lines) == 1
-        after = lines[0]
-        assert len(after["events"]) == before + 1
-        assert len(_events(after, EVENT_TOOL_INVOKED)) == 3
-        assert after["task"] == entry["task"]
-        assert after["shard_id"] == entry["shard_id"]
-        assert after["capture"]["session_end_observed"] is True
-        git_ids_before = {e["event_id"] for e in _events(entry, EVENT_FILE_CHANGED)}
-        git_ids_after = {e["event_id"] for e in _events(after, EVENT_FILE_CHANGED)}
-        assert git_ids_before == git_ids_after  # stable across folds
+        # The ended receipt is immutable (it may already be synced); a hook
+        # with no work right after the end is ignored: no segment is opened.
+        assert out.action == "ignored" and "ended" in out.detail
+        assert _raw(repo) == before
+        assert not buffer_path(repo.resolve(), SID).exists()  # no spurious segment opened
+        assert len(_runs_lines(repo)) == 1
+        assert _runs_lines(repo)[0]["receipt_id"] == entry["receipt_id"]
+
+    def test_a_tool_hook_long_after_the_end_opens_a_resumed_segment(self, repo: Path):
+        entry = _session(repo)
+        ended_at = datetime.fromisoformat(entry["capture"]["last_activity_at"].replace("Z", "+00:00"))
+        later = (ended_at + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        tool = ch.ReducedHookPayload(event="PostToolUse", session_id=SID, tool_name="Bash", tool_kind="command",
+                                     command_action="Bash: ls", command_kind="other")
+        out = ch.apply_reduced_hook(tool, repo.resolve(), at=later)  # resumed without a SessionStart seen
+        assert out.action == "buffered"  # a new segment, not the ended receipt
+        assert buffer_path(repo.resolve(), SID).exists()
 
     def test_duplicate_tool_payload_counts_twice_but_one_record(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")
@@ -1217,6 +1320,243 @@ class TestStatusPayloadParsing:
 
 
 # ---------------------------------------------------------------------------
+# Session git outcome: end HEAD, session-created commits, their PR
+# ---------------------------------------------------------------------------
+
+
+def _head(repo: Path) -> str:
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def _projected(entry: dict) -> dict:
+    return receipt_to_dict(build_shard_receipt(entry), extended=True)
+
+
+class TestSessionGitOutcome:
+    def _commit_mid_session(self, repo: Path, *, corroborate: bool = True, amend: bool = False) -> str:
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="add feature and commit")
+        (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        _git(repo, "add", "feature.py")
+        _git(repo, "commit", "-q", "-m", "feature")
+        if amend:
+            _git(repo, "commit", "-q", "--amend", "-m", "feature (amended)")
+        if corroborate:  # the agent's own Bash tool call that made the commit
+            _run(repo, "PostToolUse", tool_name="Bash",
+                 tool_input={"command": "git add feature.py && git commit -m feature"})
+        _run(repo, "Stop")
+        return _head(repo)
+
+    def _shift_buffer_back(self, repo: Path, seconds: int) -> None:
+        """Pretend the session's hooks all happened *seconds* earlier (it then went idle)."""
+        path = buffer_path(repo.resolve(), SID)
+        buf = json.loads(path.read_text(encoding="utf-8"))
+
+        def back(stamp: str) -> str:
+            t = datetime.fromisoformat(stamp.replace("Z", "+00:00")) - timedelta(seconds=seconds)
+            return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        for key in ("started_at", "last_activity_at"):
+            buf[key] = back(buf[key])
+        buf["git_write_at"] = [back(s) for s in buf.get("git_write_at") or []]
+        path.write_text(json.dumps(buf), encoding="utf-8")
+
+    def test_an_uncorroborated_commit_is_not_the_sessions(self, repo: Path):
+        # Committed during the window, but no git command in the agent's own
+        # tool calls: another session or a person may have made it.
+        self._commit_mid_session(repo, corroborate=False)
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert entry["session_commits"]["shas"] == [] and _projected(entry)["commit"] is None
+
+    def test_no_reflog_means_session_commits_are_unknown(self, repo: Path):
+        _git(repo, "config", "core.logAllRefUpdates", "false")
+        for log in (repo / ".git" / "logs").rglob("*"):
+            if log.is_file():
+                log.unlink()
+        self._commit_mid_session(repo)
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert entry["git_end_head"] == _head(repo)
+        assert "session_commits" not in entry  # unknown, never an empty "no commits" list
+        assert _projected(entry)["commit"] is None
+
+    def test_a_rebase_pick_of_an_earlier_commit_is_not_claimed(self, repo: Path):
+        _git(repo, "checkout", "-q", "-b", "mine")
+        (repo / "mine.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "mine.py")
+        _git(repo, "commit", "-q", "-m", "made by a person before the session")
+        _git(repo, "checkout", "-q", "-")
+        (repo / "base.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "base.py")
+        _git(repo, "commit", "-q", "-m", "base moved on")
+        _git(repo, "checkout", "-q", "mine")
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="rebase my branch")
+        _git(repo, "rebase", "-q", "master" if (repo / ".git" / "refs" / "heads" / "master").exists() else "main")
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "git rebase main"})
+        _run(repo, "Stop")
+        _run(repo, "SessionEnd", reason="other")
+        entry = _runs_lines(repo)[0]
+        assert entry["session_commits"]["shas"] == []  # under-counted, never fabricated
+        assert _projected(entry)["commit"] is None
+
+    def test_a_corroborated_true_merge_is_the_result(self, repo: Path):
+        _git(repo, "checkout", "-q", "-b", "side")
+        (repo / "side.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "side.py")
+        subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m",
+                        "side work"], cwd=repo, check=True, capture_output=True,
+                       env={**os.environ, "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        _git(repo, "checkout", "-q", "-")
+        (repo / "main.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "main.py")
+        # Made long before the session, so only the merge is the session's.
+        subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m",
+                        "main work"], cwd=repo, check=True, capture_output=True,
+                       env={**os.environ, "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="merge side")
+        _git(repo, "merge", "-q", "--no-ff", "--no-edit", "side")  # reflog: "merge side: Merge made by ..."
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "git merge --no-ff side"})
+        _run(repo, "Stop")
+        _run(repo, "SessionEnd", reason="other")
+        entry = _runs_lines(repo)[0]
+        assert entry["session_commits"]["shas"] == [_head(repo)]
+        assert _projected(entry)["commit"] == _head(repo)
+
+    def test_an_amended_commit_is_the_result(self, repo: Path):
+        head = self._commit_mid_session(repo, amend=True)
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert entry["session_commits"]["shas"] == [head] and _projected(entry)["commit"] == head
+
+    def test_a_fast_forward_pull_of_someone_elses_commit_is_never_the_result(self, repo: Path, tmp_path: Path):
+        teammate = tmp_path / "teammate"
+        subprocess.run(["git", "clone", "-q", str(repo), str(teammate)], check=True, capture_output=True)
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="sync with upstream")
+        (teammate / "theirs.py").write_text("x\n", encoding="utf-8")
+        _git(teammate, "add", "theirs.py")
+        _git(teammate, "commit", "-q", "-m", "a teammate's work")  # during the session, elsewhere
+        theirs = _head(teammate)
+        _git(repo, "fetch", "-q", str(teammate), "HEAD")
+        _git(repo, "merge", "-q", "--ff-only", "FETCH_HEAD")  # reflog: "merge FETCH_HEAD: Fast-forward"
+        # Even with the agent's own git command as corroboration, a fast-forward creates nothing.
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "git merge --ff-only FETCH_HEAD"})
+        _run(repo, "Stop")
+        _run(repo, "SessionEnd", reason="other")
+        entry = _runs_lines(repo)[0]
+        assert entry["git_end_head"] == theirs
+        assert entry["session_commits"]["shas"] == []
+        assert _projected(entry)["commit"] is None
+
+    def test_a_manual_commit_after_the_session_went_idle_is_not_the_sessions(self, repo: Path):
+        self._commit_mid_session(repo)
+        self._shift_buffer_back(repo, 3 * 3600)  # the session's activity was hours ago
+        (repo / "later.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "later.py")
+        _git(repo, "commit", "-q", "-m", "made by hand later")
+        assert sweep_stale_buffers(repo, max_age_seconds=60)  # the idle sweep finalises now
+        entry = _runs_lines(repo)[0]
+        assert entry["git_end_head"] == _head(repo)
+        assert _head(repo) not in entry["session_commits"]["shas"]
+        assert _projected(entry)["commit"] is None
+
+    def test_session_created_commit_is_the_projected_commit(self, repo: Path):
+        start = _head(repo)
+        head = self._commit_mid_session(repo)
+        stopped = _runs_lines(repo)[0]
+        # Not on an ordinary turn: the git outcome is a finalisation step only.
+        assert "git_end_head" not in stopped and _projected(stopped)["commit"] is None
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert entry["git_head_commit_hash"] == start
+        assert entry["git_end_head"] == head
+        assert entry["session_commits"] == {"source": "git_observed", "shas": [head], "truncated": False}
+        projected = _projected(entry)
+        assert projected["commit"] == head and projected["base_commit"] == start
+        assert projected["pr_url"] is None  # no PR lookup in the test suite (OPENSHARD_PR_LOOKUP=off)
+
+    def test_no_commit_means_no_projected_commit(self, repo: Path):
+        entry = _session(repo)
+        assert entry["git_end_head"] == entry["git_head_commit_hash"]
+        assert entry["session_commits"]["shas"] == []
+        assert _projected(entry)["commit"] is None
+
+    def test_a_head_that_only_moved_is_never_the_result(self, repo: Path):
+        start = _head(repo)
+        _git(repo, "checkout", "-q", "-b", "other")
+        (repo / "old.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "old.py")
+        _git(repo, "commit", "-q", "-m", "pre-existing work", "--date=2000-01-01T00:00:00Z")
+        subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--amend",
+                        "--no-edit"], cwd=repo, check=True, capture_output=True,
+                       env={**os.environ, "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        old = _head(repo)
+        _git(repo, "checkout", "-q", "-")
+        assert _head(repo) == start
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="look at the other branch")
+        _git(repo, "checkout", "-q", "other")  # HEAD moves to a commit older than the session
+        _run(repo, "Stop")
+        _run(repo, "SessionEnd", reason="other")
+        entry = _runs_lines(repo)[0]
+        assert entry["git_end_head"] == old
+        assert entry["session_commits"]["shas"] == []
+        assert _projected(entry)["commit"] is None
+
+    def test_inline_hooks_never_look_up_a_pr(self, repo: Path, monkeypatch):
+        monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "on")
+        monkeypatch.setattr(ch, "_PR_LOOKUP_ENABLED", False)  # an in-process hook, not the service
+        monkeypatch.setattr(ch, "_gh_pull_request", lambda *a: pytest.fail("gh called on the hook path"))
+        self._commit_mid_session(repo)
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        assert "pull_request" not in _runs_lines(repo)[0]
+
+    def test_pr_url_only_when_its_head_is_a_session_commit(self, repo: Path, monkeypatch):
+        monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "on")
+        monkeypatch.setattr(ch, "_PR_LOOKUP_ENABLED", True)  # as in the capture service worker
+        calls: list[tuple] = []
+
+        def fake_pr(root, branch, commits):
+            calls.append((branch, set(commits)))
+            head = next(iter(commits))
+            return {"url": "https://github.com/acme/widget/pull/7", "number": 7, "head": head, "source": "gh_observed"}
+
+        monkeypatch.setattr(ch, "_gh_pull_request", fake_pr)
+        head = self._commit_mid_session(repo)
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert calls and calls[0][1] == {head}
+        assert entry["pull_request"]["head"] == head and entry["pull_request"]["source"] == "gh_observed"
+        assert _projected(entry)["pr_url"] == "https://github.com/acme/widget/pull/7"
+
+    def test_gh_lookup_matches_head_ref_oid_and_fails_closed(self, repo: Path, monkeypatch):
+        import shutil
+
+        head = "a" * 40
+        rows = [{"number": 3, "url": "https://github.com/acme/widget/pull/3", "headRefOid": "b" * 40},
+                {"number": 4, "url": "https://github.com/acme/widget/pull/4", "headRefOid": head}]
+
+        class _Proc:
+            def __init__(self, code: int, out: str):
+                self.returncode, self.stdout = code, out
+
+        monkeypatch.setattr(shutil, "which", lambda name: "gh")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(0, json.dumps(rows)))
+        pr = ch._gh_pull_request(repo, "feature", {head})
+        assert pr == {"url": "https://github.com/acme/widget/pull/4", "number": 4, "head": head,
+                      "source": "gh_observed"}
+        assert ch._gh_pull_request(repo, "feature", {"c" * 40}) is None
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc(1, ""))
+        assert ch._gh_pull_request(repo, "feature", {head}) is None
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        assert ch._gh_pull_request(repo, "feature", {head}) is None
+
+
+# ---------------------------------------------------------------------------
 # PR6: model / token / cost capture via the status line
 # ---------------------------------------------------------------------------
 
@@ -1255,10 +1595,25 @@ class TestModelTokenCostCapture:
         assert "Models" in out
         assert "→" in out
 
-    def test_token_usage_captured_with_provenance(self, repo: Path):
+    def test_status_line_last_call_tokens_are_never_recorded_as_session_totals(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")
         _status(repo, tokens_input=14000, tokens_output=2000, cache_read=500)
         _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        # ``context_window.current_usage`` is the last API call only: unknown
+        # (with the reason) rather than an undercount labelled as the session.
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens", "tokens_provenance"):
+            assert key not in entry
+        assert entry["capture"]["tokens_not_recorded_reason"] == "transcript_unavailable"
+
+    def test_token_usage_captured_with_provenance(self, repo: Path):
+        transcript = _transcript(repo, [
+            _assistant_line("msg_1", input_tokens=10000, output_tokens=1500, cache_read=500),
+            _assistant_line("msg_2", input_tokens=4000, output_tokens=500),
+        ])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _status(repo, tokens_input=1, tokens_output=1, cache_read=1)  # last call only: ignored
+        _run(repo, "Stop", transcript_path=str(transcript))
         entry = _runs_lines(repo)[0]
         assert entry["prompt_tokens"] == 14000
         assert entry["completion_tokens"] == 2000
@@ -1271,6 +1626,184 @@ class TestModelTokenCostCapture:
         assert "14k input" in out
         assert "2k output" in out
 
+    def test_transcript_usage_counts_each_message_id_once_and_breaks_down_by_model(self, repo: Path):
+        # Claude Code writes one streamed API message over several lines that
+        # all repeat the same message id and usage: counted once.
+        streamed = _assistant_line("msg_a", input_tokens=3, output_tokens=700, cache_read=90_000,
+                                   cache_creation=4_000)
+        transcript = _transcript(repo, [
+            streamed, streamed, streamed,
+            {"type": "user", "timestamp": "2099-01-01T00:00:01.000Z", "message": {"content": "hi"}},
+            _assistant_line("msg_b", input_tokens=2, output_tokens=300, cache_read=10_000,
+                            model="claude-sonnet-5-5"),
+            _assistant_line("msg_c", model="<synthetic>"),
+        ])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        entry = _runs_lines(repo)[0]
+        assert (entry["prompt_tokens"], entry["completion_tokens"]) == (5, 1_000)
+        assert (entry["cache_read_tokens"], entry["cache_creation_tokens"]) == (100_000, 4_000)
+        assert entry["total_tokens"] == 1_005  # input + output (existing convention)
+        capture = entry["capture"]
+        assert capture["tokens_source"] == "transcript"
+        assert capture["usage_messages"] == 3
+        assert capture["usage_by_model"]["claude-opus-5-5"]["output"] == 700
+        assert capture["usage_by_model"]["claude-sonnet-5-5"]["messages"] == 1
+        raw = _raw(repo)
+        assert str(transcript.parent) not in raw.replace("\\\\", "\\")
+        assert "RAW ASSISTANT TEXT" not in raw
+
+    def test_transcript_usage_before_the_receipt_window_is_excluded(self, repo: Path):
+        transcript = _transcript(repo, [
+            _assistant_line("old", output_tokens=999_999, at="2000-01-01T00:00:00.000Z"),
+            _assistant_line("new", output_tokens=42),
+        ])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 42
+
+    def test_a_message_id_in_two_transcript_files_counts_once(self, repo: Path):
+        transcript = _transcript(repo, [_assistant_line("shared", output_tokens=10),
+                                        _assistant_line("main-only", output_tokens=1)])
+        sub = transcript.with_suffix("") / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-1.jsonl").write_text(
+            json.dumps(_assistant_line("shared", output_tokens=10)) + "\n"
+            + json.dumps(_assistant_line("child", output_tokens=5)) + "\n", encoding="utf-8")
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 16
+
+    def test_a_message_split_across_two_reads_counts_once_even_after_eviction(self, repo: Path, monkeypatch):
+        monkeypatch.setattr(ch, "_TRANSCRIPT_RECENT_IDS", 1)
+        transcript = _transcript(repo, [_assistant_line("m1", output_tokens=4)])  # m1's first line
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 4
+        with transcript.open("a", encoding="utf-8") as fh:  # m1 continues, then m2 evicts it, then m1 again
+            for line in (_assistant_line("m1", output_tokens=6), _assistant_line("m2", output_tokens=1),
+                         _assistant_line("m1", output_tokens=6)):
+                fh.write(json.dumps(line) + "\n")
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 7  # m1 once (latest usage) + m2
+
+    def test_a_replaced_longer_transcript_is_read_from_the_start(self, repo: Path):
+        transcript = _transcript(repo, [_assistant_line("a", output_tokens=3)])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        transcript.write_text("".join(json.dumps(_assistant_line(f"b{n}", output_tokens=1)) + "\n"
+                                      for n in range(5)), encoding="utf-8")
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 5
+
+    def test_subagent_transcripts_are_included(self, repo: Path):
+        transcript = _transcript(repo, [_assistant_line("main", output_tokens=10)])
+        sub = transcript.with_suffix("") / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-1.jsonl").write_text(
+            json.dumps(_assistant_line("child", output_tokens=5, model="claude-haiku-5")) + "\n", encoding="utf-8")
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 15
+
+    def test_a_transcript_outside_claudes_projects_dir_is_never_read(self, repo: Path, tmp_path: Path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        rogue = elsewhere / f"{SID}.jsonl"
+        rogue.write_text(json.dumps(_assistant_line("x", output_tokens=7)) + "\n", encoding="utf-8")
+        assert ch._valid_transcript_path(str(rogue), SID) is None
+        assert ch._valid_transcript_path(f"\\\\server\\share\\{SID}.jsonl", SID) is None
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(rogue))
+        _run(repo, "Stop", transcript_path=str(rogue))
+        assert "completion_tokens" not in _runs_lines(repo)[0]
+
+    def test_transcript_is_read_incrementally_across_folds(self, repo: Path):
+        transcript = _transcript(repo, [_assistant_line("m1", output_tokens=10)])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        buf = json.loads(buffer_path(repo.resolve(), SID).read_text(encoding="utf-8"))
+        offset = buf["transcript_state"]["files"]["main"]["offset"]
+        assert offset == transcript.stat().st_size
+        with transcript.open("a", encoding="utf-8") as fh:  # m1 re-reported while streaming, then m2
+            fh.write(json.dumps(_assistant_line("m1", output_tokens=10)) + "\n")
+            fh.write(json.dumps(_assistant_line("m2", output_tokens=5)) + "\n")
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 15
+        transcript.write_text(json.dumps(_assistant_line("m9", output_tokens=1)) + "\n", encoding="utf-8")
+        _run(repo, "Stop", transcript_path=str(transcript))  # rewritten (shorter): read again from the start
+        assert _runs_lines(repo)[0]["completion_tokens"] == 1
+
+    def test_capped_subagent_transcripts_mark_tokens_incomplete_and_leave_cost_unknown(self, repo: Path,
+                                                                                         monkeypatch):
+        monkeypatch.setattr(ch, "_TRANSCRIPT_MAX_FILES", 2)
+        transcript = _transcript(repo, [_assistant_line("main", output_tokens=10)])
+        sub = transcript.with_suffix("") / "subagents"
+        sub.mkdir(parents=True)
+        for n in range(3):
+            (sub / f"agent-{n}.jsonl").write_text(
+                json.dumps(_assistant_line(f"c{n}", output_tokens=1)) + "\n", encoding="utf-8")
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        entry = _runs_lines(repo)[0]
+        assert entry["completion_tokens"] == 11  # a lower bound, flagged
+        assert entry["capture"]["tokens_incomplete_reason"] == "transcript_files_capped"
+        assert "incomplete" in entry["summary"]
+        assert "estimated_cost" not in entry
+
+    def _headless(self, repo: Path, records: list[dict]) -> dict:
+        """A ``claude -p`` style session: transcript usage, no status line (no agent-reported cost)."""
+        transcript = _transcript(repo, records)
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        return _runs_lines(repo)[0]
+
+    def test_headless_cost_is_priced_per_model_with_1h_cache_writes(self, repo: Path):
+        entry = self._headless(repo, [
+            _assistant_line("o1", input_tokens=1_000, output_tokens=2_000, cache_read=100_000,
+                            cache_5m=4_000, cache_1h=10_000, model="claude-opus-5-5"),
+            _assistant_line("s1", input_tokens=500, output_tokens=1_000, cache_1h=20_000,
+                            model="claude-sonnet-5-5"),
+        ])
+        # Opus 5.5: 1k*$4 + 2k*$20 + 100k*$0.20 + 4k*$5 (5m) + 10k*$8 (1h) per MTok = $0.164
+        # Sonnet 5.5: 0.5k*$2 + 1k*$10 + 20k*$4 (1h) per MTok = $0.091
+        assert entry["estimated_cost"] == pytest.approx(0.255)
+        assert entry["cost_provenance"] == "official_rate_estimate"
+        by_model = entry["capture"]["usage_by_model"]
+        assert by_model["claude-opus-5-5"]["cache_creation_1h"] == 10_000
+        assert by_model["claude-opus-5-5"]["cache_creation_5m"] == 4_000
+        assert by_model["claude-sonnet-5-5"]["cache_creation_1h"] == 20_000
+        projected = _projected(entry)
+        assert projected["cost_usd"] == pytest.approx(0.255) and projected["cost_is_estimate"] is True
+        assert projected["cost_provenance"] == "official_rate_estimate"
+
+    @pytest.mark.parametrize("records", [
+        # A model with no official rate: unknown, never the priced part alone.
+        [_assistant_line("o1", output_tokens=1_000), _assistant_line("x1", output_tokens=1, model="claude-new-9")],
+        # Cache writes with no 5m/1h split: their rate is unknown.
+        [_assistant_line("o1", output_tokens=1_000, cache_creation=5_000)],
+    ])
+    def test_headless_cost_is_unknown_rather_than_a_partial_sum(self, repo: Path, records):
+        entry = self._headless(repo, records)
+        assert "estimated_cost" not in entry
+        assert entry["capture"]["cost_not_recorded_reason"] == "no_official_rate_for_usage"
+        assert build_shard_receipt(entry).cost_raw is None  # no aggregate-rate fallback either
+
+    def test_claude_codes_own_cost_wins_over_the_list_rate(self, repo: Path):
+        transcript = _transcript(repo, [_assistant_line("o1", output_tokens=1_000)])
+        _run(repo, "SessionStart", source="startup")
+        _status(repo, cost_total=0.0)
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _status(repo, cost_total=0.5)
+        _run(repo, "Stop", transcript_path=str(transcript))
+        entry = _runs_lines(repo)[0]
+        assert entry["estimated_cost"] == pytest.approx(0.5) and entry["cost_provenance"] == "agent_reported"
+
+    def test_a_transcript_path_for_another_session_is_never_read(self, repo: Path):
+        other = _transcript(repo, [_assistant_line("x", output_tokens=7)], session_id=SID2)
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(other))
+        _run(repo, "Stop", transcript_path=str(other))
+        assert "completion_tokens" not in _runs_lines(repo)[0]
+
     def test_cost_is_delta_from_baseline_not_raw_cumulative_total(self, repo: Path):
         _run(repo, "SessionStart", source="startup")
         _status(repo, cost_total=0.10)  # baseline observed before any real work
@@ -1279,7 +1812,12 @@ class TestModelTokenCostCapture:
         _run(repo, "Stop")
         entry = _runs_lines(repo)[0]
         assert entry["estimated_cost"] == pytest.approx(0.27)
-        assert entry["cost_provenance"] == "provider_reported"
+        # Claude Code's own estimate: agent_reported, never provider_reported.
+        assert entry["cost_provenance"] == "agent_reported"
+        assert "tokens_provenance" not in entry  # no transcript here: tokens unknown, not last-call
+        projected = receipt_to_dict(build_shard_receipt(entry), extended=True)
+        assert projected["cost_provenance"] == "agent_reported"
+        assert projected["cost_is_estimate"] is True
 
     def test_cost_display_is_clearly_labelled_estimate(self, repo: Path):
         _run(repo, "SessionStart", source="startup")
@@ -1473,12 +2011,12 @@ class TestStatusLineFastPath:
         _run(repo, "UserPromptSubmit", prompt="task")  # first prompt already folds once
         before = _raw(repo)
         for i in range(10):
-            _status(repo, tokens_input=1000 + i, cost_total=0.01 * i)
+            _status(repo, tokens_input=1000 + i, cost_total=0.01 * (i + 1))
         assert _raw(repo) == before  # status pings alone never rewrite runs.jsonl
         _run(repo, "Stop")
         assert len(_runs_lines(repo)) == 1
         entry = _runs_lines(repo)[0]
-        assert entry["prompt_tokens"] == 1009  # last-observed value still reaches the fold
+        assert entry["estimated_cost"] == pytest.approx(0.09)  # last-observed value still reaches the fold
 
 
 class TestRepoIdentityCaching:

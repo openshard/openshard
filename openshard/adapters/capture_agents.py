@@ -60,6 +60,11 @@ class AgentProfile:
     # that already has an ``.openshard/`` directory -- never into an
     # arbitrary folder, where writing ``.openshard/`` would be clutter.
     opt_in_repo: bool = False
+    # Provenance of the session *cost* when it differs from the token
+    # provenance: Claude Code's ``cost.total_cost_usd`` is Claude Code's own
+    # estimate, not a figure the model provider reported. None = same as
+    # ``usage_provenance``.
+    cost_provenance: str | None = None
 
 
 CLAUDE_CODE_PROFILE = AgentProfile(
@@ -75,12 +80,14 @@ CLAUDE_CODE_PROFILE = AgentProfile(
     files_source_label="claude_hook_reported",
     model_source="status_line",
     usage_provenance="provider_reported",
+    cost_provenance="agent_reported",
     task_placeholder="Claude Code session (task not captured)",
     import_note=(
         "Captured automatically from Claude Code lifecycle hooks. "
         "Tool/file facts are as reported by Claude Code; files are inferred from git diff. "
-        "Model/cost/tokens are read from Claude Code's status line when one is configured "
-        "(see `openshard mcp install claude`); otherwise they stay Unknown/Not recorded. "
+        "Model and cost (Claude Code's own estimate) are read from Claude Code's status line "
+        "when one is configured (see `openshard mcp install claude`); token counts are summed from the API usage "
+        "Claude Code records in its session transcript. Otherwise they stay Unknown/Not recorded. "
         "OpenShard does not run checks for this capture path: any check outcome here is the "
         "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),

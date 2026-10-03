@@ -70,6 +70,7 @@ import sys
 import time
 
 from openshard.adapters import capture_auth as _auth
+from openshard.adapters.agent_env import claude_agent_env, format_agent_env
 from openshard.history.task_identity import launch_task_id
 from openshard.util.home import openshard_home
 
@@ -132,6 +133,10 @@ PROJECT_DIR_HEADER = "X-OpenShard-Project-Dir"
 # Code's HTTP hooks fill it from ``$OPENSHARD_TASK_ID`` (allowedEnvVars); the
 # command clients validate the environment value and send it themselves.
 TASK_ID_HEADER = "X-OpenShard-Task-Id"
+# Where Claude Code runs (provider + surface), derived by this client from
+# the environment Claude Code gave the hook process -- the capture service
+# does not share it. ``claude_hooks.format_agent_env`` / ``parse_agent_env``.
+AGENT_ENV_HEADER = "X-OpenShard-Agent-Env"
 
 _CONNECT_TIMEOUT = 0.25  # loopback connect; refused/absent is instant, a hang must not stall a hook
 _REQUEST_TIMEOUT = 5.0
@@ -286,6 +291,7 @@ def post_hook(
     hook_path: str = HOOK_PATH,
     env: dict | os._Environ | None = None,
     task_id: str | None = None,
+    agent_env: str | None = None,
 ) -> bool:
     """POST one raw hook payload. True when the service accepted (durably queued) it.
 
@@ -302,6 +308,8 @@ def post_hook(
     headers = _auth_headers(env, project_dir)
     if task_id:
         headers[TASK_ID_HEADER] = task_id
+    if agent_env:
+        headers[AGENT_ENV_HEADER] = agent_env
     result = _request("POST", port, path, raw, headers)
     return result is not None and result[0] == 200
 
@@ -617,14 +625,15 @@ def _project_dir(env: dict | os._Environ) -> str | None:
 
 def _inline_hook(
     raw: bytes, env: dict | os._Environ, event_override: str | None, agent: str = "claude_code",
-    task_id: str | None = None,
+    task_id: str | None = None, agent_env: dict[str, str] | None = None,
 ) -> str:
     from openshard.adapters.claude_hooks import handle_hook, parse_hook_payload
 
     data = parse_hook_payload(raw)
     if data is None:
         return "ignored"
-    outcome = handle_hook(data, env=env, event_override=event_override, agent=agent, task_id=task_id)
+    outcome = handle_hook(data, env=env, event_override=event_override, agent=agent, task_id=task_id,
+                          agent_env=agent_env)
     if outcome.action == "error" or env.get("OPENSHARD_HOOK_DEBUG"):
         try:
             sys.stderr.write(f"[openshard hooks] {outcome.event or '?'}: {outcome.action} ({outcome.detail})\n")
@@ -673,12 +682,16 @@ def _run_hook_raw(
     # unset/malformed value is simply "no declaration") and forwarded on its
     # own header, or handed to the in-process fold -- never read from ``raw``.
     task_id = launch_task_id(env)
+    # Provider/surface of the Claude Code process that ran this hook, from
+    # the environment it handed us (the service never sees that environment).
+    agent_env = claude_agent_env(env) if agent == "claude_code" else None
+    agent_env_header = format_agent_env(agent_env)
     try:
         if not disabled(env):
             project_dir = _project_dir(env)
             port = resolve_port(env)
             if post_hook(port, raw, project_dir=project_dir, event_override=event_override,
-                         hook_path=hook_path, env=env, task_id=task_id):
+                         hook_path=hook_path, env=env, task_id=task_id, agent_env=agent_env_header):
                 if claude_session_start:
                     _heal_claude_hook_config(raw, env, desired_port=port)
                 return "forwarded"
@@ -686,14 +699,14 @@ def _run_hook_raw(
                 port_after, _state = ensure_service(env)
                 if port_after is not None and post_hook(
                     port_after, raw, project_dir=project_dir, event_override=event_override,
-                    hook_path=hook_path, env=env, task_id=task_id,
+                    hook_path=hook_path, env=env, task_id=task_id, agent_env=agent_env_header,
                 ):
                     if claude_session_start:
                         _heal_claude_hook_config(raw, env, desired_port=port_after)
                     return "forwarded"
     except Exception:
         pass
-    return _inline_hook(raw, env, event_override, agent, task_id)
+    return _inline_hook(raw, env, event_override, agent, task_id, agent_env)
 
 
 def _is_claude_session_start(raw: bytes, event_override: str | None) -> bool:

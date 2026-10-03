@@ -200,14 +200,18 @@ class TestOneHistoryThreeAgents:
         assert len(lines) == 3 and len({e["shard_id"] for e in lines}) == 3
         assert all(e["capture"]["session_id"] == SHARED_SID for e in lines)
         assert {e["task"] for e in lines} == {"claude task", "codex task", "opencode task"}
-        # A second turn of the Codex session updates the Codex record only.
+        # The Codex session already ended: a later turn under the same id opens
+        # a new Codex receipt; the ended one and the other agents' stay as they were.
+        before = {e["receipt_id"]: json.dumps(e) for e in lines}
         handle_hook({"session_id": SHARED_SID, "cwd": str(repo), "hook_event_name": "UserPromptSubmit",
                      "prompt": "more"}, env={}, agent="codex")
         handle_hook({"session_id": SHARED_SID, "cwd": str(repo), "hook_event_name": "Stop"}, env={}, agent="codex")
         lines = _lines(repo)
-        assert len(lines) == 3
-        codex = next(e for e in lines if e["executor"] == "codex_hooks")
-        assert codex["capture"]["prompt_count"] == 2 and codex["capture"]["turn_count"] == 2
+        assert len(lines) == 4
+        assert {e["receipt_id"]: json.dumps(e) for e in lines[:3]} == before
+        resumed = lines[3]
+        assert resumed["executor"] == "codex_hooks" and resumed["capture"]["start_source"] == "resume"
+        assert resumed["capture"]["prompt_count"] == 1 and resumed["capture"]["turn_count"] == 1
         assert next(e for e in lines if e["executor"] == "claude_code_hooks")["capture"]["turn_count"] == 1
         opencode = next(e for e in lines if e["executor"] == "opencode_plugin")
         assert opencode["capture"]["turn_count"] == 0 and opencode["capture"]["idle_count"] == 1

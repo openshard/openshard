@@ -56,7 +56,10 @@ names, tool names, repo-relative file paths, a secret-scrubbed bounded
 excerpt of the *first* user prompt as the Shard task (the same thing
 ``import claude --task`` asks the user to type), a scrubbed bounded Bash
 command summary, prompt/tool/turn counts, git branch/HEAD/dirty state.
-Never stored: transcripts or ``transcript_path``, full prompts, later
+Never stored: transcripts or ``transcript_path`` (the path is held only on
+the transient staging buffer / capture queue, so the fold can sum the
+token usage Claude Code recorded there -- see ``read_transcript_usage``;
+nothing else in the transcript is read), full prompts, later
 prompts, assistant messages (``last_assistant_message``), tool responses
 and tool error text (only a shell command's exit code is kept), file contents, environment variables, absolute paths, or
 anything matching the secret scrubber.
@@ -163,12 +166,16 @@ import json
 import os
 import re
 import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from openshard.adapters.agent_env import PROVIDER_SOURCE_AGENT_ENV, claude_agent_env
+from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
+from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
 from openshard.adapters.capture_agents import (
     AGENT_CLAUDE_CODE,
     CLAUDE_CODE_PROFILE,
@@ -323,6 +330,7 @@ _TOOL_FOLD_INTERVAL_SECONDS = 30
 # evidence still reaches runs.jsonl. Deliberately generous: an idle-but-live
 # session is only ever snapshotted, never marked ended.
 _STALE_BUFFER_SECONDS = 60 * 60
+_HOOK_SWEEP_DEADLINE_SECONDS = 2.0  # overall budget of the sweep a session-opening hook runs
 _MAX_STALE_SWEEP = 20
 
 # Requirement: hook processing must never hang Claude Code on lock
@@ -431,6 +439,18 @@ class HookPayload:
     # header -- never by a translator, never read out of the agent's own
     # payload (which is untrusted for this). See ``_bind_task_context``.
     task_id: str | None = None
+    # Claude Code's ``transcript_path``, kept only when it names this
+    # session's own transcript file (see ``_valid_transcript_path``). Held on
+    # the transient staging buffer so the fold can sum the session's token
+    # usage; the transcript's content and the path itself never reach
+    # ``runs.jsonl``.
+    transcript_path: str | None = None
+    # Where the agent runs, read by the capture client / in-process hook from
+    # the environment Claude Code gives its hook processes (never from the
+    # payload): the model provider its configuration selects and the raw
+    # ``CLAUDE_CODE_ENTRYPOINT`` surface. See ``claude_agent_env``.
+    agent_provider: str | None = None
+    agent_surface: str | None = None
 
 
 OUTCOME_PASSED = "passed"
@@ -542,7 +562,9 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     """Pick the supported fields out of a decoded hook payload.
 
     Unknown keys are ignored. Returns None when no supported event name can
-    be determined. ``transcript_path``, ``tool_result``,
+    be determined. ``transcript_path`` is kept as a path only (validated by
+    ``_valid_transcript_path``; read at fold time for token usage alone).
+    ``tool_result``,
     ``last_assistant_message`` and every other field are never read; for a
     shell tool only the documented outcome markers are (see
     ``_claude_command_outcome``: two booleans in ``tool_response``, the
@@ -594,6 +616,7 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
         tool_success=True if event == EVENT_POST_TOOL_USE else None,
         command_outcome=command_outcome,
         command_exit_code=command_exit_code,
+        transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
     )
 
 
@@ -642,6 +665,19 @@ def _claude_command_outcome(
         if _CLAUDE_TIMEOUT_LINE_RE.match(first):
             return OUTCOME_NOT_COMPLETED, None
     return None, None
+
+
+# ---------------------------------------------------------------------------
+# Agent environment (provider / surface; see adapters/agent_env.py)
+# ---------------------------------------------------------------------------
+
+
+def apply_agent_env(payload: HookPayload, agent_env: Mapping[str, str] | None) -> None:
+    """Attach a validated agent environment to a Claude Code *payload* (other agents: untouched)."""
+    if not agent_env or payload.agent != AGENT_CLAUDE_CODE:
+        return
+    payload.agent_provider = _agent_provider_or_none(agent_env.get("provider"))
+    payload.agent_surface = _agent_surface_or_none(agent_env.get("surface"))
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +785,325 @@ def extract_status_payload(data: Mapping[str, Any]) -> StatusPayload | None:
         tokens_cache_creation=_int_or_none(usage.get("cache_creation_input_tokens")),
         tokens_cache_read=_int_or_none(usage.get("cache_read_input_tokens")),
     )
+
+
+# ---------------------------------------------------------------------------
+# Session token usage from the Claude Code transcript. The status line's
+# ``context_window.current_usage`` is the *last* API call only, so it is
+# never recorded as a session total. At fold time the transcript Claude Code
+# itself writes is read for assistant ``message.usage`` -- the API
+# response's own usage, counted once per ``message.id`` (Claude Code writes
+# one streamed message over several lines) -- and summed over this
+# receipt's window. Reading is incremental: the buffer keeps a byte offset
+# per transcript file and the usage of recent message ids, so a fold reads
+# only what Claude Code appended since the last one. Only token counts and
+# model ids are kept; nothing else in the transcript is read, and neither
+# its content nor its path is stored on the record.
+# ---------------------------------------------------------------------------
+
+_TRANSCRIPT_MAX_FILES = 50  # main transcript + subagent transcripts read per receipt
+_TRANSCRIPT_RECENT_IDS = 16  # message ids per file kept open for re-reported streaming lines
+_TRANSCRIPT_MAX_CLOSED_IDS = 20_000  # closed message ids remembered for de-duplication across files
+_MAX_USAGE_MODELS = 10
+TOKENS_SOURCE_TRANSCRIPT = "transcript"
+TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE = "transcript_unavailable"
+TOKENS_INCOMPLETE_FILES_CAPPED = "transcript_files_capped"
+# One message's usage: input, output, cache_read, cache_creation (total),
+# cache_creation 5m, cache_creation 1h, cache_creation with no TTL split.
+_USAGE_FIELDS = ("input", "output", "cache_read", "cache_creation",
+                 "cache_creation_5m", "cache_creation_1h", "cache_creation_unsplit")
+
+
+def _transcript_roots() -> list[Path]:
+    """Where Claude Code keeps transcripts: ``~/.claude/projects`` and ``$CLAUDE_CONFIG_DIR/projects``."""
+    roots = [Path.home() / ".claude" / "projects"]
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if isinstance(config_dir, str) and config_dir.strip():
+        roots.append(Path(config_dir.strip()) / "projects")
+    return roots
+
+
+def _valid_transcript_path(raw: object, session_id: str | None) -> str | None:
+    """*raw* when it is this session's own ``<session_id>.jsonl`` under Claude Code's projects dir.
+
+    Anything else -- another file name, a relative or UNC path, a path
+    outside ``~/.claude/projects`` (or ``$CLAUDE_CONFIG_DIR/projects``) -- is
+    None and never read.
+    """
+    if not isinstance(raw, str) or not raw or len(raw) > 2_000 or not isinstance(session_id, str) or not session_id:
+        return None
+    if raw.startswith(("\\\\", "//")):
+        return None
+    try:
+        path = Path(raw)
+        if not path.is_absolute() or path.name != f"{session_id}.jsonl":
+            return None
+        resolved = path.resolve()
+        for root in _transcript_roots():
+            try:
+                if resolved.is_relative_to(root.resolve()):
+                    return raw
+            except (OSError, ValueError):
+                continue
+    except (ValueError, OSError):
+        return None
+    return None
+
+
+def _transcript_files(path: Path) -> tuple[list[Path], bool]:
+    """The session transcript plus its subagent transcripts; True when some were left out (cap)."""
+    files = [path]
+    capped = False
+    try:
+        sub = path.with_suffix("") / "subagents"
+        if sub.is_dir():
+            children = sorted(p for p in sub.glob("*.jsonl") if p.is_file())
+            capped = len(children) > _TRANSCRIPT_MAX_FILES - 1
+            files.extend(children[: _TRANSCRIPT_MAX_FILES - 1])
+    except OSError:
+        pass
+    return files, capped
+
+
+def _parse_utc(stamp: object) -> datetime | None:
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else None
+
+
+def _count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _usage_row(usage: Mapping[str, Any]) -> list[int]:
+    """One API message's usage as ``_USAGE_FIELDS`` (the 5m/1h cache-write split when reported)."""
+    creation = _count(usage.get("cache_creation_input_tokens"))
+    split = usage.get("cache_creation")
+    five = one = 0
+    unsplit = creation
+    if isinstance(split, Mapping):
+        five = _count(split.get("ephemeral_5m_input_tokens"))
+        one = _count(split.get("ephemeral_1h_input_tokens"))
+        unsplit = max(0, creation - five - one)
+    return [_count(usage.get("input_tokens")), _count(usage.get("output_tokens")),
+            _count(usage.get("cache_read_input_tokens")), creation, five, one, unsplit]
+
+
+def _new_transcript_state(since: object) -> dict:
+    return {"since": since, "files": {}, "closed": {}, "closed_ids": [], "capped": False}
+
+
+def _file_head(file: Path) -> str | None:
+    """A short hash of the file's first bytes: a replaced transcript (even a longer one) changes it."""
+    import hashlib
+
+    try:
+        with file.open("rb") as fh:
+            return hashlib.sha256(fh.read(512)).hexdigest()[:16]
+    except OSError:
+        return None
+
+
+def _close_message(state: dict, mid: str, model: str, row: list) -> None:
+    """Fold one message whose streaming lines are behind us into its model's totals, once per id."""
+    closed_ids: list = state.setdefault("closed_ids", [])
+    if mid in closed_ids:
+        return
+    if len(closed_ids) >= _TRANSCRIPT_MAX_CLOSED_IDS:
+        state["capped"] = True  # de-duplication memory exhausted: totals no longer claimed complete
+    else:
+        closed_ids.append(mid)
+    closed = state.setdefault("closed", {})
+    totals = closed.get(model)
+    if not isinstance(totals, list) or len(totals) != len(_USAGE_FIELDS) + 1:
+        totals = [0] * (len(_USAGE_FIELDS) + 1)
+    for i, v in enumerate(row):
+        totals[i] += int(v)
+    totals[-1] += 1  # messages
+    closed[model] = totals
+
+
+def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
+    """Read what was appended to *files* since *state*'s offsets. False when the main file is unreadable.
+
+    A file that shrank or was replaced (its first bytes changed) invalidates
+    every offset: the caller starts over. Only complete lines are consumed.
+    A message id is counted once across *all* files: each file keeps its
+    last few ids open (a streamed message's lines are contiguous and may
+    straddle two reads, so a continuing id replaces rather than adds), and
+    an id already closed or open elsewhere is skipped. Never raises.
+    """
+    from openshard.adapters.claude_code_import import _sanitize_model
+
+    since = _parse_utc(state.get("since"))
+    closed_ids = set(state.get("closed_ids") or [])
+    for index, file in enumerate(files):
+        key = "main" if index == 0 else file.name
+        slot = state["files"].setdefault(key, {"offset": 0, "recent": {}})
+        try:
+            size = file.stat().st_size
+            if size < int(slot.get("offset") or 0):
+                return False  # truncated: the caller resets the state
+            head = _file_head(file)
+            if int(slot.get("offset") or 0) and slot.get("head") and head != slot.get("head"):
+                return False  # replaced by another file: the caller resets the state
+            slot["head"] = head
+            with file.open("rb") as fh:
+                fh.seek(int(slot.get("offset") or 0))
+                chunk = fh.read(size - int(slot.get("offset") or 0))
+        except OSError:
+            if index == 0:
+                return False
+            continue
+        end = chunk.rfind(b"\n")
+        if end < 0:
+            continue
+        slot["offset"] = int(slot.get("offset") or 0) + end + 1
+        recent: dict = slot.setdefault("recent", {})
+        for raw in chunk[: end + 1].splitlines():
+            if b'"usage"' not in raw or b'"assistant"' not in raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(rec, dict) or rec.get("type") != "assistant":
+                continue
+            msg = rec.get("message")
+            if not isinstance(msg, dict):
+                continue
+            mid, usage = msg.get("id"), msg.get("usage")
+            if not isinstance(mid, str) or not mid or not isinstance(usage, dict):
+                continue
+            if since is not None:
+                at = _parse_utc(rec.get("timestamp"))
+                if at is None or at < since:
+                    continue
+            model = msg.get("model")
+            name = _sanitize_model(model) if isinstance(model, str) and model != "<synthetic>" else "unknown"
+            if mid not in recent and (mid in closed_ids or any(
+                mid in (other or {}).get("recent", {}) for k, other in state["files"].items() if k != key
+            )):
+                continue  # already counted (earlier in this file, or in another transcript)
+            recent.pop(mid, None)  # the latest line of a streamed message wins
+            recent[mid] = [name, *_usage_row(usage)]
+            while len(recent) > _TRANSCRIPT_RECENT_IDS:
+                old_id = next(iter(recent))
+                old = recent.pop(old_id)
+                _close_message(state, old_id, old[0], old[1:])
+                closed_ids.add(old_id)
+    return True
+
+
+def _summarise_transcript_state(state: dict) -> dict | None:
+    """``{"messages", "totals", "by_model", "complete"}`` from an incremental state, or None when empty."""
+    per_model: dict[str, list[int]] = {}
+    for model, totals in (state.get("closed") or {}).items():
+        if isinstance(totals, list) and len(totals) == len(_USAGE_FIELDS) + 1:
+            per_model[model] = [int(v) for v in totals]
+    for slot in (state.get("files") or {}).values():
+        for row in ((slot or {}).get("recent") or {}).values():
+            if not isinstance(row, list) or len(row) != len(_USAGE_FIELDS) + 1:
+                continue
+            acc = per_model.setdefault(row[0], [0] * (len(_USAGE_FIELDS) + 1))
+            for i, v in enumerate(row[1:]):
+                acc[i] += int(v)
+            acc[-1] += 1
+    messages = sum(acc[-1] for acc in per_model.values())
+    if not messages:
+        return None
+    totals = {f: sum(acc[i] for acc in per_model.values()) for i, f in enumerate(_USAGE_FIELDS)}
+    by_model = {
+        m: {**{f: acc[i] for i, f in enumerate(_USAGE_FIELDS)}, "messages": acc[-1]}
+        for m, acc in sorted(per_model.items(), key=lambda kv: -kv[1][-1])
+    }
+    complete = not state.get("capped") and len(by_model) <= _MAX_USAGE_MODELS
+    return {"messages": messages, "totals": totals, "by_model": dict(list(by_model.items())[:_MAX_USAGE_MODELS]),
+            "complete": complete}
+
+
+def read_transcript_usage(path: Path, *, since: datetime | str | None = None) -> dict | None:
+    """Token usage summed from a Claude Code transcript (one full read), or None. Never raises.
+
+    De-duplicated per message id, limited to assistant records stamped at or
+    after *since*, subagent transcripts included. See ``_transcript_usage``
+    for the incremental form the fold uses.
+    """
+    stamp = since.strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(since, datetime) else since
+    state = _new_transcript_state(stamp)
+    files, capped = _transcript_files(path)
+    state["capped"] = capped
+    if not _read_transcript_increment(state, files):
+        return None
+    return _summarise_transcript_state(state)
+
+
+def _transcript_usage(buf: dict) -> dict | None:
+    """This receipt's transcript usage, reading only what was appended since the last fold.
+
+    The incremental state lives on the (transient) buffer; a transcript that
+    shrank starts it over. When the transcript cannot be read now, the last
+    summary (if any) stands. Never raises.
+    """
+    cached = buf.get("transcript_usage") if isinstance(buf.get("transcript_usage"), dict) else None
+    raw = _valid_transcript_path(buf.get("transcript_path"), buf.get("session_id"))
+    if raw is None:
+        return cached
+    try:
+        since = buf.get("started_at")
+        state = buf.get("transcript_state")
+        if not isinstance(state, dict) or state.get("since") != since or not isinstance(state.get("files"), dict):
+            state = _new_transcript_state(since)
+        files, capped = _transcript_files(Path(raw))
+        state["capped"] = bool(state.get("capped")) or capped
+        if not _read_transcript_increment(state, files):
+            state = _new_transcript_state(since)
+            state["capped"] = capped
+            if not _read_transcript_increment(state, files):
+                return cached
+        buf["transcript_state"] = state
+        usage = _summarise_transcript_state(state)
+    except Exception:
+        return cached
+    if usage is None:
+        return cached
+    buf["transcript_usage"] = usage
+    return usage
+
+
+def _transcript_cost(usage: Mapping[str, Any]) -> float | None:
+    """List-rate USD for transcript usage, priced per model with the 5m/1h cache-write split.
+
+    None -- never a partial sum -- when any model has no official rate, when
+    some cache writes carry no TTL split (their rate is unknown), or when
+    the usage itself is incomplete.
+    """
+    from openshard.models.pricing import estimate_usage_cost
+
+    if not usage.get("complete"):
+        return None
+    total = 0.0
+    for model, row in (usage.get("by_model") or {}).items():
+        if not isinstance(row, Mapping):
+            return None
+        if int(row.get("cache_creation_unsplit") or 0):
+            return None
+        tokens = [int(row.get(k) or 0) for k in ("input", "output", "cache_read", "cache_creation_5m",
+                                                    "cache_creation_1h")]
+        if not any(tokens):
+            continue
+        estimate = estimate_usage_cost(
+            model, input_tokens=tokens[0], output_tokens=tokens[1], cache_read_tokens=tokens[2],
+            cache_write_tokens=tokens[3], cache_write_1h_tokens=tokens[4],
+        )
+        if estimate is None:
+            return None
+        total += estimate.usd
+    return round(total, 6)
 
 
 def _status_line_text(data: Mapping[str, Any]) -> str:
@@ -881,14 +1236,53 @@ def _to_repo_relative(raw_path: str | None, repo_root: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+# Claude Code wraps a pasted prompt as ``<pasted_content id="...">...</pasted_content>``;
+# the wrapper is transport, not the task text.
+_PASTED_OPEN_RE = re.compile(r"^\s*<pasted_content\b[^<>]*>\s*", re.IGNORECASE)
+_PASTED_CLOSE_RE = re.compile(r"\s*</pasted_content\s*>", re.IGNORECASE)
+
+
+def _strip_pasted_wrapper(prompt: str) -> str:
+    """*prompt* without a leading ``<pasted_content ...>`` tag and its closing tag."""
+    match = _PASTED_OPEN_RE.match(prompt)
+    if not match:
+        return prompt
+    return _PASTED_CLOSE_RE.sub(" ", prompt[match.end():], count=1).strip()
+
+
 def sanitize_task_excerpt(prompt: str | None) -> str | None:
     """First-prompt excerpt used as the Shard task: scrubbed, bounded, or None."""
     if not isinstance(prompt, str) or not prompt.strip():
         return None
     from openshard.adapters.claude_code_import import _sanitize_task
 
-    text = _sanitize_task(prompt, placeholder="", cap=_TASK_CAP)
+    text = _sanitize_task(_strip_pasted_wrapper(prompt), placeholder="", cap=_TASK_CAP)
     return text or None
+
+
+def _scrubbed_command(command: str) -> str:
+    """*command* (first 1,000 chars) secret-scrubbed, redacted and whitespace-collapsed."""
+    from openshard.security.redaction import redact_sensitive_text
+    from openshard.security.secret_scan import scrub_text_for_secrets
+
+    scrubbed, _ = scrub_text_for_secrets(command[:1_000], source_label="<hook-command>")
+    scrubbed, _kinds = redact_sensitive_text(scrubbed)
+    return " ".join(scrubbed.split())
+
+
+def _command_key(scrubbed: str) -> str | None:
+    """A short stable key for "the same command run again" (red-then-green check loops).
+
+    The hash of the *scrubbed*, whitespace-normalised command (see
+    ``_scrubbed_command``) -- never of the raw text, so no secret is ever
+    under it -- truncated to 16 hex chars. Distinguishes commands whose
+    displayed text was redacted alike. None for an empty command.
+    """
+    if not scrubbed:
+        return None
+    import hashlib
+
+    return hashlib.sha256(scrubbed.encode("utf-8")).hexdigest()[:16]
 
 
 def summarize_command(command: str | None, label: str = "Bash") -> tuple[str, str | None, str]:
@@ -902,23 +1296,25 @@ def summarize_command(command: str | None, label: str = "Bash") -> tuple[str, st
     never as a verification result. *label* is the tool's own name
     (``Bash`` for Claude Code/Codex, ``bash`` for OpenCode).
     """
+    action, target, kind, _key = _summarize_command(command, label)
+    return action, target, kind
+
+
+def _summarize_command(command: str | None, label: str) -> tuple[str, str | None, str, str | None]:
+    """``summarize_command`` plus the command's ``_command_key`` (one scrub for both)."""
     from openshard.safety.sanitize import sanitize_text
-    from openshard.security.secret_scan import scrub_text_for_secrets
 
     if not isinstance(command, str) or not command.strip():
-        return f"{label} command", None, "other"
-    from openshard.security.redaction import redact_sensitive_text
+        return f"{label} command", None, "other", None
 
     kind = "test" if _TEST_COMMAND_RE.search(command) else ("lint" if _LINT_COMMAND_RE.search(command) else "other")
-    scrubbed, _ = scrub_text_for_secrets(command[:1_000], source_label="<hook-command>")
-    scrubbed, _kinds = redact_sensitive_text(scrubbed)
-    collapsed = " ".join(scrubbed.split())
+    collapsed = _scrubbed_command(command)
     safe = sanitize_text(collapsed, _COMMAND_CAP)
     first = collapsed.split(" ", 1)[0] if collapsed else ""
     target = first if _FIRST_TOKEN_RE.match(first) else None
     if not safe:
-        return f"{label} command (redacted)", target, kind
-    return f"{label}: {safe}", target, kind
+        return f"{label} command (redacted)", target, kind, _command_key(collapsed)
+    return f"{label}: {safe}", target, kind, _command_key(collapsed)
 
 
 # ---------------------------------------------------------------------------
@@ -963,7 +1359,12 @@ class ReducedHookPayload:
     command_safety: str | None = None
     command_outcome: str | None = None  # see HookPayload.command_outcome
     command_exit_code: int | None = None
+    command_key: str | None = None  # see _command_key(): same check command -> same key
+    git_write: bool = False  # the command can create commits (see _GIT_WRITE_RE); corroborates them
     task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
+    transcript_path: str | None = None  # see HookPayload.transcript_path
+    agent_provider: str | None = None  # see HookPayload.agent_provider
+    agent_surface: str | None = None
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {
@@ -997,9 +1398,19 @@ class ReducedHookPayload:
             data["command_outcome"] = self.command_outcome
         if self.command_exit_code is not None:
             data["command_exit_code"] = self.command_exit_code
+        if self.command_key is not None:
+            data["command_key"] = self.command_key
+        if self.git_write:
+            data["git_write"] = True
         # Only when declared, so queue lines of an undeclared session keep their shape.
         if self.task_id is not None:
             data["task_id"] = self.task_id
+        if self.transcript_path is not None:
+            data["transcript_path"] = self.transcript_path
+        if self.agent_provider is not None:
+            data["agent_provider"] = self.agent_provider
+        if self.agent_surface is not None:
+            data["agent_surface"] = self.agent_surface
         return data
 
     @classmethod
@@ -1057,8 +1468,20 @@ class ReducedHookPayload:
             command_safety=_command_safety_or_none(data.get("command_safety")),
             command_outcome=_command_outcome_or_none(data.get("command_outcome")),
             command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
+            command_key=_command_key_or_none(data.get("command_key")),
+            git_write=data.get("git_write") is True,
             task_id=stored_task_id(data),
+            transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
+            agent_provider=_agent_provider_or_none(data.get("agent_provider")),
+            agent_surface=_agent_surface_or_none(data.get("agent_surface")),
         )
+
+
+_COMMAND_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _command_key_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and _COMMAND_KEY_RE.match(value) else None
 
 
 def _valid_baseline(raw: object) -> dict | None:
@@ -1109,6 +1532,9 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         tool_success=payload.tool_success if isinstance(payload.tool_success, bool) else None,
         attrs=_clean_attrs(payload.attrs),
         task_id=payload.task_id if is_task_id(payload.task_id) else None,
+        transcript_path=_valid_transcript_path(payload.transcript_path, payload.session_id),
+        agent_provider=_agent_provider_or_none(payload.agent_provider),
+        agent_surface=_agent_surface_or_none(payload.agent_surface),
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
@@ -1130,11 +1556,14 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
             if reduced.file_target is None and reduced.file_targets:
                 reduced.file_target = reduced.file_targets[0]["path"]
         elif kind == TOOL_KIND_COMMAND:
-            action, target, ckind = summarize_command(payload.command, label=tool)
+            action, target, ckind, key = _summarize_command(payload.command, tool)
             reduced.command_action, reduced.command_target, reduced.command_kind = action, target, ckind
+            if ckind in ("test", "lint"):
+                reduced.command_key = key  # only check-shaped commands need one (see _record_check)
             reduced.command_outcome = _command_outcome_or_none(payload.command_outcome)
             reduced.command_exit_code = _exit_code_or_none(payload.command_exit_code)
             reduced.command_safety = classify_command_text(payload.command)
+            reduced.git_write = bool(payload.command and _GIT_WRITE_RE.search(payload.command))
         elif kind == TOOL_KIND_READ:
             reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
             reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
@@ -1347,10 +1776,11 @@ def _write_buffer(path: Path, buf: dict) -> None:
 def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
     """Rebuild a staging buffer from an already-persisted record.
 
-    Used when a hook arrives for a session whose buffer is gone (resumed
-    after SessionEnd, or a background Stop hook finishing after SessionEnd
-    deleted it) so no later hook can ever overwrite the record with an
-    empty snapshot.
+    Used when a hook arrives for a session whose buffer is gone but whose
+    record has not ended (the idle sweep folded and removed it) so no later
+    hook can ever overwrite the record with an empty snapshot. A record whose
+    session *ended* is never rebuilt: later hooks open a new segment instead
+    (see ``_resumed_segment``).
     """
     capture = entry.get("capture")
     if not isinstance(capture, dict):
@@ -1397,6 +1827,9 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "started_at": capture.get("started_at") or entry.get("timestamp") or _now(),
         "last_activity_at": capture.get("last_activity_at") or _now(),
         "start_source": capture.get("start_source"),
+        "resumed_from_receipt_id": (
+            capture.get("resumed_from_receipt_id") if isinstance(capture.get("resumed_from_receipt_id"), str) else None
+        ),
         "git_branch": entry.get("git_branch"),
         "git_head_commit_hash": entry.get("git_head_commit_hash"),
         "git_dirty": entry.get("git_dirty"),
@@ -1449,8 +1882,20 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
             else None
         ),
         "status_last_seen_at": capture.get("last_status_ping_at"),
+        # Transcript usage this record already carries stands until the
+        # transcript is read again. Claude Code tokens recorded any other way
+        # (pre-transcript records: the status line's last call) are never
+        # carried forward as session totals.
+        "transcript_usage": _stored_transcript_usage(entry, capture),
+        "tokens_scope": (
+            "last_call"
+            if entry.get("executor") == EXECUTOR and capture.get("tokens_source") != TOKENS_SOURCE_TRANSCRIPT
+            else None
+        ),
         "model_source": capture.get("model_source") if capture.get("model_source") != "not_captured" else None,
         "provider_current": capture.get("provider") if isinstance(capture.get("provider"), str) else None,
+        "provider_source": capture.get("provider_source") if isinstance(capture.get("provider_source"), str) else None,
+        "surface": _agent_surface_or_none(capture.get("surface")),
         "usage_by_key": usage_by_key,
         "usage_provenance": next(
             (v for v in (entry.get("tokens_provenance"), entry.get("cost_provenance")) if isinstance(v, str)),
@@ -1459,10 +1904,33 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "applied_ids": [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)],
         "check_command_seen": bool(entry.get("verification_attempted")),
         **_stored_checks(entry),
+        **_stored_check_latest(entry, capture),
         "capture_losses": _stored_losses(capture),
         "baseline": _stored_baseline(entry, capture),
         "task_context": _stored_task_context(entry, capture),
         "task_context_conflicts": _stored_count(capture.get("task_context_conflicts")),
+        "git_outcome": _stored_git_outcome(entry),
+        "git_write_at": [w for w in (capture.get("git_write_at") or []) if isinstance(w, str)],
+        # The owner the record was created with; never re-resolved or back-filled.
+        "owner": entry.get("owner") if isinstance(entry.get("owner"), str) else None,
+    }
+
+
+def _stored_transcript_usage(entry: dict, capture: dict) -> dict | None:
+    """The transcript usage a persisted record carries (``capture.tokens_source == transcript``), or None."""
+    if capture.get("tokens_source") != TOKENS_SOURCE_TRANSCRIPT:
+        return None
+    names = {"input": "prompt_tokens", "output": "completion_tokens",
+             "cache_read": "cache_read_tokens", "cache_creation": "cache_creation_tokens"}
+    totals = {k: entry.get(v) for k, v in names.items()}
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in totals.values()):
+        return None
+    by_model = capture.get("usage_by_model")
+    return {
+        "messages": _stored_count(capture.get("usage_messages")),
+        "totals": totals,
+        "by_model": by_model if isinstance(by_model, dict) else {},
+        "complete": capture.get("tokens_incomplete_reason") is None,
     }
 
 
@@ -1521,6 +1989,22 @@ def _stored_checks(entry: dict) -> dict:
     return {"checks": checks, "checks_total": max(total, len(checks))}
 
 
+def _stored_check_latest(entry: dict, capture: dict) -> dict:
+    """The per-command latest outcomes and per-run counts a persisted record carries (empty when none)."""
+    raw = capture.get("check_latest")
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    latest = {k: v for k, v in raw.items() if isinstance(k, str) and v in ("passed", "failed", "unknown")}
+    raw_runs = capture.get("check_runs")
+    runs: dict = raw_runs if isinstance(raw_runs, dict) else {}
+    return {
+        "check_latest": latest,
+        "check_latest_overflow": bool(capture.get("check_latest_overflow")),
+        "checks_passed_runs": _stored_count(runs.get("passed")),
+        "checks_failed_runs": _stored_count(runs.get("failed")),
+    }
+
+
 def _stored_baseline(entry: dict, capture: dict) -> dict:
     """The session-start baseline a persisted record carries (v0.4.4 ``changes.baseline``).
 
@@ -1556,10 +2040,15 @@ def _is_session_entry(entry: dict, session_id: str, executor: str = EXECUTOR) ->
 
 
 def _find_persisted_entry(repo_root: Path, session_id: str, executor: str = EXECUTOR) -> dict | None:
-    """One raw scan of runs.jsonl for this session's record (no coercion)."""
+    """One raw scan of runs.jsonl for this session's latest record (no coercion).
+
+    A resumed session can have several receipts (one per segment, see
+    ``_resumed_segment``); the last one written is the live candidate.
+    """
     path = repo_root / ".openshard" / "runs.jsonl"
     if not path.exists():
         return None
+    found: dict | None = None
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -1570,22 +2059,83 @@ def _find_persisted_entry(repo_root: Path, session_id: str, executor: str = EXEC
             except json.JSONDecodeError:
                 continue
             if isinstance(d, dict) and _is_session_entry(d, session_id, executor):
-                return d
+                found = d
     except OSError:
         return None
-    return None
+    return found
+
+
+def _entry_ended(entry: dict) -> bool:
+    capture = entry.get("capture")
+    return isinstance(capture, dict) and capture.get("session_end_observed") is True
+
+
+def _resumed_segment(
+    persisted: dict, repo_root: Path, session_id: str, first_hook: str, *, now: str | None,
+    agent: str, baseline: dict | None,
+) -> dict:
+    """A fresh buffer for hooks arriving after this session's receipt already ended.
+
+    A receipt is immutable once its session ended: it may already be synced,
+    and the Platform keeps the first copy it accepted per ``receipt_id``.
+    Hooks for the same agent session id after that -- a ``claude --resume``,
+    or a late background hook -- start a new receipt segment instead: new
+    run/receipt identity at its first work, ``start_source: resume``, a
+    baseline and HEAD taken now, and a link back to the ended receipt. The
+    ended receipt's dedup ids are carried over, so a replayed queue line it
+    already applied is still recognised as a duplicate.
+    """
+    buf = _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline)
+    buf["start_source"] = "resume"
+    previous = persisted.get("receipt_id")
+    if isinstance(previous, str) and previous:
+        buf["resumed_from_receipt_id"] = previous
+    raw_capture = persisted.get("capture")
+    capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
+    buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
+    return buf
+
+
+# Hooks that can start a resumed segment of an ended session at once; any
+# other hook (a late async PostToolUse/Stop of the ended session) is ignored
+# while it arrives within the grace period after the session ended.
+_SEGMENT_OPENING_EVENTS = frozenset({EVENT_SESSION_START, EVENT_USER_PROMPT_SUBMIT, EVENT_MODEL_INVOCATION})
+_LATE_HOOK_GRACE_SECONDS = 60
+
+
+def _late_hook_for_ended(persisted: dict, first_hook: str, now: str | None) -> bool:
+    """True for a non-opening hook arriving within the grace period after *persisted* ended."""
+    if first_hook in _SEGMENT_OPENING_EVENTS:
+        return False
+    raw_capture = persisted.get("capture")
+    capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
+    at = _parse_utc(now) if now else None
+    age = _seconds_since(capture.get("last_activity_at"), at)
+    return age is not None and age < _LATE_HOOK_GRACE_SECONDS
 
 
 def _load_or_create_buffer(
     repo_root: Path, session_id: str, first_hook: str, *, now: str | None = None,
     agent: str = AGENT_CLAUDE_CODE, baseline: dict | None = None,
-) -> dict:
+) -> dict | None:
+    """The session's buffer: live, rebuilt from a not-ended record, a resumed segment, or new.
+
+    None for a late non-opening hook of a session that ended moments ago
+    (see ``_late_hook_for_ended``): it belongs to the ended, immutable
+    receipt and must not open a spurious segment.
+    """
     path = buffer_path(repo_root, session_id, agent)
     buf = _read_buffer(path) if path.exists() else None
     if buf is not None:
         return buf
     persisted = _find_persisted_entry(repo_root, session_id, profile_for(agent).executor)
     if persisted is not None:
+        if _entry_ended(persisted):
+            if _late_hook_for_ended(persisted, first_hook, now):
+                return None
+            return _resumed_segment(
+                persisted, repo_root, session_id, first_hook, now=now, agent=agent, baseline=baseline,
+            )
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
             return rebuilt
@@ -1609,6 +2159,10 @@ def _load_buffer_light(repo_root: Path, session_id: str, agent: str = AGENT_CLAU
     if path.exists():
         return _read_buffer(path)
     persisted = _find_persisted_entry(repo_root, session_id, profile_for(agent).executor) or {}
+    if _entry_ended(persisted):
+        # The ended receipt is immutable; the next real hook opens a new
+        # segment (see _resumed_segment) and later pings feed that one.
+        return None
     return _buffer_from_entry(persisted, session_id) or None
 
 
@@ -1643,12 +2197,18 @@ def _ensure_record(buf: dict, repo_root: Path) -> None:
     timestamp = buf.get("started_at") or _now()
     run_index = _count_history_lines(repo_root)
     sid = str(buf.get("session_id") or "")
+    receipt_id = new_receipt_id()
+    run_id = f"{timestamp}-{sid[:8]}" if sid else timestamp
+    if buf.get("resumed_from_receipt_id"):
+        # A resumed segment can start within the same second as the ended
+        # one; its own receipt id keeps the run id distinct.
+        run_id = f"{run_id}-{receipt_id[-8:]}"
     buf["record"] = {
-        "run_id": f"{timestamp}-{sid[:8]}" if sid else timestamp,
+        "run_id": run_id,
         "shard_id": _make_shard_id(timestamp, run_index),
         # v0.4.4: the global identity of this record. Minted once here, at
         # creation, and carried through every fold; never position-derived.
-        "receipt_id": new_receipt_id(),
+        "receipt_id": receipt_id,
         "attempt_number": 1,
         "timestamp": timestamp,
     }
@@ -1984,12 +2544,35 @@ def _command_status(payload: ReducedHookPayload, failed_event: bool) -> str:
     return outcome if outcome in (OUTCOME_PASSED, OUTCOME_FAILED) else "unknown"
 
 
+_MAX_CHECK_KEYS = 100  # distinct check commands whose latest outcome is tracked
+
+
 def _record_check(
     buf: dict, name: str, kind: str, *, status: str, at: str, exit_code: int | None = None,
+    key: str | None = None,
 ) -> None:
     """Remember one hook-observed check command with the outcome its hook reported
-    (``unknown`` when the hook reported none)."""
+    (``unknown`` when the hook reported none).
+
+    Every run counts (``checks_total``, ``checks_passed_runs`` /
+    ``checks_failed_runs``), and the *latest* outcome per command
+    (``check_latest``, keyed by ``command_key``) is what the verification
+    status is computed from -- a check that failed and then passed on a
+    re-run is passed; the earlier failed run stays listed and counted.
+    """
     buf["checks_total"] = int(buf.get("checks_total") or 0) + 1
+    if status in ("passed", "failed"):
+        counter = f"checks_{status}_runs"
+        buf[counter] = int(buf.get(counter) or 0) + 1
+    latest = buf.get("check_latest")
+    if not isinstance(latest, dict):
+        latest = buf["check_latest"] = {}
+    slot = key or f"name:{name}"
+    if slot in latest or len(latest) < _MAX_CHECK_KEYS:
+        latest.pop(slot, None)  # re-insert: most recently run last
+        latest[slot] = status
+    else:
+        buf["check_latest_overflow"] = True
     checks = buf.get("checks")
     if not isinstance(checks, list):
         checks = buf["checks"] = []
@@ -2048,29 +2631,49 @@ def _hook_verification(buf: dict) -> dict:
             source=SOURCE_DIRECTLY_OBSERVED, observation_mode=MODE_HOOK_TOOL_EVENT, checks_attempted=0,
             reason="No check command observed in the agent's tool events.",
         )
-    failed = sum(1 for c in checks if c.get("status") == "failed")
-    passed = sum(1 for c in checks if c.get("status") == "passed")
     stamps = [c["at"] for c in checks if isinstance(c.get("at"), str)]
     truncated = total > len(checks)
     if truncated:
         incomplete.append(REASON_CHECKS_TRUNCATED)
-    # Checks past the buffer bound have no recorded outcome, so they count as unknown.
-    unknown = total - passed - failed
-    if failed:
+    latest = buf.get("check_latest") if isinstance(buf.get("check_latest"), dict) else None
+    superseded = 0
+    if latest:
+        # The status follows each command's *latest* reported outcome, so a
+        # red-then-green loop ends green. ``checks_attempted`` counts every
+        # run; ``checks_passed`` / ``checks_failed`` count commands by their
+        # latest outcome (a passed status with a failed count is inconsistent
+        # by contract). Earlier failed runs stay in ``checks`` and the reason.
+        outcomes = list(latest.values())
+        latest_failed = outcomes.count("failed")
+        latest_passed = outcomes.count("passed")
+        passed, failed = latest_passed, latest_failed
+        unknown = len(outcomes) - latest_failed - latest_passed + (1 if buf.get("check_latest_overflow") else 0)
+        superseded = _stored_count(buf.get("checks_failed_runs")) if not latest_failed else 0
+    else:
+        # A buffer rebuilt from an older record: outcomes per run only.
+        failed = sum(1 for c in checks if c.get("status") == "failed")
+        passed = sum(1 for c in checks if c.get("status") == "passed")
+        latest_failed, latest_passed = failed, passed
+        # Checks past the buffer bound have no recorded outcome, so they count as unknown.
+        unknown = total - passed - failed
+    if latest_failed:
         status = STATUS_FAILED
-    elif passed and not unknown:
+    elif latest_passed and not unknown:
         status = STATUS_PASSED
-    elif passed:
+    elif latest_passed:
         status = STATUS_PARTIAL
     else:
         status = STATUS_UNKNOWN
     if unknown:
         incomplete.append(REASON_OUTCOME_NOT_OBSERVED)
-    if failed:
+    if latest_failed:
         reason = "The agent's hook reported a check command as failed; OpenShard did not run it."
-    elif passed and not unknown:
+    elif superseded and latest_passed and not unknown:
+        reason = (f"The agent's hook reported {superseded} failed check run(s) that passed on a later re-run; "
+                  "OpenShard did not run them.")
+    elif latest_passed and not unknown:
         reason = "The agent's hook reported the check command outcome(s); OpenShard did not run them."
-    elif passed:
+    elif latest_passed:
         reason = "The agent's hook reported some check outcomes; the rest were not observed."
     else:
         reason = "Check command(s) observed through agent hooks; outcome not observed."
@@ -2201,6 +2804,207 @@ def _stamp_task_context(entry: dict, buf: dict) -> None:
         entry["capture"]["task_context_conflicts"] = conflicts
 
 
+# ---------------------------------------------------------------------------
+# Session outcome in git (finalisation only): the HEAD the session ended on,
+# the commits created during it, and the pull request that carries one.
+# ---------------------------------------------------------------------------
+
+_MAX_SESSION_COMMITS = 50
+_GH_TIMEOUT_SECONDS = 5.0
+PR_LOOKUP_ENV = "OPENSHARD_PR_LOOKUP"  # "off" disables the ``gh`` pull-request lookup
+_SHA_RE = re.compile(r"^[0-9a-f]{40,64}$")
+
+
+def _sha_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lower()
+    return value if _SHA_RE.match(value) else None
+
+
+# Reflog subjects of entries that *create* a new commit in this checkout:
+# commit / amend / merge commit, cherry-pick, revert, ``git am``, and a true
+# (non-fast-forward) merge or pull ("... Merge made by the 'ort' strategy.").
+# A fast-forward ("pull: Fast-forward", "merge x: Fast-forward"), checkout
+# or reset only moves HEAD onto existing commits and never qualifies.
+# Rebase picks ("rebase (pick)", "pull --rebase (pick)") are excluded too:
+# they rewrite commits that may have been made before the session, so they
+# are under-counted rather than claimed.
+_REFLOG_CREATED_RE = re.compile(
+    r"^(?:commit(?: \((?:amend|merge|initial)\))?|cherry-pick|revert|am):"
+    r"|^(?:merge|pull)\b[^:]*: Merge made by "
+)
+_SESSION_COMMIT_GRACE_SECONDS = 120  # clock slack after the session's last observed hook
+_GIT_WRITE_CORROBORATION_SECONDS = 900  # a commit may take this long before its tool call returns
+# A shell command that can create commits (the agent's own tool call is the
+# corroboration a session-created commit needs). Matched on the raw command
+# at reduce time; only a boolean is kept.
+_GIT_WRITE_RE = re.compile(r"\bgit\b[^|;&]*\b(?:commit|cherry-pick|revert|merge|pull|am)\b")
+_MAX_GIT_WRITES = 50
+_PR_LOOKUP_ENABLED = False  # True only in the capture service process (see enable_pr_lookup)
+
+
+def enable_pr_lookup() -> None:
+    """Allow the session-end ``gh`` lookup in this process (the capture service worker).
+
+    Off by default, so an in-process (inline) hook -- which Claude Code is
+    waiting on -- never makes a network call at SessionEnd or in a sweep.
+    """
+    global _PR_LOOKUP_ENABLED
+    _PR_LOOKUP_ENABLED = True
+
+
+def _reflog_created(repo_root: Path) -> dict[str, int] | None:
+    """``{sha: reflog unix time}`` for HEAD reflog entries that created a commit, or None. Never raises."""
+    out = run_git(repo_root, ["reflog", "show", "--date=unix", "--format=%H%x09%gd%x09%gs", "-n", "500", "HEAD"])
+    if not out or not out.strip():
+        # No reflog (core.logAllRefUpdates=false, a fresh clone, an error):
+        # which commits the session created is unknown, never "none".
+        return None
+    created: dict[str, int] = {}
+    for line in out.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        sha = _sha_or_none(parts[0])
+        stamp = re.search(r"@\{(\d+)\}$", parts[1].strip())
+        if sha and stamp and _REFLOG_CREATED_RE.match(parts[2]):
+            created.setdefault(sha, int(stamp.group(1)))  # newest entry first
+    return created
+
+
+def _session_git_outcome(buf: dict, repo_root: Path) -> dict | None:
+    """``git_observed`` end state of the session, or None when git cannot say. Never raises.
+
+    A commit counts as created by this session only when all of these hold:
+    it is reachable from the end HEAD but not from the start HEAD; this
+    checkout's HEAD reflog records it being *created* (commit / amend /
+    merge commit / cherry-pick / revert / ``am`` / non-fast-forward merge
+    or pull -- never a fast-forward, never a rebase pick, which may rewrite
+    commits made before the session) at a time inside the session window
+    ``[started_at, last_activity_at + grace]``; its committer time is inside
+    the same window; and the agent's own hook stream reported a
+    commit-making ``git`` command whose call returned shortly after it. A
+    teammate's commits pulled in, commits made by hand after the session
+    went idle and another session's commits therefore do not count.
+    ``commits`` is None (unknown) without a start HEAD or a reflog.
+    """
+    try:
+        end = _sha_or_none(run_git(repo_root, ["rev-parse", "HEAD"]))
+        if end is None:
+            return None
+        outcome: dict[str, Any] = {"source": ATTR_GIT_OBSERVED, "end_head": end, "commits": None, "truncated": False}
+        start = _sha_or_none(buf.get("git_head_commit_hash"))
+        started = _parse_utc(buf.get("started_at"))
+        last = _parse_utc(buf.get("last_activity_at")) or started
+        reflog = _reflog_created(repo_root)
+        if start is not None and started is not None and last is not None and reflog is not None:
+            lo, hi = int(started.timestamp()), int(last.timestamp()) + _SESSION_COMMIT_GRACE_SECONDS
+            writes = [int(t.timestamp()) for t in (_parse_utc(s) for s in (buf.get("git_write_at") or [])) if t]
+            log = run_git(repo_root, [
+                "log", f"--max-count={_MAX_SESSION_COMMITS + 1}", "--format=%H %ct", f"{start}..{end}",
+            ])
+            if log is not None:
+                commits: list[str] = []
+                rows = [r.split() for r in log.splitlines() if r.strip()]
+                for row in rows[:_MAX_SESSION_COMMITS]:
+                    sha = _sha_or_none(row[0]) if row else None
+                    if not sha or len(row) < 2 or not row[1].isdigit() or not lo <= int(row[1]) <= hi:
+                        continue
+                    created_at = reflog.get(sha)
+                    if created_at is None or not lo <= created_at <= hi:
+                        continue
+                    if not any(t - _GIT_WRITE_CORROBORATION_SECONDS <= created_at <= t + 5 for t in writes):
+                        continue
+                    commits.append(sha)
+                outcome["commits"] = commits
+                outcome["truncated"] = len(rows) > _MAX_SESSION_COMMITS
+        branch = (run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip()
+        if (
+            outcome["commits"] and branch and branch != "HEAD" and _PR_LOOKUP_ENABLED
+            and os.environ.get(PR_LOOKUP_ENV, "").lower() != "off"
+        ):
+            pr = _gh_pull_request(repo_root, branch, set(outcome["commits"]))
+            if pr is not None:
+                outcome["pull_request"] = pr
+        return outcome
+    except Exception:
+        return None
+
+
+def _gh_pull_request(repo_root: Path, branch: str, session_commits: set[str]) -> dict | None:
+    """The pull request whose head is one of *session_commits*, as the GitHub CLI reports it.
+
+    One read-only ``gh pr list --head <branch>`` with a short timeout; only
+    a PR whose ``headRefOid`` *is* a commit this session created counts.
+    No ``gh``, no auth, no network, no match -> None. Never raises.
+    """
+    import shutil
+    import subprocess
+
+    from openshard.util.git import NO_WINDOW_KW
+
+    try:
+        exe = shutil.which("gh")
+        if exe is None:
+            return None
+        proc = subprocess.run(
+            [exe, "pr", "list", "--head", branch, "--state", "all",
+             "--json", "number,url,headRefOid", "--limit", "5"],
+            cwd=str(repo_root), capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_GH_TIMEOUT_SECONDS, check=False, **NO_WINDOW_KW,
+        )
+        if proc.returncode != 0:
+            return None
+        rows = json.loads(proc.stdout or "")
+    except Exception:
+        return None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        head, url, number = _sha_or_none(row.get("headRefOid")), row.get("url"), row.get("number")
+        if head in session_commits and isinstance(url, str) and re.match(r"^https://[^\s]{1,2040}$", url):
+            return {
+                "url": url, "number": number if isinstance(number, int) and not isinstance(number, bool) else None,
+                "head": head, "source": "gh_observed",
+            }
+    return None
+
+
+def _stamp_git_outcome(entry: dict, buf: dict) -> None:
+    """Persist the finalisation-time git outcome (``_session_git_outcome``) on *entry*."""
+    outcome = buf.get("git_outcome")
+    if not isinstance(outcome, dict) or _sha_or_none(outcome.get("end_head")) is None:
+        return
+    entry["git_end_head"] = outcome["end_head"]
+    commits = outcome.get("commits")
+    if isinstance(commits, list):
+        entry["session_commits"] = {
+            "source": ATTR_GIT_OBSERVED,
+            "shas": [c for c in commits if _sha_or_none(c)][:_MAX_SESSION_COMMITS],
+            "truncated": bool(outcome.get("truncated")),
+        }
+    pr = outcome.get("pull_request")
+    if isinstance(pr, dict) and isinstance(pr.get("url"), str):
+        entry["pull_request"] = {k: pr.get(k) for k in ("url", "number", "head", "source")}
+
+
+def _stored_git_outcome(entry: dict) -> dict | None:
+    """The git outcome a persisted record carries (rebuilt buffers keep it until re-finalised)."""
+    end = _sha_or_none(entry.get("git_end_head"))
+    if end is None:
+        return None
+    outcome: dict[str, Any] = {"source": ATTR_GIT_OBSERVED, "end_head": end, "commits": None, "truncated": False}
+    block = entry.get("session_commits")
+    if isinstance(block, dict) and isinstance(block.get("shas"), list):
+        outcome["commits"] = [c for c in block["shas"] if _sha_or_none(c)]
+        outcome["truncated"] = bool(block.get("truncated"))
+    pr = entry.get("pull_request")
+    if isinstance(pr, dict) and isinstance(pr.get("url"), str):
+        outcome["pull_request"] = dict(pr)
+    return outcome
+
+
 def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     """Build the coerced runs.jsonl record for a session's current state.
 
@@ -2295,8 +3099,11 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     task = buf.get("task") if isinstance(buf.get("task"), str) and buf.get("task") else None
 
     # Model/cost/tokens -- opportunistically populated by the Claude Code
-    # status line (handle_claude_status) or by what another agent's own hook
-    # stream reports (PR12), never guessed from names/env vars. Absent
+    # status line (handle_claude_status), the session transcript's usage
+    # (tokens) or by what another agent's own hook stream reports (PR12),
+    # never guessed from names. The provider is the one the agent reports, or
+    # for Claude Code the one its own environment selects (provider_source
+    # ``agent_env``; see claude_agent_env) -- never guessed from the model. Absent
     # entirely (not merely None) when never observed, so old readers and
     # the "verification never fabricated" contract both stay honest.
     models_seen = [m for m in (buf.get("models_seen") or []) if isinstance(m, str)][:5]
@@ -2320,12 +3127,39 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # For per-message usage reports (OpenCode) the baseline is 0 and the
         # total is the sum over distinct message ids (see _apply_status).
         estimated_cost = round(max(0.0, float(cost_total) - float(cost_baseline)), 6)
-        cost_provenance = usage_provenance
+        # Claude Code's cost is its own estimate (agent_reported), even though
+        # its token usage is the provider's (see AgentProfile.cost_provenance).
+        cost_provenance = profile.cost_provenance or usage_provenance
 
     tokens_current = buf.get("tokens_current") if isinstance(buf.get("tokens_current"), dict) else None
     prompt_tokens = completion_tokens = total_tokens = None
     cache_creation_tokens = cache_read_tokens = None
     tokens_provenance: str | None = None
+    tokens_source: str | None = None
+    tokens_not_recorded: str | None = None
+    transcript_usage = _transcript_usage(buf)
+    if transcript_usage:
+        # Session totals from the transcript (the API responses' own usage).
+        tokens_current = dict(transcript_usage.get("totals") or {})
+        tokens_source = TOKENS_SOURCE_TRANSCRIPT
+    elif buf.get("tokens_scope") == "last_call":
+        # Only the status line's last-call figures are known: never recorded
+        # as session totals. Unknown, with the reason, beats an undercount.
+        tokens_current = None
+        tokens_not_recorded = TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE
+    cost_not_recorded: str | None = None
+    if estimated_cost is None and transcript_usage:
+        # No cost the agent reported (headless ``claude -p`` has no status
+        # line): price the usage per model at the official list rates, with
+        # 1-hour cache writes at their own rate. Any model without a rate,
+        # unsplit cache writes or incomplete usage -> unknown, never a partial sum.
+        from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE
+
+        priced = _transcript_cost(transcript_usage)
+        if priced is not None:
+            estimated_cost, cost_provenance = priced, COST_PROVENANCE_OFFICIAL_RATE
+        else:
+            cost_not_recorded = "no_official_rate_for_usage"
     if tokens_current:
         prompt_tokens = int(tokens_current.get("input") or 0)
         completion_tokens = int(tokens_current.get("output") or 0)
@@ -2430,11 +3264,34 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "last_status_ping_at": buf.get("status_last_seen_at"),
         },
     }
+    if "owner" not in buf:
+        # Resolved once per receipt (never re-read on later folds) from the
+        # explicit ``identity.owner`` config; never inferred.
+        from openshard.config.settings import recorded_owner
+
+        buf["owner"] = recorded_owner(repo_root)
+    if isinstance(buf.get("owner"), str) and buf["owner"]:
+        entry["owner"] = buf["owner"]
     if isinstance(record.get("receipt_id"), str) and record["receipt_id"]:
         # v0.4.4 global identity -- present on every record created by this
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
     _stamp_task_context(entry, buf)
+    _stamp_git_outcome(entry, buf)
+    git_writes = [w for w in (buf.get("git_write_at") or []) if isinstance(w, str)]
+    if git_writes:
+        entry["capture"]["git_write_at"] = git_writes[-_MAX_GIT_WRITES:]
+    check_latest = buf.get("check_latest")
+    if isinstance(check_latest, dict) and check_latest:
+        # Latest outcome per check command (keys are hashes, never command
+        # text), so a buffer rebuilt from this record keeps the same status.
+        entry["capture"]["check_latest"] = dict(list(check_latest.items())[-_MAX_CHECK_KEYS:])
+        entry["capture"]["check_runs"] = {
+            "passed": _stored_count(buf.get("checks_passed_runs")),
+            "failed": _stored_count(buf.get("checks_failed_runs")),
+        }
+        if buf.get("check_latest_overflow"):
+            entry["capture"]["check_latest_overflow"] = True
     invocation_count = int(buf.get("invocation_count") or 0)
     if invocation_count:
         # Model invocations observed (Antigravity PreInvocation); absent for
@@ -2454,6 +3311,16 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             # Delegation / approval-gate facts the agent reported (Hermes);
             # absent for agents whose hooks expose none.
             entry["capture"][count_key] = {n: int(raw_counts.get(n) or 0) for n in count_names}
+    if isinstance(buf.get("resumed_from_receipt_id"), str):
+        # This receipt continues an agent session whose earlier receipt had
+        # already ended (see _resumed_segment); that receipt is left as it was.
+        entry["capture"]["resumed_from_receipt_id"] = buf["resumed_from_receipt_id"]
+    if isinstance(buf.get("provider_source"), str) and provider_current:
+        entry["capture"]["provider_source"] = buf["provider_source"]
+    surface = _agent_surface_or_none(buf.get("surface"))
+    if surface:
+        # How the agent was launched (Claude Code: CLAUDE_CODE_ENTRYPOINT, raw).
+        entry["capture"]["surface"] = surface
     if raw_usage:
         # Per-message usage memory (OpenCode), bounded; lets a buffer rebuilt
         # from this record keep deduplicating re-reported messages.
@@ -2468,6 +3335,22 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         entry["cache_creation_tokens"] = cache_creation_tokens
         entry["cache_read_tokens"] = cache_read_tokens
         entry["tokens_provenance"] = tokens_provenance
+    if tokens_source is not None and transcript_usage:
+        entry["capture"]["tokens_source"] = tokens_source
+        entry["capture"]["usage_messages"] = int(transcript_usage.get("messages") or 0)
+        if transcript_usage.get("by_model"):
+            # Local per-model breakdown (with the 5m/1h cache-write split);
+            # the synced fields stay the totals above.
+            entry["capture"]["usage_by_model"] = transcript_usage["by_model"]
+        if not transcript_usage.get("complete"):
+            # Some subagent transcripts (or models) were left out: the totals
+            # are a lower bound, and no cost is derived from them.
+            entry["capture"]["tokens_incomplete_reason"] = TOKENS_INCOMPLETE_FILES_CAPPED
+            entry["summary"] = entry["summary"] + " Token usage is incomplete (transcript files capped)."
+    elif tokens_not_recorded is not None:
+        entry["capture"]["tokens_not_recorded_reason"] = tokens_not_recorded
+    if cost_not_recorded is not None:
+        entry["capture"]["cost_not_recorded_reason"] = cost_not_recorded
     if duration_seconds is not None:
         entry["duration_seconds"] = duration_seconds
     try:
@@ -2483,17 +3366,36 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     return coerce_shard_entry(entry)
 
 
-def _fold(buf: dict, repo_root: Path) -> tuple[dict, str]:
-    """Snapshot the session into runs.jsonl (replace this session's line or append)."""
+def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, str]:
+    """Snapshot the session into runs.jsonl (replace this session's line or append).
+
+    *finalize* (SessionEnd, or the idle sweep closing a session) also records
+    the session's git outcome -- end HEAD, commits created, their PR -- which
+    costs a few git calls and possibly one ``gh`` call, so it never runs on
+    an ordinary turn or tool snapshot.
+    """
     from openshard.history.jsonl_store import upsert_jsonl
 
+    if finalize:
+        git_outcome = _session_git_outcome(buf, repo_root)
+        if git_outcome is not None:
+            buf["git_outcome"] = git_outcome
     entry = build_hook_entry(buf, repo_root)
     session_id = str(buf.get("session_id"))
     executor = _buffer_profile(buf).executor
+    receipt_id = (buf.get("record") or {}).get("receipt_id")
+    if isinstance(receipt_id, str) and receipt_id:
+        # One line per receipt: a resumed session's segments share the agent
+        # session id, so the receipt identity is what selects the line.
+        def match(e: dict) -> bool:
+            return e.get("receipt_id") == receipt_id
+    else:  # a record rebuilt from pre-0.4.4 history has no receipt_id
+        def match(e: dict) -> bool:
+            return _is_session_entry(e, session_id, executor)
     outcome = upsert_jsonl(
         repo_root / ".openshard" / "runs.jsonl",
         entry,
-        lambda e: _is_session_entry(e, session_id, executor),
+        match,
         timeout=_LOCK_TIMEOUT_SECONDS,
     )
     buf["last_fold_at"] = _now()
@@ -2502,6 +3404,7 @@ def _fold(buf: dict, repo_root: Path) -> tuple[dict, str]:
 
 def sweep_stale_buffers(
     repo_root: Path, *, max_age_seconds: float = _STALE_BUFFER_SECONDS, now: datetime | None = None,
+    deadline_seconds: float | None = None,
 ) -> list[str]:
     """Fold and remove staging buffers of sessions idle for *max_age_seconds*.
 
@@ -2514,6 +3417,7 @@ def sweep_stale_buffers(
     folded. Never raises.
     """
     folded: list[str] = []
+    started = time.monotonic()
     try:
         directory = sessions_dir(repo_root)
         if not directory.is_dir():
@@ -2524,6 +3428,8 @@ def sweep_stale_buffers(
         for path in candidates[: _MAX_STALE_SWEEP * 4]:
             if len(folded) >= _MAX_STALE_SWEEP:
                 break
+            if deadline_seconds is not None and time.monotonic() - started >= deadline_seconds:
+                break  # the rest are swept by the next sweep
             peek = _read_buffer(path)
             if peek is None:
                 continue
@@ -2548,7 +3454,7 @@ def sweep_stale_buffers(
                         if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
                             losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
                         buf["capture_losses"] = losses
-                        swept_entry, _ = _fold(buf, repo_root)
+                        swept_entry, _ = _fold(buf, repo_root, finalize=True)
                         _schedule_post_session_verify(repo_root, swept_entry)
                     path.unlink()
                 folded.append(sid)
@@ -2600,6 +3506,15 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     event = payload.event
     profile = _buffer_profile(buf)
     _bind_task_context(buf, payload, now=now)
+    if payload.transcript_path:
+        # Transient: read at fold for token usage only (see _transcript_usage).
+        buf["transcript_path"] = payload.transcript_path
+    if payload.agent_provider and not buf.get("provider_current"):
+        # First observation wins: a session's environment does not change.
+        buf["provider_current"] = payload.agent_provider
+        buf["provider_source"] = PROVIDER_SOURCE_AGENT_ENV
+    if payload.agent_surface and not buf.get("surface"):
+        buf["surface"] = payload.agent_surface
     if payload.model_id:
         # The agent's own hook stream names the model (Codex: every payload;
         # OpenCode: the user message's selected model). Recorded as observed.
@@ -2773,6 +3688,11 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
                 metadata["outcome_source"] = "agent_reported"
             if payload.command_safety is not None:
                 metadata["command_safety"] = payload.command_safety
+            if payload.git_write:
+                # When the agent ran a commit-making git command (the tool
+                # call returned at *now*): corroboration for _session_git_outcome.
+                writes = [w for w in (buf.get("git_write_at") or []) if isinstance(w, str)]
+                buf["git_write_at"] = (writes + [now])[-_MAX_GIT_WRITES:]
             if outcome == "failed":
                 # A command the agent reports as exited non-zero is failed
                 # activity evidence even when it arrived through the success
@@ -2787,7 +3707,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
                 buf["check_command_seen"] = True
                 _record_check(
                     buf, action, payload.command_kind, status=outcome, at=now,
-                    exit_code=payload.command_exit_code,
+                    exit_code=payload.command_exit_code, key=payload.command_key,
                 )
         _append_event(
             buf, event_type="tool.invoked", action=action, target=target,
@@ -2936,6 +3856,8 @@ def _observe_model(buf: dict, model_id: str | None, provider_id: str | None, sou
     if safe_provider != "unknown":
         if buf.get("provider_current") != safe_provider:
             buf["provider_current"] = safe_provider
+            # Now the agent's own report, not (any longer) its environment.
+            buf["provider_source"] = "agent_reported"
         if "/" not in safe_model:
             safe_model = f"{safe_provider}/{safe_model}"
     changed = False
@@ -3054,10 +3976,17 @@ def apply_reduced_hook(
 
         path = buffer_path(repo_root, payload.session_id, payload.agent)
         with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
-            buf = _load_or_create_buffer(
+            loaded = _load_or_create_buffer(
                 repo_root, payload.session_id, payload.event, now=now, agent=payload.agent,
                 baseline=payload.baseline,
             )
+            if loaded is None:
+                ended = _find_persisted_entry(repo_root, payload.session_id, profile_for(payload.agent).executor)
+                applied = ((ended or {}).get("capture") or {}).get("applied_event_ids") or []
+                detail = "duplicate event id" if dedup_id and dedup_id in applied else "late hook for an ended session"
+                return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
+                                   repo_root=repo_root, detail=detail)
+            buf = loaded
             if _already_applied(buf, dedup_id):
                 return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
                                    repo_root=repo_root, detail="duplicate event id")
@@ -3065,14 +3994,14 @@ def apply_reduced_hook(
             _mark_applied(buf, dedup_id)
             remote_events = _remote_capture_new_events(buf)
             if buf.get("ended") and _has_activity(buf):
-                # A hook arriving after SessionEnd (a background Stop that
-                # finished late, or a resume of an ended session): snapshot
-                # and drop the rebuilt buffer again rather than leave it behind.
+                # An ended buffer (this SessionEnd, or a buffer an older
+                # version left behind): snapshot and drop it rather than
+                # leave it behind. Hooks after the end open a new segment.
                 should_fold, should_delete = True, True
             entry: dict | None = None
             outcome = ""
             if should_fold:
-                entry, outcome = _fold(buf, repo_root)
+                entry, outcome = _fold(buf, repo_root, finalize=bool(buf.get("ended")))
             if should_delete:
                 try:
                     if path.exists():
@@ -3093,8 +4022,9 @@ def apply_reduced_hook(
         ):
             # An agent with no start hook (Antigravity) opens a session with
             # its first model invocation; it has no end hook either, so this
-            # sweep is what eventually closes its idle sessions.
-            sweep_stale_buffers(repo_root)
+            # sweep is what eventually closes its idle sessions. Bounded: this
+            # may run inside the hook process Claude Code is waiting on.
+            sweep_stale_buffers(repo_root, deadline_seconds=_HOOK_SWEEP_DEADLINE_SECONDS)
 
         record = buf.get("record") or {}
         if entry is not None:
@@ -3158,7 +4088,11 @@ def apply_capture_loss(
 
         path = buffer_path(repo_root, session_id, agent)
         with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
-            buf = _load_or_create_buffer(repo_root, session_id, "CaptureLoss", now=now, agent=agent)
+            loaded = _load_or_create_buffer(repo_root, session_id, "CaptureLoss", now=now, agent=agent)
+            if loaded is None:
+                return HookOutcome(event="CaptureLoss", action="ignored", session_id=session_id,
+                                   repo_root=repo_root, detail="loss reported right after the session ended")
+            buf = loaded
             losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
             losses.append(make_reason(kind, count))
             buf["capture_losses"] = losses[-_MAX_BUFFERED_EVENTS:]
@@ -3233,6 +4167,7 @@ def handle_hook(
     event_override: str | None = None,
     agent: str = AGENT_CLAUDE_CODE,
     task_id: str | None = None,
+    agent_env: Mapping[str, str] | None = None,
 ) -> HookOutcome:
     """Process one decoded hook payload from *agent* synchronously. Never raises.
 
@@ -3262,6 +4197,7 @@ def handle_hook(
                                session_id=payload.session_id, repo_root=repo_root,
                                detail="usage recorded" if recorded else "no session buffer yet")
         payload.task_id = task_id if is_task_id(task_id) else None
+        apply_agent_env(payload, agent_env)
         reduced = reduce_hook_payload(payload, repo_root)
         if reduced is None:
             return HookOutcome(event=payload.event, action="ignored", detail="missing or invalid session_id")
@@ -3284,6 +4220,7 @@ def handle_claude_hook(
         event_override=event_override,
         agent=AGENT_CLAUDE_CODE,
         task_id=launch_task_id(env),
+        agent_env=claude_agent_env(env if env is not None else os.environ),
     )
 
 
@@ -3389,6 +4326,10 @@ def _apply_status(payload: StatusPayload, buf: dict, *, now: str | None = None) 
             changed = True
 
     if payload.tokens_input is not None or payload.tokens_output is not None:
+        # Claude Code's ``context_window.current_usage``: the last API call
+        # only. Kept on the buffer, never recorded as the session's totals
+        # (those come from the transcript; see _transcript_usage).
+        buf["tokens_scope"] = "last_call"
         tokens = {
             "input": payload.tokens_input or 0,
             "output": payload.tokens_output or 0,

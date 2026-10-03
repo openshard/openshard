@@ -344,8 +344,20 @@ never invented evidence.
   `session.deleted`); `capture.idle_count` / `last_idle_at` record what
   was seen. OpenCode exposes no positive "turn finished successfully"
   signal the plugin forwards, so none is claimed.
-* **Cost / tokens**: Claude Code from the status line (`provider_reported`,
-  unchanged). Codex hooks expose neither, so a Codex record never carries
+* **Cost / tokens**: Claude Code's cost is the status line's
+  `cost.total_cost_usd` delta over the session -- Claude Code's own
+  estimate, so `cost_provenance: agent_reported`. Its tokens are summed at
+  fold time from the API `usage` Claude Code writes in the session
+  transcript (`transcript_path`, plus `subagents/*.jsonl`), counted once per
+  `message.id` and only for messages stamped inside this Receipt's window
+  (`tokens_provenance: provider_reported`, `capture.tokens_source:
+  transcript`, a local per-model breakdown in `capture.usage_by_model`).
+  Only `type`, `timestamp`, `message.id`, `message.model` and
+  `message.usage` are read; neither the transcript's content nor its path
+  is stored. The status line's `context_window.current_usage` is the last
+  API call only and is never recorded as session totals: without a
+  readable transcript tokens stay unknown with
+  `capture.tokens_not_recorded_reason: transcript_unavailable`. Codex hooks expose neither, so a Codex record never carries
   `estimated_cost`/`prompt_tokens` (receipt shows *Not recorded*). OpenCode
   reports `cost` and `tokens` on each assistant message; the buffer keeps
   the latest report per message id and sums them, so a message re-reported
@@ -357,8 +369,52 @@ never invented evidence.
   shows *Not recorded*, never `$0.00`. Tokens are kept either way.
 * **Model / provider**: preserved as the agent reports them, sanitized and
   bounded. A provider is never guessed from a model name; OpenCode's record
-  is `provider/model` only when OpenCode itself exposed both.
-* **Never stored**: transcripts / `transcript_path`, `tool_response` /
+  is `provider/model` only when OpenCode itself exposed both. Claude Code's
+  provider is read from the environment it gives its hook processes
+  (`capture.provider_source: agent_env`): `CLAUDE_CODE_USE_BEDROCK` ->
+  `amazon_bedrock`, `CLAUDE_CODE_USE_VERTEX` -> `google_vertex`,
+  `CLAUDE_CODE_USE_FOUNDRY` -> `microsoft_foundry`, none of them ->
+  `anthropic`, unless `ANTHROPIC_BASE_URL` routes to a gateway (then
+  unknown). `CLAUDE_CODE_ENTRYPOINT` is kept raw as `capture.surface`
+  (`cli`, `sdk-cli`, `claude-vscode`, ...). The command-hook client derives
+  both and sends them on its own header (`X-OpenShard-Agent-Env`), since
+  the capture service does not share Claude Code's environment; the first
+  observation in a session wins.
+* **End of session (git)**: at `SessionEnd` (or the idle sweep) capture
+  records `git_end_head` and `session_commits` (`git_observed`). A commit
+  counts only when it is reachable from the end HEAD but not the start
+  HEAD, this checkout's HEAD reflog shows it being *created* (commit,
+  amend, merge commit, cherry-pick, revert, `am`, a non-fast-forward merge
+  or pull -- never a fast-forward, and never a rebase pick, which can
+  rewrite commits made before the session: those are left out rather than
+  claimed) between session start and 2 minutes after its last
+  hook, its committer time is in that window, and the agent's own tool
+  calls include a commit-making `git` command that returned shortly after
+  it. Without a reflog the list is unknown. The synced `commit` is the end
+  HEAD only when it is one of those; `pr_url` only when `gh pr list --head
+  <branch>` (5 s timeout, capture service only -- never in a hook process
+  Claude Code waits on) reports a PR whose head is a session commit.
+  `OPENSHARD_PR_LOOKUP=off` disables that lookup.
+* **Cost without a status line** (headless `claude -p`): the transcript
+  usage is priced per model at the official list rate, 5-minute and
+  1-hour cache writes each at their own published rate
+  (`cost_provenance: official_rate_estimate`). A model without a rate,
+  cache writes without the 5m/1h split, or incomplete usage (subagent
+  transcripts capped, `capture.tokens_incomplete_reason`) leave the cost
+  unknown (`capture.cost_not_recorded_reason`) -- never a partial sum.
+  Transcripts are read incrementally and only under `~/.claude/projects`
+  (or `$CLAUDE_CONFIG_DIR/projects`).
+* **Owner**: `owner` is stamped only from an explicit `identity.owner`
+  (`openshard config set-owner "<name>"`, user-global; `--repo` writes this
+  repository's `.openshard/config.yml`, which wins). Never inferred from git or organisation data.
+* **Checks re-run**: a check command that failed and then passed on a
+  re-run reads `passed`. The status follows each command's latest reported
+  outcome (commands keyed by a hash of their scrubbed text);
+  `checks_attempted` counts every run, `checks_passed` / `checks_failed`
+  count commands by latest outcome, and the failed run stays in `checks`
+  and `capture.check_runs`.
+* **Never stored**: transcripts / `transcript_path` (the path lives only on
+  the transient staging buffer and capture queue), `tool_response` /
   tool output and error text (a shell command's integer exit code is the
   only thing read from them, see Verification v2), `last_assistant_message`, patch bodies, tool arguments other
   than the file path / command, absolute paths outside the repository,
@@ -463,7 +519,7 @@ events, also what telemetry reports) is unchanged.
 
 | Agent | Check invocation | Check result | Exit / error | Transcript | Model / provider | Now recorded |
 |---|---|---|---|---|---|---|
-| Claude Code | `PostToolUse` / `PostToolUseFailure`, Bash + PowerShell `tool_input.command` | `PostToolUse` is documented success-only; a non-zero exit fires `PostToolUseFailure` | `error` first line `Exit code N` (the only stable part); `is_interrupt`; timeout line | `transcript_path` (lags; not read) | status line `model.id`; `SessionStart.model` sometimes; no provider | foreground Bash `PostToolUse` -> `passed`; `Exit code N` -> `failed` + N; interrupt/timeout, `run_in_background`, `backgroundTaskId`, `interrupted` -> `unknown` |
+| Claude Code | `PostToolUse` / `PostToolUseFailure`, Bash + PowerShell `tool_input.command` | `PostToolUse` is documented success-only; a non-zero exit fires `PostToolUseFailure` | `error` first line `Exit code N` (the only stable part); `is_interrupt`; timeout line | `transcript_path` (read at fold for token `usage` only) | status line `model.id`; `SessionStart.model` sometimes; no provider | foreground Bash `PostToolUse` -> `passed`; `Exit code N` -> `failed` + N; interrupt/timeout, `run_in_background`, `backgroundTaskId`, `interrupted` -> `unknown` |
 | Codex | `PostToolUse` Bash | none: `PostToolUse` fires for non-zero exits too, and `tool_response` is only the output text | none documented | `transcript_path` (documented as unstable) | `model` every event; no provider | unchanged: `unknown` |
 | Cursor | `postToolUse` / `postToolUseFailure` `Shell` | `tool_output` JSON; the reference `Shell` example carries `exitCode` | `exitCode`; `failure_type` (`error`/`timeout`/`permission_denied`); `is_interrupt` | `transcript_path` (not read) | `model` / `model_id`; no provider | `exitCode` -> `passed` / `failed`; timeout / denied / interrupt -> `unknown`; no `exitCode` -> `unknown` |
 | OpenCode | `tool.execute.after` `bash` | not documented (source: `output.metadata.exit`, null on timeout/abort) | not documented | not exposed to plugins | `providerID` / `modelID` on messages | unchanged: `unknown` (source-only field not relied on) |

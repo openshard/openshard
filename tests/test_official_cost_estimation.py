@@ -12,6 +12,16 @@ from openshard.models.pricing import (
 )
 
 
+def test_anthropic_1h_cache_writes_use_the_published_1h_rate() -> None:
+    # platform.claude.com pricing: Opus 5.5 5m writes $5, 1h writes $8 per MTok.
+    estimate = estimate_usage_cost("claude-opus-5-5", cache_write_tokens=1_000_000, cache_write_1h_tokens=1_000_000)
+    assert estimate is not None and estimate.cache_write_usd == pytest.approx(13.0)
+    assert official_rate("claude-sonnet-5-5").cache_write_1h_per_mtok == 4.0
+    assert official_rate("claude-haiku-4-5").cache_write_1h_per_mtok == 2.0
+    # No published 1h rate -> unknown, never a 5m-rate undercount.
+    assert estimate_usage_cost("gpt-5.6-sol", cache_write_1h_tokens=1_000) is None
+
+
 def test_openai_sol_prices_input_output_and_cache() -> None:
     estimate = estimate_usage_cost(
         "gpt-5.6-sol",

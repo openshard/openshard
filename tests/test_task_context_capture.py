@@ -656,16 +656,13 @@ class TestBufferAndFold:
         ended = _entry(repo, SID1)
         late = {**docs[2]}  # a background Stop finishing after SessionEnd
 
-        handle_hook(late, env=_claude_env(repo), task_id=TASK_B)
-        entry = _entry(repo, SID1)
-        assert entry["task_id"] == TASK_A and entry["capture"]["task_context_conflicts"] == 1
-        assert entry["receipt_id"] == ended["receipt_id"]
-
-        handle_hook(late, env=_claude_env(repo), task_id=TASK_A)  # the same id again: no conflict
-        handle_hook(late, env=_claude_env(repo), task_id=None)  # no declaration: kept, not dropped
-        entry = _entry(repo, SID1)
-        assert entry["task_id"] == TASK_A and entry["capture"]["task_context_conflicts"] == 1
-        assert entry["capture"]["task_context"] == ended["capture"]["task_context"]
+        # The ended receipt is immutable: a late hook, whatever it declares,
+        # never re-binds it nor counts a conflict on it.
+        for declared in (TASK_B, TASK_A, None):
+            handle_hook(late, env=_claude_env(repo), task_id=declared)
+        (entry,) = _lines(repo)
+        assert entry == ended
+        assert entry["task_id"] == TASK_A and "task_context_conflicts" not in entry["capture"]
 
     def test_late_declaration_is_never_retroactive(self, repo):
         docs = _claude_docs(repo, SID1)

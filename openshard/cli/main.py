@@ -7359,7 +7359,8 @@ def sync_now(limit: int, as_json: bool) -> None:
     if report.in_progress:
         line += f" {report.in_progress} session(s) in progress, left alone."
     if report.stale:
-        line += f" {report.stale} changed locally since sync."
+        line += (f" {report.stale} changed locally after it was synced and was not re-sent "
+                 "(hosted Receipts are immutable; see `openshard sync status`).")
     if report.stopped and report.sent:
         line += f" Stopped: {report.stopped}."
     click.echo(line)
@@ -7680,6 +7681,59 @@ def config_show(as_json: bool) -> None:
     if not valid:
         click.echo("Warning: config could not be parsed; showing safe defaults.\n")
     click.echo(yaml.safe_dump(safe, sort_keys=False, default_flow_style=False).rstrip())
+
+
+@config_cmd.command("set-owner")
+@click.argument("owner", required=False)
+@click.option("--clear", is_flag=True, default=False, help="Remove the configured owner.")
+@click.option("--repo", "repo_scope", is_flag=True, default=False,
+              help="Write this repository's config instead of the user-global ~/.openshard/config.yml.")
+def config_set_owner(owner: str | None, clear: bool, repo_scope: bool) -> None:
+    """Set the explicit owner stamped on new Receipts (identity.owner).
+
+    Written to the user-global config by default, or to this repository's
+    config with --repo (a repository value wins). Never inferred from git or
+    organisation metadata; Receipts already recorded keep their owner.
+    """
+    from openshard.adapters.claude_mcp_install import find_repo_root
+    from openshard.config.settings import (
+        clean_owner,
+        config_search_path,
+        user_config_path,
+        write_identity_owner,
+    )
+
+    if clear == bool(owner):
+        raise click.UsageError("Give an owner name, or --clear (not both).")
+    value: str | None = None
+    if not clear:
+        value = clean_owner(owner)
+        if value is None or value != " ".join(str(owner).split()):
+            raise click.UsageError("Owner must be plain text up to 120 characters (no paths or secret-like values).")
+    if repo_scope:
+        root = find_repo_root(Path.cwd())
+        home = Path.home().resolve()
+        if root is None or home == root.resolve() or home.is_relative_to(root.resolve()):
+            # Never the home directory (or above it), even when that is itself a git repository.
+            raise click.UsageError("--repo needs to run inside a project repository.")
+        path = config_search_path(root)
+        if not path.exists() and (root / "config.yml").exists():
+            raise click.UsageError(
+                f"{root / 'config.yml'} is this repository's config; a new {path} would replace it. "
+                "Add identity.owner to config.yml by hand, or set the owner user-globally (no --repo).")
+    else:
+        path = user_config_path()
+    if path.exists():
+        click.echo(f"Note: {path} is rewritten; YAML comments in it are not preserved.", err=True)
+    try:
+        written = write_identity_owner(path, value)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(f"Could not update {path}: {exc}") from exc
+    scope = "repository" if repo_scope else "user"
+    if value is None:
+        click.echo(f"Owner cleared from the {scope} config ({written}).")
+    else:
+        click.echo(f"Owner set to {value!r} in the {scope} config ({written}). New Receipts are stamped with it.")
 
 
 # ---------------------------------------------------------------------------

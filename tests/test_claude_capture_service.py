@@ -368,7 +368,10 @@ def _stable_view(entry: dict) -> dict:
                                  # the inline path never does (dedup_id=None throughout),
                                  # so its applied_event_ids stays empty. Not a correctness
                                  # difference -- see build_hook_entry/apply_reduced_hook.
-                                 "applied_event_ids")},
+                                 "applied_event_ids",
+                                 # Read from the hook process environment: the inline path
+                                 # has it, a raw HTTP POST (no command client) carries none.
+                                 "provider", "provider_source", "surface")},
         "events": [{k: e.get(k) for k in _STABLE_EVENT_KEYS} for e in entry["events"]],
         "verification_attempted": entry["verification_attempted"],
         "verification_passed": entry["verification_passed"],
@@ -416,9 +419,11 @@ class TestEventualConsistency:
         assert _wait_for(lambda: (_e := _first_line(repo)) is not None and _e["capture"]["turn_count"] == 1)
         entry = _lines(repo)[0]
         assert entry["execution_model"] == "claude-sonnet-5"
-        assert entry["cost_provenance"] == "provider_reported"
+        # Claude Code's own cost estimate: the agent's report, not the provider's.
+        assert entry["cost_provenance"] == "agent_reported"
         assert entry["estimated_cost"] == pytest.approx(0.25)
-        assert entry["tokens_provenance"] == "provider_reported"
+        # The status line's tokens are the last API call only: never session totals.
+        assert "tokens_provenance" not in entry
 
     def test_project_dir_header_anchors_the_repo_when_cwd_is_elsewhere(self, service, repo, tmp_path):
         elsewhere = tmp_path / "somewhere else"

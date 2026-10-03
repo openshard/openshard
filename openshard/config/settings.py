@@ -268,6 +268,92 @@ def save_config(config: dict[str, Any], path: str | os.PathLike | None = None) -
     return target
 
 
+# ---------------------------------------------------------------------------
+# Run owner (``identity.owner``)
+# ---------------------------------------------------------------------------
+
+OWNER_MAX_CHARS = 120
+
+
+def user_config_path(env: dict | os._Environ | None = None) -> Path:
+    """The user-global config file, ``<OPENSHARD_HOME>/config.yml`` (``~/.openshard/config.yml``).
+
+    Only ``identity.owner`` is read from it (see :func:`recorded_owner`);
+    every other setting still comes from :func:`load_config`'s search order.
+    """
+    from openshard.util.home import openshard_home
+
+    return Path(openshard_home(env)) / "config.yml"
+
+
+def _owner_from(path: Path | None) -> str | None:
+    if path is None or not path.is_file():
+        return None
+    try:
+        data = _load_yaml(path)
+    except Exception:
+        return None
+    identity = data.get("identity") if isinstance(data, dict) else None
+    return clean_owner(identity.get("owner")) if isinstance(identity, dict) else None
+
+
+def clean_owner(value: object) -> str | None:
+    """*value* as a storable owner (scrubbed, at most 120 chars), or None when nothing safe remains."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    from openshard.safety.sanitize import sanitize_text
+
+    return sanitize_text(" ".join(value.split()), OWNER_MAX_CHARS) or None
+
+
+def recorded_owner(repo_root: Path | None = None, env: dict | os._Environ | None = None) -> str | None:
+    """The explicit run owner to stamp on a record, or None. Never raises.
+
+    ``identity.owner`` from the repository's config (the file
+    :func:`find_config_path` resolves for *repo_root*) wins over the
+    user-global :func:`user_config_path`. Only ever what a person configured
+    (``openshard config set-owner``): never inferred from git ``user.name``,
+    the OS account or organisation metadata.
+    """
+    try:
+        return _owner_from(find_config_path(cwd=repo_root)) or _owner_from(user_config_path(env))
+    except Exception:
+        return None
+
+
+def stamp_owner(entry: dict, repo_root: Path | None) -> None:
+    """Set ``entry["owner"]`` from :func:`recorded_owner` when one is configured (absent otherwise)."""
+    owner = recorded_owner(repo_root)
+    if owner:
+        entry["owner"] = owner
+
+
+def write_identity_owner(path: Path, owner: str | None) -> Path:
+    """Set (or, with None, remove) ``identity.owner`` in the YAML config at *path*.
+
+    Every other key in the file is preserved (comments are not: the file is
+    re-serialised). Raises ``ValueError`` when an existing file is not a
+    YAML mapping, rather than overwriting it.
+    """
+    data: dict[str, Any] = {}
+    if path.is_file():
+        loaded = _load_yaml(path)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{path} is not a YAML mapping")
+        data = loaded
+    identity = data.get("identity")
+    identity = dict(identity) if isinstance(identity, dict) else {}
+    if owner is None:
+        identity.pop("owner", None)
+    else:
+        identity["owner"] = owner
+    if identity:
+        data["identity"] = identity
+    else:
+        data.pop("identity", None)
+    return save_config(data, path)
+
+
 def get_onboarding(config: dict[str, Any]) -> dict[str, Any]:
     """Return the additive ``onboarding`` block from *config*, or ``{}``."""
     value = config.get("onboarding")

@@ -101,6 +101,7 @@ from typing import Any
 
 from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
+from openshard.adapters.agent_env import parse_agent_env
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE, profile_for
 from openshard.adapters.claude_hooks import (
     EVENT_MODEL_INVOCATION,
@@ -109,9 +110,11 @@ from openshard.adapters.claude_hooks import (
     ReducedHookPayload,
     StatusPayload,
     _snapshot_baseline,
+    apply_agent_env,
     apply_capture_loss,
     apply_reduced_hook,
     apply_status_payload,
+    enable_pr_lookup,
     extract_agent_payload,
     extract_status_payload,
     reduce_hook_payload,
@@ -284,6 +287,9 @@ class CaptureRecorder:
 
     def __init__(self, *, instance_id: str, state_path: Path | None = None, state: dict | None = None) -> None:
         self.instance_id = instance_id
+        # Session-end PR lookups run here, off Claude Code's hook path (an
+        # inline hook process never makes them; see claude_hooks.enable_pr_lookup).
+        enable_pr_lookup()
         self._state_path = state_path
         self._state: dict = dict(state or {})
         self._seq = 0
@@ -481,6 +487,7 @@ class CaptureRecorder:
         agent: str = AGENT_CLAUDE_CODE,
         authorize: Callable[[Path], bool] | None = None,
         task_id: str | None = None,
+        agent_env: dict[str, str] | None = None,
     ) -> tuple[str, str]:
         """Validate, reduce and durably queue one hook payload. Returns ``(action, detail)``.
 
@@ -524,6 +531,7 @@ class CaptureRecorder:
             self.enqueue(root, key)
             return "queued", "status"
         payload.task_id = task_id if is_task_id(task_id) else None
+        apply_agent_env(payload, agent_env)  # client-derived provider/surface (AGENT_ENV_HEADER)
         reduced = reduce_hook_payload(payload, root)
         if reduced is None:
             self._bump("ignored")
@@ -1050,6 +1058,7 @@ class _Handler(BaseHTTPRequestHandler):
         project_dir = self.headers.get(client.PROJECT_DIR_HEADER)
         project_dir = project_dir.strip() if isinstance(project_dir, str) and project_dir.strip() else None
         task_id = self._declared_task_id()
+        agent_env = parse_agent_env(self.headers.get(client.AGENT_ENV_HEADER))
 
         # The agent a capability must be scoped to is the one this event will
         # be *recorded as* -- the receiver path picks the translator and the
@@ -1065,7 +1074,7 @@ class _Handler(BaseHTTPRequestHandler):
                 event_override = params.get("event") or None
                 action, _detail = self.server.recorder.record_hook(
                     data, project_dir=project_dir, event_override=event_override, agent=_HOOK_PATH_AGENTS[path],
-                    authorize=authorize, task_id=task_id,
+                    authorize=authorize, task_id=task_id, agent_env=agent_env,
                 )
             else:
                 action, _detail = self.server.recorder.record_status(

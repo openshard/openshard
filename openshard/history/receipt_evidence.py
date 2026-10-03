@@ -551,6 +551,46 @@ def base_commit_value(entry: dict) -> str | None:
     return value if _SHA_RE.match(value) else None
 
 
+def provider_value(entry: dict) -> str | None:
+    """The model provider the capture recorded (``capture.provider``): reported by the
+    agent, or for Claude Code read from its own environment (``provider_source``)."""
+    return _text(_dict(entry.get("capture")).get("provider"), 128)
+
+
+def surface_value(entry: dict) -> str | None:
+    """How the agent was launched (``capture.surface``: Claude Code's raw entrypoint)."""
+    return _text(_dict(entry.get("capture")).get("surface"), 64)
+
+
+def commit_value(entry: dict) -> str | None:
+    """The resulting commit, only when git observed the session create it.
+
+    Capture records the HEAD the session ended on (``git_end_head``) and the
+    commits created during the session (``session_commits``, git_observed).
+    The end HEAD is the result only when it is one of those -- a HEAD that
+    merely moved (checkout, reset, pull) is never presented as the work.
+    """
+    end = entry.get("git_end_head")
+    block = _dict(entry.get("session_commits"))
+    shas = block.get("shas")
+    if not isinstance(end, str) or not isinstance(shas, list) or end not in shas:
+        return None
+    value = end.strip().lower()
+    return value if _SHA_RE.match(value) else None
+
+
+def pr_url_value(entry: dict) -> str | None:
+    """A pull request URL whose head the hosting provider reported as a session-created commit."""
+    pr = _dict(entry.get("pull_request"))
+    url, head = pr.get("url"), pr.get("head")
+    shas = _dict(entry.get("session_commits")).get("shas")
+    if not isinstance(url, str) or not isinstance(shas, list) or head not in shas:
+        return None
+    if not re.match(r"^https://[^\s]{1,2040}$", url):
+        return None
+    return url
+
+
 def content_hash_value(entry: dict) -> str | None:
     value = entry.get("content_hash")
     return value if isinstance(value, str) and _CONTENT_HASH_RE.match(value) else None
@@ -676,6 +716,10 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "learning": learning_block,
         "permissions": permission_evidence_block,
         "base_commit": base_commit_value,
+        "provider": provider_value,
+        "surface": surface_value,
+        "commit": commit_value,
+        "pr_url": pr_url_value,
         "content_hash": content_hash_value,
         "session": session_block,
         "routing": routing_block,
@@ -697,6 +741,10 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
 __all__ = [
     "approval_detail_block",
     "base_commit_value",
+    "commit_value",
+    "pr_url_value",
+    "provider_value",
+    "surface_value",
     "content_hash_value",
     "execution_loop_block",
     "learning_block",

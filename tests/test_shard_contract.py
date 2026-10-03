@@ -543,6 +543,16 @@ class TestDisplayModelName(unittest.TestCase):
     def test_glm(self):
         self.assertEqual(_display_model_name("z-ai/glm-5.1"), "GLM-5.1")
 
+    def test_hyphenated_single_digit_versions_join_with_a_dot(self):
+        from openshard.history.shard_contract import _format_model_slug_shard
+
+        self.assertEqual(_format_model_slug_shard("claude-opus-5-5"), "Claude Opus 5.5")
+        self.assertEqual(_format_model_slug_shard("claude-sonnet-4-6"), "Claude Sonnet 4.6")
+        self.assertEqual(_format_model_slug_shard("llama-3-1-8b"), "Llama 3.1 8B")
+        self.assertEqual(_display_model_name("claude-opus-5-5"), "Claude Opus 5.5")
+        # Dated parts are never joined.
+        self.assertEqual(_format_model_slug_shard("gpt-4o-2024-08-06"), "GPT-4O 2024 08 06")
+
     def test_qwen(self):
         self.assertEqual(_display_model_name("qwen/qwen-3.6-plus"), "Qwen 3.6 Plus")
 

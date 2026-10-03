@@ -432,14 +432,25 @@ def _format_model_slug_shard(name: str) -> str:
             tagged.append(("version", part))
         else:
             tagged.append(("word", part.capitalize()))
+    def _digit(j: int) -> bool:
+        return tagged[j][0] == "version" and len(tagged[j][1]) == 1 and tagged[j][1].isdigit()
+
     out = ""
+    joined = False
     for i, (kind, text) in enumerate(tagged):
         if i == 0:
             out = text
+        elif _digit(i) and _digit(i - 1) and not joined:
+            # Two single-digit parts are one version: "claude-opus-5-5" ->
+            # "Claude Opus 5.5". Dated parts ("2024-08-06") never match.
+            out += "." + text
+            joined = True
+            continue
         elif kind == "version" and tagged[i - 1][0] == "abbrev":
             out += "-" + text
         else:
             out += " " + text
+        joined = False
     return out
 
 
@@ -1080,7 +1091,12 @@ def build_shard_receipt(
     # In that case price the recorded usage against the exact model's dated
     # official list rate. Provider/agent-reported cost still wins, unknown or
     # multi-model usage stays unknown, and no token provenance means no estimate.
-    if cost_raw is None and isinstance(entry.get("tokens_provenance"), str):
+    # A capture that recorded per-model usage (Claude Code transcript, with
+    # its 5m/1h cache-write split) already priced it per model -- or decided
+    # it cannot be priced honestly; one aggregate rate would understate it.
+    _capture_raw = entry.get("capture")
+    _per_model_usage = isinstance(_capture_raw, dict) and isinstance(_capture_raw.get("usage_by_model"), dict)
+    if cost_raw is None and isinstance(entry.get("tokens_provenance"), str) and not _per_model_usage:
         _pricing_model = single_pricing_model(entry)
         _cost_estimate = estimate_usage_cost(
             _pricing_model,
