@@ -285,6 +285,18 @@ def test_a_stalled_read_is_bounded_and_never_accumulates_readers(tmp_path, monke
             time.sleep(0.001)
 
 
+def test_a_lookup_waits_within_its_budget_for_an_earlier_read_to_free_the_slot(tmp_path):
+    repo = _seeded(tmp_path)
+    assert snap._reader_slot.acquire(blocking=False)
+    timer = threading.Timer(0.05, snap._reader_slot.release)
+    timer.start()
+    try:
+        found = snap.lookup_snapshot(repo / ".openshard", budget_ms=5000)
+        assert found.status == "available"
+    finally:
+        timer.join()
+
+
 def test_a_result_arriving_after_the_budget_is_not_used(tmp_path, monkeypatch):
     repo = _seeded(tmp_path)
     real = snap._read

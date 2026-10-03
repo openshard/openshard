@@ -704,7 +704,9 @@ def lookup_snapshot(store: Path, *, budget_ms: float = DEFAULT_BUDGET_MS,
 
     if budget_ms <= 0:
         return done(TIMEOUT)
-    if not _reader_slot.acquire(blocking=False):
+    # An earlier read that outlived its own budget may still hold the slot;
+    # wait for it within this lookup's budget, never longer.
+    if not _reader_slot.acquire(timeout=budget_ms / 1000):
         return done(BUSY)
     results: queue.Queue = queue.Queue(maxsize=1)
 
