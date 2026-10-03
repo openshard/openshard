@@ -71,6 +71,33 @@ All notable changes to OpenShard are documented here.
 
 ### Changed
 
+- **Claude Code Receipts are truthful about usage, provider and outcome**
+  ([docs/agent-capture.md](docs/agent-capture.md)).
+  - Tokens are session totals summed from the API usage in Claude Code's
+    transcript, once per message id, instead of the status line's last API
+    call; without a readable transcript they stay unknown, never an
+    undercount. A per-model breakdown is kept locally.
+  - Claude Code's session cost is labelled `cost_provenance: agent_reported`
+    (it is Claude Code's own estimate), still shown as an estimate.
+  - `capture.provider` comes from Claude Code's environment (Bedrock /
+    Vertex / Foundry / Anthropic; unknown behind a custom
+    `ANTHROPIC_BASE_URL`) and `capture.surface` from
+    `CLAUDE_CODE_ENTRYPOINT`; both are synced as `provider` / `surface`.
+  - At session end capture records the end HEAD and the commits created
+    during the session; the synced `commit` is the end HEAD only when the
+    session created it, and `pr_url` only when `gh` reports a PR whose head
+    is such a commit (`OPENSHARD_PR_LOOKUP=off` disables the lookup).
+  - A check command that failed and then passed on a re-run reads passed;
+    the failed run stays listed and counted.
+  - Resuming an ended session opens a new Receipt (`start_source: resume`,
+    `capture.resumed_from_receipt_id`) instead of rewriting the ended,
+    possibly already synced one, which used to leave it stale forever.
+  - Tasks drop Claude Code's `<pasted_content>` wrapper; `claude-opus-5-5`
+    displays as "Claude Opus 5.5".
+- `openshard config set-owner "<name>" [--repo] | --clear` sets the explicit
+  Receipt owner (`identity.owner`, user-global `~/.openshard/config.yml` by
+  default). Hook, import and wrap captures now stamp it like native runs;
+  it is never inferred from git or organisation data.
 - The receipt's `Checks` row names each group (`1 passed, 1 failed, 1
   unknown`) when not everything passed. The stored and synced `checks` string
   is unchanged.

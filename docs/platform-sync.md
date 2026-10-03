@@ -109,10 +109,16 @@ when you connect to a different one.
 
 ## Changed locally after sync
 
-`openshard note` and `openshard feedback` amend a stored record, and a
-hook session can occasionally fold again after it was sent. The stored
-`content_hash` moves when that happens, and `status` reports the Receipt
-as "changed locally": the hosted copy is the earlier one. Nothing is
+`openshard note` and `openshard feedback` amend a stored record. The
+stored `content_hash` moves when that happens, and `status` reports the
+Receipt as "changed locally": the hosted copy is the earlier one.
+
+A hook-captured Receipt is never rewritten after its session ended. When
+the same agent session id sends hooks again later (`claude --resume`, or a
+late background hook), capture opens a new Receipt for that segment: new
+`run_id` / `receipt_id`, `session.start_source: resume`, a working-tree
+baseline and HEAD taken at the resume, and `capture.resumed_from_receipt_id`
+pointing at the ended one. Each segment syncs on its own. Nothing is
 resent in this version, because the Platform keeps the first copy it
 accepted and treats different content under the same `receipt_id` as a
 conflict. Hosted receipt revisions are the next Platform step.
