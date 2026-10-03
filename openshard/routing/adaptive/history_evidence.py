@@ -17,6 +17,11 @@ and decides, transparently, whether there is enough of it to route on:
 
 When the gate is not met the decision records ``history_evidence.used: false``
 and why. No rate is ever invented for a model without observations.
+
+History that could not be read in time (a precomputed snapshot that was late,
+missing, corrupt or truncated) is *unavailable*, not empty: ``availability``
+records why, and the gate reports ``history_<availability>`` with unknown
+counts rather than claiming ``no_history``.
 """
 from __future__ import annotations
 
@@ -67,7 +72,9 @@ class HistoryEvidence:
 
     per_model: dict[str, ModelHistory] = field(default_factory=dict)
     harness: str | None = None
-    entries_scanned: int = 0
+    entries_scanned: int | None = 0
+    availability: str = "available"  # anything else: history could not be read, counts unknown
+    snapshot_id: str | None = None  # the precomputed learning snapshot this came from, if any
 
     def meaningful_for(self, candidates: Iterable[str]) -> dict[str, ObservedEvidence]:
         """Evidence for the *candidates* that clear the per-model sample gate."""
@@ -95,6 +102,12 @@ class HistoryEvidence:
                 self.per_model[m].verified for m in ids if m in self.per_model
             ),
         }
+        if self.snapshot_id is not None:
+            record["snapshot_id"] = self.snapshot_id
+        if self.availability != "available":
+            record.update(reason="history_" + self.availability, entries_scanned=None,
+                          candidates_with_evidence=None, verified_outcomes_for_candidates=None)
+            return None, record
         if not self.per_model:
             return None, record
         if not meaningful:
@@ -136,30 +149,35 @@ def build_history_evidence(
     return HistoryEvidence(per_model=per_model, harness=harness, entries_scanned=scanned)
 
 
+def history_evidence_from_lines(lines: Iterable[str], *, harness: str | None = None) -> HistoryEvidence:
+    """Evidence from the first ``MAX_ENTRIES_SCANNED`` lines of a ``runs.jsonl``. Pure."""
+    outcomes: list[RoutingOutcome] = []
+    for i, line in enumerate(lines):
+        if i >= MAX_ENTRIES_SCANNED:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            try:
+                outcomes.append(outcome_from_receipt(entry))
+            except Exception:
+                continue
+    return build_history_evidence(outcomes, harness=harness)
+
+
 def load_history_evidence(runs_path: Path, *, harness: str | None = None) -> HistoryEvidence:
     """Read ``runs.jsonl`` and build evidence. Never raises; a missing or
     unreadable file is simply no history."""
-    outcomes: list[RoutingOutcome] = []
     try:
         with runs_path.open(encoding="utf-8") as fh:
-            for i, line in enumerate(fh):
-                if i >= MAX_ENTRIES_SCANNED:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(entry, dict):
-                    try:
-                        outcomes.append(outcome_from_receipt(entry))
-                    except Exception:
-                        continue
+            return history_evidence_from_lines(fh, harness=harness)
     except OSError:
         return HistoryEvidence(harness=harness)
-    return build_history_evidence(outcomes, harness=harness)
 
 
 __all__ = [
@@ -173,5 +191,6 @@ __all__ = [
     "HistoryEvidence",
     "ModelHistory",
     "build_history_evidence",
+    "history_evidence_from_lines",
     "load_history_evidence",
 ]

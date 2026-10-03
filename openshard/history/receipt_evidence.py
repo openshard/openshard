@@ -421,7 +421,11 @@ def organisation_policy_block(entry: dict) -> dict[str, Any] | None:
     }
 
 
-_LEARNING_STATUSES = frozenset({"used", "no_relevant_signals", "no_history", "disabled", "error"})
+_LEARNING_STATUSES = frozenset({
+    "used", "no_relevant_signals", "no_history", "disabled", "error",
+    # The precomputed snapshot was late or unusable: history unknown, not absent.
+    "unavailable", "timeout",
+})
 
 
 def learning_block(entry: dict) -> dict[str, Any] | None:
@@ -440,7 +444,7 @@ def learning_block(entry: dict) -> dict[str, Any] | None:
     checks = verification.get("recommended_checks")
     files = raw.get("context_files_added")
     ids = raw.get("signal_ids")
-    return {
+    out: dict[str, Any] = {
         "status": status,
         "used": raw.get("used") is True,
         "signals_used": _count(raw.get("signals_used")),
@@ -458,6 +462,28 @@ def learning_block(entry: dict) -> dict[str, Any] | None:
             label for label in (_text(_dict(c).get("label"), 120) for c in checks[:3]) if label
         ] if isinstance(checks, list) else [],
     }
+    snapshot = _learning_snapshot(raw.get("snapshot"))
+    if snapshot is not None:  # only runs that read the precomputed snapshot carry it
+        out["snapshot"] = snapshot
+    return out
+
+
+def _learning_snapshot(value: object) -> dict[str, Any] | None:
+    """Where OSN's signals came from: the precomputed snapshot and how its lookup went."""
+    raw = _dict(value)
+    if not raw:
+        return None
+    out: dict[str, Any] = {
+        "status": _text(raw.get("status"), 32),
+        "snapshot_id": _text(raw.get("snapshot_id"), 64),
+        "generated_at": _text(raw.get("generated_at"), 32),
+        "lookup_ms": _number(raw.get("lookup_ms")),
+        "budget_ms": _number(raw.get("budget_ms")),
+    }
+    if raw.get("trimmed") is True:  # trimmed to fit: only the stored signals could be considered
+        out.update(trimmed=True, signals_stored=_count(raw.get("signals_stored")),
+                   signals_derived=_count(raw.get("signals_derived")))
+    return out
 
 
 MAX_SUPERVISOR_DECISIONS = 8

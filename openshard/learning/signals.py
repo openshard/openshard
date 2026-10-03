@@ -509,10 +509,14 @@ def strength_for(samples: int) -> str:
 def freshness_for(last_seen: datetime | None, now: datetime) -> str:
     if last_seen is None:
         return STALE  # undated evidence cannot be shown to be current
-    age = (now - last_seen).days
-    if age <= FRESH_DAYS:
+    return freshness_for_age((now - last_seen).days)
+
+
+def freshness_for_age(age_days: int) -> str:
+    """Freshness for evidence last seen *age_days* whole days ago."""
+    if age_days <= FRESH_DAYS:
         return FRESH
-    if age <= STALE_AFTER_DAYS:
+    if age_days <= STALE_AFTER_DAYS:
         return AGING
     return STALE
 
@@ -873,6 +877,13 @@ class LearningIndex:
     excluded: dict[str, int]
     unreadable: int = 0
     observations: tuple[Observation, ...] = ()
+    # Every signal derived, when ``signals`` holds only a subset (a precomputed
+    # snapshot keeps the surfaceable ones). None: ``signals`` is the full set.
+    signals_total: int | None = None
+
+    @property
+    def total_signals(self) -> int:
+        return len(self.signals) if self.signals_total is None else self.signals_total
 
     def get(self, signal_id: str) -> LearningSignal | None:
         return next((s for s in self.signals if s.signal_id == signal_id), None)
@@ -939,13 +950,18 @@ def derive_signals(
 def read_entries(runs_path: Path) -> tuple[list[dict], int]:
     """(entries, unreadable line count) from a ``runs.jsonl``, most recent
     ``MAX_ENTRIES_SCANNED`` only. Never raises: a missing file is no history."""
-    entries: list[dict] = []
-    bad = 0
     try:
         with runs_path.open(encoding="utf-8", errors="replace") as fh:
             lines = fh.readlines()
     except OSError:
         return [], 0
+    return entries_from_lines(lines)
+
+
+def entries_from_lines(lines: list[str]) -> tuple[list[dict], int]:
+    """(entries, unreadable line count) from the most recent ``MAX_ENTRIES_SCANNED`` lines. Pure."""
+    entries: list[dict] = []
+    bad = 0
     for line in lines[-MAX_ENTRIES_SCANNED:]:
         line = line.strip()
         if not line:
@@ -992,7 +1008,9 @@ __all__ = [
     "LearningSignal",
     "Observation",
     "derive_signals",
+    "entries_from_lines",
     "freshness_for",
+    "freshness_for_age",
     "load_learning_index",
     "observe",
     "read_entries",

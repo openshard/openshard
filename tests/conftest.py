@@ -1,6 +1,7 @@
 """Shared pytest fixtures for the OpenShard test suite."""
 from __future__ import annotations
 
+import os
 import socket
 from unittest.mock import patch
 
@@ -9,6 +10,77 @@ import pytest
 # Capture-service fixtures (``repo``, ``capture_env``, ``service``) shared by
 # the capture, hook and v0.4.4 test modules.
 pytest_plugins = ["tests.capture_fixtures"]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_learning_worker(monkeypatch):
+    """History writes in tests never launch a background learning worker.
+
+    The production switch, so it also holds for OpenShard subprocesses a test
+    starts. Tests that need a published learning snapshot ask for one
+    explicitly (``learning_fixtures.publish_learning`` or ``inline_learning``);
+    tests of the scheduler itself use ``real_learning_scheduler``.
+    """
+    monkeypatch.setenv("OPENSHARD_LEARNING_WORKER", "0")
+
+
+class LearningLaunches(list):
+    """Recorded ``(argv, kwargs)`` worker launches. ``pid`` is what each fake process
+    reports: a live one by default (a worker still starting), or ``NO_SUCH_PID``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pid = os.getpid()
+
+
+@pytest.fixture
+def real_learning_scheduler(monkeypatch):
+    """The real scheduler and ``nudge``, with process launches recorded instead of run."""
+    from openshard.learning import worker
+
+    monkeypatch.delenv("OPENSHARD_LEARNING_WORKER", raising=False)
+    launches = LearningLaunches()
+
+    def spawn(argv, **kwargs):
+        launches.append((argv, kwargs))
+        return type("Launched", (), {"pid": launches.pid})()
+
+    monkeypatch.setattr(worker, "_spawn", spawn)
+    return launches
+
+
+NO_SUCH_PID = 2**31 - 4  # a valid pid value that is never allocated in practice
+
+
+@pytest.fixture
+def inline_learning(monkeypatch):
+    """History writes refresh the learning snapshot synchronously, in-process.
+
+    Stands in for the background worker having caught up, for end-to-end tests
+    where one OSN run must learn from the previous one.
+    """
+    from openshard.learning.worker import refresh_snapshot
+
+    monkeypatch.setattr(
+        "openshard.learning.worker.schedule_update",
+        lambda path, *a, **kw: refresh_snapshot(path) if path.name == "runs.jsonl" else None,
+    )
+
+
+GENEROUS_LEARNING_BUDGET_MS = 5000.0
+
+
+@pytest.fixture
+def generous_learning_budget(monkeypatch):
+    """Keep tests that assert on learning data independent of CPU load.
+
+    OSN's real lookup budget (25 ms, at most 100) is deliberately small and
+    fails open to ``timeout``, which is correct but nondeterministic on a busy
+    test machine. This raises the default and the ceiling for the test only;
+    tests of the budget itself pass explicit budgets and are unaffected.
+    """
+    monkeypatch.setattr("openshard.learning.snapshot.DEFAULT_BUDGET_MS", GENEROUS_LEARNING_BUDGET_MS)
+    monkeypatch.setattr("openshard.learning.snapshot.MAX_BUDGET_MS", GENEROUS_LEARNING_BUDGET_MS)
 
 
 def _free_loopback_port() -> int:

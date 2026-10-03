@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 
+import pytest
 from click.testing import CliRunner
 
 from openshard.cli.main import cli
@@ -19,7 +20,10 @@ from openshard.osn.model_provider import (
     build_prompt,
 )
 from openshard.providers.base import BaseProvider, ChatResponse, UsageStats
-from tests.learning_fixtures import MOBILE_CHECK, NOW, REPO, osn_entry
+from tests.learning_fixtures import MOBILE_CHECK, NOW, REPO, osn_entry, publish_learning
+
+pytestmark = pytest.mark.usefixtures("generous_learning_budget")
+
 
 PY = sys.executable
 VERIFY = f'"{PY}" -c "import sys; sys.exit(0 if open(\'out.txt\').read()==\'ok\' else 1)"'
@@ -71,6 +75,7 @@ def _seed(repo, entries):
     with (store / "runs.jsonl").open("a", encoding="utf-8") as fh:
         for e in entries:
             fh.write(json.dumps(e) + "\n")
+    publish_learning(repo)
 
 
 def _history_for(repo_name, check):
@@ -82,8 +87,12 @@ def _history_for(repo_name, check):
     ]
 
 
-def test_second_related_run_uses_the_first_runs_evidence_end_to_end(tmp_path, monkeypatch):
-    """Run 1 fails verification, run 2 recovers; a later related task sees both."""
+def test_second_related_run_uses_the_first_runs_evidence_end_to_end(tmp_path, monkeypatch, inline_learning):
+    """Run 1 fails verification, run 2 recovers; a later related task sees both.
+
+    ``inline_learning``: each run's history write refreshes the snapshot, as the
+    background worker would before the next run starts.
+    """
     repo = _repo(tmp_path)
     # Run 1: the first model's change fails the check, the recovery model's passes.
     fp1 = RecordingProvider([_writes("out.txt", "nope"), _writes("out.txt", "ok")])

@@ -24,6 +24,16 @@ All notable changes to OpenShard are documented here.
   - `openshard learn signals | inspect | last | impact` inspects learning and compares
     outcomes of runs with and without it (observational, no causal claim). Hosted sync stays
     bounded to the current Platform contract until the learning projection is added there.
+  - `osn run` reads no history at startup. A background worker re-derives signals and
+    routing history after each history write and publishes a complete snapshot. A run does
+    one bounded local lookup (`learning.lookup_budget_ms`, default 25 ms, at most 100), with
+    no remote call. It freezes the result for routing, context and the Receipt, and each
+    model sees only its own statistics. A late, unusable or other-checkout snapshot
+    fails open and is recorded as `timeout` or `unavailable` with unknown counts, never
+    as no history or zero. Snapshots are capped at 384 KB (the weakest, stalest signals
+    are trimmed to fit, with the full count kept), the worker retries failed
+    passes and OSN restarts a stale worker after its lookup; `OPENSHARD_LEARNING_WORKER=0`
+    turns background refresh off.
 
 - **Remote capture: evidence leaves an ephemeral agent environment while
   the agent works.** `openshard remote create --agent <agent>` (on a trusted

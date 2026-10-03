@@ -18,6 +18,12 @@ re-derivable from history with ``openshard learn inspect <signal_id>``.
 * ``verification.influenced`` is always False in V1: recommended checks are
   shown, never executed. ``current_check_recommended`` says whether the check
   the user supplied is the one history points at.
+
+``snapshot`` says where the signals came from when OSN read the precomputed
+learning snapshot: its id, when it was generated, and how the bounded lookup
+went. A lookup that was late or found nothing usable is status ``timeout`` or
+``unavailable`` -- the history may exist; it was not read -- never
+``no_history``.
 """
 from __future__ import annotations
 
@@ -98,6 +104,7 @@ def build_learning_record(
     context_supplied: bool = False,
     routing_record: dict[str, Any] | None = None,
     context_files_added: list[str] | None = None,
+    snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``learning`` block for one OSN Receipt. Never raises on odd input."""
     record: dict[str, Any] = {"version": LEARNING_RECORD_VERSION}
@@ -137,6 +144,8 @@ def build_learning_record(
         record["check"] = dict(check)
     if attempt_models:
         record["attempt_models"] = [{"attempt": n, "model": m} for n, m in attempt_models[:5]]
+    if snapshot:
+        record["snapshot"] = dict(snapshot)
     return record
 
 

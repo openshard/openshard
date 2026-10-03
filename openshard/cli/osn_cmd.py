@@ -20,6 +20,7 @@ import click
 
 if TYPE_CHECKING:
     from openshard.learning.retrieval import LearningContext
+    from openshard.learning.snapshot import LearningSnapshot
     from openshard.osn.budget import BudgetLedger, BudgetLimits
     from openshard.osn.routing import OsnRouting
     from openshard.sync.capabilities import LazyCapabilities
@@ -246,13 +247,16 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     from openshard.learning.record import check_identity
 
     check = check_identity(argv)
-    learning = None if no_learning else _consult_learning(task, repo_root, check)
-    learning_files = _learning_context_files(learning, repo_root, list(context_files))
+    check_fingerprint = (check or {}).get("fingerprint")
+    # One bounded read of the precomputed learning snapshot, frozen for the whole
+    # run: routing history, the model's context and the Receipt all come from it.
+    snapshot = None if no_learning else _lookup_learning(repo_root, repo_config)
+    learning = snapshot.consult(task, current_check_fingerprint=check_fingerprint) if snapshot else None
     routing = _resolve_routing(task, repo_root, explicit_model=model, escalate=list(escalate),
                                capabilities=capabilities, model_policy=model_policy,
                                max_attempts=attempts_allowed,
                                cost_budget_usd=budget.limits.max_spend_usd if budget is not None else None,
-                               learning=learning)
+                               learning=learning, snapshot=snapshot)
     try:
         enforce_models_allowed(routing.models, model_policy)
     except ValueError as exc:
@@ -277,12 +281,20 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         )
     model = routing.first_model
     models = routing.models
+    learning_for = _learning_by_model(snapshot, task, check_fingerprint)
+    if learning_for is not None:
+        learning = learning_for(model)  # the first model's view: never another model's statistics
+    learning_files = _learning_context_files(learning, repo_root, list(context_files))
     if not as_json:
         click.echo(f"  Route   {' → '.join(_friendly_model(m) for m in models)}")
         if routing.applied and routing.decision is not None:
             click.echo(f"  Policy  Adaptive Routing V2 · {routing.decision.resolved_class}")
-        for line in _learning_preamble(learning):
+        for line in _learning_preamble(learning, snapshot):
             click.echo(line)
+        if learning is not None and snapshot is not None and snapshot.trimmed \
+                and learning.status in ("used", "no_relevant_signals"):
+            click.echo(f"    (learning snapshot trimmed to fit: {snapshot.signals_stored} of "
+                       f"{snapshot.signals_derived} derived signal(s) stored)")
         for f in learning_files:
             click.echo(f"    + context {f} (a test that failed on similar work; shown as untrusted content)")
 
@@ -302,6 +314,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         context_files=[*context_files, *learning_files],
         budget=budget,
         learning_context=learning.prompt_text if learning is not None else None,
+        learning_context_for=(lambda m: learning_for(m).prompt_text) if learning_for is not None else None,
     )
     supervisor = _resolve_supervisor(routing, budget, action_provider, capabilities, user_ladder=list(escalate),
                                      explicit_model=explicit_model)
@@ -327,12 +340,13 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     from openshard.learning.record import build_learning_record
 
     learning_record = build_learning_record(
-        learning,
+        _supplied_learning(learning_for, action_provider.learning_models, learning),
         check=check,
         attempt_models=_attempt_models(action_provider.usage),
         context_supplied=action_provider.learning_supplied,
         routing_record=routing.record,
         context_files_added=learning_files if action_provider.learning_supplied else [],
+        snapshot=snapshot.record() if snapshot is not None else None,
     )
     entry = build_osn_run_entry(
         receipt, task=task, usage=action_provider.usage, duration_seconds=duration,
@@ -419,19 +433,71 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         click.echo(f"  Blocked by policy/skipped: {', '.join(skipped)}")
 
 
-def _consult_learning(task: str, repo_root: Path, check: dict | None) -> LearningContext:
-    """Learning signals for this task from this repository's history. Never raises:
-    learning that cannot be read is recorded as such and the run goes ahead."""
-    from openshard.learning.retrieval import STATUS_ERROR, LearningContext, consult
-    from openshard.learning.signals import load_learning_index, repo_key
+def _lookup_learning(repo_root: Path, repo_config: dict) -> LearningSnapshot:
+    """The precomputed learning snapshot, read once within ``learning.lookup_budget_ms``.
 
-    try:
-        repo = repo_key(repo_root)
-        index = load_learning_index(repo_root, repo=repo)
-        return consult(task, index, repo=repo,
-                       current_check_fingerprint=(check or {}).get("fingerprint"))
-    except Exception as exc:
-        return LearningContext(STATUS_ERROR, None, error=type(exc).__name__)
+    No history read and no remote call: the background worker derived it
+    (``openshard.learning.worker``). Never raises; a late or unusable snapshot
+    comes back saying so and the run goes ahead without learning.
+    """
+    from openshard.learning.snapshot import lookup_budget_ms, lookup_snapshot
+    from openshard.learning.worker import nudge
+
+    snapshot = lookup_snapshot(repo_root / ".openshard", budget_ms=lookup_budget_ms(repo_config))
+    # After the lookup, outside its budget: a snapshot that is missing, unusable or
+    # behind history (one stat) gets a background re-derivation for the next run.
+    nudge(repo_root / ".openshard" / "runs.jsonl", snapshot)
+    return snapshot
+
+
+def _learning_by_model(snapshot: LearningSnapshot | None, task: str, check_fingerprint: str | None):
+    """``model -> LearningContext`` from the one frozen snapshot, computed once per model.
+
+    Each model gets the task's relevant signals minus other models' results.
+    None when learning is off.
+    """
+    if snapshot is None:
+        return None
+    cache: dict[str, LearningContext] = {}
+
+    def learning_for(model: str) -> LearningContext:
+        if model not in cache:
+            cache[model] = snapshot.consult(task, current_check_fingerprint=check_fingerprint, model=model)
+        return cache[model]
+
+    return learning_for
+
+
+def _supplied_learning(learning_for, supplied_models: list[str], default: LearningContext | None):
+    """The learning the Receipt reports: the signals that actually reached a model.
+
+    With escalation, attempts on different models may have seen different
+    model-specific signals; the record lists every signal shown, in the order
+    first shown. When nothing reached a model it is *default* (what was
+    retrieved) and the record's ``context_supplied`` says it was not shown.
+    """
+    if learning_for is None or not supplied_models:
+        return default
+    contexts = [learning_for(m) for m in supplied_models]
+    if len(contexts) == 1:
+        return contexts[0]
+    from dataclasses import replace
+
+    retrieved, seen = [], set()
+    checks, seen_checks = [], set()
+    for ctx in contexts:
+        for r in ctx.retrieved:
+            if r.signal.signal_id not in seen:
+                seen.add(r.signal.signal_id)
+                retrieved.append(r)
+        for c in ctx.recommended_checks:
+            if c.signal_id not in seen_checks:
+                seen_checks.add(c.signal_id)
+                checks.append(c)
+    first = contexts[0]
+    return replace(first, retrieved=retrieved, recommended_checks=checks,
+                   status="used" if retrieved else first.status,
+                   current_check_recommended=any(c.current_check_recommended for c in contexts))
 
 
 def _learning_context_files(learning: LearningContext | None, repo_root: Path, explicit: list[str]) -> list[str]:
@@ -464,13 +530,26 @@ def _attempt_models(usage) -> list[tuple[int, str]]:
     return sorted(by_attempt.items())
 
 
-def _learning_preamble(learning: LearningContext | None) -> list[str]:
+# Why an ``unavailable`` snapshot could not be used, where that is more specific
+# than "could not be read".
+_SNAPSHOT_UNAVAILABLE = {
+    "missing": "learning snapshot not built yet; continuing without it",
+    "oversized": "learning snapshot exceeded the size cap; continuing without it",
+}
+
+
+def _learning_preamble(learning: LearningContext | None, snapshot: LearningSnapshot | None = None) -> list[str]:
     """What learning found, shown before the run starts. Advisory wording only."""
     if learning is None:
         return ["  Learning  off (--no-learning)"]
     if not learning.used:
+        specific = _SNAPSHOT_UNAVAILABLE.get(snapshot.status) if snapshot is not None else None
+        if learning.status == "unavailable" and specific:
+            return [f"  Learning  {specific}"]
         reason = {
             "no_history": "no prior verified evidence in this repository",
+            "unavailable": "learning evidence could not be read; continuing without it",
+            "timeout": "the bounded learning lookup did not finish in time; continuing without it",
             "no_relevant_signals": f"{learning.signals_considered} signal(s) known, none relevant to this task",
             "error": "history could not be read; continuing without it",
         }.get(learning.status, learning.status)
@@ -518,7 +597,8 @@ def _learning_json(record: dict | None) -> dict | None:
 def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, escalate: list[str],
                      capabilities: LazyCapabilities, model_policy, max_attempts: int | None = None,
                      cost_budget_usd: float | None = None,
-                     learning: LearningContext | None = None) -> OsnRouting:
+                     learning: LearningContext | None = None,
+                     snapshot: LearningSnapshot | None = None) -> OsnRouting:
     """First model and escalation ladder: the user's choice, else Routing V2 when
     the ``adaptive_routing`` capability is on, else the keyword router as before.
 
@@ -532,15 +612,14 @@ def _resolve_routing(task: str, repo_root: Path, *, explicit_model: str | None, 
         return model_policy
 
     def history_loader():
-        runs = repo_root / ".openshard" / "runs.jsonl"
-        shape = learning.shape if learning is not None else None
-        if shape is not None:
-            from openshard.learning.routing import load_scoped_history
-
-            return load_scoped_history(runs, harness=HARNESS, repo=shape.repo, task_category=shape.task_category)
+        if snapshot is not None:
+            # Learning on: the frozen snapshot's precomputed history, never a re-read.
+            shape = learning.shape if learning is not None else None
+            return snapshot.history(shape.task_category if shape is not None else None, harness=HARNESS)
+        # --no-learning (the only way there is no snapshot): harness-wide history, as always.
         from openshard.routing.adaptive.history_evidence import load_history_evidence
 
-        return load_history_evidence(runs, harness=HARNESS)
+        return load_history_evidence(repo_root / ".openshard" / "runs.jsonl", harness=HARNESS)
 
     return resolve_osn_routing(
         task,

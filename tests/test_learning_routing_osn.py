@@ -4,13 +4,18 @@ from __future__ import annotations
 import json
 import subprocess
 
+import pytest
+
 from tests import test_adaptive_routing_osn as base
-from tests.learning_fixtures import osn_entry
+from tests.learning_fixtures import osn_entry, publish_learning
 from tests.test_adaptive_routing_osn import FakeProvider, _invoke, _last_run, _writes
 
 # The capability-on CLI harness: a fake Platform serving capabilities and a fixed catalog.
 platform = base.platform
 catalog = base.catalog
+
+
+pytestmark = pytest.mark.usefixtures("generous_learning_budget")
 
 
 def _cli_repo(tmp_path, monkeypatch, platform, keys):
@@ -24,6 +29,7 @@ def _seed(repo, entries):
     with (repo / ".openshard" / "runs.jsonl").open("a", encoding="utf-8") as fh:
         for e in entries:
             fh.write(json.dumps(e) + "\n")
+    publish_learning(repo)
 
 
 def _history(model, n, passed, *, repo="repo"):
