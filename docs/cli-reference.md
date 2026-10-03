@@ -20,6 +20,24 @@ openshard capture rotate-token                     # Replace the local capture t
 openshard mcp uninstall claude                     # Remove Openshard's Claude Code config; history is never deleted
 ```
 
+Configuration. `set-owner` writes `identity.owner` to the user-global
+`~/.openshard/config.yml` (under `OPENSHARD_HOME` when set), or with `--repo` to
+`<repo root>/.openshard/config.yml`. A repository config's owner wins over the
+user-global one. The owner is only what you set here: it is never inferred from
+git, the OS account or organisation metadata, and Receipts already recorded keep
+their owner. `--repo` must run inside a project repository (never the home
+directory or a repository containing it), and refuses when the repository only
+has a root `config.yml`. The rewritten file keeps its other keys but not YAML
+comments:
+
+```bash
+openshard config show                              # Active configuration, secrets redacted
+openshard config show --json                       # Same, machine-readable
+openshard config set-owner "Jane Doe"              # Stamp new Receipts with this owner (user-global)
+openshard config set-owner "Platform team" --repo  # Same, for this repository only
+openshard config set-owner --clear                 # Remove the owner (add --repo for the repository config)
+```
+
 Grok Bot (Cursor's cloud teammate; see [grok-bot.md](grok-bot.md)):
 
 ```bash
