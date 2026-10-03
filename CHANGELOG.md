@@ -83,10 +83,15 @@ All notable changes to OpenShard are documented here.
     Vertex / Foundry / Anthropic; unknown behind a custom
     `ANTHROPIC_BASE_URL`) and `capture.surface` from
     `CLAUDE_CODE_ENTRYPOINT`; both are synced as `provider` / `surface`.
-  - At session end capture records the end HEAD and the commits created
-    during the session; the synced `commit` is the end HEAD only when the
-    session created it, and `pr_url` only when `gh` reports a PR whose head
+  - At session end capture records the end HEAD and the commits the
+    session created (reflog-proven, inside the session window, corroborated
+    by the agent's own git command; fast-forward pulls never count); the
+    synced `commit` is the end HEAD only when it is one of those, and
+    `pr_url` only when `gh` (capture service only) reports a PR whose head
     is such a commit (`OPENSHARD_PR_LOOKUP=off` disables the lookup).
+  - Headless sessions without Claude Code's own cost are priced per model
+    from transcript usage, with 1-hour cache writes at Anthropic's published
+    1-hour rate; an unpriced model leaves the cost unknown.
   - A check command that failed and then passed on a re-run reads passed;
     the failed run stays listed and counted.
   - Resuming an ended session opens a new Receipt (`start_source: resume`,

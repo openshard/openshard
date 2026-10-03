@@ -381,16 +381,30 @@ never invented evidence.
   the capture service does not share Claude Code's environment; the first
   observation in a session wins.
 * **End of session (git)**: at `SessionEnd` (or the idle sweep) capture
-  records `git_end_head` and `session_commits` -- commits reachable from
-  the end HEAD but not from the start HEAD and committed after the session
-  started (`git_observed`). The synced `commit` is the end HEAD only when
-  it is one of those; `pr_url` only when `gh pr list --head <branch>` (5 s
-  timeout) reports a pull request whose head is a session commit.
-  `OPENSHARD_PR_LOOKUP=off` disables that lookup. No git or `gh` call is
-  added to ordinary turns.
+  records `git_end_head` and `session_commits` (`git_observed`). A commit
+  counts only when it is reachable from the end HEAD but not the start
+  HEAD, this checkout's HEAD reflog shows it being *created* (commit,
+  amend, merge commit, cherry-pick, revert, rebase pick -- never a
+  fast-forward pull) between session start and 2 minutes after its last
+  hook, its committer time is in that window, and the agent's own tool
+  calls include a commit-making `git` command that returned shortly after
+  it. Without a reflog the list is unknown. The synced `commit` is the end
+  HEAD only when it is one of those; `pr_url` only when `gh pr list --head
+  <branch>` (5 s timeout, capture service only -- never in a hook process
+  Claude Code waits on) reports a PR whose head is a session commit.
+  `OPENSHARD_PR_LOOKUP=off` disables that lookup.
+* **Cost without a status line** (headless `claude -p`): the transcript
+  usage is priced per model at the official list rate, 5-minute and
+  1-hour cache writes each at their own published rate
+  (`cost_provenance: official_rate_estimate`). A model without a rate,
+  cache writes without the 5m/1h split, or incomplete usage (subagent
+  transcripts capped, `capture.tokens_incomplete_reason`) leave the cost
+  unknown (`capture.cost_not_recorded_reason`) -- never a partial sum.
+  Transcripts are read incrementally and only under `~/.claude/projects`
+  (or `$CLAUDE_CONFIG_DIR/projects`).
 * **Owner**: `owner` is stamped only from an explicit `identity.owner`
-  (`openshard config set-owner "<name>"`, user-global; `--repo` for this
-  repository, which wins). Never inferred from git or organisation data.
+  (`openshard config set-owner "<name>"`, user-global; `--repo` writes this
+  repository's `.openshard/config.yml`, which wins). Never inferred from git or organisation data.
 * **Checks re-run**: a check command that failed and then passed on a
   re-run reads `passed`. The status follows each command's latest reported
   outcome (commands keyed by a hash of their scrubbed text);
