@@ -399,6 +399,13 @@ def build_claude_code_import_entry(
 
     entry["events"] = _build_import_events(entry, changed_files, files_source)
 
+    try:
+        from openshard.config.settings import stamp_owner
+
+        # Explicit owner (``identity.owner``) only; never inferred.
+        stamp_owner(entry, repo_path)
+    except Exception:
+        pass
     return coerce_shard_entry(entry)
 
 

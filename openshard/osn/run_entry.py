@@ -373,14 +373,9 @@ def build_osn_run_entry(
         pass
 
     try:
-        from openshard.config.settings import load_config_safe
-        from openshard.safety.sanitize import sanitize_text
+        from openshard.config.settings import stamp_owner
 
-        config, valid, _ = load_config_safe(cwd=repo_path)
-        identity = config.get("identity") if valid and isinstance(config, dict) else None
-        owner = sanitize_text(identity.get("owner"), 120) if isinstance(identity, dict) else None
-        if owner:
-            entry["owner"] = owner
+        stamp_owner(entry, repo_path)
     except Exception:
         pass
 

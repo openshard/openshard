@@ -1630,6 +1630,8 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "baseline": _stored_baseline(entry, capture),
         "task_context": _stored_task_context(entry, capture),
         "task_context_conflicts": _stored_count(capture.get("task_context_conflicts")),
+        # The owner the record was created with; never re-resolved or back-filled.
+        "owner": entry.get("owner") if isinstance(entry.get("owner"), str) else None,
     }
 
 
@@ -2630,6 +2632,14 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "last_status_ping_at": buf.get("status_last_seen_at"),
         },
     }
+    if "owner" not in buf:
+        # Resolved once per receipt (never re-read on later folds) from the
+        # explicit ``identity.owner`` config; never inferred.
+        from openshard.config.settings import recorded_owner
+
+        buf["owner"] = recorded_owner(repo_root)
+    if isinstance(buf.get("owner"), str) and buf["owner"]:
+        entry["owner"] = buf["owner"]
     if isinstance(record.get("receipt_id"), str) and record["receipt_id"]:
         # v0.4.4 global identity -- present on every record created by this
         # version; absent (never back-filled) on records rebuilt from older history.

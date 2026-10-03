@@ -7682,6 +7682,45 @@ def config_show(as_json: bool) -> None:
     click.echo(yaml.safe_dump(safe, sort_keys=False, default_flow_style=False).rstrip())
 
 
+@config_cmd.command("set-owner")
+@click.argument("owner", required=False)
+@click.option("--clear", is_flag=True, default=False, help="Remove the configured owner.")
+@click.option("--repo", "repo_scope", is_flag=True, default=False,
+              help="Write this repository's config instead of the user-global ~/.openshard/config.yml.")
+def config_set_owner(owner: str | None, clear: bool, repo_scope: bool) -> None:
+    """Set the explicit owner stamped on new Receipts (identity.owner).
+
+    Written to the user-global config by default, or to this repository's
+    config with --repo (a repository value wins). Never inferred from git or
+    organisation metadata; Receipts already recorded keep their owner.
+    """
+    from openshard.config.settings import (
+        clean_owner,
+        config_search_path,
+        find_config_path,
+        user_config_path,
+        write_identity_owner,
+    )
+
+    if clear == bool(owner):
+        raise click.UsageError("Give an owner name, or --clear (not both).")
+    value: str | None = None
+    if not clear:
+        value = clean_owner(owner)
+        if value is None or value != " ".join(str(owner).split()):
+            raise click.UsageError("Owner must be plain text up to 120 characters (no paths or secret-like values).")
+    path = (find_config_path() or config_search_path()) if repo_scope else user_config_path()
+    try:
+        written = write_identity_owner(path, value)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(f"Could not update {path}: {exc}") from exc
+    scope = "repository" if repo_scope else "user"
+    if value is None:
+        click.echo(f"Owner cleared from the {scope} config ({written}).")
+    else:
+        click.echo(f"Owner set to {value!r} in the {scope} config ({written}). New Receipts are stamped with it.")
+
+
 # ---------------------------------------------------------------------------
 def _print_catalog_entry(e) -> None:
     """Detail view for a catalog entry (used for discovery-only models)."""
