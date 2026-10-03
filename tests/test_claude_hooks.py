@@ -914,6 +914,17 @@ class TestPrivacy:
         assert "topsecretvalue123" not in raw
         assert "MY_API_KEY" not in raw
 
+    def test_pasted_content_wrapper_is_not_part_of_the_task(self, repo: Path):
+        prompt = '<pasted_content id="7ef4"> Act as an independent reviewer.\nDo not modify files.</pasted_content>'
+        assert sanitize_task_excerpt(prompt) == "Act as an independent reviewer. Do not modify files."
+        # Only a *leading* wrapper is transport; a tag quoted mid-prompt is text.
+        assert sanitize_task_excerpt("explain <pasted_content> tags") == "explain <pasted_content> tags"
+        _run(repo, "UserPromptSubmit", prompt=prompt)
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["task"].startswith("Act as an independent reviewer.")
+        assert "pasted_content" not in entry["task"] and "pasted_content" not in entry["task_title"]
+
     def test_task_excerpt_helper(self):
         assert sanitize_task_excerpt(None) is None
         assert sanitize_task_excerpt("   ") is None

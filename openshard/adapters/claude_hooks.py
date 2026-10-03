@@ -1055,13 +1055,27 @@ def _to_repo_relative(raw_path: str | None, repo_root: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+# Claude Code wraps a pasted prompt as ``<pasted_content id="...">...</pasted_content>``;
+# the wrapper is transport, not the task text.
+_PASTED_OPEN_RE = re.compile(r"^\s*<pasted_content\b[^<>]*>\s*", re.IGNORECASE)
+_PASTED_CLOSE_RE = re.compile(r"\s*</pasted_content\s*>", re.IGNORECASE)
+
+
+def _strip_pasted_wrapper(prompt: str) -> str:
+    """*prompt* without a leading ``<pasted_content ...>`` tag and its closing tag."""
+    match = _PASTED_OPEN_RE.match(prompt)
+    if not match:
+        return prompt
+    return _PASTED_CLOSE_RE.sub(" ", prompt[match.end():], count=1).strip()
+
+
 def sanitize_task_excerpt(prompt: str | None) -> str | None:
     """First-prompt excerpt used as the Shard task: scrubbed, bounded, or None."""
     if not isinstance(prompt, str) or not prompt.strip():
         return None
     from openshard.adapters.claude_code_import import _sanitize_task
 
-    text = _sanitize_task(prompt, placeholder="", cap=_TASK_CAP)
+    text = _sanitize_task(_strip_pasted_wrapper(prompt), placeholder="", cap=_TASK_CAP)
     return text or None
 
 
