@@ -541,6 +541,19 @@ class TestLifecycle:
         assert "Claude Code session resumed" in acts
         assert lines[0]["capture"]["session_end_observed"] is False
 
+    def test_resume_within_the_same_second_still_gets_its_own_run_id(self, repo: Path):
+        at = "2030-01-01T00:00:00Z"  # end and resume observed in the same second
+        root = repo.resolve()
+        for event, extra in (("UserPromptSubmit", {"task_excerpt": "one"}), ("Stop", {}),
+                             ("SessionEnd", {"reason": "prompt_input_exit"}),
+                             ("SessionStart", {"source": "resume"}),
+                             ("UserPromptSubmit", {"task_excerpt": "two"}), ("Stop", {})):
+            ch.apply_reduced_hook(ch.ReducedHookPayload(event=event, session_id=SID, **extra), root, at=at)
+        first, second = _runs_lines(repo)
+        assert first["timestamp"] == second["timestamp"] == at
+        assert second["run_id"] != first["run_id"]
+        assert second["receipt_id"] != first["receipt_id"]
+
     def test_resume_after_end_opens_a_new_receipt_and_leaves_the_ended_one_unchanged(self, repo: Path):
         ended = _session(repo)
         before = _raw(repo)

@@ -2164,12 +2164,18 @@ def _ensure_record(buf: dict, repo_root: Path) -> None:
     timestamp = buf.get("started_at") or _now()
     run_index = _count_history_lines(repo_root)
     sid = str(buf.get("session_id") or "")
+    receipt_id = new_receipt_id()
+    run_id = f"{timestamp}-{sid[:8]}" if sid else timestamp
+    if buf.get("resumed_from_receipt_id"):
+        # A resumed segment can start within the same second as the ended
+        # one; its own receipt id keeps the run id distinct.
+        run_id = f"{run_id}-{receipt_id[-8:]}"
     buf["record"] = {
-        "run_id": f"{timestamp}-{sid[:8]}" if sid else timestamp,
+        "run_id": run_id,
         "shard_id": _make_shard_id(timestamp, run_index),
         # v0.4.4: the global identity of this record. Minted once here, at
         # creation, and carried through every fold; never position-derived.
-        "receipt_id": new_receipt_id(),
+        "receipt_id": receipt_id,
         "attempt_number": 1,
         "timestamp": timestamp,
     }
