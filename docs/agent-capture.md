@@ -384,8 +384,10 @@ never invented evidence.
   records `git_end_head` and `session_commits` (`git_observed`). A commit
   counts only when it is reachable from the end HEAD but not the start
   HEAD, this checkout's HEAD reflog shows it being *created* (commit,
-  amend, merge commit, cherry-pick, revert, rebase pick -- never a
-  fast-forward pull) between session start and 2 minutes after its last
+  amend, merge commit, cherry-pick, revert, `am`, a non-fast-forward merge
+  or pull -- never a fast-forward, and never a rebase pick, which can
+  rewrite commits made before the session: those are left out rather than
+  claimed) between session start and 2 minutes after its last
   hook, its committer time is in that window, and the agent's own tool
   calls include a commit-making `git` command that returned shortly after
   it. Without a reflog the list is unknown. The synced `commit` is the end

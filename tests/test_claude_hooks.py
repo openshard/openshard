@@ -1370,6 +1370,62 @@ class TestSessionGitOutcome:
         entry = _runs_lines(repo)[0]
         assert entry["session_commits"]["shas"] == [] and _projected(entry)["commit"] is None
 
+    def test_no_reflog_means_session_commits_are_unknown(self, repo: Path):
+        _git(repo, "config", "core.logAllRefUpdates", "false")
+        for log in (repo / ".git" / "logs").rglob("*"):
+            if log.is_file():
+                log.unlink()
+        self._commit_mid_session(repo)
+        _run(repo, "SessionEnd", reason="prompt_input_exit")
+        entry = _runs_lines(repo)[0]
+        assert entry["git_end_head"] == _head(repo)
+        assert "session_commits" not in entry  # unknown, never an empty "no commits" list
+        assert _projected(entry)["commit"] is None
+
+    def test_a_rebase_pick_of_an_earlier_commit_is_not_claimed(self, repo: Path):
+        _git(repo, "checkout", "-q", "-b", "mine")
+        (repo / "mine.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "mine.py")
+        _git(repo, "commit", "-q", "-m", "made by a person before the session")
+        _git(repo, "checkout", "-q", "-")
+        (repo / "base.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "base.py")
+        _git(repo, "commit", "-q", "-m", "base moved on")
+        _git(repo, "checkout", "-q", "mine")
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="rebase my branch")
+        _git(repo, "rebase", "-q", "master" if (repo / ".git" / "refs" / "heads" / "master").exists() else "main")
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "git rebase main"})
+        _run(repo, "Stop")
+        _run(repo, "SessionEnd", reason="other")
+        entry = _runs_lines(repo)[0]
+        assert entry["session_commits"]["shas"] == []  # under-counted, never fabricated
+        assert _projected(entry)["commit"] is None
+
+    def test_a_corroborated_true_merge_is_the_result(self, repo: Path):
+        _git(repo, "checkout", "-q", "-b", "side")
+        (repo / "side.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "side.py")
+        subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m",
+                        "side work"], cwd=repo, check=True, capture_output=True,
+                       env={**os.environ, "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        _git(repo, "checkout", "-q", "-")
+        (repo / "main.py").write_text("x\n", encoding="utf-8")
+        _git(repo, "add", "main.py")
+        # Made long before the session, so only the merge is the session's.
+        subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m",
+                        "main work"], cwd=repo, check=True, capture_output=True,
+                       env={**os.environ, "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z"})
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="merge side")
+        _git(repo, "merge", "-q", "--no-ff", "--no-edit", "side")  # reflog: "merge side: Merge made by ..."
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "git merge --no-ff side"})
+        _run(repo, "Stop")
+        _run(repo, "SessionEnd", reason="other")
+        entry = _runs_lines(repo)[0]
+        assert entry["session_commits"]["shas"] == [_head(repo)]
+        assert _projected(entry)["commit"] == _head(repo)
+
     def test_an_amended_commit_is_the_result(self, repo: Path):
         head = self._commit_mid_session(repo, amend=True)
         _run(repo, "SessionEnd", reason="prompt_input_exit")
@@ -1605,6 +1661,40 @@ class TestModelTokenCostCapture:
         _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
         _run(repo, "Stop", transcript_path=str(transcript))
         assert _runs_lines(repo)[0]["completion_tokens"] == 42
+
+    def test_a_message_id_in_two_transcript_files_counts_once(self, repo: Path):
+        transcript = _transcript(repo, [_assistant_line("shared", output_tokens=10),
+                                        _assistant_line("main-only", output_tokens=1)])
+        sub = transcript.with_suffix("") / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-1.jsonl").write_text(
+            json.dumps(_assistant_line("shared", output_tokens=10)) + "\n"
+            + json.dumps(_assistant_line("child", output_tokens=5)) + "\n", encoding="utf-8")
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 16
+
+    def test_a_message_split_across_two_reads_counts_once_even_after_eviction(self, repo: Path, monkeypatch):
+        monkeypatch.setattr(ch, "_TRANSCRIPT_RECENT_IDS", 1)
+        transcript = _transcript(repo, [_assistant_line("m1", output_tokens=4)])  # m1's first line
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 4
+        with transcript.open("a", encoding="utf-8") as fh:  # m1 continues, then m2 evicts it, then m1 again
+            for line in (_assistant_line("m1", output_tokens=6), _assistant_line("m2", output_tokens=1),
+                         _assistant_line("m1", output_tokens=6)):
+                fh.write(json.dumps(line) + "\n")
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 7  # m1 once (latest usage) + m2
+
+    def test_a_replaced_longer_transcript_is_read_from_the_start(self, repo: Path):
+        transcript = _transcript(repo, [_assistant_line("a", output_tokens=3)])
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _run(repo, "Stop", transcript_path=str(transcript))
+        transcript.write_text("".join(json.dumps(_assistant_line(f"b{n}", output_tokens=1)) + "\n"
+                                      for n in range(5)), encoding="utf-8")
+        _run(repo, "Stop", transcript_path=str(transcript))
+        assert _runs_lines(repo)[0]["completion_tokens"] == 5
 
     def test_subagent_transcripts_are_included(self, repo: Path):
         transcript = _transcript(repo, [_assistant_line("main", output_tokens=10)])

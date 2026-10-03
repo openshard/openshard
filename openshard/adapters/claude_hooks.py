@@ -802,7 +802,8 @@ def extract_status_payload(data: Mapping[str, Any]) -> StatusPayload | None:
 # ---------------------------------------------------------------------------
 
 _TRANSCRIPT_MAX_FILES = 50  # main transcript + subagent transcripts read per receipt
-_TRANSCRIPT_RECENT_IDS = 256  # message ids per file kept open for re-reported streaming lines
+_TRANSCRIPT_RECENT_IDS = 16  # message ids per file kept open for re-reported streaming lines
+_TRANSCRIPT_MAX_CLOSED_IDS = 20_000  # closed message ids remembered for de-duplication across files
 _MAX_USAGE_MODELS = 10
 TOKENS_SOURCE_TRANSCRIPT = "transcript"
 TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE = "transcript_unavailable"
@@ -893,11 +894,29 @@ def _usage_row(usage: Mapping[str, Any]) -> list[int]:
 
 
 def _new_transcript_state(since: object) -> dict:
-    return {"since": since, "files": {}, "closed": {}, "capped": False}
+    return {"since": since, "files": {}, "closed": {}, "closed_ids": [], "capped": False}
 
 
-def _close_message(state: dict, model: str, row: list) -> None:
-    """Fold one message whose streaming lines are behind us into its model's totals."""
+def _file_head(file: Path) -> str | None:
+    """A short hash of the file's first bytes: a replaced transcript (even a longer one) changes it."""
+    import hashlib
+
+    try:
+        with file.open("rb") as fh:
+            return hashlib.sha256(fh.read(512)).hexdigest()[:16]
+    except OSError:
+        return None
+
+
+def _close_message(state: dict, mid: str, model: str, row: list) -> None:
+    """Fold one message whose streaming lines are behind us into its model's totals, once per id."""
+    closed_ids: list = state.setdefault("closed_ids", [])
+    if mid in closed_ids:
+        return
+    if len(closed_ids) >= _TRANSCRIPT_MAX_CLOSED_IDS:
+        state["capped"] = True  # de-duplication memory exhausted: totals no longer claimed complete
+    else:
+        closed_ids.append(mid)
     closed = state.setdefault("closed", {})
     totals = closed.get(model)
     if not isinstance(totals, list) or len(totals) != len(_USAGE_FIELDS) + 1:
@@ -911,19 +930,28 @@ def _close_message(state: dict, model: str, row: list) -> None:
 def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
     """Read what was appended to *files* since *state*'s offsets. False when the main file is unreadable.
 
-    A file that shrank (rewritten / rotated) invalidates every offset: the
-    caller starts over. Only complete lines are consumed. Never raises.
+    A file that shrank or was replaced (its first bytes changed) invalidates
+    every offset: the caller starts over. Only complete lines are consumed.
+    A message id is counted once across *all* files: each file keeps its
+    last few ids open (a streamed message's lines are contiguous and may
+    straddle two reads, so a continuing id replaces rather than adds), and
+    an id already closed or open elsewhere is skipped. Never raises.
     """
     from openshard.adapters.claude_code_import import _sanitize_model
 
     since = _parse_utc(state.get("since"))
+    closed_ids = set(state.get("closed_ids") or [])
     for index, file in enumerate(files):
         key = "main" if index == 0 else file.name
         slot = state["files"].setdefault(key, {"offset": 0, "recent": {}})
         try:
             size = file.stat().st_size
             if size < int(slot.get("offset") or 0):
-                return False  # truncated or replaced: the caller resets the state
+                return False  # truncated: the caller resets the state
+            head = _file_head(file)
+            if int(slot.get("offset") or 0) and slot.get("head") and head != slot.get("head"):
+                return False  # replaced by another file: the caller resets the state
+            slot["head"] = head
             with file.open("rb") as fh:
                 fh.seek(int(slot.get("offset") or 0))
                 chunk = fh.read(size - int(slot.get("offset") or 0))
@@ -957,12 +985,17 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
                     continue
             model = msg.get("model")
             name = _sanitize_model(model) if isinstance(model, str) and model != "<synthetic>" else "unknown"
+            if mid not in recent and (mid in closed_ids or any(
+                mid in (other or {}).get("recent", {}) for k, other in state["files"].items() if k != key
+            )):
+                continue  # already counted (earlier in this file, or in another transcript)
             recent.pop(mid, None)  # the latest line of a streamed message wins
             recent[mid] = [name, *_usage_row(usage)]
             while len(recent) > _TRANSCRIPT_RECENT_IDS:
                 old_id = next(iter(recent))
                 old = recent.pop(old_id)
-                _close_message(state, old[0], old[1:])
+                _close_message(state, old_id, old[0], old[1:])
+                closed_ids.add(old_id)
     return True
 
 
@@ -2789,19 +2822,24 @@ def _sha_or_none(value: object) -> str | None:
     return value if _SHA_RE.match(value) else None
 
 
-# Reflog subjects of entries that *create* a commit in this checkout. A
-# fast-forward ("pull: Fast-forward", "merge x: Fast-forward"), checkout or
-# reset only moves HEAD onto commits made elsewhere and never qualifies.
+# Reflog subjects of entries that *create* a new commit in this checkout:
+# commit / amend / merge commit, cherry-pick, revert, ``git am``, and a true
+# (non-fast-forward) merge or pull ("... Merge made by the 'ort' strategy.").
+# A fast-forward ("pull: Fast-forward", "merge x: Fast-forward"), checkout
+# or reset only moves HEAD onto existing commits and never qualifies.
+# Rebase picks ("rebase (pick)", "pull --rebase (pick)") are excluded too:
+# they rewrite commits that may have been made before the session, so they
+# are under-counted rather than claimed.
 _REFLOG_CREATED_RE = re.compile(
-    r"^(?:commit(?: \((?:amend|merge|initial)\))?|cherry-pick|revert"
-    r"|rebase(?: -i)? \((?:pick|reword|edit|squash|fixup|continue)\)):"
+    r"^(?:commit(?: \((?:amend|merge|initial)\))?|cherry-pick|revert|am):"
+    r"|^(?:merge|pull)\b[^:]*: Merge made by "
 )
 _SESSION_COMMIT_GRACE_SECONDS = 120  # clock slack after the session's last observed hook
 _GIT_WRITE_CORROBORATION_SECONDS = 900  # a commit may take this long before its tool call returns
 # A shell command that can create commits (the agent's own tool call is the
 # corroboration a session-created commit needs). Matched on the raw command
 # at reduce time; only a boolean is kept.
-_GIT_WRITE_RE = re.compile(r"\bgit\b[^|;&]*\b(?:commit|cherry-pick|revert|rebase|merge|am)\b")
+_GIT_WRITE_RE = re.compile(r"\bgit\b[^|;&]*\b(?:commit|cherry-pick|revert|merge|pull|am)\b")
 _MAX_GIT_WRITES = 50
 _PR_LOOKUP_ENABLED = False  # True only in the capture service process (see enable_pr_lookup)
 
@@ -2819,7 +2857,9 @@ def enable_pr_lookup() -> None:
 def _reflog_created(repo_root: Path) -> dict[str, int] | None:
     """``{sha: reflog unix time}`` for HEAD reflog entries that created a commit, or None. Never raises."""
     out = run_git(repo_root, ["reflog", "show", "--date=unix", "--format=%H%x09%gd%x09%gs", "-n", "500", "HEAD"])
-    if out is None:
+    if not out or not out.strip():
+        # No reflog (core.logAllRefUpdates=false, a fresh clone, an error):
+        # which commits the session created is unknown, never "none".
         return None
     created: dict[str, int] = {}
     for line in out.splitlines():
@@ -2839,8 +2879,9 @@ def _session_git_outcome(buf: dict, repo_root: Path) -> dict | None:
     A commit counts as created by this session only when all of these hold:
     it is reachable from the end HEAD but not from the start HEAD; this
     checkout's HEAD reflog records it being *created* (commit / amend /
-    merge commit / cherry-pick / revert / rebase pick -- never a
-    fast-forward pull) at a time inside the session window
+    merge commit / cherry-pick / revert / ``am`` / non-fast-forward merge
+    or pull -- never a fast-forward, never a rebase pick, which may rewrite
+    commits made before the session) at a time inside the session window
     ``[started_at, last_activity_at + grace]``; its committer time is inside
     the same window; and the agent's own hook stream reported a
     commit-making ``git`` command whose call returned shortly after it. A
