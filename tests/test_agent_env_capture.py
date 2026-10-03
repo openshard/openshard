@@ -20,12 +20,8 @@ import pytest
 from openshard.adapters import claude_capture_client as client
 from openshard.adapters import claude_capture_service as svc
 from openshard.adapters import claude_hooks as ch
-from openshard.adapters.claude_hooks import (
-    claude_agent_env,
-    format_agent_env,
-    handle_claude_hook,
-    parse_agent_env,
-)
+from openshard.adapters.agent_env import claude_agent_env, format_agent_env, parse_agent_env
+from openshard.adapters.claude_hooks import handle_claude_hook
 from openshard.history.shard_contract import build_shard_receipt
 from openshard.history.views import receipt_to_dict
 from tests.capture_fixtures import SID, _lines, _make_repo

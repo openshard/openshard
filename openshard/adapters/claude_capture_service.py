@@ -101,6 +101,7 @@ from typing import Any
 
 from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
+from openshard.adapters.agent_env import parse_agent_env
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE, profile_for
 from openshard.adapters.claude_hooks import (
     EVENT_MODEL_INVOCATION,
@@ -115,7 +116,6 @@ from openshard.adapters.claude_hooks import (
     apply_status_payload,
     extract_agent_payload,
     extract_status_payload,
-    parse_agent_env,
     reduce_hook_payload,
     resolve_repo_root,
     sessions_dir,

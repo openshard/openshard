@@ -70,6 +70,7 @@ import sys
 import time
 
 from openshard.adapters import capture_auth as _auth
+from openshard.adapters.agent_env import claude_agent_env, format_agent_env
 from openshard.history.task_identity import launch_task_id
 from openshard.util.home import openshard_home
 
@@ -683,8 +684,8 @@ def _run_hook_raw(
     task_id = launch_task_id(env)
     # Provider/surface of the Claude Code process that ran this hook, from
     # the environment it handed us (the service never sees that environment).
-    agent_env = _claude_agent_env(env) if agent == "claude_code" else None
-    agent_env_header = _format_agent_env(agent_env)
+    agent_env = claude_agent_env(env) if agent == "claude_code" else None
+    agent_env_header = format_agent_env(agent_env)
     try:
         if not disabled(env):
             project_dir = _project_dir(env)
@@ -706,18 +707,6 @@ def _run_hook_raw(
     except Exception:
         pass
     return _inline_hook(raw, env, event_override, agent, task_id, agent_env)
-
-
-def _claude_agent_env(env: dict | os._Environ) -> dict[str, str]:
-    from openshard.adapters.claude_hooks import claude_agent_env
-
-    return claude_agent_env(env)
-
-
-def _format_agent_env(agent_env: dict[str, str] | None) -> str | None:
-    from openshard.adapters.claude_hooks import format_agent_env
-
-    return format_agent_env(agent_env)
 
 
 def _is_claude_session_start(raw: bytes, event_override: str | None) -> bool:
