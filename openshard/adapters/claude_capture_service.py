@@ -114,6 +114,7 @@ from openshard.adapters.claude_hooks import (
     apply_capture_loss,
     apply_reduced_hook,
     apply_status_payload,
+    enable_pr_lookup,
     extract_agent_payload,
     extract_status_payload,
     reduce_hook_payload,
@@ -286,6 +287,9 @@ class CaptureRecorder:
 
     def __init__(self, *, instance_id: str, state_path: Path | None = None, state: dict | None = None) -> None:
         self.instance_id = instance_id
+        # Session-end PR lookups run here, off Claude Code's hook path (an
+        # inline hook process never makes them; see claude_hooks.enable_pr_lookup).
+        enable_pr_lookup()
         self._state_path = state_path
         self._state: dict = dict(state or {})
         self._seq = 0

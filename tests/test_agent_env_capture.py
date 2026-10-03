@@ -80,6 +80,13 @@ class TestInProcessCapture:
         assert (projected["provider"], projected["surface"]) == ("amazon_bedrock", "cli")
         assert "CLAUDE_CODE_USE_BEDROCK" not in json.dumps(entry)
 
+    def test_provider_source_follows_a_later_provider_report(self, repo: Path):
+        from openshard.adapters.claude_hooks import _observe_model
+
+        buf = {"provider_current": "anthropic", "provider_source": "agent_env", "models_seen": []}
+        assert _observe_model(buf, "claude-opus-5-5", "amazon-bedrock", "status_line")
+        assert buf["provider_current"] == "amazon-bedrock" and buf["provider_source"] == "agent_reported"
+
     def test_gateway_session_leaves_provider_unknown(self, repo: Path):
         env = {"CLAUDE_PROJECT_DIR": str(repo), "ANTHROPIC_BASE_URL": "https://gw.example.com"}
         for doc in _docs(repo):

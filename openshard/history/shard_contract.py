@@ -1091,7 +1091,12 @@ def build_shard_receipt(
     # In that case price the recorded usage against the exact model's dated
     # official list rate. Provider/agent-reported cost still wins, unknown or
     # multi-model usage stays unknown, and no token provenance means no estimate.
-    if cost_raw is None and isinstance(entry.get("tokens_provenance"), str):
+    # A capture that recorded per-model usage (Claude Code transcript, with
+    # its 5m/1h cache-write split) already priced it per model -- or decided
+    # it cannot be priced honestly; one aggregate rate would understate it.
+    _capture_raw = entry.get("capture")
+    _per_model_usage = isinstance(_capture_raw, dict) and isinstance(_capture_raw.get("usage_by_model"), dict)
+    if cost_raw is None and isinstance(entry.get("tokens_provenance"), str) and not _per_model_usage:
         _pricing_model = single_pricing_model(entry)
         _cost_estimate = estimate_usage_cost(
             _pricing_model,
