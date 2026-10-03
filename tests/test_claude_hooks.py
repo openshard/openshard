@@ -68,6 +68,7 @@ from openshard.history.shard_contract import (
     render_compact_shard_receipt,
     render_full_shard_receipt,
 )
+from openshard.history.views import receipt_to_dict
 
 SID ="0f1e2d3c-4b5a-4697-8877-665544332211"
 SID2 = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -1374,7 +1375,12 @@ class TestModelTokenCostCapture:
         _run(repo, "Stop")
         entry = _runs_lines(repo)[0]
         assert entry["estimated_cost"] == pytest.approx(0.27)
-        assert entry["cost_provenance"] == "provider_reported"
+        # Claude Code's own estimate: agent_reported, never provider_reported.
+        assert entry["cost_provenance"] == "agent_reported"
+        assert "tokens_provenance" not in entry  # no transcript here: tokens unknown, not last-call
+        projected = receipt_to_dict(build_shard_receipt(entry), extended=True)
+        assert projected["cost_provenance"] == "agent_reported"
+        assert projected["cost_is_estimate"] is True
 
     def test_cost_display_is_clearly_labelled_estimate(self, repo: Path):
         _run(repo, "SessionStart", source="startup")

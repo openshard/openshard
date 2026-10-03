@@ -2506,7 +2506,9 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # For per-message usage reports (OpenCode) the baseline is 0 and the
         # total is the sum over distinct message ids (see _apply_status).
         estimated_cost = round(max(0.0, float(cost_total) - float(cost_baseline)), 6)
-        cost_provenance = usage_provenance
+        # Claude Code's cost is its own estimate (agent_reported), even though
+        # its token usage is the provider's (see AgentProfile.cost_provenance).
+        cost_provenance = profile.cost_provenance or usage_provenance
 
     tokens_current = buf.get("tokens_current") if isinstance(buf.get("tokens_current"), dict) else None
     prompt_tokens = completion_tokens = total_tokens = None

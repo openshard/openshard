@@ -416,7 +416,8 @@ class TestEventualConsistency:
         assert _wait_for(lambda: (_e := _first_line(repo)) is not None and _e["capture"]["turn_count"] == 1)
         entry = _lines(repo)[0]
         assert entry["execution_model"] == "claude-sonnet-5"
-        assert entry["cost_provenance"] == "provider_reported"
+        # Claude Code's own cost estimate: the agent's report, not the provider's.
+        assert entry["cost_provenance"] == "agent_reported"
         assert entry["estimated_cost"] == pytest.approx(0.25)
         # The status line's tokens are the last API call only: never session totals.
         assert "tokens_provenance" not in entry
