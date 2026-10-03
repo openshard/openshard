@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import sys
 
+import pytest
+
 from openshard.learning.retrieval import consult, task_shape_for
 from openshard.learning.signals import KIND_TEST, derive_signals, observe
 from openshard.osn.loop import run_bounded_loop
@@ -11,6 +13,9 @@ from openshard.osn.model_provider import ModelActionProvider
 from openshard.verification.failed_tests import MAX_FAILED_TESTS, failing_test_ids
 from tests.learning_fixtures import NOW, REPO, osn_entry
 from tests.test_learning_osn import RecordingProvider, _invoke, _repo, _runs, _seed, _writes
+
+pytestmark = pytest.mark.usefixtures("generous_learning_budget")
+
 
 PY = sys.executable
 MOBILE = "tests/test_layout.py::test_mobile_viewport_rejects_non_positive_widths"

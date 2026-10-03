@@ -120,6 +120,7 @@ from openshard.adapters.claude_hooks import (
 )
 from openshard.history.capture_completeness import REASON_CORRUPT_QUEUED_EVENT
 from openshard.history.task_identity import is_task_id
+from openshard.util.process import pid_alive
 
 # PR12: receiver path -> agent key. One service, one queue format, one
 # fold; only the translator run on the blocking path differs.
@@ -209,26 +210,7 @@ def _write_state(path: Path, state: dict) -> None:
         pass
 
 
-def _pid_alive(pid: object) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    if sys.platform == "win32":
-        import ctypes
-
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-            return bool(ok) and code.value == 259  # STILL_ACTIVE
-        finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+_pid_alive = pid_alive
 
 
 # ---------------------------------------------------------------------------

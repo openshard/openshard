@@ -61,6 +61,10 @@ STATUS_NO_RELEVANT = "no_relevant_signals"
 STATUS_NO_HISTORY = "no_history"
 STATUS_DISABLED = "disabled"
 STATUS_ERROR = "error"
+# The precomputed snapshot OSN reads at startup could not be used. Neither
+# means "no history": the history may exist, it just was not read in time.
+STATUS_UNAVAILABLE = "unavailable"  # missing, unreadable, corrupt, incomplete or incompatible
+STATUS_TIMEOUT = "timeout"  # not read within the lookup budget
 
 
 @dataclass(frozen=True)
@@ -159,10 +163,30 @@ def score_signal(signal: LearningSignal, shape: TaskShape) -> tuple[int, tuple[s
     return score, tuple(reasons)
 
 
-def retrieve(index: LearningIndex, shape: TaskShape, *, limit: int = DEFAULT_LIMIT) -> list[RetrievedSignal]:
+def about_other_model(signal: LearningSignal, model: str | None) -> bool:
+    """True for a signal that reports *another* model's results.
+
+    A ``model_task_outcomes`` signal is about its subject model; a
+    ``recovery_path`` reports the later model's results. Shown to a model, only
+    its own statistics are relevant. Every other kind is model-neutral.
+    """
+    if model is None:
+        return False
+    if signal.kind == KIND_MODEL_OUTCOMES:
+        return signal.subject.get("model") != model
+    if signal.kind == KIND_RECOVERY:
+        return signal.subject.get("to_model") != model
+    return False
+
+
+def retrieve(index: LearningIndex, shape: TaskShape, *, limit: int = DEFAULT_LIMIT,
+             model: str | None = None) -> list[RetrievedSignal]:
+    """Relevant signals for *shape*. With *model*, signals about other models are not candidates."""
     limit = max(0, min(limit, MAX_LIMIT))
     scored: list[RetrievedSignal] = []
     for s in index.signals:
+        if about_other_model(s, model):
+            continue
         result = score_signal(s, shape)
         if result is not None:
             scored.append(RetrievedSignal(s, result[0], result[1]))
@@ -201,8 +225,9 @@ class LearningContext:
     status: str
     shape: TaskShape | None
     retrieved: list[RetrievedSignal] = field(default_factory=list)
-    signals_considered: int = 0
-    receipts_with_evidence: int = 0
+    # None: not known (the learning source could not be read), which is not zero.
+    signals_considered: int | None = 0
+    receipts_with_evidence: int | None = 0
     recommended_checks: list[CheckRecommendation] = field(default_factory=list)
     current_check_recommended: bool = False
     error: str | None = None
@@ -296,26 +321,32 @@ def consult(
     repo: str | None,
     current_check_fingerprint: str | None = None,
     limit: int = DEFAULT_LIMIT,
+    model: str | None = None,
 ) -> LearningContext:
-    """Retrieve learning for *task*. Never raises."""
+    """Retrieve learning for *task*. Never raises.
+
+    *model*: the model the context is for; signals reporting other models'
+    results are left out (see ``about_other_model``). None: every model.
+    """
     try:
         shape = task_shape_for(task, repo)
-        if index is None or not index.signals:
+        if index is None or not index.total_signals:
             return LearningContext(STATUS_NO_HISTORY, shape,
                                    receipts_with_evidence=index.receipts_with_evidence if index else 0)
-        retrieved = retrieve(index, shape, limit=limit)
+        retrieved = retrieve(index, shape, limit=limit, model=model)
         recs, aligned = recommend_checks(retrieved, current_check_fingerprint)
         return LearningContext(
             STATUS_USED if retrieved else STATUS_NO_RELEVANT,
             shape,
             retrieved,
-            signals_considered=len(index.signals),
+            signals_considered=index.total_signals,
             receipts_with_evidence=index.receipts_with_evidence,
             recommended_checks=recs,
             current_check_recommended=aligned,
         )
     except Exception as exc:
-        return LearningContext(STATUS_ERROR, None, error=type(exc).__name__)
+        return LearningContext(STATUS_ERROR, None, signals_considered=None, receipts_with_evidence=None,
+                               error=type(exc).__name__)
 
 
 __all__ = [
@@ -326,11 +357,14 @@ __all__ = [
     "STATUS_ERROR",
     "STATUS_NO_HISTORY",
     "STATUS_NO_RELEVANT",
+    "STATUS_TIMEOUT",
+    "STATUS_UNAVAILABLE",
     "STATUS_USED",
     "CheckRecommendation",
     "LearningContext",
     "RetrievedSignal",
     "TaskShape",
+    "about_other_model",
     "consult",
     "recommend_checks",
     "render_prompt_block",

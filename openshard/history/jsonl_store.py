@@ -32,6 +32,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 
 if sys.platform == "win32":
@@ -246,7 +247,7 @@ def _atomic_replace(path: Path, blob: str) -> None:
             fh.write(blob)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
     except BaseException:
         try:
             tmp.unlink()
@@ -255,6 +256,47 @@ def _atomic_replace(path: Path, blob: str) -> None:
         raise
 
 
+def replace_with_retry(source: Path, target: Path) -> None:
+    """``os.replace`` that retries a transient Windows sharing violation (at most 6 ms of sleep).
+
+    On Windows a rename over a file another process has open fails. Readers
+    that follow the learning worker's rule (copy under the history lock, then
+    close) hold it only briefly, so a short retry is enough; a caller that can
+    afford to wait longer (the learning worker) retries the whole pass.
+    """
+    for attempt in range(4):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if sys.platform != "win32" or attempt == 3:
+                raise
+            time.sleep(0.002)
+
+
+def _learning_update(function):
+    """After a successful write to a ``runs.jsonl``, ask the learning worker to refresh.
+
+    Runs only once the write returned (its lock released), so durability is
+    unaffected. Never raises and never waits on a lock: it costs a dirty-marker
+    write and a non-blocking lock attempt, plus a process launch when no worker
+    is running. Learning is derived, and a capture must not depend on it.
+    """
+    @wraps(function)
+    def wrapped(path, *args, **kwargs):
+        result = function(path, *args, **kwargs)
+        if Path(path).name == "runs.jsonl":
+            try:
+                from openshard.learning.worker import schedule_update
+
+                schedule_update(Path(path))
+            except Exception:
+                pass
+        return result
+    return wrapped
+
+
+@_learning_update
 def upsert_jsonl(
     path: Path, record: dict, match: Callable[[dict], bool], *, timeout: float | None = None
 ) -> str:
@@ -300,6 +342,7 @@ def upsert_jsonl(
         return "appended"
 
 
+@_learning_update
 def amend_last_jsonl(
     path: Path, transform: Callable[[dict], dict], *, timeout: float | None = None
 ) -> dict | None:
@@ -345,6 +388,7 @@ def amend_last_jsonl(
         return None
 
 
+@_learning_update
 def append_jsonl(path: Path, record: dict) -> None:
     """Append one record to *path* as a single locked, fsync'd JSON line.
 
@@ -362,6 +406,7 @@ def append_jsonl(path: Path, record: dict) -> None:
             os.fsync(fh.fileno())
 
 
+@_learning_update
 def write_jsonl(path: Path, records: list[dict]) -> None:
     """Crash-safe locked whole-file rewrite of *path* with *records*.
 

@@ -2474,17 +2474,35 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     _learn = (receipt.recorded_evidence or {}).get("learning")
     if isinstance(_learn, dict):
         lines.append(f"{_INDENT}LEARNING")
+        _lsnap_raw = _learn.get("snapshot")
+        _lsnap: dict = _lsnap_raw if isinstance(_lsnap_raw, dict) else {}
+        _trim_note = (
+            f"{_lsnap.get('signals_stored')} of {_lsnap.get('signals_derived')} derived signal(s) stored "
+            "(trimmed to fit)" if _lsnap.get("trimmed") is True else None
+        )
         if _learn.get("used"):
             _considered = _learn.get("signals_considered")
             lines.append(_row("Signals", f"{_learn.get('signals_used') or 0} prior verified signal(s) considered"
                               + (f" (of {_considered})" if _considered else "")))
+            if _trim_note:
+                lines.append(_row("Snapshot", _trim_note))
             _ctx = "supplied to the model" if _learn.get("context_supplied") else "not supplied"
             _files = _learn.get("context_files_added") or []
             lines.append(_row("Context", _ctx + (f" (+ {', '.join(_files)})" if _files else "")))
         else:
             _why = {"disabled": "not consulted (--no-learning)", "no_history": "no prior verified evidence",
-                    "no_relevant_signals": "no relevant signals", "error": "history could not be read"}
-            lines.append(_row("Signals", _why.get(str(_learn.get("status")), str(_learn.get("status")))))
+                    "no_relevant_signals": "no relevant signals", "error": "history could not be read",
+                    "unavailable": "not used: learning evidence could not be read",
+                    "timeout": "not used: the bounded learning lookup did not finish in time"}
+            _snap = _learn.get("snapshot")
+            _snap_why = {"missing": "not used: learning snapshot not built yet",
+                         "oversized": "not used: learning snapshot exceeded the size cap"}.get(
+                (_snap.get("status") if isinstance(_snap, dict) else None) or "")
+            _status = str(_learn.get("status"))
+            lines.append(_row("Signals", (_snap_why if _status == "unavailable" else None)
+                              or _why.get(_status, _status)))
+            if _trim_note and _status == "no_relevant_signals":
+                lines.append(_row("Snapshot", _trim_note))
         _rr = f" ({_learn['routing_reason']})" if _learn.get("routing_reason") else ""
         lines.append(_row("Routing", f"influenced: {'yes' if _learn.get('routing_influenced') else 'no'}{_rr}"))
         lines.append(_row("Verification", "influenced: " + ("yes" if _learn.get("verification_influenced")

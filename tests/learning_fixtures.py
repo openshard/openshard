@@ -109,3 +109,14 @@ def osn_entry(
 MOBILE_CHECK = {"fingerprint": "f00dcafe00000001", "label": "pnpm test:e2e -- mobile",
                 "label_complete": True, "kind": "test"}
 UNIT_CHECK = {"fingerprint": "f00dcafe00000002", "label": "pnpm test", "label_complete": True, "kind": "test"}
+
+
+def publish_learning(repo) -> str:
+    """Publish the learning snapshot for *repo*'s history, as the background worker would.
+
+    OSN reads only this precomputed snapshot at startup, so a test that seeds
+    ``runs.jsonl`` directly publishes it before running.
+    """
+    from openshard.learning.worker import refresh_snapshot
+
+    return refresh_snapshot(repo / ".openshard" / "runs.jsonl")

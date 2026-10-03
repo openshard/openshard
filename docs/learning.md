@@ -15,8 +15,11 @@ It is not a vector memory, it trains nothing, and it never changes policy.
 
 ## Signals
 
-Signals are derived at read time from `.openshard/runs.jsonl`, the same way
-routing outcomes are, and are never written back into a Receipt. Each one has:
+Signals are derived from `.openshard/runs.jsonl`, the same way routing
+outcomes are, and are never written back into a Receipt. For OSN runs they are
+derived in the background and read from a precomputed snapshot (see
+[Startup cost](#startup-cost)); `openshard learn` and the MCP tool derive them
+directly. Each one has:
 
 - a **scope**: the repository and task category (the keyword classifier the
   routing layer already records);
@@ -87,6 +90,10 @@ off with `--no-learning`):
    give. The routing record says which scope decided and why.
 4. A verify command that caught failures on similar work, but is not the one
    supplied, is **recommended, never run**.
+5. Each model sees only its own statistics. A `model_task_outcomes` signal goes
+   only to the model it describes, and a `recovery_path` only to the model that
+   recovered. When an escalation moves to another model, that attempt gets the
+   context built for that model.
 
 The Receipt gets a compact `learning` block containing:
 
@@ -95,7 +102,12 @@ The Receipt gets a compact `learning` block containing:
 - `routing.influenced` (true only when an applied V2 decision used history);
 - `verification.influenced` (always false; recommendations are advisory);
 - the model each attempt requested, and a privacy-safe identity of the verify
-  command.
+  command;
+- `snapshot`: the precomputed snapshot the run read (its id and when it was
+  generated) and how the lookup went (`lookup_ms`, `budget_ms`, `status`).
+
+When escalation shows different models different signals, the block lists every
+signal that reached a model.
 
 The command's arguments are withheld from its label unless every token is
 plain. Failing test ids are kept on the attempt's verification record as
@@ -104,6 +116,93 @@ identifiers only, never output text.
 The full Receipt shows a LEARNING section. The block is **not synced**: the
 Platform's receipt contract is a strict object without this field, so it stays
 local until the contract defines it.
+
+## Startup cost
+
+OSN does not read history at startup. After every successful write to
+`runs.jsonl`, a background worker re-derives the signals and the routing history
+(harness-wide, and per task category for this repository) with the same
+functions described above, and publishes them as one file under
+`.openshard/learning-cache/`. A run reads that file once, synchronously, within a
+budget, and uses that one frozen result for routing, the model's context and the
+Receipt.
+
+- Budget: `learning.lookup_budget_ms` in the repository config, 25 by default
+  and at most 100. No remote call, no git subprocess, and `runs.jsonl` is not
+  read. The budget is best effort, not a realtime guarantee: the read runs on a
+  thread and the run stops waiting at the budget, but a JSON parse already under
+  way holds Python's GIL and finishes first. A result that arrives late is
+  reported as `timeout` and not used.
+- Size: a snapshot is at most 384 KB, which bounds the read and so how far a
+  parse can overrun the budget. The read's cost is dominated by validating each
+  stored signal rather than by JSON parsing, so the snapshot stores what the
+  reader needs in a form it can check cheaply (for example last-seen time as an
+  integer). On an unloaded machine a snapshot at the cap is read inside the
+  default budget; on a heavily loaded one a lookup can be late, and is then
+  recorded as `timeout`. A larger derivation is trimmed to fit: the weakest and
+  stalest signals are dropped first, and the snapshot records `trimmed: true`,
+  `signals_stored` and the full derived count. Dropped signals are never
+  scored, so a run reports as `signals_considered` only the signals it could
+  consider; the Receipt's `snapshot` block carries `trimmed`,
+  `signals_stored` and `signals_derived`, and the rendered Receipt adds
+  "N of M derived signal(s) stored (trimmed to fit)". Only if even a snapshot with no signals
+  cannot fit is an `oversized` marker published, and learning is reported
+  `unavailable` rather than read late or partially.
+- Routing history is decoded as the live loader decodes it: if the history it
+  reads is not valid UTF-8, the snapshot records routing history as
+  unavailable (the live loader would have had none), while signals are decoded
+  leniently, as they always were.
+- Format: the snapshot carries a schema version. A snapshot from an older
+  OpenShard is `incompatible` (so `unavailable`, fail-open) and the worker
+  rebuilds it.
+- A late lookup fails open as `timeout`. A missing, unreadable, corrupt,
+  incomplete, incompatible or oversized snapshot, or one derived for another
+  checkout, fails open as `unavailable`. Both mean the history was not read, not
+  that there is none: the Receipt records `signals_considered` as unknown
+  (`null`), never 0, and the routing record says `history_timeout` or
+  `history_unavailable` with unknown counts, never `no_history`. Only a
+  repository with no history at all (no snapshot and no `runs.jsonl`) is
+  `no_history`.
+- Repository identity: the worker records the checkout root and the size and
+  modification time of the git config holding the remote. The lookup re-checks
+  them with `stat` calls. A snapshot from another checkout is `repo_mismatch`;
+  after any git config change (for example a new remote) it is
+  `identity_changed` until the worker re-derives it. Both are `unavailable`.
+- Freshness is recomputed from each signal's last-seen time when the snapshot
+  is read, so an older snapshot never surfaces stale signals.
+- Cost to a history write: a dirty-marker write and a non-blocking lock attempt
+  (a small constant cost, independent of history size), plus a process launch
+  on the one write that starts a worker. The
+  write itself is complete and durable before any of this runs. While the
+  worker copies a chunk of history (at most 4 MB) it holds the history lock, so
+  a concurrent writer can wait for that one read.
+- Many writes coalesce into one worker, and a write that lands mid-derivation
+  triggers another pass. After its last pass the worker stays the owner for
+  about two seconds and picks up any write in that window itself, so a stream
+  of writes starts one process rather than one per write, and no write is left
+  unpublished. Under a steady stream of writes (several sessions at once) the
+  worker paces itself: passes are at least 10 seconds apart, or twice the last
+  pass if that took longer, waiting only while newer writes are pending. After
+  10 minutes or 50 passes it exits with the newest write still pending and
+  starts a fresh worker for it, so no process runs indefinitely and an
+  upgraded OpenShard takes over. The worker closes history before deriving, so on
+  Windows a writer's atomic replace is never blocked. A snapshot is published
+  only whole (temp file, then atomic replace), derived from one consistent copy.
+- Self-healing: a failed pass (for example a reader holding the snapshot on
+  Windows) is retried a bounded number of times. A launch whose process died
+  before starting is reclaimed at once. After each lookup, OSN starts a worker
+  if the snapshot is missing, unusable or behind the history (one `stat`), so
+  a crashed or failed worker never waits for another Receipt. Each trigger
+  starts at most one process, and none while a worker is running.
+- The worker is started with Python's safe-path mode (`-P`) from the
+  OpenShard home directory, never from the repository, so a cloned repository
+  cannot put its own code on the worker's import path. On Windows it is started
+  outside the caller's job object where the job allows that, so it outlives a
+  hook that exits.
+- `OPENSHARD_LEARNING_WORKER=0` turns background refresh off; OSN then reports
+  learning as `unavailable` or serves the last published snapshot.
+- `--no-learning` skips the snapshot entirely; routing then reads harness-wide
+  history as it always has.
 
 ## Inspecting
 

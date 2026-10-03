@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -74,6 +75,10 @@ class ModelActionProvider:
     # ``learning_supplied`` becomes True once a model call actually carried it.
     learning_context: str | None = None
     learning_supplied: bool = False
+    # Per-model context from one frozen learning snapshot. When set it replaces
+    # ``learning_context``, so a model never sees another model's statistics.
+    learning_context_for: Callable[[str], str | None] | None = None
+    learning_models: list[str] = field(default_factory=list)  # models a call actually carried it to
 
     def model_for(self, attempt: int) -> str:
         return self.models[min(max(attempt, 1), len(self.models)) - 1]
@@ -100,8 +105,9 @@ class ModelActionProvider:
             model, self.next_model_override = self.next_model_override, None
         else:
             model = self.model_for(ctx.attempt)
-        prompt = build_prompt(ctx, self.repo_root, self.context_files, learning=self.learning_context)
-        content = self._ask(ctx.attempt, model, prompt)
+        learning = self._learning_for(model)
+        prompt = build_prompt(ctx, self.repo_root, self.context_files, learning=learning)
+        content = self._ask(ctx.attempt, model, prompt, learning=bool(learning))
         try:
             return parse_writes(content)
         except ModelResponseError as exc:
@@ -111,17 +117,28 @@ class ModelActionProvider:
                 f"{prompt}\n\nYour previous reply was rejected: {exc}. "
                 "Reply with ONLY the JSON object described in the instructions."
             )
-            return parse_writes(self._ask(ctx.attempt, model, repair))
+            return parse_writes(self._ask(ctx.attempt, model, repair, learning=bool(learning)))
 
-    def _ask(self, attempt: int, model: str, prompt: str) -> str:
+    def _learning_for(self, model: str) -> str | None:
+        if self.learning_context_for is None:
+            return self.learning_context
+        try:
+            return self.learning_context_for(model)
+        except Exception:
+            return None  # learning is advisory; it never stops an attempt
+
+    def _ask(self, attempt: int, model: str, prompt: str, *, learning: bool | None = None) -> str:
         if self.budget is not None:
             self.budget.before_model_call()  # raises BudgetExhausted; no call is made
-        system = SYSTEM_PROMPT + LEARNING_SYSTEM_NOTE if self.learning_context else SYSTEM_PROMPT
+        carried = bool(self.learning_context) if learning is None else learning
+        system = SYSTEM_PROMPT + LEARNING_SYSTEM_NOTE if carried else SYSTEM_PROMPT
         resp = self.provider.execute(
             model, prompt, system=system, max_tokens=self.max_tokens,
         )
-        if self.learning_context:
+        if carried:
             self.learning_supplied = True
+            if model not in self.learning_models:
+                self.learning_models.append(model)
         u = resp.usage
         self.usage.append(AttemptUsage(
             attempt, resp.model or model, u.prompt_tokens, u.completion_tokens, u.estimated_cost,
