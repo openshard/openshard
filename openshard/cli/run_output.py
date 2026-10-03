@@ -357,8 +357,11 @@ def _format_model_slug(raw: str) -> str:
 def _model_label(model: str) -> str:
     if model in _MODEL_SHORT:
         return _MODEL_SHORT[model]
+    from openshard.history.shard_contract import display_model_name
     from openshard.models.registry import display_name_for
-    return display_name_for(model, fallback=_format_model_slug(model))
+    # display_model_name knows direct-provider ids (claude-opus-5-5) and only
+    # then falls back to the slug formatter.
+    return display_name_for(model, fallback=display_model_name(model))
 
 
 def _profile_display_label(profile: str | None, is_readonly: bool = False) -> str:

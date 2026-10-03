@@ -33,8 +33,9 @@ class TestLifecycleValues(unittest.TestCase):
                 self.assertIsInstance(entry.lifecycle, str)
 
     def test_registry_size_matches_curated_roster(self) -> None:
-        # Two evaluated GPT-5.6 lanes plus four provider-backed OpenAI watchlist entries.
-        self.assertEqual(len(_REGISTRY), 49)
+        # Two evaluated GPT-5.6 lanes plus four provider-backed OpenAI watchlist
+        # entries; six current provider models catalogued as watchlist 2026-10-03.
+        self.assertEqual(len(_REGISTRY), 55)
 
 
 class TestRoutingDefaultEligibility(unittest.TestCase):

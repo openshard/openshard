@@ -10,10 +10,18 @@ writes are priced separately when the provider exposes them. These are list-rate
 estimates, not billing statements: plan credits, batch, regional processing,
 fast mode, long-context uplifts and negotiated pricing can differ.
 
-Sources checked 2026-10-01:
+Sources checked 2026-10-03:
 OpenAI: https://developers.openai.com/api/docs/pricing
-Anthropic: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
 Google: https://ai.google.dev/gemini-api/docs/pricing
+MiniMax: https://platform.minimax.io/docs/guides/pricing-paygo
+Moonshot: https://platform.kimi.ai/docs/pricing/chat
+Z.ai: https://docs.z.ai/guides/overview/pricing
+
+Rates that depend on prompt length or time of day (xAI Grok above 200k input,
+MiniMax-M3 above 512k, DeepSeek peak/off-peak, Gemini Pro above 200k) have no
+single list rate and are deliberately absent: an estimate there would be wrong
+for part of the traffic. Anthropic cache writes are the 5-minute rate.
 """
 
 from __future__ import annotations
@@ -21,7 +29,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-PRICING_SNAPSHOT_DATE = "2026-10-01"
+PRICING_SNAPSHOT_DATE = "2026-10-03"
 COST_PROVENANCE_OFFICIAL_RATE = "official_rate_estimate"
 
 
@@ -52,24 +60,49 @@ class CostEstimate:
 
 
 _OPENAI = "https://developers.openai.com/api/docs/pricing"
-_ANTHROPIC = "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+_ANTHROPIC = "https://platform.claude.com/docs/en/about-claude/pricing"
 _GOOGLE = "https://ai.google.dev/gemini-api/docs/pricing"
+_MINIMAX = "https://platform.minimax.io/docs/guides/pricing-paygo"
+_MOONSHOT = "https://platform.kimi.ai/docs/pricing/chat"
+_ZAI = "https://docs.z.ai/guides/overview/pricing"
 
 _RATES: tuple[OfficialRate, ...] = (
+    OfficialRate("openai", "gpt-6-astra", 10.0, 50.0, 1.0, 12.50, _OPENAI, aliases=("openai/gpt-6-astra",)),
+    OfficialRate("openai", "gpt-6.1-sol", 2.0, 10.0, 0.10, 2.50, _OPENAI, aliases=("openai/gpt-6.1-sol",)),
+    OfficialRate("openai", "gpt-6-sol", 2.0, 10.0, 0.20, 2.50, _OPENAI, aliases=("openai/gpt-6-sol",)),
+    OfficialRate("openai", "gpt-6-luna", 0.10, 0.50, 0.01, 0.125, _OPENAI, aliases=("openai/gpt-6-luna",)),
     OfficialRate("openai", "gpt-5.6-sol", 4.0, 20.0, 0.40, 5.0, _OPENAI, aliases=("openai/gpt-5.6-sol", "GPT-5.6 Sol")),
     OfficialRate("openai", "gpt-5.6-terra", 2.0, 12.0, 0.20, 2.50, _OPENAI, aliases=("openai/gpt-5.6-terra",)),
     OfficialRate("openai", "gpt-5.6-luna", 0.20, 1.20, 0.02, 0.25, _OPENAI, aliases=("openai/gpt-5.6-luna",)),
-    OfficialRate("openai", "gpt-6-astra", 10.0, 50.0, 1.0, 12.50, _OPENAI, aliases=("openai/gpt-6-astra",)),
-    OfficialRate("anthropic", "claude-opus-5-5", 4.0, 20.0, 0.20, 5.0, _ANTHROPIC, aliases=("anthropic/claude-opus-5-5", "claude-opus-5.5")),
-    OfficialRate("anthropic", "claude-opus-5", 5.0, 25.0, 0.50, 6.25, _ANTHROPIC, aliases=("anthropic/claude-opus-5",)),
-    OfficialRate("anthropic", "claude-fable-5-1", 10.0, 50.0, 0.25, 12.50, _ANTHROPIC, aliases=("anthropic/claude-fable-5-1", "claude-fable-5.1")),
+    OfficialRate("openai", "gpt-5.5", 5.0, 30.0, 0.50, None, _OPENAI, aliases=("openai/gpt-5.5",)),
+    OfficialRate("openai", "gpt-5.5-pro", 30.0, 180.0, None, None, _OPENAI, aliases=("openai/gpt-5.5-pro",)),
+    OfficialRate("openai", "gpt-5.4", 2.50, 15.0, 0.25, None, _OPENAI, aliases=("openai/gpt-5.4",)),
+    OfficialRate("openai", "gpt-5.4-pro", 30.0, 180.0, None, None, _OPENAI, aliases=("openai/gpt-5.4-pro",)),
+    OfficialRate("openai", "gpt-5.4-mini", 0.75, 4.50, 0.075, None, _OPENAI, aliases=("openai/gpt-5.4-mini",)),
+    OfficialRate("openai", "gpt-5.4-nano", 0.20, 1.25, 0.02, None, _OPENAI, aliases=("openai/gpt-5.4-nano",)),
+    OfficialRate("anthropic", "claude-fable-5-1", 10.0, 50.0, 0.25, 12.50, _ANTHROPIC, aliases=("anthropic/claude-fable-5-1", "anthropic/claude-fable-5.1", "claude-fable-5.1")),
     OfficialRate("anthropic", "claude-fable-5", 10.0, 50.0, 1.0, 12.50, _ANTHROPIC, aliases=("anthropic/claude-fable-5",)),
-    OfficialRate("anthropic", "claude-sonnet-5-5", 2.0, 10.0, 0.20, 2.50, _ANTHROPIC, aliases=("anthropic/claude-sonnet-5-5", "claude-sonnet-5.5")),
-    OfficialRate("anthropic", "claude-haiku-4-5", 1.0, 5.0, 0.10, 1.25, _ANTHROPIC, aliases=("anthropic/claude-haiku-4-5", "claude-haiku-4.5")),
+    OfficialRate("anthropic", "claude-opus-5-5", 4.0, 20.0, 0.20, 5.0, _ANTHROPIC, aliases=("anthropic/claude-opus-5-5", "anthropic/claude-opus-5.5", "claude-opus-5.5")),
+    OfficialRate("anthropic", "claude-opus-5", 5.0, 25.0, 0.50, 6.25, _ANTHROPIC, aliases=("anthropic/claude-opus-5",)),
+    OfficialRate("anthropic", "claude-opus-4-8", 5.0, 25.0, 0.50, 6.25, _ANTHROPIC, aliases=("anthropic/claude-opus-4-8", "anthropic/claude-opus-4.8", "claude-opus-4.8")),
+    OfficialRate("anthropic", "claude-opus-4-7", 5.0, 25.0, 0.50, 6.25, _ANTHROPIC, aliases=("anthropic/claude-opus-4-7", "anthropic/claude-opus-4.7", "claude-opus-4.7")),
+    OfficialRate("anthropic", "claude-opus-4-6", 5.0, 25.0, 0.50, 6.25, _ANTHROPIC, aliases=("anthropic/claude-opus-4-6", "anthropic/claude-opus-4.6", "claude-opus-4.6")),
+    OfficialRate("anthropic", "claude-sonnet-5-5", 2.0, 10.0, 0.20, 2.50, _ANTHROPIC, aliases=("anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-5.5", "claude-sonnet-5.5")),
+    OfficialRate("anthropic", "claude-sonnet-5", 2.0, 10.0, 0.20, 2.50, _ANTHROPIC, aliases=("anthropic/claude-sonnet-5",)),
+    OfficialRate("anthropic", "claude-sonnet-4-6", 3.0, 15.0, 0.30, 3.75, _ANTHROPIC, aliases=("anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4.6", "claude-sonnet-4.6")),
+    OfficialRate("anthropic", "claude-haiku-4-5", 1.0, 5.0, 0.10, 1.25, _ANTHROPIC, aliases=("anthropic/claude-haiku-4-5", "anthropic/claude-haiku-4.5", "claude-haiku-4.5", "claude-haiku-4-5-20251001")),
+    # Gemini 3.6-3.8 Flash list rates rise on 2027-01-01 per the pricing page;
+    # these are the rates in force on PRICING_SNAPSHOT_DATE.
+    OfficialRate("google", "gemini-3.8-flash", 0.75, 3.75, 0.075, None, _GOOGLE, aliases=("google/gemini-3.8-flash",)),
     OfficialRate("google", "gemini-3.7-flash", 0.75, 3.75, 0.075, None, _GOOGLE, aliases=("google/gemini-3.7-flash",)),
     OfficialRate("google", "gemini-3.6-flash", 0.75, 3.75, 0.075, None, _GOOGLE, aliases=("google/gemini-3.6-flash",)),
     OfficialRate("google", "gemini-3.5-flash", 1.50, 9.0, 0.15, None, _GOOGLE, aliases=("google/gemini-3.5-flash",)),
-    OfficialRate("google", "gemini-3.1-flash-lite", 0.25, 1.50, None, None, _GOOGLE, aliases=("google/gemini-3.1-flash-lite",)),
+    OfficialRate("google", "gemini-3.5-flash-lite", 0.30, 2.50, 0.03, None, _GOOGLE, aliases=("google/gemini-3.5-flash-lite",)),
+    OfficialRate("google", "gemini-3.1-flash-lite", 0.25, 1.50, 0.025, None, _GOOGLE, aliases=("google/gemini-3.1-flash-lite",)),
+    OfficialRate("minimax", "MiniMax-M2.7", 0.30, 1.20, 0.06, 0.375, _MINIMAX, aliases=("minimax/minimax-m2.7",)),
+    OfficialRate("moonshot", "kimi-k3", 3.0, 15.0, 0.30, None, _MOONSHOT, aliases=("moonshotai/kimi-k3",)),
+    OfficialRate("moonshot", "kimi-k2.6", 0.95, 4.0, 0.16, None, _MOONSHOT, aliases=("moonshotai/kimi-k2.6",)),
+    OfficialRate("zai", "glm-5.1", 1.40, 4.40, 0.26, None, _ZAI, aliases=("z-ai/glm-5.1",)),
 )
 
 _INDEX: dict[str, OfficialRate] = {}

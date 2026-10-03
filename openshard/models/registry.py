@@ -1049,6 +1049,149 @@ _REGISTRY: list[ModelEntry] = [
         cost_class="cheap",
         notes="Extremely fast reasoning candidate. Benchmark for verifier/control tasks.",
     ),
+
+    # ------------------------------------------------------------------
+    # Catalog refresh 2026-10-03 — current provider models, catalogued only.
+    #
+    # Every entry below is ``watchlist``: recognised, displayed and explicitly
+    # selectable, never a default, a role-group member or a scored-routing
+    # candidate until an evaluation promotes it. Roles stay empty so no
+    # resolver hint can pick them. Ids are the OpenRouter slugs; facts are
+    # from the official provider docs (checked 2026-10-03) and the checked-in
+    # OpenRouter snapshot (2026-09-25). Prices live in openshard/models/pricing.py.
+    #
+    #   Anthropic  https://platform.claude.com/docs/en/about-claude/models/overview
+    #              https://platform.claude.com/docs/en/about-claude/pricing
+    #   Google     https://ai.google.dev/gemini-api/docs/models
+    #   xAI        https://docs.x.ai/docs/models
+    #   Moonshot   https://platform.kimi.ai/docs/pricing/chat
+    # ------------------------------------------------------------------
+    ModelEntry(
+        id="anthropic/claude-fable-5.1",
+        lifecycle="watchlist",
+        display_name="Anthropic: Claude Fable 5.1",
+        provider="Anthropic",
+        tier="frontier",
+        roles=(),
+        experimental=False,
+        context_length=1_000_000,
+        input_modalities=("text", "image"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=False,
+        supports_multimodal=True,
+        latency_class="slow",
+        cost_class="expensive",
+        notes=(
+            "API id claude-fable-5-1. Successor to Fable 5 at the same per-token price; "
+            "adaptive thinking always on, 128k max output, forced tool_choice rejected. "
+            "Watchlist until Openshard evaluation."
+        ),
+    ),
+    ModelEntry(
+        id="anthropic/claude-opus-5.5",
+        lifecycle="watchlist",
+        display_name="Anthropic: Claude Opus 5.5",
+        provider="Anthropic",
+        tier="frontier",
+        roles=(),
+        experimental=False,
+        context_length=1_000_000,
+        input_modalities=("text", "image"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="normal",
+        cost_class="expensive",
+        notes=(
+            "API id claude-opus-5-5. Current Opus; thinking cannot be disabled (default "
+            "effort medium), forced tool_choice rejected, 128k max output. Watchlist until "
+            "Openshard evaluation; Opus 4.8 stays the escalation model."
+        ),
+    ),
+    ModelEntry(
+        id="anthropic/claude-sonnet-5.5",
+        lifecycle="watchlist",
+        display_name="Anthropic: Claude Sonnet 5.5",
+        provider="Anthropic",
+        tier="strong",
+        roles=(),
+        experimental=False,
+        context_length=1_000_000,
+        input_modalities=("text", "image"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="normal",
+        cost_class="expensive",
+        notes=(
+            "API id claude-sonnet-5-5. Current Sonnet; released after the 2026-09-25 "
+            "OpenRouter snapshot. Watchlist until Openshard evaluation; Sonnet 4.6 stays "
+            "the default Sonnet lane."
+        ),
+    ),
+    ModelEntry(
+        id="google/gemini-3.8-flash",
+        lifecycle="watchlist",
+        display_name="Google: Gemini 3.8 Flash",
+        provider="Google",
+        tier="mid",
+        roles=(),
+        experimental=False,
+        context_length=1_048_576,
+        input_modalities=("text", "image"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="fast",
+        cost_class="cheap",
+        notes=(
+            "Latest stable Gemini Flash. OpenRouter also reports video/audio/file input. "
+            "Watchlist until Openshard evaluation."
+        ),
+    ),
+    ModelEntry(
+        id="x-ai/grok-4.7",
+        lifecycle="watchlist",
+        display_name="xAI: Grok 4.7",
+        provider="xAI",
+        tier="strong",
+        roles=(),
+        experimental=False,
+        context_length=500_000,
+        input_modalities=("text", "image"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="normal",
+        cost_class="mid",
+        notes=(
+            "Latest Grok; price doubles above 200k input tokens. Watchlist until "
+            "Openshard evaluation."
+        ),
+    ),
+    ModelEntry(
+        id="moonshotai/kimi-k3",
+        lifecycle="watchlist",
+        display_name="MoonshotAI: Kimi K3",
+        provider="Moonshot AI",
+        tier="strong",
+        roles=(),
+        experimental=False,
+        context_length=1_048_576,
+        input_modalities=("text", "image"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="normal",
+        cost_class="expensive",
+        notes="Latest Kimi; OpenRouter also reports video input. Watchlist until Openshard evaluation.",
+    ),
 ]
 
 # ---------------------------------------------------------------------------

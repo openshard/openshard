@@ -112,6 +112,13 @@ def filter_deprecated(
     return result
 
 
+# Curated lifecycles that record a model without promoting it: catalogued
+# (watchlist) or retired (deprecated). Being in the registry under one of these
+# must not let a model into scored routing, or adding a newly released model to
+# the catalog would make it the "newest version" the shortlist prefers.
+_UNPROMOTED_CURATED_LIFECYCLES: frozenset[str] = frozenset({"watchlist", "deprecated"})
+
+
 def filter_unpromoted(
     entries: list[InventoryEntry],
     *,
@@ -129,7 +136,8 @@ def filter_unpromoted(
 
     Curated means a registry id, or (without *registry_fn*) an alias the
     curated catalog resolves, so direct-provider ids such as
-    ``claude-sonnet-4-6`` count as ``anthropic/claude-sonnet-4.6``.
+    ``claude-sonnet-4-6`` count as ``anthropic/claude-sonnet-4.6``. Watchlist
+    and deprecated entries are catalogued, not curated for routing.
     Like ``build_shortlist``, an inventory with no curated (or allowed) entry
     at all is returned unchanged rather than emptied.
 
@@ -153,13 +161,25 @@ def filter_unpromoted(
         except Exception:
             resolve = None
 
+    def _promotable(lifecycle: str | None) -> bool:
+        return lifecycle is not None and lifecycle not in _UNPROMOTED_CURATED_LIFECYCLES
+
     def _curated(mid: str) -> bool:
         try:
-            if _lc_fn(mid) is not None:
-                return True
+            lc = _lc_fn(mid)
+            if lc is not None:
+                return _promotable(lc)
         except Exception:
             pass
-        return resolve is not None and resolve(mid) is not None
+        if resolve is None:
+            return False
+        canonical = resolve(mid)
+        if canonical is None:
+            return False
+        try:
+            return _promotable(_lc_fn(canonical))
+        except Exception:
+            return True
 
     kept = [e for e in entries if e.model.id in allow or _curated(e.model.id)]
     return kept if kept else list(entries)
