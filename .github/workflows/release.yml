@@ -43,6 +43,10 @@ jobs:
               sys.exit(f"tag {tag} does not match pyproject.toml version {version}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"version={version}\n")
+          with open("CHANGELOG.md", encoding="utf-8") as fh:
+              changelog = fh.read()
+          if not re.search(rf"^## {re.escape(version)} - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.M):
+              sys.exit(f"missing dated CHANGELOG.md section for {version}")
           print(f"ok: {tag} == {version}")
           EOF
 
@@ -122,6 +126,11 @@ jobs:
               *) echo "::error::unexpected artifact $f for version $VERSION"; exit 1 ;;
             esac
           done
+
+      - name: Smoke installed wheel outside the source tree
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: python scripts/smoke_release.py dist/openshard-${VERSION}-py3-none-any.whl --version "$VERSION"
 
       - uses: actions/upload-artifact@v4
         with:

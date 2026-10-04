@@ -190,6 +190,7 @@ from openshard.history.capture_completeness import (
     build_completeness,
     make_reason,
 )
+from openshard.history.correlation import correlation_block, launch_correlation
 from openshard.history.task_identity import (
     EVIDENCE_DECLARED,
     TASK_CONTEXT_SOURCE_LAUNCH_ENV,
@@ -214,6 +215,7 @@ SESSIONS_DIRNAME = "claude_sessions"
 BUFFER_SCHEMA_VERSION = 1
 
 EVENT_SESSION_START = "SessionStart"
+EVENT_MODEL_SWITCH = "PostModelSwitch"
 EVENT_USER_PROMPT_SUBMIT = "UserPromptSubmit"
 EVENT_POST_TOOL_USE = "PostToolUse"
 EVENT_POST_TOOL_USE_FAILURE = "PostToolUseFailure"
@@ -246,6 +248,7 @@ EVENT_APPROVAL_REQUEST = "ApprovalRequest"
 EVENT_APPROVAL_DECISION = "ApprovalDecision"
 SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_SESSION_START,
+    EVENT_MODEL_SWITCH,
     EVENT_USER_PROMPT_SUBMIT,
     EVENT_POST_TOOL_USE,
     EVENT_POST_TOOL_USE_FAILURE,
@@ -440,6 +443,7 @@ class HookPayload:
     # header -- never by a translator, never read out of the agent's own
     # payload (which is untrusted for this). See ``_bind_task_context``.
     task_id: str | None = None
+    correlation: dict | None = None  # launcher declaration; never agent payload
     # Claude Code's ``transcript_path``, kept only when it names this
     # session's own transcript file (see ``_valid_transcript_path``). Held on
     # the transient staging buffer so the fold can sum the session's token
@@ -451,6 +455,7 @@ class HookPayload:
     # payload): the model provider its configuration selects and the raw
     # ``CLAUDE_CODE_ENTRYPOINT`` surface. See ``claude_agent_env``.
     agent_provider: str | None = None
+    effort_level: str | None = None
     agent_surface: str | None = None
 
 
@@ -559,6 +564,10 @@ def is_grok_build_document(data: Mapping[str, Any]) -> bool:
     return any(key in data for key in _GROK_BUILD_MARKER_KEYS)
 
 
+def _effort_level(value: object) -> str | None:
+    return value if isinstance(value, str) and value in {"low", "medium", "high", "xhigh", "max"} else None
+
+
 def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None = None) -> HookPayload | None:
     """Pick the supported fields out of a decoded hook payload.
 
@@ -618,6 +627,11 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
         command_outcome=command_outcome,
         command_exit_code=command_exit_code,
         transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
+        model_id=_sanitize_model_id(_str_or_none(
+            data.get("model") if event == EVENT_SESSION_START else
+            data.get("to_model") if event == EVENT_MODEL_SWITCH else None, 200)),
+        effort_level=_effort_level(data.get("effort", {}).get("level"))
+        if isinstance(data.get("effort"), dict) else None,
     )
 
 
@@ -1383,9 +1397,11 @@ class ReducedHookPayload:
     command_exit_code: int | None = None
     command_key: str | None = None  # see _command_key(): same check command -> same key
     git_write: bool = False  # the command can create commits (see _GIT_WRITE_RE); corroborates them
+    correlation: dict | None = None
     task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
     transcript_path: str | None = None  # see HookPayload.transcript_path
     agent_provider: str | None = None  # see HookPayload.agent_provider
+    effort_level: str | None = None
     agent_surface: str | None = None
 
     def to_dict(self) -> dict:
@@ -1425,12 +1441,16 @@ class ReducedHookPayload:
         if self.git_write:
             data["git_write"] = True
         # Only when declared, so queue lines of an undeclared session keep their shape.
+        if self.correlation is not None:
+            data["correlation"] = correlation_block(self.correlation)
         if self.task_id is not None:
             data["task_id"] = self.task_id
         if self.transcript_path is not None:
             data["transcript_path"] = self.transcript_path
         if self.agent_provider is not None:
             data["agent_provider"] = self.agent_provider
+        if self.effort_level is not None:
+            data["effort_level"] = self.effort_level
         if self.agent_surface is not None:
             data["agent_surface"] = self.agent_surface
         return data
@@ -1492,9 +1512,11 @@ class ReducedHookPayload:
             command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
             command_key=_command_key_or_none(data.get("command_key")),
             git_write=data.get("git_write") is True,
+            correlation=correlation_block(data.get("correlation")),
             task_id=stored_task_id(data),
             transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
             agent_provider=_agent_provider_or_none(data.get("agent_provider")),
+            effort_level=_effort_level(data.get("effort_level")),
             agent_surface=_agent_surface_or_none(data.get("agent_surface")),
         )
 
@@ -1553,9 +1575,11 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         provider_id=_str_or_none(payload.provider_id, 80),
         tool_success=payload.tool_success if isinstance(payload.tool_success, bool) else None,
         attrs=_clean_attrs(payload.attrs),
+        correlation=correlation_block(payload.correlation),
         task_id=payload.task_id if is_task_id(payload.task_id) else None,
         transcript_path=_valid_transcript_path(payload.transcript_path, payload.session_id),
         agent_provider=_agent_provider_or_none(payload.agent_provider),
+        effort_level=_effort_level(payload.effort_level),
         agent_surface=_agent_surface_or_none(payload.agent_surface),
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT:
@@ -1931,6 +1955,9 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "provider_current": capture.get("provider") if isinstance(capture.get("provider"), str) else None,
         "provider_source": capture.get("provider_source") if isinstance(capture.get("provider_source"), str) else None,
         "surface": _agent_surface_or_none(capture.get("surface")),
+        "effort_level": _effort_level(capture.get("effort_level")),
+        "effort_levels_seen": [v for v in capture.get("effort_levels_seen", []) if _effort_level(v)]
+        if isinstance(capture.get("effort_levels_seen"), list) else [],
         "usage_by_key": usage_by_key,
         "usage_provenance": next(
             (v for v in (entry.get("tokens_provenance"), entry.get("cost_provenance")) if isinstance(v, str)),
@@ -1942,6 +1969,8 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         **_stored_check_latest(entry, capture),
         "capture_losses": _stored_losses(capture),
         "baseline": _stored_baseline(entry, capture),
+        "correlation": correlation_block(entry.get("correlation")),
+        "correlation_conflicts": _stored_count(capture.get("correlation_conflicts")),
         "task_context": _stored_task_context(entry, capture),
         "task_context_conflicts": _stored_count(capture.get("task_context_conflicts")),
         "git_outcome": _stored_git_outcome(entry),
@@ -3389,6 +3418,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
     _stamp_task_context(entry, buf)
+    if correlation_block(buf.get("correlation")) is not None:
+        entry["correlation"] = correlation_block(buf["correlation"])
+    if buf.get("correlation_conflicts"):
+        entry["capture"]["correlation_conflicts"] = _stored_count(buf["correlation_conflicts"])
     _stamp_git_outcome(entry, buf)
     git_writes = [w for w in (buf.get("git_write_at") or []) if isinstance(w, str)]
     if git_writes:
@@ -3433,6 +3466,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if surface:
         # How the agent was launched (Claude Code: CLAUDE_CODE_ENTRYPOINT, raw).
         entry["capture"]["surface"] = surface
+    if _effort_level(buf.get("effort_level")):
+        entry["capture"]["effort_level"] = buf["effort_level"]
+        entry["capture"]["effort_source"] = "claude_hook"
+        entry["capture"]["effort_levels_seen"] = list(buf.get("effort_levels_seen", []))
     if raw_usage:
         # Per-message usage memory (OpenCode), bounded; lets a buffer rebuilt
         # from this record keep deduplicating re-reported messages.
@@ -3626,6 +3663,13 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     event = payload.event
     profile = _buffer_profile(buf)
     _bind_task_context(buf, payload, now=now)
+    declared = correlation_block(payload.correlation)
+    bound = correlation_block(buf.get("correlation"))
+    if declared is not None:
+        if bound is None and not buf.get("record"):
+            buf["correlation"] = declared
+        elif bound != declared:
+            buf["correlation_conflicts"] = _stored_count(buf.get("correlation_conflicts")) + 1
     if payload.transcript_path:
         # Transient: read at fold for token usage only (see _transcript_usage).
         buf["transcript_path"] = payload.transcript_path
@@ -3635,10 +3679,19 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         buf["provider_source"] = PROVIDER_SOURCE_AGENT_ENV
     if payload.agent_surface and not buf.get("surface"):
         buf["surface"] = payload.agent_surface
+    if payload.agent == AGENT_CLAUDE_CODE and payload.effort_level:
+        buf["effort_level"] = payload.effort_level
+        levels = buf.setdefault("effort_levels_seen", [])
+        if payload.effort_level not in levels:
+            levels.append(payload.effort_level)
     if payload.model_id:
         # The agent's own hook stream names the model (Codex: every payload;
         # OpenCode: the user message's selected model). Recorded as observed.
-        _observe_model(buf, payload.model_id, payload.provider_id, profile.model_source)
+        source = "claude_hook" if payload.agent == AGENT_CLAUDE_CODE else profile.model_source
+        _observe_model(buf, payload.model_id, payload.provider_id, source)
+
+    if event == EVENT_MODEL_SWITCH:
+        return "session model changed", bool(buf.get("record")), False
 
     if event == EVENT_SESSION_START:
         source = payload.source or "unknown"
@@ -4290,6 +4343,7 @@ def handle_hook(
     agent: str = AGENT_CLAUDE_CODE,
     task_id: str | None = None,
     agent_env: Mapping[str, str] | None = None,
+    correlation: dict | None = None,
 ) -> HookOutcome:
     """Process one decoded hook payload from *agent* synchronously. Never raises.
 
@@ -4318,6 +4372,7 @@ def handle_hook(
             return HookOutcome(event="status", action="buffered" if recorded else "ignored",
                                session_id=payload.session_id, repo_root=repo_root,
                                detail="usage recorded" if recorded else "no session buffer yet")
+        payload.correlation = correlation_block(correlation)
         payload.task_id = task_id if is_task_id(task_id) else None
         apply_agent_env(payload, agent_env)
         reduced = reduce_hook_payload(payload, repo_root)
@@ -4341,6 +4396,7 @@ def handle_claude_hook(
         env=env,
         event_override=event_override,
         agent=AGENT_CLAUDE_CODE,
+        correlation=launch_correlation(env),
         task_id=launch_task_id(env),
         agent_env=claude_agent_env(env if env is not None else os.environ),
     )

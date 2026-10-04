@@ -344,8 +344,11 @@ class TestClaudeHttpHookInstall:
             assert hook["headers"][client.TASK_ID_HEADER] == "$OPENSHARD_TASK_ID"
             assert hook["headers"]["X-OpenShard-Project-Dir"] == "$CLAUDE_PROJECT_DIR"
             assert hook["headers"]["X-OpenShard-Capture-Token"].startswith("r2.")
-            # Only the two variables OpenShard needs may be interpolated.
-            assert hook["allowedEnvVars"] == ["CLAUDE_PROJECT_DIR", "OPENSHARD_TASK_ID"]
+            # Only the project and explicitly declared linking context may be interpolated.
+            assert hook["allowedEnvVars"] == [
+                "CLAUDE_PROJECT_DIR", "OPENSHARD_TASK_ID", "OPENSHARD_CORRELATION_CONTEXT",
+            ]
+            assert hook["headers"][client.CORRELATION_HEADER] == "$OPENSHARD_CORRELATION_CONTEXT"
 
     def test_session_start_command_hook_is_unchanged(self):
         hook = build_hook_config()["SessionStart"][0]["hooks"][0]

@@ -4,6 +4,23 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+## 0.4.10 - 2026-10-04
+
+### Fixed
+
+- Release validation now installs the built wheel into a clean environment and
+  checks `remote create`, `remote attach`, `workflow timeline`, and `verify`.
+  The 0.4.9 PyPI distribution did not contain the newer remote-capture commands.
+- Claude capture reads model identity from SessionStart and PostModelSwitch,
+  and effective effort from documented hook payloads. Missing identity stays
+  unknown; requested environment settings are never promoted to observations.
+- `verify --compare-base COMMIT` independently runs approved pytest commands
+  on detached base/head worktrees. It reports new and baseline-matching failures
+  without changing the verification verdict or inferring an environmental cause.
+- Explicit workflow correlation now survives authenticated capture and queue
+  replay across agent adapters, with conflicting declarations counted.
+
+
 ### Added
 
 - **Learning Loop V1** ([docs/learning.md](docs/learning.md)). OpenShard derives evidence-backed

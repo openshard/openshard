@@ -2139,6 +2139,8 @@ def _select_entry(entries: list[dict], ref: str | None) -> dict | None:
 
 
 @cli.command("verify")
+@click.option("--compare-base", default=None, metavar="COMMIT",
+              help="Also execute approved pytest checks on detached base/head worktrees; never overrides failures.")
 @click.option("--receipt", "receipt_ref", default=None, metavar="ID",
               help="Receipt to verify (receipt_id, shard_id or run_id). Defaults to the latest.")
 @click.option("--from-observed", is_flag=True, default=False,
@@ -2158,7 +2160,7 @@ def _select_entry(entries: list[dict], ref: str | None) -> dict | None:
               help="Run nothing locally: attach the GitHub check-run verdict for this Shard's exact commit "
                    "(needs the gh CLI). Never attaches CI from another commit or to a dirty tree.")
 def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run: bool, timeout: float,
-           as_json: bool, strict: bool, from_ci: bool) -> None:
+           as_json: bool, strict: bool, from_ci: bool, compare_base: str | None = None) -> None:
     """Re-run approved checks and record the outcome OpenShard itself observed.
 
     Picks the repository's verification contract (``verification_commands``
@@ -2189,6 +2191,8 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         tree_state,
     )
 
+    if from_ci and compare_base:
+        raise click.UsageError("--compare-base cannot be combined with --ci")
     loc = _locate_history()
     repo_root = loc.root
     # A session whose end event never arrived (closed terminal, crash) is
@@ -2244,6 +2248,11 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
     attestation = build_attestation(
         entry, results, before=before, after=after, started_at=started_at, completed_at=_utc_stamp(),
     )
+    if compare_base:
+        from openshard.verification.baseline import run_baseline_comparison
+
+        attestation["baseline_comparison"] = run_baseline_comparison(
+            repo_root, compare_base, planned, approve=approve, timeout=timeout)
     record_attestation(repo_root, attestation)
     _remote_request_delivery(repo_root)
     summary = summarize_attestation(attestation)
@@ -2254,6 +2263,7 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
             "verify", "ok", receipt=receipt_label, attestation_id=attestation["attestation_id"],
             checks=attestation["checks"], verification=summary["verification"],
             strict=strict, exit_code=strict_exit,
+            **({"baseline_comparison": attestation["baseline_comparison"]} if compare_base else {}),
         ), indent=2))
         if strict_exit:
             sys.exit(strict_exit)
@@ -2263,6 +2273,9 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         detail = f"exit {result.exit_code}" if result.exit_code is not None else result.note
         click.echo(f"  {result.check.name}: {result.status}" + (f" ({detail})" if detail else ""))
     click.echo(f"\nRe-verified: {display_line(summary)}")
+    if compare_base:
+        click.echo("Baseline diagnostic (does not change the verdict):")
+        click.echo(json.dumps(attestation["baseline_comparison"], indent=2))
     click.echo("Recorded in .openshard/verifications.jsonl (evidence: directly_observed).")
     if strict_exit == 1:
         click.echo("Strict: an executed check failed (exit 1).")
@@ -8145,6 +8158,10 @@ cli.add_command(ingest_group)
 cli.add_command(insights_group)
 cli.add_command(osn_group)
 cli.add_command(learn_group)
+
+from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
+
+cli.add_command(workflow_group)
 
 
 if __name__ == "__main__":
