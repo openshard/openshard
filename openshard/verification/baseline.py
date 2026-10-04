@@ -93,7 +93,7 @@ def _pytest_args(argv: tuple[str, ...] | list[str]) -> list[str] | None:
 
 
 def _dependency_fingerprint() -> str:
-    packages = sorted((d.metadata.get("Name", ""), d.version) for d in importlib.metadata.distributions())
+    packages = sorted((d.metadata["Name"] or "", d.version) for d in importlib.metadata.distributions())
     return hashlib.sha256(json.dumps(packages).encode()).hexdigest()
 
 

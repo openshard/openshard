@@ -43,6 +43,10 @@ jobs:
               sys.exit(f"tag {tag} does not match pyproject.toml version {version}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"version={version}\n")
+          with open("CHANGELOG.md", encoding="utf-8") as fh:
+              changelog = fh.read()
+          if not re.search(rf"^## {re.escape(version)} - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.M):
+              sys.exit(f"missing dated CHANGELOG.md section for {version}")
           print(f"ok: {tag} == {version}")
           EOF
 
