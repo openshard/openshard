@@ -158,6 +158,9 @@ def request_delivery(env: dict | os._Environ | None = None, *, repo_root: Path |
         source = os.environ if env is None else env
         if attachment is None and spool._SCOPE_ENV not in source:
             candidates = spool.connected_envs(env)
+            legacy = spool.session_env(env, "legacy")
+            if ConnectedSession.from_state((spool.read_state(legacy) or {}).get("connected")) is not None:
+                candidates.insert(0, legacy)
             requested = False
             for scoped in candidates:
                 candidate = spool.read_state(scoped) or {}

@@ -279,3 +279,28 @@ class TestConcurrentConnectedSessions:
         plain = CliRunner().invoke(cli, ["remote", "status"])
         assert "Connected capture: 1 session(s)" in plain.output
         assert "not attached" not in plain.output
+
+    def test_legacy_connected_journal_survives_new_session_and_receives_delivery_request(self, home, repo, monkeypatch):
+        import shutil
+
+        _connected_env(monkeypatch)
+        _work(repo)
+        original = spool.connected_envs()[0]
+        original_dir = spool.spool_dir(original)
+        legacy = spool.session_env(None, "legacy")
+        legacy_dir = spool.spool_dir(legacy)
+        for name in (spool.STATE_FILENAME, spool.SPOOL_FILENAME):
+            shutil.copyfile(original_dir / name, legacy_dir / name)
+        shutil.rmtree(original_dir)
+        first = spool.pending_count(legacy)
+        handle_claude_hook({"session_id": "abababab-3434-4565-8787-909090909090", "cwd": str(repo), "hook_event_name": "SessionStart", "source": "startup"})
+        assert spool.pending_count(legacy) == first
+        assert len(spool.connected_envs()) == 1
+        assert collector.request_delivery(repo_root=repo)
+        assert (spool.read_state(legacy) or {})["deliver"] is True
+        assert all((spool.read_state(env) or {}).get("deliver") for env in spool.connected_envs())
+        fake = FakeConnectedPlatform()
+        report = collector.flush(client=fake)
+        assert report.events_sent > first
+        assert len({batch["collector_id"] for batch in fake.batches}) == 2
+        assert spool.pending_count() == 0
