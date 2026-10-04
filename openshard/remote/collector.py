@@ -135,6 +135,7 @@ def record(
                 e for e in (entry.get("events") or [])
                 if isinstance(e, dict) and e.get("event_type") == "file.changed"
             ]
+        env = spool.session_env(env, capture_id)
         count = spool.append(
             env, capture_id, [e for e in events if isinstance(e, dict)],
             link=record if isinstance(record, dict) else None, repo_root=repo_root, file_events=file_events,
@@ -154,6 +155,17 @@ def request_delivery(env: dict | os._Environ | None = None, *, repo_root: Path |
     """Ask the next flush to deliver Receipts and verification evidence (after ``openshard verify``). Never raises."""
     try:
         attachment = resolve_attachment(env)
+        source = os.environ if env is None else env
+        if attachment is None and spool._SCOPE_ENV not in source:
+            candidates = spool.connected_envs(env)
+            requested = False
+            for scoped in candidates:
+                candidate = spool.read_state(scoped) or {}
+                if repo_root is not None and str(repo_root.resolve()) not in candidate.get("repos", []):
+                    continue
+                requested = request_delivery(scoped, repo_root=repo_root) or requested
+            if candidates:
+                return requested
         state = spool.read_state(env) or {}
         capture_id: str
         if attachment is not None:
@@ -166,6 +178,7 @@ def request_delivery(env: dict | os._Environ | None = None, *, repo_root: Path |
             if not isinstance(raw_capture_id, str) or not raw_capture_id:
                 return False
             capture_id = raw_capture_id
+        env = spool.session_env(env, capture_id)
         if repo_root is not None:
             spool.append(env, capture_id, [], repo_root=repo_root)
         spool.update_state(env, capture_id, deliver=True)
@@ -206,7 +219,10 @@ def _deliver(env: dict | os._Environ | None, link: Any, client: Any, state: dict
         root = Path(repo)
         if not (root / ".openshard" / "runs.jsonl").is_file():
             continue
-        report = sync_client.flush(root, env=env, link=link, transport=client, limit=spool.MAX_LINKS)
+        receipt_ids = frozenset(item["receipt_id"] for item in state.get("links", [])
+                                if isinstance(item, dict) and isinstance(item.get("receipt_id"), str))
+        report = sync_client.flush(root, env=env, link=link, transport=client,
+                                   limit=spool.MAX_LINKS, receipt_ids=receipt_ids)
         for key in ("sent", "created", "duplicate", "conflict", "rejected", "pending", "in_progress", "evidence_recorded"):
             totals[key] += int(getattr(report, key, 0) or 0)
         totals["stopped"] = totals["stopped"] or report.stopped
@@ -227,6 +243,33 @@ def flush(
     only when the spool state asks for it (a session ended, or
     ``openshard verify`` ran).
     """
+    # Flush every connected session independently; no shared queue can replace another.
+    source = os.environ if env is None else env
+    if spool._SCOPE_ENV not in source and resolve_attachment(env) is None:
+        scopes = spool.connected_envs(env)
+        legacy = spool.session_env(env, "legacy")
+        if spool.read_state(legacy) is not None:
+            scopes.insert(0, legacy)
+        if scopes:
+            total = RemoteFlushReport()
+            for scoped in scopes:
+                part = flush(scoped, client=client, now=now, deliver=deliver, heartbeat=heartbeat)
+                total.attached = total.attached or part.attached
+                for name in ("batches", "events_sent", "events_rejected", "pending"):
+                    setattr(total, name, getattr(total, name) + getattr(part, name))
+                total.heartbeat = total.heartbeat or part.heartbeat
+                total.stopped = total.stopped or part.stopped
+                total.repos = list(dict.fromkeys([*total.repos, *part.repos]))
+                if part.receipts is not None:
+                    if total.receipts is None:
+                        total.receipts = dict(part.receipts)
+                    else:
+                        for key, value in part.receipts.items():
+                            if isinstance(value, int) and not isinstance(value, bool):
+                                total.receipts[key] = int(total.receipts.get(key) or 0) + value
+                            elif value and not total.receipts.get(key):
+                                total.receipts[key] = value
+            return total
     report = RemoteFlushReport()
     try:
         attachment = resolve_attachment(env)
@@ -244,6 +287,10 @@ def flush(
                 report.stopped = "not_attached"
                 return report
             capture_id = raw_capture_id
+            if capture_id != connected_sink_id(connection, connected):
+                report.stopped = "connection_changed"
+                report.pending = spool.pending_count(env)
+                return report
         report.attached = True
         current = now if now is not None else time.time()
 
@@ -457,7 +504,9 @@ def flush_periodically(stop: threading.Event, *, env: dict | os._Environ | None 
                 stop.wait(min(1.0, FLUSH_INTERVAL_SECONDS))
             if resolve_attachment(env) is None:
                 state = spool.read_state(env) or {}
-                if resolve_connection(env) is None or ConnectedSession.from_state(state.get("connected")) is None:
+                if resolve_connection(env) is None or (
+                    ConnectedSession.from_state(state.get("connected")) is None and not spool.connected_envs(env)
+                ):
                     continue
             idle_for = time.time() - last_contact
             if spool.pending_count(env) or woke or idle_for >= HEARTBEAT_SECONDS:

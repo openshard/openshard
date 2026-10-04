@@ -24,7 +24,7 @@ The functions here never raise: any unexpected per-run error degrades to
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from openshard.ci.policy_check import (
     _manual_review_required,
@@ -40,6 +40,12 @@ from openshard.history.shard_schema import (
 
 if TYPE_CHECKING:
     from openshard.history.shard_contract import ShardReceipt
+
+
+class _CategoryCount(TypedDict):
+    category: str
+    count: int
+
 
 
 # Ordered category set. Classification walks this list top-down; first match wins.
@@ -160,7 +166,7 @@ class FailureReport:
 
     runs_checked: int
     category_counts: dict[str, int]
-    top_categories: list[dict]
+    top_categories: list[_CategoryCount]
     recommendations: list[str]
     failures: list[FailureClassification] = field(default_factory=list)
 
@@ -251,7 +257,7 @@ def evaluate_failures(
         category_counts[c.category] = category_counts.get(c.category, 0) + 1
 
     # Top failure categories (exclude the not-a-failure terminal), most common first.
-    top_categories = [
+    top_categories: list[_CategoryCount] = [
         {"category": name, "count": count}
         for name, count in sorted(
             (

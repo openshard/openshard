@@ -4,6 +4,27 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+## 0.4.11 - 2026-10-04
+
+### Fixed
+
+- Connected agent sessions keep separate upload queues. Starting another
+  session no longer replaces a previous session's pending evidence.
+- Receipt delivery stays within the session that captured it. Queued evidence
+  cannot be sent to a different organisation after an account change.
+- Post-session verification requests reach every connected session for that
+  repository, rather than whichever session status happened to select.
+
+### Added
+
+- Hosted Receipts can show OSN's learning evidence: which history was supplied,
+  whether it changed routing, and which checks were recommended. Recommendations
+  remain advisory; supplying context does not prove that the model followed it
+  or that it improved the outcome. Older Receipts remain unchanged.
+- A runtime capture audit documents where model, token and cost evidence is
+  available, and which cloud integrations still need a readable evidence source.
+
+
 ## 0.4.10 - 2026-10-04
 
 ### Fixed

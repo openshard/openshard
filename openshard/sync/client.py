@@ -250,6 +250,7 @@ def flush(
     transport: _transport.PlatformTransport | None = None,
     now: datetime | None = None,
     limit: int = DEFAULT_FLUSH_LIMIT,
+    receipt_ids: frozenset[str] | None = None,
 ) -> FlushReport:
     """Send every eligible unsynced receipt in *root* to the Platform. Never raises."""
     env = os.environ if env is None else env
@@ -273,6 +274,9 @@ def flush(
         _close_idle_sessions(root, now)
         records = _outbox.load_outbox(root)
         found = discover(root, link=link, now=now, records=records)
+        if receipt_ids is not None:
+            found.candidates = [c for c in found.candidates if c.receipt_id in receipt_ids]
+            found.newly_stale = [rid for rid in found.newly_stale if rid in receipt_ids]
         _persist_stale(root, found, records, link)
         report.scanned = found.scanned
         report.pending = found.pending
@@ -328,7 +332,7 @@ def flush(
                 _transport.record_failure(env, now=now.timestamp() if now is not None else None)
                 report.stopped = "paused: unavailable"
                 return report
-        _flush_evidence(root, link, sender, report, env=env, version=version, stamp=stamp, limit=limit)
+        _flush_evidence(root, link, sender, report, env=env, version=version, stamp=stamp, limit=limit, receipt_ids=receipt_ids)
         return report
     except Exception:
         report.stopped = report.stopped or "error"
@@ -345,6 +349,7 @@ def _flush_evidence(
     version: str,
     stamp: float | None,
     limit: int,
+    receipt_ids: frozenset[str] | None = None,
 ) -> None:
     """Send later verification evidence for Receipts whose hosted copy is the local one.
 
@@ -370,6 +375,8 @@ def _flush_evidence(
         if budget <= 0:
             return
         rid = stored_receipt_id(entry)
+        if receipt_ids is not None and rid not in receipt_ids:
+            continue
         record = records.get(rid) if rid is not None else None
         if rid is None or record is None or record.get("state") != _outbox.STATE_SYNCED:
             continue

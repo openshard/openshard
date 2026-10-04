@@ -113,9 +113,11 @@ The command's arguments are withheld from its label unless every token is
 plain. Failing test ids are kept on the attempt's verification record as
 identifiers only, never output text.
 
-The full Receipt shows a LEARNING section. The block is **not synced**: the
-Platform's receipt contract is a strict object without this field, so it stays
-local until the contract defines it.
+The full local Receipt shows a LEARNING section. Sync also sends a bounded
+learning summary to Platform: signal IDs, context delivery, routing influence,
+advisory checks and snapshot timing. Hosted Receipts show this evidence when
+present. Older Receipts remain unchanged. Runtime-reported context delivery
+does not prove that the agent followed it or that it improved the outcome.
 
 ## Startup cost
 

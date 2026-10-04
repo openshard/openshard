@@ -251,7 +251,7 @@ def test_unknown_counts_stay_unknown_through_record_projection_and_render(lookup
     block = learning_block(entry)
     assert block["status"] == status and block["signals_considered"] is None
     assert block["snapshot"]["status"] == lookup.status
-    assert '"learning"' not in json.dumps(build_envelope(entry, 0, core_version="0.5.0"))  # stays local
+    assert build_envelope(entry, 0, core_version="0.5.0")["receipt"]["learning"] == block
     text = render_full_shard_receipt(build_shard_receipt(entry, index=0))
     section = text.split("LEARNING", 1)[1].split("\n\n", 1)[0]
     signals_row = next(line for line in section.splitlines() if line.strip().startswith("Signals"))

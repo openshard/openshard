@@ -431,9 +431,8 @@ _LEARNING_STATUSES = frozenset({
 def learning_block(entry: dict) -> dict[str, Any] | None:
     """Learning Loop V1: whether prior signals were consulted and what they influenced.
 
-    Local Receipt surfaces only. The hosted contract is a strict object that
-    does not (yet) define this block, so ``views`` deliberately leaves it out
-    of the sync projection rather than have every OSN Receipt rejected.
+    Privacy-bounded local and hosted evidence. Context delivery never proves
+    the agent followed it, and V1 recommendations never change verification.
     """
     raw = _dict(entry.get("learning"))
     status = raw.get("status")
@@ -449,7 +448,7 @@ def learning_block(entry: dict) -> dict[str, Any] | None:
         "used": raw.get("used") is True,
         "signals_used": _count(raw.get("signals_used")),
         "signals_considered": _count(raw.get("signals_considered")),
-        "signal_ids": [_text(i, 32) for i in ids[:5] if isinstance(i, str)] if isinstance(ids, list) else [],
+        "signal_ids": [label for label in (_text(i, 32) for i in ids[:5] if isinstance(i, str)) if label] if isinstance(ids, list) else [],
         "context_supplied": raw.get("context_supplied") is True,
         "context_files_added": (
             [f for f in (_text(x, 160) for x in files[:2] if isinstance(x, str)) if f]
