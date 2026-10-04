@@ -100,3 +100,28 @@ printf '%s %s %s' "$result" "$overall_failed" "$verification_status"
     result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)
     expected_exit = 0 if case in ("created", "duplicate", "existing") else 1
     assert result.stdout.splitlines()[-1] == f"{expected_exit} 1 failed"
+
+
+@pytest.mark.skipif(not SHELL_REQUIRED and BASH is None, reason="requires workflow Bash")
+@pytest.mark.parametrize("exists,fail_action", [(False, ""), (True, ""), (False, "create"), (True, "upload"), (True, "edit")])
+def test_release_finishes_existing_page_and_propagates_command_errors(exists, fail_action, tmp_path):
+    workflow = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/release.yml").read_text())
+    script = next(s["run"] for s in workflow["jobs"]["github-release"]["steps"] if s.get("name") == "Create release and attach artifacts")
+    import shlex
+
+    command = f'''set -euo pipefail
+TAG=v0.4.10
+calls={shlex.quote(tmp_path.joinpath('calls').as_posix())}
+gh() {{
+  printf '%s\\n' "$2" >> "$calls"
+  if [[ "$2" == view ]]; then return {0 if exists else 1}; fi
+  if [[ "$2" == {shlex.quote(fail_action)} ]]; then return 5; fi
+}}
+''' + script
+    assert BASH is not None, "CI requires workflow Bash"
+    result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True)
+    assert result.returncode == (5 if fail_action else 0), result.stderr
+    expected = ["view", "upload", "edit"] if exists else ["view", "create"]
+    if fail_action == "upload":
+        expected = expected[:2]
+    assert tmp_path.joinpath("calls").read_text().splitlines() == expected
