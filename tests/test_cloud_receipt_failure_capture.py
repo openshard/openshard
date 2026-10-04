@@ -16,7 +16,7 @@ def workflow_bash() -> str | None:
         git = shutil.which("git")
         if git:
             parent = Path(git).parent
-            for path in (parent / "bash.exe", parent.parent / "bin" / "bash.exe"):
+            for path in (parent / "bash.exe", parent.parent / "bin" / "bash.exe", parent.parent.parent / "bin" / "bash.exe"):
                 if path.is_file():
                     return str(path)
         return None
@@ -24,9 +24,10 @@ def workflow_bash() -> str | None:
 
 
 BASH = workflow_bash()
+SHELL_REQUIRED = os.environ.get("GITHUB_ACTIONS") == "true"
 
 
-@pytest.mark.skipif(BASH is None or not shutil.which("jq"), reason="requires workflow Bash and jq")
+@pytest.mark.skipif(not SHELL_REQUIRED and (BASH is None or not shutil.which("jq")), reason="requires workflow Bash and jq")
 def test_failed_check_is_recorded_and_next_check_runs():
     workflow = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/openshard-cloud-receipts.yml").read_text())
     script = next(s["run"] for s in workflow["jobs"]["capture"]["steps"] if s.get("name") == "Verify and create hosted Receipts")
@@ -38,12 +39,13 @@ run_check "passed test" "test" true
 [[ "$failed" == 1 ]]
 echo "$checks"
 '''
+    assert BASH is not None, "CI requires Git Bash; workflow shell checks must execute"
     result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)
     checks = json.loads(result.stdout.splitlines()[-1])
     assert [(c["status"], c["exit_code"]) for c in checks] == [("failed", 1), ("passed", 0)]
 
 
-@pytest.mark.skipif(BASH is None or not shutil.which("jq"), reason="requires workflow Bash and jq")
+@pytest.mark.skipif(not SHELL_REQUIRED and (BASH is None or not shutil.which("jq")), reason="requires workflow Bash and jq")
 @pytest.mark.parametrize("case", ["created", "duplicate", "existing", "wrong_id", "wrong_error", "unauthorized", "server_error", "malformed", "bad_success", "transport"])
 def test_delivery_retains_existing_receipt_and_rejects_other_errors(case):
     import hashlib
@@ -94,6 +96,7 @@ result=0
 deliver_receipt || result=$?
 printf '%s %s %s' "$result" "$overall_failed" "$verification_status"
 '''
+    assert BASH is not None, "CI requires Git Bash; workflow shell checks must execute"
     result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)
     expected_exit = 0 if case in ("created", "duplicate", "existing") else 1
     assert result.stdout.splitlines()[-1] == f"{expected_exit} 1 failed"

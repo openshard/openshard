@@ -26,6 +26,7 @@ The shell regression test now selects Git Bash explicitly from the Git
 installation on Windows. PATH's WSL `bash.exe` launcher is not a substitute for
 the shell that can run this GitHub Actions script. The test is added to the
 curated Windows smoke set so the fast PR gate exercises it before merge.
+In GitHub Actions these tests must run; missing shell tools fail instead of skip.
 
 This is a delivery and validation repair. It does not publish 0.4.10, recover a
 lost cloud environment, or infer model identity, tokens or cost.
