@@ -79,9 +79,7 @@ jobs:
             exit 0
           fi
 
-          oidc_response=$(curl -fsSL             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENSHARD_OIDC_AUDIENCE}")
-          oidc_token=$(jq -r '.value' <<<"$oidc_response")
-          [[ -n "$oidc_token" && "$oidc_token" != "null" ]] || exit 1
+
 
           overall_failed=0
 
@@ -214,6 +212,11 @@ jobs:
                 diff_added: $diff_added,
                 diff_removed: $diff_removed
               }')
+
+            # Mint immediately before delivery: verifying several commits can outlive a token.
+            oidc_response=$(curl -fsSL             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENSHARD_OIDC_AUDIENCE}")
+            oidc_token=$(jq -r '.value' <<<"$oidc_response")
+            [[ -n "$oidc_token" && "$oidc_token" != "null" ]] || exit 1
 
             # Required commits are captured first and must succeed. A backfill
             # may already be hosted (409 when its payload differs); warn, never
