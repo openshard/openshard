@@ -335,6 +335,10 @@ def build_wrap_entry(
 
     ensure_task_id(entry, task_id)
 
+    from openshard.history.correlation import stamp_launch_correlation
+
+    stamp_launch_correlation(entry)
+
     entry["events"] = _build_wrap_events(entry, changed_files, files_source, exit_code)
 
     try:

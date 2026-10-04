@@ -704,7 +704,10 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
     """Every entry-derived block in one dict (``ShardReceipt.recorded_evidence``). Never raises."""
     if not isinstance(entry, dict):
         return {}
+    from openshard.history.correlation import correlation_block
+
     projectors = {
+        "correlation": lambda record: correlation_block(record.get("correlation")),
         "approval_detail": approval_detail_block,
         "sandbox_detail": sandbox_detail_block,
         "execution_loop": execution_loop_block,

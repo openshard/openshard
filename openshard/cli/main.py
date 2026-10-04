@@ -8146,6 +8146,10 @@ cli.add_command(insights_group)
 cli.add_command(osn_group)
 cli.add_command(learn_group)
 
+from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
+
+cli.add_command(workflow_group)
+
 
 if __name__ == "__main__":
     from openshard.cli.entrypoint import _harden_stdio_encoding

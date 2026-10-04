@@ -182,6 +182,12 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
             "verification": verification_to_dict(receipt.verification),
         })
         d.update(_recorded_evidence_to_dict(receipt))
+        # Omit for legacy records: no historical backfill or invented context.
+        from openshard.history.correlation import correlation_block
+
+        correlation = correlation_block((receipt.recorded_evidence or {}).get("correlation"))
+        if correlation is not None:
+            d["correlation"] = correlation
     return d
 
 

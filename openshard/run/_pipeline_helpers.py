@@ -742,6 +742,10 @@ def _log_run(
     from openshard.history.task_identity import ensure_task_id as _etid
     _etid(entry, task_id)
 
+    from openshard.history.correlation import stamp_launch_correlation
+
+    stamp_launch_correlation(entry)
+
     if effective_executor == "native":
         entry["events"] = _build_native_events(
             entry, files, verification_attempted, verification_passed, retry_triggered,
