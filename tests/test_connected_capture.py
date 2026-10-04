@@ -215,3 +215,92 @@ class TestConnectedCollector:
         assert wire is not None
         assert wire["action"] == "[withheld]"
         assert secret not in json.dumps(wire)
+class TestConcurrentConnectedSessions:
+    def test_switching_sessions_keeps_both_pending_journals(self, home, repo, monkeypatch):
+        _connected_env(monkeypatch)
+        _work(repo)
+        first = spool.pending_count()
+        other_sid = "abababab-3434-4565-8787-909090909090"
+        for event, extra in [("SessionStart", {"source": "startup"}), ("UserPromptSubmit", {"prompt": "second task"}), ("PostToolUse", {"tool_name": "Bash", "tool_input": {"command": "python -m pytest -q"}})]:
+            handle_claude_hook({"session_id": other_sid, "cwd": str(repo), "hook_event_name": event, **extra})
+        assert spool.pending_count() > first
+        fake = FakeConnectedPlatform()
+        report = collector.flush(client=fake)
+        assert report.events_sent > first
+        assert len({batch["collector_id"] for batch in fake.batches}) == 2
+        assert spool.pending_count() == 0
+
+    def test_changing_organisation_never_sends_queued_session_to_new_account(self, home, repo, monkeypatch):
+        _connected_env(monkeypatch)
+        _work(repo)
+        pending = spool.pending_count()
+        monkeypatch.setenv(cconfig.ORG_ENV, "1f1e2d3c-4b5a-4697-8877-665544332211")
+        fake = FakeConnectedPlatform()
+        report = collector.flush(client=fake)
+        assert report.stopped == "connection_changed"
+        assert fake.batches == []
+        assert spool.pending_count() == pending
+
+    def test_delivery_requests_reach_every_session_for_the_repository(self, home, repo, monkeypatch):
+        _connected_env(monkeypatch)
+        _work(repo)
+        handle_claude_hook({"session_id": "abababab-3434-4565-8787-909090909090", "cwd": str(repo), "hook_event_name": "SessionStart", "source": "startup"})
+        assert collector.request_delivery(repo_root=repo)
+        assert all((spool.read_state(env) or {}).get("deliver") for env in spool.connected_envs())
+
+    def test_delivery_does_not_include_unrelated_receipts(self, home, repo, monkeypatch):
+        _connected_env(monkeypatch)
+        _work(repo, end=True)
+        own = load_history(repo / ".openshard" / "runs.jsonl", coerce=True)[-1]
+        foreign = dict(own, receipt_id="rcpt_" + "f" * 32, run_id="foreign-run")
+        history = repo / ".openshard" / "runs.jsonl"
+        with history.open("a") as stream:
+            stream.write(json.dumps(foreign) + "\n")
+        fake = FakeConnectedPlatform()
+        collector.flush(client=fake, deliver=True)
+        assert [r["receipt"]["receipt_id"] for r in fake.receipts] == [own["receipt_id"]]
+
+    def test_status_reports_connected_sessions_without_claiming_manual_attachment(self, home, repo, monkeypatch):
+        from click.testing import CliRunner
+
+        from openshard.cli.main import cli
+
+        _connected_env(monkeypatch)
+        _work(repo)
+        pending = spool.pending_count()
+        result = CliRunner().invoke(cli, ["remote", "status", "--json"])
+        assert result.exit_code == 0
+        body = json.loads(result.output)
+        assert body["status"] == "connected"
+        assert body["connected"] is True and body["attachment"] is None
+        assert len(body["sessions"]) == 1
+        assert body["local"]["pending"] == pending
+        assert OSC not in result.output
+        plain = CliRunner().invoke(cli, ["remote", "status"])
+        assert "Connected capture: 1 session(s)" in plain.output
+        assert "not attached" not in plain.output
+
+    def test_legacy_connected_journal_survives_new_session_and_receives_delivery_request(self, home, repo, monkeypatch):
+        import shutil
+
+        _connected_env(monkeypatch)
+        _work(repo)
+        original = spool.connected_envs()[0]
+        original_dir = spool.spool_dir(original)
+        legacy = spool.session_env(None, "legacy")
+        legacy_dir = spool.spool_dir(legacy)
+        for name in (spool.STATE_FILENAME, spool.SPOOL_FILENAME):
+            shutil.copyfile(original_dir / name, legacy_dir / name)
+        shutil.rmtree(original_dir)
+        first = spool.pending_count(legacy)
+        handle_claude_hook({"session_id": "abababab-3434-4565-8787-909090909090", "cwd": str(repo), "hook_event_name": "SessionStart", "source": "startup"})
+        assert spool.pending_count(legacy) == first
+        assert len(spool.connected_envs()) == 1
+        assert collector.request_delivery(repo_root=repo)
+        assert (spool.read_state(legacy) or {})["deliver"] is True
+        assert all((spool.read_state(env) or {}).get("deliver") for env in spool.connected_envs())
+        fake = FakeConnectedPlatform()
+        report = collector.flush(client=fake)
+        assert report.events_sent > first
+        assert len({batch["collector_id"] for batch in fake.batches}) == 2
+        assert spool.pending_count() == 0

@@ -191,6 +191,9 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         runtime = (receipt.recorded_evidence or {}).get("runtime_configuration")
         if runtime is not None:
             d["runtime_configuration"] = runtime
+        learning = (receipt.recorded_evidence or {}).get("learning")
+        if learning is not None:
+            d["learning"] = learning
     return d
 
 

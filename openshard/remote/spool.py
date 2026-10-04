@@ -18,8 +18,10 @@ Layout (``<OPENSHARD_HOME>/remote-capture/``):
                   ``acked_seq``, the Receipt identities to link, the
                   repositories seen, and the retry/backoff bookkeeping.
 
-The spool belongs to one capture. Attaching to a different capture starts a
-fresh spool: Events captured for one capture are never sent to another.
+Manual remote capture uses the root journal. Persistent connected sessions
+each use ``sessions/<hashed-capture-id>/`` so concurrent and offline sessions
+cannot replace one another. A changed organisation cannot receive an earlier
+organisation's queue. Legacy root journals remain readable.
 
 What is spooled is what may be sent: ``wire_event`` bounds every field to
 the Platform contract and drops anything that must not leave (absolute
@@ -45,6 +47,9 @@ from openshard.safety.sanitize import is_absolute_path
 SPOOL_DIRNAME = "remote-capture"
 SPOOL_FILENAME = "spool.jsonl"
 STATE_FILENAME = "state.json"
+# Internal selector, never a credential or transmitted field.
+_SCOPE_ENV = "OPENSHARD_REMOTE_SPOOL_SCOPE"
+_SCOPE_RE = re.compile(r"^connected-[0-9a-f]{32}$")
 
 BATCH_EVENTS = 100  # Platform: REMOTE_CAPTURE_LIMITS.batchEvents
 MAX_LINKS = 10  # Platform: receiptsPerCapture
@@ -88,7 +93,28 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def spool_dir(env: dict | os._Environ | None = None) -> Path:
-    return Path(capture_home(env)) / SPOOL_DIRNAME
+    root = Path(capture_home(env)) / SPOOL_DIRNAME
+    scope = (os.environ if env is None else env).get(_SCOPE_ENV)
+    return root / "sessions" / scope if isinstance(scope, str) and _SCOPE_RE.fullmatch(scope) else root
+
+
+def session_env(env: dict | os._Environ | None, capture_id: str) -> dict[str, str]:
+    """Isolate a connected session's journal; manual remote captures retain the legacy path."""
+    source = dict(os.environ if env is None else env)
+    if source.get(_SCOPE_ENV) != "legacy":
+        source[_SCOPE_ENV] = capture_id if _SCOPE_RE.fullmatch(capture_id) else "legacy"
+    return source
+
+
+def connected_envs(env: dict | os._Environ | None = None) -> list[dict[str, str]]:
+    source = dict(os.environ if env is None else env)
+    source.pop(_SCOPE_ENV, None)
+    root = spool_dir(source) / "sessions"
+    try:
+        return [session_env(source, p.name) for p in sorted(root.iterdir())
+                if _SCOPE_RE.fullmatch(p.name) and (p / STATE_FILENAME).is_file()]
+    except OSError:
+        return []
 
 
 def _spool_path(env: dict | os._Environ | None) -> Path:
@@ -244,7 +270,12 @@ def _state_for(env: dict | os._Environ | None, capture_id: str) -> dict[str, Any
 
 def read_state(env: dict | os._Environ | None = None) -> dict[str, Any] | None:
     """The spool state as last written (no lock, read-only). None when there is no spool."""
-    return _read_state(env)
+    state = _read_state(env)
+    if state is None and _SCOPE_ENV not in (os.environ if env is None else env):
+        # Backwards-compatible status inspection for one connected session.
+        states = [_read_state(e) for e in connected_envs(env)]
+        return next((s for s in reversed(states) if s is not None), None)
+    return state
 
 
 def _lock(env: dict | os._Environ | None):
@@ -254,6 +285,7 @@ def _lock(env: dict | os._Environ | None):
 
 def update_state(env: dict | os._Environ | None, capture_id: str, **fields: Any) -> dict[str, Any]:
     """Merge *fields* into the state under the lock. Returns the new state."""
+    env = session_env(env, capture_id)
     with _lock(env):
         state = _state_for(env, capture_id)
         state.update(fields)
@@ -280,6 +312,7 @@ def append(
     *file_events* carry stable ids and are re-derived at every fold, so only
     ids this spool has not written before are appended.
     """
+    env = session_env(env, capture_id)
     wire = [w for w in (wire_event(e) for e in events) if w is not None]
     with _lock(env):
         state = _state_for(env, capture_id)
@@ -343,6 +376,7 @@ def _read_lines(env: dict | os._Environ | None) -> list[dict]:
 
 def pending(env: dict | os._Environ | None, capture_id: str, *, limit: int = BATCH_EVENTS) -> tuple[list[dict], dict[str, Any]]:
     """The next unacknowledged Events as wire Events (each with ``seq``), and the state."""
+    env = session_env(env, capture_id)
     with _lock(env):
         state = _state_for(env, capture_id)
         acked = int(state.get("acked_seq") or 0)
@@ -353,15 +387,17 @@ def pending(env: dict | os._Environ | None, capture_id: str, *, limit: int = BAT
 
 def pending_count(env: dict | os._Environ | None = None) -> int:
     state = _read_state(env)
-    if state is None:
-        return 0
-    return max(int(state.get("next_seq") or 1) - 1 - int(state.get("acked_seq") or 0), 0)
+    total = max(int((state or {}).get("next_seq") or 1) - 1 - int((state or {}).get("acked_seq") or 0), 0)
+    if _SCOPE_ENV not in (os.environ if env is None else env):
+        total += sum(pending_count(e) for e in connected_envs(env))
+    return total
 
 
 def acknowledge(
     env: dict | os._Environ | None, capture_id: str, upto_seq: int, *, sent: int = 0, rejected: int = 0,
 ) -> dict[str, Any]:
     """Mark every Event up to *upto_seq* as settled (accepted, or refused for good) and compact when drained."""
+    env = session_env(env, capture_id)
     with _lock(env):
         state = _state_for(env, capture_id)
         state["acked_seq"] = max(int(state.get("acked_seq") or 0), int(upto_seq))

@@ -1,4 +1,4 @@
-"""Learning on the Receipt: shown locally, re-validated, and kept out of the hosted envelope."""
+"""Learning on the Receipt: re-validated and bounded for local and hosted views."""
 from __future__ import annotations
 
 import json
@@ -72,12 +72,16 @@ def test_receipts_without_learning_render_no_learning_section():
     assert "LEARNING" not in rendered
 
 
-def test_hosted_envelope_carries_neither_learning_nor_failing_test_ids():
-    """The Platform contract is a strict object without these fields: sending them would
-    get every new OSN Receipt rejected. They stay local until the contract defines them."""
-    envelope = build_envelope(_entry(), 0, core_version="0.5.0")
+def test_hosted_envelope_carries_bounded_learning_without_raw_context():
+    envelope = build_envelope(_entry(), 0, core_version="0.4.11")
+    assert envelope["receipt"]["learning"] == learning_block(_entry())
     blob = json.dumps(envelope)
-    for leaked in ('"learning"', "failed_tests", MOBILE, "ls_aaaaaaaaaaaa", "context_files_added", "openshard_history"):
+    for leaked in ("failed_tests", MOBILE, "openshard_history", "supporting_receipt_ids", "attempt_models"):
         assert leaked not in blob
     # The run's own outcome still syncs exactly as before.
     assert envelope["receipt"]["verification"]["status"] == "passed"
+
+
+def test_unsafe_learning_signal_ids_are_omitted_from_hosted_projection():
+    entry = _entry(dict(USED, signal_ids=["", "/private/signal", "ls_safe"]))
+    assert build_envelope(entry, 0, core_version="0.4.11")["receipt"]["learning"]["signal_ids"] == ["ls_safe"]
