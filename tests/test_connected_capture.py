@@ -259,3 +259,23 @@ class TestConcurrentConnectedSessions:
         fake = FakeConnectedPlatform()
         collector.flush(client=fake, deliver=True)
         assert [r["receipt"]["receipt_id"] for r in fake.receipts] == [own["receipt_id"]]
+
+    def test_status_reports_connected_sessions_without_claiming_manual_attachment(self, home, repo, monkeypatch):
+        from click.testing import CliRunner
+
+        from openshard.cli.main import cli
+
+        _connected_env(monkeypatch)
+        _work(repo)
+        pending = spool.pending_count()
+        result = CliRunner().invoke(cli, ["remote", "status", "--json"])
+        assert result.exit_code == 0
+        body = json.loads(result.output)
+        assert body["status"] == "connected"
+        assert body["connected"] is True and body["attachment"] is None
+        assert len(body["sessions"]) == 1
+        assert body["local"]["pending"] == pending
+        assert OSC not in result.output
+        plain = CliRunner().invoke(cli, ["remote", "status"])
+        assert "Connected capture: 1 session(s)" in plain.output
+        assert "not attached" not in plain.output

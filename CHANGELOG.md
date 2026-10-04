@@ -17,6 +17,8 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- `remote status` shows persistent connected sessions and their queued evidence,
+  instead of incorrectly calling an active account connection unattached.
 - Hosted Receipts can show OSN's learning evidence: which history was supplied,
   whether it changed routing, and which checks were recommended. Recommendations
   remain advisory; supplying context does not prove that the model followed it

@@ -287,6 +287,7 @@ def flush(
                 report.stopped = "not_attached"
                 return report
             capture_id = raw_capture_id
+            report.attached = True
             if capture_id != connected_sink_id(connection, connected):
                 report.stopped = "connection_changed"
                 report.pending = spool.pending_count(env)

@@ -7593,6 +7593,7 @@ def remote_flush(background: bool, as_json: bool) -> None:
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def remote_status(as_json: bool) -> None:
     """Show what this environment is attached to and what is still queued locally."""
+    from openshard.connected.config import resolve_connection
     from openshard.remote import spool
     from openshard.remote.config import resolve_attachment
     from openshard.remote.transport import RemoteCaptureClient
@@ -7601,7 +7602,26 @@ def remote_status(as_json: bool) -> None:
     state = spool.read_state() or {}
     local = {key: state.get(key) for key in ("collector_id", "spooled", "sent", "rejected", "dropped", "stopped",
                                              "last_contact_at", "last_attempt_at")}
-    local["pending"] = spool.pending_count()
+    local["pending"] = spool.pending_count(spool.session_env(None, "legacy")) if attachment else spool.pending_count()
+    connection = resolve_connection() if attachment is None else None
+    sessions = []
+    if attachment is None:
+        scoped = spool.connected_envs()
+        legacy = spool.session_env(None, "legacy")
+        if (spool.read_state(legacy) or {}).get("connected"):
+            scoped.append(legacy)
+        for session_env in scoped:
+            session_state = spool.read_state(session_env) or {}
+            sessions.append({
+                "capture_id": session_state.get("capture_id"),
+                "pending": spool.pending_count(session_env),
+                "spooled": session_state.get("spooled", 0),
+                "sent": session_state.get("sent", 0),
+                "stopped": session_state.get("stopped"),
+            })
+        if sessions:
+            for key in ("spooled", "sent"):
+                local[key] = sum(int(session.get(key) or 0) for session in sessions)
     hosted = None
     if attachment is not None:
         result, hosted = RemoteCaptureClient(attachment, user_agent="openshard/status").status()
@@ -7609,12 +7629,24 @@ def remote_status(as_json: bool) -> None:
             hosted = {"unreachable": result.kind}
     if as_json:
         click.echo(json.dumps(_machine_envelope(
-            "remote.status", "attached" if attachment else "not_attached",
+            "remote.status", "attached" if attachment else "connected" if connection else "not_attached",
             attachment=attachment.to_public_dict() if attachment else None, local=local, hosted=hosted,
+            connected=connection is not None, sessions=sessions,
         ), indent=2))
         return
     if attachment is None:
-        click.echo("Remote capture: not attached  (openshard remote attach)")
+        if connection is not None:
+            click.echo(f"Connected capture: {len(sessions)} session(s), {local['pending']} event(s) queued")
+            click.echo(f"  local:     {local['spooled'] or 0} captured, {local['sent'] or 0} sent")
+            if not sessions:
+                click.echo("  No captured session has been recorded in this environment yet.")
+            for session in sessions:
+                if session.get("stopped"):
+                    click.echo(f"  stopped:   {session['capture_id']}: {session['stopped']}")
+        else:
+            click.echo("Remote capture: not attached  (openshard remote attach)")
+            if local["pending"]:
+                click.echo(f"  {local['pending']} queued event(s) retained; reconnect the original account to deliver them.")
         return
     hosted = hosted or {}
     click.echo(f"Remote capture: {attachment.capture_id}")
