@@ -24,7 +24,7 @@ _TRACE = re.compile(r"00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})\Z")
 
 def identifier(value: object) -> str | None:
     """Reject unsafe/oversized IDs; truncation could alias different work."""
-    if not isinstance(value, str) or not _ID.fullmatch(value) or unsafe_text(value):
+    if not isinstance(value, str) or not _ID.fullmatch(value) or "://" in value or unsafe_text(value):
         return None
     return value
 
@@ -69,17 +69,25 @@ def correlation_block(value: object) -> dict | None:
     return {"evidence": "declared", **result}
 
 
+def parse_correlation(raw: object) -> dict | None:
+    """Decode bounded explicit context from an environment value or header."""
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_CONTEXT_BYTES:
+        return None
+    try:
+        return correlation_block(json.loads(raw))
+    except (ValueError, RecursionError):
+        return None
+
+
+def launch_correlation(env: Mapping[str, str] | None = None) -> dict | None:
+    return parse_correlation((os.environ if env is None else env).get(CONTEXT_ENV))
+
+
 def stamp_launch_correlation(entry: dict, env: Mapping[str, str] | None = None) -> None:
     """Stamp once before sealing a new record; never overwrite supplied context."""
     if "correlation" in entry:
         return
-    raw = (os.environ if env is None else env).get(CONTEXT_ENV)
-    if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_CONTEXT_BYTES:
-        return
-    try:
-        block = correlation_block(json.loads(raw))
-    except (ValueError, RecursionError):
-        return
+    block = launch_correlation(env)
     if block:
         entry["correlation"] = block
 

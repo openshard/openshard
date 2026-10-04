@@ -50,11 +50,13 @@ from pathlib import Path
 from openshard.adapters import capture_auth as _auth
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.adapters.claude_capture_client import (
+    CORRELATION_HEADER,
     DEFAULT_PORT,
     HOOK_PATH,
     PROJECT_DIR_HEADER,
     TASK_ID_HEADER,
 )
+from openshard.history.correlation import CONTEXT_ENV
 from openshard.history.task_identity import TASK_ID_ENV
 
 HOOK_COMMAND = "openshard hooks claude"
@@ -93,6 +95,7 @@ class HookSpec:
 
 HOOK_SPECS: tuple[HookSpec, ...] = (
     HookSpec("SessionStart", None, 15, TRANSPORT_COMMAND),
+    HookSpec("PostModelSwitch", None, 5, TRANSPORT_COMMAND),
     HookSpec("UserPromptSubmit", None, 5, TRANSPORT_HTTP),
     HookSpec("PostToolUse", TOOL_MATCHER, 5, TRANSPORT_HTTP),
     HookSpec("PostToolUseFailure", TOOL_MATCHER, 5, TRANSPORT_HTTP),
@@ -126,17 +129,18 @@ def _hook_entry(spec: HookSpec, port: int = DEFAULT_PORT, capability: str | None
             # receiver, not another repository, never shutdown.
             headers[_auth.TOKEN_HEADER] = capability
         # Declared launch context: Claude Code fills this from its own
-        # environment (``OPENSHARD_TASK_ID`` is the only variable besides the
-        # project dir it may interpolate). Unset -> empty header -> the
+        # environment (only the task, correlation context and project directory
+        # may be interpolated). Unset -> empty header -> the
         # service reads "no declaration"; it is validated there and never
         # taken from the payload.
         headers[TASK_ID_HEADER] = f"${TASK_ID_ENV}"
+        headers[CORRELATION_HEADER] = f"${CONTEXT_ENV}"
         entry: dict = {
             "type": "http",
             "url": hook_url(port),
             "timeout": spec.timeout,
             "headers": headers,
-            "allowedEnvVars": ["CLAUDE_PROJECT_DIR", TASK_ID_ENV],
+            "allowedEnvVars": ["CLAUDE_PROJECT_DIR", TASK_ID_ENV, CONTEXT_ENV],
         }
         return entry
     entry = {"type": "command", "command": HOOK_COMMAND, "timeout": spec.timeout}

@@ -583,12 +583,12 @@ class TestHookConfigShape(unittest.TestCase):
         # command that starts the service.
         config = build_hook_config()
         self.assertEqual(set(config), set(HOOK_EVENTS))
-        self.assertEqual(set(HTTP_EVENTS), set(HOOK_EVENTS) - {"SessionStart"})
+        self.assertEqual(set(HTTP_EVENTS), set(HOOK_EVENTS) - {"SessionStart", "PostModelSwitch"})
         for event, groups in config.items():
             self.assertEqual(len(groups), 1, event)
             hooks = groups[0]["hooks"]
             self.assertIsInstance(hooks[0]["timeout"], int)
-            if event == "SessionStart":
+            if event in {"SessionStart", "PostModelSwitch"}:
                 self.assertEqual(len(hooks), 1)
                 self.assertEqual(hooks[0]["type"], "command")
                 self.assertEqual(hooks[0]["command"], HOOK_COMMAND)
@@ -596,12 +596,13 @@ class TestHookConfigShape(unittest.TestCase):
                 self.assertEqual(len(hooks), 2)
                 self.assertEqual(hooks[0]["type"], "http")
                 self.assertEqual(hooks[0]["url"], f"http://127.0.0.1:{DEFAULT_PORT}/hooks/claude")
-                self.assertEqual(hooks[0]["allowedEnvVars"], ["CLAUDE_PROJECT_DIR", "OPENSHARD_TASK_ID"])
+                self.assertEqual(hooks[0]["allowedEnvVars"], ["CLAUDE_PROJECT_DIR", "OPENSHARD_TASK_ID", "OPENSHARD_CORRELATION_CONTEXT"])
                 self.assertEqual(
                     hooks[0]["headers"],
                     {
                         "X-OpenShard-Project-Dir": "$CLAUDE_PROJECT_DIR",
                         "X-OpenShard-Task-Id": "$OPENSHARD_TASK_ID",
+                        "X-OpenShard-Correlation": "$OPENSHARD_CORRELATION_CONTEXT",
                     },
                 )
                 self.assertEqual(

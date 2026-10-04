@@ -71,6 +71,7 @@ import time
 
 from openshard.adapters import capture_auth as _auth
 from openshard.adapters.agent_env import claude_agent_env, format_agent_env
+from openshard.history.correlation import launch_correlation
 from openshard.history.task_identity import launch_task_id
 from openshard.util.home import openshard_home
 
@@ -133,6 +134,7 @@ PROJECT_DIR_HEADER = "X-OpenShard-Project-Dir"
 # Code's HTTP hooks fill it from ``$OPENSHARD_TASK_ID`` (allowedEnvVars); the
 # command clients validate the environment value and send it themselves.
 TASK_ID_HEADER = "X-OpenShard-Task-Id"
+CORRELATION_HEADER = "X-OpenShard-Correlation"
 # Where Claude Code runs (provider + surface), derived by this client from
 # the environment Claude Code gave the hook process -- the capture service
 # does not share it. ``claude_hooks.format_agent_env`` / ``parse_agent_env``.
@@ -308,6 +310,9 @@ def post_hook(
     headers = _auth_headers(env, project_dir)
     if task_id:
         headers[TASK_ID_HEADER] = task_id
+    context = launch_correlation(env)
+    if context:
+        headers[CORRELATION_HEADER] = json.dumps(context, separators=(",", ":"))
     if agent_env:
         headers[AGENT_ENV_HEADER] = agent_env
     result = _request("POST", port, path, raw, headers)
@@ -633,7 +638,7 @@ def _inline_hook(
     if data is None:
         return "ignored"
     outcome = handle_hook(data, env=env, event_override=event_override, agent=agent, task_id=task_id,
-                          agent_env=agent_env)
+                          agent_env=agent_env, correlation=launch_correlation(env))
     if outcome.action == "error" or env.get("OPENSHARD_HOOK_DEBUG"):
         try:
             sys.stderr.write(f"[openshard hooks] {outcome.event or '?'}: {outcome.action} ({outcome.detail})\n")

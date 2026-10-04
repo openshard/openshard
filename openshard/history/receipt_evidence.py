@@ -700,6 +700,15 @@ def stage_metrics(entry: dict) -> list[dict[str, float | int | None]]:
     ]
 
 
+def runtime_configuration_block(entry: dict) -> dict | None:
+    """Effective settings explicitly reported by Claude hooks, never requested env settings."""
+    capture = _dict(entry.get("capture"))
+    level = capture.get("effort_level")
+    if capture.get("effort_source") != "claude_hook" or level not in ("low", "medium", "high", "xhigh", "max"):
+        return None
+    return {"effort": level, "source": "claude_hook", "evidence": "agent_reported"}
+
+
 def project_entry_evidence(entry: Any) -> dict[str, Any]:
     """Every entry-derived block in one dict (``ShardReceipt.recorded_evidence``). Never raises."""
     if not isinstance(entry, dict):
@@ -707,6 +716,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
     from openshard.history.correlation import correlation_block
 
     projectors = {
+        "runtime_configuration": runtime_configuration_block,
         "correlation": lambda record: correlation_block(record.get("correlation")),
         "approval_detail": approval_detail_block,
         "sandbox_detail": sandbox_detail_block,

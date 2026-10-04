@@ -188,6 +188,9 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         correlation = correlation_block((receipt.recorded_evidence or {}).get("correlation"))
         if correlation is not None:
             d["correlation"] = correlation
+        runtime = (receipt.recorded_evidence or {}).get("runtime_configuration")
+        if runtime is not None:
+            d["runtime_configuration"] = runtime
     return d
 
 
