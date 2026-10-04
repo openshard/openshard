@@ -80,6 +80,7 @@ SERVICE_TEST_FILES: tuple[str, ...] = (
 # sandbox diff/apply, repo_map's git subprocess calls, CLI entrypoints).
 # None of these use the real capture service.
 WINDOWS_SMOKE_TEST_FILES: tuple[str, ...] = (
+    "tests/test_cloud_receipt_failure_capture.py",
     "tests/test_util_home_git.py",
     "tests/test_jsonl_store.py",
     "tests/test_claude_hooks.py",

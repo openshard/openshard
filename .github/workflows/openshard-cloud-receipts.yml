@@ -81,6 +81,40 @@ jobs:
 
 
 
+          # A merge push can include commits already captured on its branch.
+          # Accept only this commit's explicit immutable-Receipt conflict;
+          # never overwrite it or turn a failed check into a passed Receipt.
+          deliver_receipt() {
+            local response_file http_status response expected_id
+            [[ "${GITHUB_REPOSITORY_ID:-}" =~ ^[0-9]+$ ]] || return 1
+            expected_id="rcpt_$(printf 'github-cloud:\0%s\0%s' "$GITHUB_REPOSITORY_ID" "$sha" | sha256sum | cut -c1-32)"
+            response_file=$(mktemp) || return 1
+            if ! http_status=$(curl -sS --connect-timeout 10 --max-time 30 \
+              -o "$response_file" -w '%{http_code}' \
+              -X POST "${OPENSHARD_API_BASE}/v1/cloud/github/receipts" \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H "Content-Type: application/json" --data "$payload"); then
+              rm -f "$response_file"
+              echo "::error::Receipt delivery transport failed for $sha."
+              return 1
+            fi
+            response=$(cat "$response_file")
+            rm -f "$response_file"
+            if [[ "$http_status" == 200 || "$http_status" == 201 ]] && \
+              jq -e --arg id "$expected_id" '.receipt_id == $id' <<<"$response" >/dev/null; then
+              echo "Captured $expected_id for $sha ($verification_status)"
+              return 0
+            fi
+            if [[ "$http_status" == 409 ]] && \
+              jq -e --arg id "$expected_id" --arg code receipt_conflict \
+                '.error.code == $code and (.error.message | contains($id))' <<<"$response" >/dev/null; then
+              echo "::notice::Receipt $expected_id for $sha is already recorded; its original evidence is retained. This recheck was not appended."
+              return 0
+            fi
+            echo "::error::Receipt delivery rejected for $sha (HTTP $http_status)."
+            return 1
+          }
+
           overall_failed=0
 
           while IFS= read -r sha; do
@@ -218,19 +252,13 @@ jobs:
             oidc_token=$(jq -r '.value' <<<"$oidc_response")
             [[ -n "$oidc_token" && "$oidc_token" != "null" ]] || exit 1
 
-            # Required commits are captured first and must succeed. A backfill
-            # may already be hosted (409 when its payload differs); warn, never
-            # abort the commits this push actually needs.
-            if ! response=$(curl -fsSL               -X POST "${OPENSHARD_API_BASE}/v1/cloud/github/receipts"               -H "Authorization: Bearer ${oidc_token}"               -H "Content-Type: application/json"               --data "$payload"); then
+            if ! deliver_receipt; then
               if jq -e --arg sha "$sha" 'index($sha) != null' <<<"$required_shas" >/dev/null; then
                 exit 1
               fi
-              echo "::warning::Receipt backfill for $sha was not accepted (it may already be hosted)."
-              echo "::endgroup::"
-              continue
+              echo "::warning::Receipt backfill delivery for $sha failed."
             fi
 
-            echo "Captured $(jq -r '.receipt_id' <<<"$response") for $sha ($verification_status)"
             echo "::endgroup::"
           done < <(jq -r '.[]' <<<"$shas")
 
