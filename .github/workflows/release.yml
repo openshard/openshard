@@ -123,6 +123,11 @@ jobs:
             esac
           done
 
+      - name: Smoke installed wheel outside the source tree
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: python scripts/smoke_release.py dist/openshard-${VERSION}-py3-none-any.whl --version "$VERSION"
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist

@@ -1,6 +1,6 @@
-# Cross-system correlation: first slice
+# Cross-system workflow correlation
 
-This implements the foundational part of **Next Order of Business (3 October
+This implements the capture and ingestion boundary for **Next Order of Business (3 October
 2026)**, against Core `eba20f7` and Platform `708e912`. It does not claim that
 the complete trigger-to-production workflow has been demonstrated.
 
@@ -68,13 +68,27 @@ Receipts: an older strict receiver correctly rejects unknown fields.
   and trace-validation cases; JSON schema regenerated.
 - Tests use isolated temporary data. They are not production dogfood.
 
-## Remaining work
+## Expanded implementation (4 October 2026)
 
-- Hook-service launch-context transport for Claude Code, Codex and Cursor.
-- Authenticated ingestion of independent deployment/health evidence.
+- Launch context now crosses the authenticated Claude capture header, reduced
+  queue, replay and neutral adapter path. First binding is frozen and later
+  conflicts are counted. Raw agent payloads cannot declare launch context.
+- Platform PR 86 adds an authenticated, idempotent append-only workflow-event
+  boundary and hosted task timeline. Reports retain source_reported authority;
+  neither matching commit IDs nor deployment success makes verification green.
+- Claude hooks capture SessionStart.model, PostModelSwitch.to_model and effective
+  effort.level. No model is inferred from ANTHROPIC_MODEL or user statements.
+  This needs the host to deliver those fields; older clients still leave unknowns.
+- Core 0.4.10 is prepared with an isolated installed-wheel smoke in the release
+  workflow. Built local wheel remote create/attach help checks and twine passed.
+  This is not a claim that 0.4.10 has been published.
+- `openshard verify --compare-base COMMIT` adds local baseline diagnostics. See
+  [baseline-verification.md](baseline-verification.md) for scope and limitations.
+
+## Remaining delivery gates
+
 - Live issue/trigger → agent → commit → PR → exact-commit CI → deployment
   → production-health dogfood, with actual evidence from every source.
-- Hosted workflow timeline UI. The command above is local only.
 - A deliberate global Shard identity migration if required; do not silently
   reinterpret existing local labels.
 
