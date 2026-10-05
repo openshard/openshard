@@ -12,7 +12,7 @@ from openshard.adapters.claude_hooks_install import (
 PATHS = {"claude": ".claude/settings.local.json", "codex": ".codex/hooks.json"}
 
 
-def configure(root: Path, agent: str, *, remove: bool = False) -> dict:
+def configure(root: Path, agent: str, *, remove: bool = False, hosted: bool = False) -> dict:
     if agent not in PATHS:
         raise ValueError("Unsupported learning hook agent")
     path = root / PATHS[agent]
@@ -25,21 +25,20 @@ def configure(root: Path, agent: str, *, remove: bool = False) -> dict:
     groups = hooks.get("UserPromptSubmit", [])
     if not isinstance(groups, list) or any(not isinstance(g, dict) or not isinstance(g.get("hooks"), list) or any(not isinstance(h, dict) for h in g["hooks"]) for g in groups):
         raise ValueError("Unexpected prompt hook layout; settings were left unchanged")
-    command = f"openshard learn hook {agent}"
-    found = any(h.get("type") == "command" and h.get("command") == command for g in groups for h in g["hooks"])
-    if remove:
-        if not found:
-            return {"agent": agent, "change": "unchanged", "warning": None}
-        kept = []
-        for group in groups:
-            remaining = [h for h in group["hooks"] if not (h.get("type") == "command" and h.get("command") == command)]
-            if remaining:
-                kept.append({**group, "hooks": remaining})
-        hooks["UserPromptSubmit"] = kept
-    else:
-        if found:
-            return {"agent": agent, "change": "unchanged", "warning": None}
-        hooks["UserPromptSubmit"] = [*groups, {"hooks": [{"type": "command", "command": command, "timeout": 2}]}]
+    base_command = f"openshard learn hook {agent}"
+    own_commands = {base_command, base_command + " --hosted"}
+    command = base_command + (" --hosted" if hosted else "")
+    own = [h for g in groups for h in g["hooks"] if h.get("type") == "command" and h.get("command") in own_commands]
+    if not remove and len(own) == 1 and own[0].get("command") == command:
+        return {"agent": agent, "change": "unchanged", "warning": None}
+    if remove and not own:
+        return {"agent": agent, "change": "unchanged", "warning": None}
+    kept = []
+    for group in groups:
+        remaining = [h for h in group["hooks"] if not (h.get("type") == "command" and h.get("command") in own_commands)]
+        if remaining:
+            kept.append({**group, "hooks": remaining})
+    hooks["UserPromptSubmit"] = kept if remove else [*kept, {"hooks": [{"type": "command", "command": command, "timeout": 3 if hosted else 2}]}]
     settings["hooks"] = hooks
     _write_settings(path, settings)
     warning = None if remove else ensure_local_settings_ignored(root, rel=PATHS[agent], note="OpenShard per-user learning hook")

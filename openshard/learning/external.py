@@ -24,7 +24,7 @@ def delivery_path(root: Path, agent: str, session: str) -> Path:
     return root / ".openshard" / "learning-deliveries" / f"{key}.json"
 
 
-def prepare_hook(data: Any, agent: str, *, env: Any = None, budget_ms: float = 25) -> tuple[dict, Path | None, dict | None]:
+def prepare_hook(data: Any, agent: str, *, env: Any = None, budget_ms: float = 25, hosted: bool = False) -> tuple[dict, Path | None, dict | None]:
     """Read one frozen snapshot, never live history or a transcript."""
     from openshard.adapters.claude_hooks import (
         extract_hook_payload,
@@ -50,6 +50,12 @@ def prepare_hook(data: Any, agent: str, *, env: Any = None, budget_ms: float = 2
     task = sanitize_task_excerpt(payload.prompt)
     if not task:
         return {}, None, None
+    if hosted:
+        from openshard.learning.hosted import retrieve
+
+        response, record = retrieve(root, task, env=hook_env)
+        stored = {"version": 1, "emitted_at": datetime.now(UTC).isoformat(), "learning": record}
+        return response, delivery_path(root, payload.agent, payload.session_id), stored
     snapshot = lookup_snapshot(root / ".openshard", budget_ms=budget_ms)
     ctx = snapshot.consult(task)
     nudge(root / ".openshard" / "runs.jsonl", snapshot)
@@ -69,14 +75,14 @@ def prepare_hook(data: Any, agent: str, *, env: Any = None, budget_ms: float = 2
     return response, delivery_path(root, payload.agent, payload.session_id), stored
 
 
-def emit_hook(stream: Any, output: Any, agent: str, *, env: Any = None) -> None:
+def emit_hook(stream: Any, output: Any, agent: str, *, env: Any = None, hosted: bool = False) -> None:
     """Fail open; write provenance only after a successful stdout handoff."""
     try:
         source = getattr(stream, "buffer", None) or stream
         raw = source.read(MAX_INPUT + 1)
         if len(raw) > MAX_INPUT:
             raise ValueError("oversized")
-        response, path, record = prepare_hook(json.loads(raw), agent, env=env)
+        response, path, record = prepare_hook(json.loads(raw), agent, env=env, hosted=hosted)
     except Exception:
         response, path, record = {}, None, None
     try:
@@ -135,7 +141,7 @@ def captured_learning(root: Path, agent: str, session: str, started_at: str) -> 
         if projected is None:
             return None
         # Preserve the canonical nested shape consumed by learning_block.
-        return {
+        result = {
             "version": 1, "status": projected["status"], "used": projected["used"],
             "signals_considered": projected["signals_considered"],
             "signals_used": projected["signals_used"], "signal_ids": projected["signal_ids"],
@@ -145,5 +151,8 @@ def captured_learning(root: Path, agent: str, session: str, started_at: str) -> 
             "verification": {"influenced": False, "recommended_checks": [{"label": label} for label in projected["recommended_checks"]]},
             "snapshot": projected.get("snapshot"),
         }
+        if "supporting_receipt_ids" in projected:
+            result["supporting_receipt_ids"] = projected["supporting_receipt_ids"]
+        return result
     except Exception:
         return None

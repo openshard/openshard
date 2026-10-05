@@ -104,10 +104,10 @@ def _try_fast_path(argv: list[str]) -> bool:
     """Handle *argv* without importing ``openshard.cli.main``. Returns True if handled."""
     if len(argv) < 2:
         return False
-    if len(argv) == 3 and argv[:2] == ["learn", "hook"] and argv[2] in ("claude", "codex"):
+    if len(argv) in (3, 4) and argv[:2] == ["learn", "hook"] and argv[2] in ("claude", "codex") and (len(argv) == 3 or argv[3] == "--hosted"):
         from openshard.learning.external import emit_hook
 
-        emit_hook(sys.stdin, sys.stdout, argv[2])
+        emit_hook(sys.stdin, sys.stdout, argv[2], hosted=len(argv) == 4)
         return True
     if argv[0] == "capture" and argv[1] == "serve" and len(argv) == 2:
         # The capture service itself (spawned detached by the client). It is

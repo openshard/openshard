@@ -464,7 +464,11 @@ def learning_block(entry: dict) -> dict[str, Any] | None:
     snapshot = _learning_snapshot(raw.get("snapshot"))
     if raw.get("context_delivery") in ("hook_response_emitted", "not_emitted"):
         out["context_delivery"] = raw["context_delivery"]
-    if snapshot is not None:  # only runs that read the precomputed snapshot carry it
+    if snapshot is not None and snapshot.get("source") == "hosted_context":
+        ids = raw.get("supporting_receipt_ids")
+        if isinstance(ids, list):
+            out["supporting_receipt_ids"] = list(dict.fromkeys(r for r in ids[:20] if isinstance(r, str) and re.fullmatch(r"rcpt_[0-9a-f]{32}", r)))
+    if snapshot is not None:  # only runs that read a bounded history snapshot carry it
         out["snapshot"] = snapshot
     return out
 
@@ -481,6 +485,8 @@ def _learning_snapshot(value: object) -> dict[str, Any] | None:
         "lookup_ms": _number(raw.get("lookup_ms")),
         "budget_ms": _number(raw.get("budget_ms")),
     }
+    if raw.get("source") == "hosted_context":
+        out["source"] = "hosted_context"
     if raw.get("trimmed") is True:  # trimmed to fit: only the stored signals could be considered
         out.update(trimmed=True, signals_stored=_count(raw.get("signals_stored")),
                    signals_derived=_count(raw.get("signals_derived")))
