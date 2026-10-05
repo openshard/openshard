@@ -46,7 +46,7 @@ echo "$checks"
 
 
 @pytest.mark.skipif(not SHELL_REQUIRED and (BASH is None or not shutil.which("jq")), reason="requires workflow Bash and jq")
-@pytest.mark.parametrize("case", ["created", "duplicate", "existing", "wrong_id", "wrong_error", "unauthorized", "server_error", "malformed", "bad_success", "transport"])
+@pytest.mark.parametrize("case", ["created", "duplicate", "attached", "attached_duplicate", "attached_wrong_sha", "attached_empty", "existing", "wrong_id", "wrong_error", "unauthorized", "server_error", "malformed", "bad_success", "transport"])
 def test_delivery_retains_existing_receipt_and_rejects_other_errors(case):
     import hashlib
     import shlex
@@ -59,6 +59,16 @@ def test_delivery_retains_existing_receipt_and_rejects_other_errors(case):
     curl_exit = 0
     if case == "duplicate":
         http = "200"
+    elif case in ("attached", "attached_duplicate", "attached_wrong_sha", "attached_empty"):
+        http = "200" if case == "attached_duplicate" else "201"
+        body = {
+            "outcome": "verification_attached",
+            "head_sha": sha if case != "attached_wrong_sha" else "b" * 40,
+            "receipt_id": None,
+            "attached": [] if case == "attached_empty" else [
+                {"receipt_id": "rcpt_existing", "outcome": "recorded", "state_applied": True}
+            ],
+        }
     elif case in ("existing", "wrong_id", "wrong_error"):
         http, body = "409", conflict
         if case == "wrong_id":
@@ -98,7 +108,7 @@ printf '%s %s %s' "$result" "$overall_failed" "$verification_status"
 '''
     assert BASH is not None, "CI requires Git Bash; workflow shell checks must execute"
     result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)
-    expected_exit = 0 if case in ("created", "duplicate", "existing") else 1
+    expected_exit = 0 if case in ("created", "duplicate", "attached", "attached_duplicate", "existing") else 1
     assert result.stdout.splitlines()[-1] == f"{expected_exit} 1 failed"
 
 
