@@ -224,6 +224,52 @@ reasons, suggested test files and the advisory block. OpenShard cannot observe
 whether an external agent acted on them, so nothing is recorded on those
 agents' Receipts.
 
+## Automatic context for Claude and Codex
+
+Opt a repository into a separate native prompt hook:
+
+```bash
+openshard learn install claude
+openshard learn install codex
+```
+
+The installed `UserPromptSubmit` hook runs `openshard learn hook <agent>` before
+each prompt. It reads one bounded local learning snapshot, selects relevant
+verified signals and emits the agent's documented `additionalContext` JSON.
+It never blocks the prompt, runs recommended commands, chooses the model or
+changes repository policy. Ordinary capture hooks remain silent. Native hooks
+must be enabled and reviewed in the agent; installing files cannot bypass that
+review or enable hooks on unsupported cloud/mobile surfaces.
+
+The default lookup budget is 25 ms. Missing or unusable snapshots fail open with
+no context; existing history is not read synchronously. A background worker is
+nudged to refresh the snapshot for a later prompt. There is no remote history
+lookup or model API call. Existing freshness, relevance, sample-size and
+verification-evidence gates still apply.
+
+After stdout is successfully written, a bounded local sidecar records signal
+IDs, selection status and snapshot provenance. The last handoff in the current
+capture segment is included when ordinary capture folds the next Receipt.
+`context_delivery: hook_response_emitted` means OpenShard wrote the native hook
+response. `context_supplied` remains false: model consumption was not observed.
+The app labels the handoff accordingly. Following a recommendation and causing
+an improved outcome are not established. A broken stdout never records a
+handoff, and an earlier resumed segment cannot populate a new Receipt.
+
+No prompt, transcript, summary text or model response is stored in the sidecar.
+Existing ended Receipts remain unchanged. Capture and learning hooks are
+separate; without capture there is no finalised delivery Receipt. Hosted usage
+telemetry does not substitute for verified learning history.
+
+Remove only the learning hook with `openshard learn uninstall claude` or
+`openshard learn uninstall codex`. Other native settings and capture hooks are
+preserved. This opt-in feature requires a version containing these commands;
+the previously published v0.4.11 wheel does not contain them.
+
+Protocol references:
+- https://code.claude.com/docs/en/hooks
+- https://developers.openai.com/codex/hooks
+
 ## Measuring
 
 `openshard learn impact` puts OSN runs that used learning next to runs that

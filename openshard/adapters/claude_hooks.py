@@ -3511,6 +3511,11 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     except Exception:
         pass
 
+    from openshard.learning.external import captured_learning
+
+    learning = captured_learning(repo_root, profile.key, str(buf.get("session_id") or ""), str(buf.get("started_at") or ""))
+    if learning is not None:
+        entry["learning"] = learning
     entry["events"] = [dict(e) for e in buf["events"] if isinstance(e, dict)] + file_events
     return coerce_shard_entry(entry)
 
