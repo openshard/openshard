@@ -71,7 +71,7 @@ def test_claude_receipt_includes_emission_but_keeps_capture_output_silent(repo):
     assert captured[0]["verification_passed"] is None
 
 
-@pytest.mark.parametrize("raw", ["bad json", "x" * (external.MAX_INPUT + 1), "[]"])
+@pytest.mark.parametrize(\n    "raw",\n    ["bad json", "x" * (external.MAX_INPUT + 1), "[]"],\n    ids=["bad-json", "oversized-input", "wrong-shape"],\n)
 def test_bad_inputs_fail_open_without_provenance(raw, tmp_path):
     output = io.StringIO()
     external.emit_hook(io.StringIO(raw), output, "claude", env={})
