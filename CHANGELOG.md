@@ -4,6 +4,50 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+## 0.4.12 - 2026-10-05
+
+<!-- release-title: Openshard v0.4.12 - The Next Run Release -->
+
+### Learn from the last run
+
+You can now give Claude Code and Codex relevant history before their next prompt.
+Openshard supplies advice through the agent's native prompt hook and records the
+handoff in its next captured Receipt.
+
+- Local hooks use a small saved snapshot of verified history.
+- With `--hosted`, a fresh cloud checkout can use hosted Receipts from the same
+  repository. It needs an existing organisation connection with read access.
+- Receipts show that the context was delivered, with links to the earlier
+  Receipts behind hosted advice.
+- If history is missing, access is unavailable or the lookup times out, the
+  task continues.
+
+### Opt in
+
+```sh
+pip install --upgrade openshard==0.4.12
+openshard learn install claude --hosted
+# or: openshard learn install codex --hosted
+```
+
+Connect your existing organisation account first and review/enable hooks in
+your agent. Leave off `--hosted` to use local history. Capture setup is separate.
+
+### What the advice means
+
+This first hosted version highlights repeated verified check results from
+similar tasks. It does not automatically run commands, select a model or change
+permissions. Delivering context is observable; whether the model follows it or
+improves the result still needs evidence.
+
+### Cloud usage
+
+The hosted platform now accepts native Claude usage logs and displays observed
+session model, tokens and cost when the runtime exports them. Missing usage
+stays unknown. Complete task billing and real Scribe/Tether export coverage
+are still being checked; this release does not reconstruct missing past data.
+
+
 ## 0.4.11 - 2026-10-04
 
 ### Fixed

@@ -27,9 +27,16 @@ def main() -> None:
         actual = subprocess.check_output([str(python), "-c", "import importlib.metadata; print(importlib.metadata.version('openshard'))"], cwd=root, env=env, text=True).strip()
         if actual != args.version:
             raise SystemExit(f"Installed version {actual!r} differs from {args.version!r}")
-        for command in (("remote",), ("remote", "create"), ("remote", "attach"), ("workflow", "timeline"), ("verify",)):
+        for command in (("remote",), ("remote", "create"), ("remote", "attach"), ("workflow", "timeline"), ("verify",), ("learn", "install"), ("learn", "hook"), ("learn", "uninstall")):
             subprocess.run([str(cli), *command, "--help"], cwd=root, env=env, check=True)
-        print(f"Built wheel smoke passed: {actual}; remote create/attach, workflow timeline, verify")
+        help_text = subprocess.check_output([str(cli), "learn", "install", "--help"], cwd=root, env=env, text=True)
+        if "--hosted" not in help_text:
+            raise SystemExit("Installed learning hook is missing --hosted")
+        for agent in ("claude", "codex"):
+            output = subprocess.check_output([str(cli), "learn", "hook", agent, "--hosted"], input="{}", cwd=root, env=env, text=True)
+            if output.strip() != "{}":
+                raise SystemExit("Installed hosted hook did not fail open for empty input")
+        print(f"Built wheel smoke passed: {actual}; remote, workflow, verify, local and hosted learning hooks")
 
 
 if __name__ == "__main__":
