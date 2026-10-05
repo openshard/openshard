@@ -206,10 +206,10 @@ jobs:
           # command failures still fail the job rather than being swallowed.
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
-            gh release edit "$TAG" --title "$RELEASE_TITLE" --notes-file notes.md
+            gh release edit "$TAG" --title "${RELEASE_TITLE:-Openshard $TAG}" --notes-file notes.md
           else
             gh release create "$TAG" dist/* \
               --verify-tag \
-              --title "$RELEASE_TITLE" \
+              --title "${RELEASE_TITLE:-Openshard $TAG}" \
               --notes-file notes.md
           fi
