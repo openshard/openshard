@@ -594,20 +594,7 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
     from openshard.adapters.claude_setup import run_setup
 
     result = run_setup(repo_path=repo_path)
-
-    # Setup has run, so basic telemetry defaults on now (before this
-    # command's own events are recorded): a person sees the notice in the
-    # output rendered below, and an agent gets the same notice in the JSON
-    # result with an instruction to show it to its owner. A decision already
-    # made is never overridden, and nothing is recorded while
-    # OPENSHARD_TELEMETRY=off, DO_NOT_TRACK or a CI variable is set.
-    try:
-        from openshard.telemetry.state import consent_after_notice
-
-        consent_after_notice(source="setup")
-    except Exception:
-        pass
-    _telemetry_after_setup(result)
+    _after_setup(result)
 
     if as_json:
         click.echo(json.dumps({**result.to_dict(), "telemetry": _telemetry_status_for_agents()}, indent=2))
@@ -618,6 +605,26 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
     _render_setup_result(result)
     if result.readiness == "not_ready":
         raise SystemExit(1)
+
+
+def _after_setup(result) -> None:
+    """What every setup path does once ``run_setup`` has run (``openshard setup`` and ``openshard connect``).
+
+    Setup has run, so basic telemetry defaults on now (before this command's
+    own events are recorded): a person sees the notice in the output
+    rendered afterwards, and an agent gets the same notice in the JSON result
+    (``_telemetry_status_for_agents``) with an instruction to show it to its
+    owner. A decision already made is never overridden, and nothing is
+    recorded while OPENSHARD_TELEMETRY=off, DO_NOT_TRACK or a CI variable is
+    set. Then the ``setup.completed`` event. Never raises.
+    """
+    try:
+        from openshard.telemetry.state import consent_after_notice
+
+        consent_after_notice(source="setup")
+    except Exception:
+        pass
+    _telemetry_after_setup(result)
 
 
 def _telemetry_after_setup(result) -> None:
@@ -805,10 +812,12 @@ def connect_cmd(endpoint: str | None, organisation_id: str | None, api_key: str 
     if check.ok:
         sync_transport.clear_backoff()  # a link that works now deserves a fresh attempt
 
-    # 3. Agent capture, through the same installers as `openshard setup`.
-    #    No provider wizard and no telemetry consent change: this command
-    #    only connects and captures.
+    # 3. Agent capture, through the same installers and the same post-setup
+    #    lifecycle as `openshard setup` (telemetry notice/consent and the
+    #    setup.completed event). The provider onboarding wizard stays with
+    #    `openshard setup`: this command only connects and captures.
     result = run_setup(repo_path=repo_path)
+    _after_setup(result)
 
     ready = check.ok and result.readiness != "not_ready"
     next_steps = _connect_next_steps(link, check, result)
@@ -820,6 +829,7 @@ def connect_cmd(endpoint: str | None, organisation_id: str | None, api_key: str 
             link={**link.to_public_dict(), "stored_now": stored},
             verification=check.to_dict(),
             setup=result.to_dict(),
+            telemetry=_telemetry_status_for_agents(),
             next_steps=next_steps,
         ), indent=2))
     else:

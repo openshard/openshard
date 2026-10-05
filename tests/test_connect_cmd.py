@@ -180,27 +180,34 @@ NO_REPO = _Setup("not_ready", is_git=False, claude=False,
                  next_steps=["Run `openshard setup` again from inside a git repository to enable coding-agent capture for a project."])
 
 
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    return _make_repo(tmp_path / "widget")
+
+
+@pytest.fixture
+def home(tmp_path: Path, monkeypatch) -> Path:
+    home = tmp_path / "home"
+    monkeypatch.setenv("OPENSHARD_HOME", str(home))
+    for var in (config.ENDPOINT_ENV, config.ORG_ENV, config.API_KEY_ENV):
+        monkeypatch.delenv(var, raising=False)
+    return home
+
+
+def _run(args, cwd: Path, monkeypatch, *, setup=READY, **kwargs):
+    """Invoke the CLI with `run_setup` replaced by a canned result (the installers have their own tests)."""
+    from openshard.cli.main import cli
+
+    monkeypatch.chdir(cwd)
+    with patch("openshard.adapters.claude_setup.run_setup", return_value=setup) as run_setup:
+        out = CliRunner().invoke(cli, args, catch_exceptions=False, **kwargs)
+    out.run_setup = run_setup  # type: ignore[attr-defined]
+    return out
+
+
 class TestConnectCommand:
-    @pytest.fixture
-    def repo(self, tmp_path: Path) -> Path:
-        return _make_repo(tmp_path / "widget")
-
-    @pytest.fixture
-    def home(self, tmp_path: Path, monkeypatch) -> Path:
-        home = tmp_path / "home"
-        monkeypatch.setenv("OPENSHARD_HOME", str(home))
-        for var in (config.ENDPOINT_ENV, config.ORG_ENV, config.API_KEY_ENV):
-            monkeypatch.delenv(var, raising=False)
-        return home
-
     def _run(self, args, cwd: Path, monkeypatch, *, setup=READY, **kwargs):
-        from openshard.cli.main import cli
-
-        monkeypatch.chdir(cwd)
-        with patch("openshard.adapters.claude_setup.run_setup", return_value=setup) as run_setup:
-            out = CliRunner().invoke(cli, args, catch_exceptions=False, **kwargs)
-        out.run_setup = run_setup  # type: ignore[attr-defined]
-        return out
+        return _run(args, cwd, monkeypatch, setup=setup, **kwargs)
 
     def test_stores_verifies_and_configures_in_one_command(self, repo, home, server, monkeypatch):
         endpoint = _endpoint(server)
@@ -345,3 +352,90 @@ class TestConnectCommand:
         out = self._run(["--help"], repo, monkeypatch)
         section = out.output.split("Getting Started:", 1)[1].split("Receipts:", 1)[0]
         assert "connect" in section and "setup" in section
+
+
+# ---------------------------------------------------------------------------
+# The post-setup lifecycle `openshard setup` performs is not bypassed
+# ---------------------------------------------------------------------------
+
+
+class TestConnectSetupLifecycle:
+    """`connect` runs the same installers as `setup`, so what `setup` does after them happens too."""
+
+    @pytest.fixture
+    def telemetry_on(self, monkeypatch):
+        from openshard.telemetry import client as tclient
+        from openshard.telemetry import transport as ttransport
+
+        monkeypatch.setenv("OPENSHARD_TELEMETRY", "on")  # conftest set it off; "on" is simply "not off"
+        rt = ttransport.RecordingTransport()
+        tclient.configure(transport=rt, repo_config={})
+        yield rt
+        tclient.configure(transport=None, repo_config=None)
+
+    @staticmethod
+    def _events(rt) -> list[dict]:
+        from openshard.telemetry import client as tclient
+
+        tclient.flush(transport=rt)
+        return rt.events
+
+    def test_connect_and_setup_share_the_one_post_setup_helper(self, repo, home, server, monkeypatch):
+        _Handler.routes[f"/v1/orgs/{ORG}/capabilities"] = (200, _caps_body(ORG))
+        with patch("openshard.cli.main._after_setup") as after:
+            out = _run(
+                ["connect", "--endpoint", _endpoint(server), "--org", ORG, "--api-key", KEY], repo, monkeypatch)
+        assert out.exit_code == 0, out.output
+        after.assert_called_once_with(READY)
+        with patch("openshard.cli.main._after_setup") as after:
+            out = _run(["setup", "--yes"], repo, monkeypatch)
+        after.assert_called_once_with(READY)
+
+    def test_human_connect_shows_the_notice_and_turns_undecided_consent_on(
+        self, repo, home, server, monkeypatch, telemetry_on,
+    ):
+        from openshard.telemetry import state
+
+        _Handler.routes[f"/v1/orgs/{ORG}/capabilities"] = (200, _caps_body(ORG))
+        assert state.load_state() is None
+        out = _run(
+            ["connect", "--endpoint", _endpoint(server), "--org", ORG, "--api-key", KEY], repo, monkeypatch)
+        assert out.exit_code == 0, out.output
+        assert "Improve OpenShard: on" in out.output and "openshard telemetry off" in out.output
+        st = state.load_state()
+        assert st is not None and st.improve == "on" and st.improve_source == "setup" and st.richer == "off"
+        events = self._events(telemetry_on)
+        types = [e["event_type"] for e in events]
+        assert "telemetry.consent_changed" in types and "setup.completed" in types
+        completed = next(e for e in events if e["event_type"] == "setup.completed")
+        assert completed["properties"]["agents"] == ["claude_code", "codex"]
+        assert completed["properties"]["result"] == "ok"
+        assert KEY not in json.dumps(events) and ENDPOINT not in json.dumps(events)
+
+    def test_json_connect_returns_the_notice_for_the_calling_agent(self, repo, home, server, monkeypatch, telemetry_on):
+        from openshard.telemetry import state
+
+        _Handler.routes[f"/v1/orgs/{ORG}/capabilities"] = (200, _caps_body(ORG))
+        out = _run(
+            ["connect", "--endpoint", _endpoint(server), "--org", ORG, "--api-key", KEY, "--json"], repo, monkeypatch)
+        assert out.exit_code == 0, out.output
+        tel = json.loads(out.output)["telemetry"]
+        assert tel["enabled"] is True and tel["consent"] == "on" and tel["consent_source"] == "setup"
+        assert tel["privacy_notice"] == state.PRIVACY_NOTICE and "owner" in tel["agent_instruction"]
+
+    def test_a_decision_already_made_is_kept_and_kill_switches_record_nothing(
+        self, repo, home, server, monkeypatch, telemetry_on,
+    ):
+        from openshard.telemetry import state
+
+        _Handler.routes[f"/v1/orgs/{ORG}/capabilities"] = (200, _caps_body(ORG))
+        state.set_consent("off", source="cli")
+        out = _run(["connect", "--endpoint", _endpoint(server), "--org", ORG, "--api-key", KEY],
+                                        repo, monkeypatch)
+        assert out.exit_code == 0 and "Improve OpenShard: off" in out.output
+        assert state.load_state().improve == "off"
+        (home / "telemetry.json").unlink()
+        monkeypatch.setenv("DO_NOT_TRACK", "1")
+        out = _run(["connect"], repo, monkeypatch)
+        assert out.exit_code == 0 and "Improve OpenShard: off" in out.output
+        assert state.load_state().improve == "unset"
