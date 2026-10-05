@@ -24,20 +24,21 @@ def learn_group() -> None:
 
 @learn_group.command("hook")
 @click.argument("agent", type=click.Choice(["claude", "codex"]))
-def learn_hook(agent: str) -> None:
+@click.option("--hosted", is_flag=True, help="Opt into read-only hosted history with the existing organisation connection.")
+def learn_hook(agent: str, hosted: bool) -> None:
     """Opt-in native prompt hook: hand off bounded advisory history."""
     import sys
 
     from openshard.learning.external import emit_hook
 
-    emit_hook(sys.stdin, sys.stdout, agent)
+    emit_hook(sys.stdin, sys.stdout, agent, hosted=hosted)
 
 
-def _configure_hook(agent: str, remove: bool) -> None:
+def _configure_hook(agent: str, remove: bool, hosted: bool = False) -> None:
     from openshard.learning.external_install import configure
 
     try:
-        result = configure(_root(), agent, remove=remove)
+        result = configure(_root(), agent, remove=remove, hosted=hosted)
     except (ValueError, OSError) as exc:
         raise click.ClickException(str(exc)) from None
     click.echo(f"{agent.capitalize()} prompt learning: {result['change']}.")
@@ -49,9 +50,10 @@ def _configure_hook(agent: str, remove: bool) -> None:
 
 @learn_group.command("install")
 @click.argument("agent", type=click.Choice(["claude", "codex"]))
-def learn_install(agent: str) -> None:
+@click.option("--hosted", is_flag=True, help="Fetch bounded hosted history on each prompt; requires existing read access.")
+def learn_install(agent: str, hosted: bool) -> None:
     """Opt this repository into automatic advisory learning on each prompt."""
-    _configure_hook(agent, False)
+    _configure_hook(agent, False, hosted=hosted)
 
 
 @learn_group.command("uninstall")
