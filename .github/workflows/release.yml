@@ -190,6 +190,10 @@ jobs:
           if grep -qi "^## $VERSION - Unreleased" CHANGELOG.md; then
             echo "::error::CHANGELOG.md still marks $VERSION as Unreleased"; exit 1
           fi
+          # Optional product-facing title, kept outside the rendered Markdown body.
+          title=$(sed -n 's/^<!-- release-title: \(.*\) -->$/\1/p' notes.md | head -n 1)
+          echo "RELEASE_TITLE=${title:-Openshard v$VERSION}" >> "$GITHUB_ENV"
+          sed -i '/^<!-- release-title: .* -->$/d' notes.md
           cat notes.md
 
       - name: Create release and attach artifacts
@@ -202,10 +206,10 @@ jobs:
           # command failures still fail the job rather than being swallowed.
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
-            gh release edit "$TAG" --title "Openshard $TAG" --notes-file notes.md
+            gh release edit "$TAG" --title "${RELEASE_TITLE:-Openshard $TAG}" --notes-file notes.md
           else
             gh release create "$TAG" dist/* \
               --verify-tag \
-              --title "Openshard $TAG" \
+              --title "${RELEASE_TITLE:-Openshard $TAG}" \
               --notes-file notes.md
           fi
