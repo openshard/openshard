@@ -24,6 +24,7 @@ The short version:
 
 | Command | What it does |
 | --- | --- |
+| `openshard connect --endpoint URL --org UUID [--api-key osk_...]` | The one-command path to a first Receipt: stores the link exactly as `sync connect` does, verifies it with one authenticated read of `<endpoint>/v1/orgs/<org>/capabilities` (reports `verified`, or the 401/403/404/unreachable reason), then configures agent capture exactly as `openshard setup` does and says what to do next. Run with no options to re-check the stored link; sends nothing. |
 | `openshard sync connect --endpoint URL --org UUID [--api-key osk_...]` | Stores the link in `~/.openshard/platform.json` (mode 0600; `OPENSHARD_HOME` applies). Prompts for the key without echo when omitted. Never writes into a repository. |
 | `openshard sync status [--json]` | Where Receipts go, and for this repository: synced, pending, still-in-progress, changed-locally, conflict and rejected counts. The key is shown as its public prefix only. |
 | `openshard sync now [--limit N] [--json]` | Sends this repository's eligible unsynced Receipts. |

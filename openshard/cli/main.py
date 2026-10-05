@@ -183,7 +183,7 @@ def _telemetry_status_for_agents() -> dict:
 
 
 _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
-    ("Getting Started", ("setup", "doctor")),
+    ("Getting Started", ("connect", "setup", "doctor")),
     ("Receipts", ("last", "history", "report", "context", "learn", "insights")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
     ("Integrations", ("mcp", "capture", "sync", "remote", "import", "ingest", "wrap", "adapters", "telemetry")),
@@ -643,6 +643,12 @@ def _telemetry_after_setup(result) -> None:
 def _render_setup_result(result) -> None:
     """Human-readable rendering of a claude_setup.SetupResult for `openshard setup`."""
     click.echo("\nOpenShard Setup\n")
+    _render_setup_components(result)
+    _render_setup_readiness(result)
+
+
+def _render_setup_components(result) -> None:
+    """One line per component of a claude_setup.SetupResult, as the installers reported it."""
     click.echo(f"  Repository:    {'git repository' if result.is_git else 'not a git repository'}")
     if result.is_git:
         cli_label = "detected" if result.claude_cli.available else "not found"
@@ -694,12 +700,17 @@ def _render_setup_result(result) -> None:
             continue
         click.echo(f"  {label} {_agent_state_labels.get(agent_result.status, agent_result.status)}")
 
+
+def _configured_agent_names(result) -> list[str]:
+    """Display names of the agents whose capture the installers actually configured."""
     from openshard.adapters.agent_setup import agent_label as _agent_label
 
-    configured = result.configured_agents()
-    agent_names = [
-        "Claude Code" if k == "claude_code" else _agent_label(k) for k in configured
-    ]
+    return ["Claude Code" if k == "claude_code" else _agent_label(k) for k in result.configured_agents()]
+
+
+def _render_setup_readiness(result) -> None:
+    """The readiness verdict and next steps of a claude_setup.SetupResult."""
+    agent_names = _configured_agent_names(result)
     use_line = f"Use {', '.join(agent_names)} normally." if agent_names else "Use your coding agent normally."
     open_line = (
         f"Open {' or '.join(agent_names)} in this repository." if agent_names
@@ -729,6 +740,148 @@ def _render_setup_result(result) -> None:
         click.echo("\nNext step:")
         for step in result.next_steps:
             click.echo(f"  - {step}")
+
+
+_LINK_CHECK_LABELS = {
+    "ok": "verified (the Platform accepted this key for the organisation)",
+    "unauthorized": "NOT verified: the Platform rejected the API key (401)",
+    "forbidden": "NOT verified: this key may not access that organisation (403)",
+    "not_found": "NOT verified: the organisation was not found at this endpoint (404)",
+    "unavailable": "NOT verified: the Platform could not be reached or gave no usable answer",
+}
+
+
+@cli.command("connect")
+@click.option("--endpoint", default=None, help="Platform base URL, e.g. https://api.openshard.dev")
+@click.option("--org", "organisation_id", default=None, help="Organisation id (UUID) the receipts belong to.")
+@click.option("--api-key", "api_key", default=None,
+              help="Organisation API key (osk_...). Omit to be prompted without echo.")
+@click.option(
+    "--repo-path", "repo_path", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+    help="Repository to configure agent capture for (default: current directory).",
+)
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@_telemetry_command("connect")
+def connect_cmd(endpoint: str | None, organisation_id: str | None, api_key: str | None,
+                repo_path: Path | None, as_json: bool) -> None:
+    """Connect to Openshard Platform and set up agent capture: the one command before a first Receipt.
+
+    Stores the Platform link exactly as `openshard sync connect` does
+    (~/.openshard/platform.json, mode 0600, never in a repository), checks
+    that the Platform accepts that key for the organisation, then configures
+    capture for every supported coding agent installed on this machine
+    exactly as `openshard setup` does (Claude Code MCP + hooks, Codex hooks,
+    OpenCode, Cursor, ...). Reports what is connected and ready, and what to
+    do next. Safe to re-run: with no --endpoint/--org it re-checks the link
+    already stored (or OPENSHARD_PLATFORM_* variables) and leaves agents that
+    are already configured untouched. Nothing is sent by this command.
+    """
+    from openshard.adapters.claude_setup import run_setup
+    from openshard.sync import transport as sync_transport
+    from openshard.sync.capabilities import check_link
+    from openshard.sync.config import SOURCE_ENV, resolve_link
+
+    # 1. The link: store a new one, or reuse what is already there.
+    stored = False
+    if endpoint is not None or organisation_id is not None:
+        if endpoint is None or organisation_id is None:
+            raise click.UsageError("--endpoint and --org go together (omit both to re-check the stored link).")
+        if api_key is None:
+            api_key = click.prompt("API key (osk_...)", hide_input=True)
+        link = _store_platform_link(endpoint, organisation_id, api_key)
+        stored = True
+    else:
+        if api_key is not None:
+            raise click.UsageError("--api-key needs --endpoint and --org as well.")
+        link = resolve_link()
+        if link is None:
+            raise click.UsageError(
+                "No Platform link stored yet. Run `openshard connect --endpoint <url> --org <uuid>` "
+                "(you will be asked for the API key without echo)."
+            )
+
+    # 2. Verify it with the same authenticated read receipt sync uses.
+    check = check_link(link)
+    if check.ok:
+        sync_transport.clear_backoff()  # a link that works now deserves a fresh attempt
+
+    # 3. Agent capture, through the same installers as `openshard setup`.
+    #    No provider wizard and no telemetry consent change: this command
+    #    only connects and captures.
+    result = run_setup(repo_path=repo_path)
+
+    ready = check.ok and result.readiness != "not_ready"
+    next_steps = _connect_next_steps(link, check, result)
+    if as_json:
+        click.echo(json.dumps(_machine_envelope(
+            "connect", "ok" if ready else "incomplete",
+            warnings=list(result.next_steps),
+            connected=check.ok,
+            link={**link.to_public_dict(), "stored_now": stored},
+            verification=check.to_dict(),
+            setup=result.to_dict(),
+            next_steps=next_steps,
+        ), indent=2))
+    else:
+        _render_connect_result(link, stored, check, result, next_steps, source_env=(link.source == SOURCE_ENV))
+    if not ready:
+        raise SystemExit(1)
+
+
+def _connect_next_steps(link, check, result) -> list[str]:
+    """What to do next after `openshard connect`, from what was actually established."""
+    steps: list[str] = []
+    if not check.ok:
+        if check.kind == "unavailable":
+            steps.append(f"Check that {link.endpoint} is reachable from this machine, then run `openshard connect` again.")
+        else:
+            steps.append("Re-run `openshard connect --endpoint <url> --org <uuid>` with the right endpoint, "
+                         "organisation id and API key (or `openshard sync disconnect` to forget this link).")
+    if result.readiness == "not_ready":
+        steps.extend(result.next_steps)
+    else:
+        names = _configured_agent_names(result)
+        steps.append(f"Open {' or '.join(names)} in this repository and complete a normal coding task.")
+        steps.append("Run `openshard last` to see the captured Receipt.")
+        if check.ok:
+            steps.append("Receipts sync to the Platform in the background while the capture service runs; "
+                         "`openshard sync now` sends them immediately and `openshard sync status` shows what was sent.")
+    return steps
+
+
+def _render_connect_result(link, stored: bool, check, result, next_steps: list[str], *, source_env: bool) -> None:
+    from openshard.sync.config import CONFIG_FILENAME
+
+    click.echo("\nOpenShard Connect\n")
+    click.echo(f"  Platform:      {link.endpoint}")
+    click.echo(f"  Organisation:  {link.organisation_id}")
+    where = "from OPENSHARD_PLATFORM_* environment variables" if source_env else (
+        f"{'stored' if stored else 'already stored'} in ~/.openshard/{CONFIG_FILENAME}"
+    )
+    click.echo(f"  API key:       {link.key_prefix}  ({where})")
+    click.echo(f"  Link check:    {_LINK_CHECK_LABELS.get(check.kind, check.kind)}")
+    click.echo("")
+    _render_setup_components(result)
+    click.echo("")
+    names = _configured_agent_names(result)
+    if check.ok and result.readiness == "ready":
+        click.echo(f"Connected and ready. Use {', '.join(names)} normally in this repository.")
+    elif check.ok and result.readiness == "ready_partial":
+        click.echo(f"Connected and ready, with limitations (see below). Use {', '.join(names)} normally; "
+                   "Receipts are still recorded.")
+    elif check.ok:
+        click.echo("Connected, but no coding agent is configured for capture yet.")
+    elif result.readiness != "not_ready":
+        click.echo(f"Not connected: the Platform link could not be verified, so nothing will sync. "
+                   f"{', '.join(names)} capture is configured and Receipts are recorded locally.")
+    else:
+        click.echo("Not connected, and no coding agent is configured for capture yet.")
+    click.echo("\nNext steps:")
+    for i, step in enumerate(next_steps, 1):
+        click.echo(f"  {i}. {step}")
+    if result.readiness == "ready_partial":
+        for step in result.next_steps:
+            click.echo(f"  ! {step}")
 
 
 @cli.command()
@@ -7284,6 +7437,21 @@ def _render_sync_status(doc: dict) -> None:
     click.echo("  change:          openshard sync now | status | connect | disconnect   (docs/platform-sync.md)")
 
 
+def _store_platform_link(endpoint: str, organisation_id: str, api_key: str):
+    """Validate and store the link (the one write `sync connect` and `connect` share). Never echoes the key."""
+    from openshard.sync import transport as sync_transport
+    from openshard.sync.config import save_link
+
+    try:
+        link = save_link(endpoint=endpoint, organisation_id=organisation_id, api_key=api_key)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
+    except OSError as exc:
+        raise click.ClickException(f"could not write the link file: {type(exc).__name__}") from None
+    sync_transport.clear_backoff()  # a new key or endpoint deserves a fresh attempt
+    return link
+
+
 @sync_group.command("connect")
 @click.option("--endpoint", required=True, help="Platform base URL, e.g. https://api.openshard.dev")
 @click.option("--org", "organisation_id", required=True, help="Organisation id (UUID) the receipts belong to.")
@@ -7293,18 +7461,9 @@ def _render_sync_status(doc: dict) -> None:
 @_telemetry_command("sync.connect")
 def sync_connect(endpoint: str, organisation_id: str, api_key: str | None, as_json: bool) -> None:
     """Store the Platform link for this user (~/.openshard/platform.json, mode 0600). Never in a repository."""
-    from openshard.sync import transport as sync_transport
-    from openshard.sync.config import save_link
-
     if api_key is None:
         api_key = click.prompt("API key (osk_...)", hide_input=True)
-    try:
-        link = save_link(endpoint=endpoint, organisation_id=organisation_id, api_key=api_key)
-    except ValueError as exc:
-        raise click.UsageError(str(exc)) from None
-    except OSError as exc:
-        raise click.ClickException(f"could not write the link file: {type(exc).__name__}") from None
-    sync_transport.clear_backoff()  # a new key or endpoint deserves a fresh attempt
+    link = _store_platform_link(endpoint, organisation_id, api_key)
     if as_json:
         click.echo(json.dumps({"connected": True, "link": link.to_public_dict()}, indent=2))
         return

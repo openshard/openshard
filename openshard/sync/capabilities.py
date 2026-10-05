@@ -135,16 +135,45 @@ def _parse_keys(body: bytes, *, organisation_id: str) -> frozenset[str] | None:
     return frozenset(keys)
 
 
-def fetch_enabled_capabilities(
-    link: PlatformLink,
-    *,
-    user_agent: str | None = None,
-    timeout: float = TOTAL_TIMEOUT_SECONDS,
-) -> frozenset[str] | None:
-    """One GET for the organisation's enabled capabilities. None on any failure. Never raises.
+LINK_OK = "ok"
+LINK_UNAUTHORIZED = "unauthorized"
+LINK_FORBIDDEN = "forbidden"
+LINK_NOT_FOUND = "not_found"
+LINK_UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class LinkCheck:
+    """What one authenticated read of the capabilities route established about a link.
+
+    ``ok`` means the endpoint answered 200 for this organisation with the
+    linked key: the Platform was reachable and the key was accepted for that
+    organisation at that moment. Nothing more is claimed (it says nothing
+    about whether receipts will later be accepted). Every other kind is the
+    HTTP answer, or ``unavailable`` when there was none (offline, timeout, a
+    redirect, an oversized or malformed body).
+    """
+
+    kind: str
+    status: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.kind == LINK_OK
+
+    def to_dict(self) -> dict:
+        return {"ok": self.ok, "kind": self.kind, "status": self.status}
+
+
+def _get_capabilities(
+    link: PlatformLink, *, user_agent: str | None, timeout: float,
+) -> tuple[int | None, bytes]:
+    """One GET of the organisation's capabilities: ``(http status or None, body)``. Never raises.
 
     Redirects are refused: the bearer key travels to the linked endpoint only.
+    A body larger than the contract allows is dropped (status None).
     """
+    import urllib.error
     import urllib.request
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -163,14 +192,56 @@ def fetch_enabled_capabilities(
     try:
         opener = urllib.request.build_opener(_NoRedirect)
         with opener.open(request, timeout=timeout) as response:  # noqa: S310 - https/loopback only
-            if int(response.status) != 200:
-                return None
+            status = int(response.status)
             body = response.read(_MAX_BODY_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), b""
     except Exception:
-        return None
+        return None, b""
     if len(body) > _MAX_BODY_BYTES:
+        return None, b""
+    return status, body
+
+
+def fetch_enabled_capabilities(
+    link: PlatformLink,
+    *,
+    user_agent: str | None = None,
+    timeout: float = TOTAL_TIMEOUT_SECONDS,
+) -> frozenset[str] | None:
+    """One GET for the organisation's enabled capabilities. None on any failure. Never raises.
+
+    Redirects are refused: the bearer key travels to the linked endpoint only.
+    """
+    status, body = _get_capabilities(link, user_agent=user_agent, timeout=timeout)
+    if status != 200:
         return None
     return _parse_keys(body, organisation_id=link.organisation_id)
+
+
+def check_link(
+    link: PlatformLink,
+    *,
+    user_agent: str | None = None,
+    timeout: float = TOTAL_TIMEOUT_SECONDS,
+) -> LinkCheck:
+    """Verify a link with the same read receipt sync and OSN use; no cache, no second credential.
+
+    ``openshard connect`` uses this to say whether the stored link works
+    before anything is sent. Never raises; the key never appears in the result.
+    """
+    status, body = _get_capabilities(link, user_agent=user_agent, timeout=timeout)
+    if status == 200:
+        if _parse_keys(body, organisation_id=link.organisation_id) is None:
+            return LinkCheck(LINK_UNAVAILABLE, status)  # answered, but not for this organisation
+        return LinkCheck(LINK_OK, status)
+    if status == 401:
+        return LinkCheck(LINK_UNAUTHORIZED, status)
+    if status == 403:
+        return LinkCheck(LINK_FORBIDDEN, status)
+    if status == 404:
+        return LinkCheck(LINK_NOT_FOUND, status)
+    return LinkCheck(LINK_UNAVAILABLE, status)
 
 
 def _cache_payload(link: PlatformLink, keys: frozenset[str] | None, *, now: float) -> dict:
