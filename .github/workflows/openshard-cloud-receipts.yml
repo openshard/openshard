@@ -105,6 +105,15 @@ jobs:
               echo "Captured $expected_id for $sha ($verification_status)"
               return 0
             fi
+            if [[ "$http_status" == 200 || "$http_status" == 201 ]] && \
+              jq -e --arg sha "$sha" '
+                .outcome == "verification_attached"
+                and .head_sha == $sha
+                and (.attached | type == "array" and length > 0)
+              ' <<<"$response" >/dev/null; then
+              echo "Attached independent CI verification for $sha ($verification_status)"
+              return 0
+            fi
             if [[ "$http_status" == 409 ]] && \
               jq -e --arg id "$expected_id" --arg code receipt_conflict \
                 '.error.code == $code and (.error.message | contains($id))' <<<"$response" >/dev/null; then
