@@ -5,8 +5,9 @@
     learn last             what learning did on the most recent OSN run
     learn impact           outcomes of runs with and without learning (observational)
 
-Everything is derived from ``.openshard/runs.jsonl`` at read time; nothing is
-written. Human output is compact; ``--json`` gives the structured records.
+Inspection derives signals from ``.openshard/runs.jsonl``. Opt-in native
+prompt hooks read the bounded snapshot and record their context handoff.
+Human output is compact; ``--json`` gives the structured records.
 """
 from __future__ import annotations
 
@@ -18,7 +19,46 @@ import click
 
 @click.group("learn")
 def learn_group() -> None:
-    """Evidence-backed learning from prior OpenShard runs (read-only)."""
+    """Inspect verified learning and opt into native prompt context hooks."""
+
+
+@learn_group.command("hook")
+@click.argument("agent", type=click.Choice(["claude", "codex"]))
+def learn_hook(agent: str) -> None:
+    """Opt-in native prompt hook: hand off bounded advisory history."""
+    import sys
+
+    from openshard.learning.external import emit_hook
+
+    emit_hook(sys.stdin, sys.stdout, agent)
+
+
+def _configure_hook(agent: str, remove: bool) -> None:
+    from openshard.learning.external_install import configure
+
+    try:
+        result = configure(_root(), agent, remove=remove)
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"{agent.capitalize()} prompt learning: {result['change']}.")
+    if result["warning"]:
+        click.echo(result["warning"], err=True)
+    if not remove:
+        click.echo("Native hooks must be enabled and reviewed in the agent. Capture hooks remain separate.")
+
+
+@learn_group.command("install")
+@click.argument("agent", type=click.Choice(["claude", "codex"]))
+def learn_install(agent: str) -> None:
+    """Opt this repository into automatic advisory learning on each prompt."""
+    _configure_hook(agent, False)
+
+
+@learn_group.command("uninstall")
+@click.argument("agent", type=click.Choice(["claude", "codex"]))
+def learn_uninstall(agent: str) -> None:
+    """Remove only the prompt learning hook, preserving capture and other hooks."""
+    _configure_hook(agent, True)
 
 
 def _root() -> Path:

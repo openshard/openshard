@@ -462,6 +462,8 @@ def learning_block(entry: dict) -> dict[str, Any] | None:
         ] if isinstance(checks, list) else [],
     }
     snapshot = _learning_snapshot(raw.get("snapshot"))
+    if raw.get("context_delivery") in ("hook_response_emitted", "not_emitted"):
+        out["context_delivery"] = raw["context_delivery"]
     if snapshot is not None:  # only runs that read the precomputed snapshot carry it
         out["snapshot"] = snapshot
     return out
