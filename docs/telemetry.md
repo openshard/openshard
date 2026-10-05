@@ -117,9 +117,11 @@ The basic telemetry preference has three states, kept in the same
 Setup turns an `unset` preference on; it never overrides a preference
 already set. Both kinds of setup do this:
 
-- **Human setup**: `openshard setup` and the onboarding flow show the
-  "Help improve OpenShard" notice in their output.
-- **Agent-driven setup**: `openshard setup --json` returns the same notice
+- **Human setup**: `openshard setup`, `openshard connect` (which runs the
+  same setup) and the onboarding flow show the "Help improve OpenShard"
+  notice in their output.
+- **Agent-driven setup**: `openshard setup --json` and `openshard connect
+  --json` return the same notice
   in its result, as `telemetry.privacy_notice`, with
   `telemetry.agent_instruction` telling the calling agent to show it to its
   owner verbatim. The agent does not get to hide it. The notice reads:

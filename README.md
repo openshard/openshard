@@ -240,10 +240,15 @@ machine, `openshard sync` sends copies of this repository's Receipts to an
 Openshard Platform organisation:
 
 ```bash
-openshard sync connect --endpoint <url> --org <org-id>
+openshard connect --endpoint <url> --org <org-id>
 openshard sync now
 openshard sync status
 ```
+
+`openshard connect` stores the link, checks that the Platform accepts the
+key for that organisation, and runs the same agent setup as `openshard
+setup`, so it is also the one command to run on a fresh machine.
+`openshard sync connect` still stores the link on its own.
 
 Sync is off until you run `connect`, sends only the same bounded fields
 `openshard history --json` already prints (no prompts, transcripts, diffs,
