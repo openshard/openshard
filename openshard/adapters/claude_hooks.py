@@ -1081,7 +1081,8 @@ def _transcript_usage(buf: dict) -> dict | None:
     locator never reach ``runs.jsonl``.
     """
     cached = buf.get("transcript_usage") if isinstance(buf.get("transcript_usage"), dict) else None
-    agent = buf.get("agent")
+    agent_raw = buf.get("agent")
+    agent = agent_raw if isinstance(agent_raw, str) else AGENT_CLAUDE_CODE
     raw = _valid_transcript_path(buf.get("transcript_path"), buf.get("session_id"), agent=agent)
     if agent == AGENT_CODEX:
         if raw is None:
