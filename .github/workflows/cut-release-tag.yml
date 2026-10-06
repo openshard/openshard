@@ -7,12 +7,9 @@ name: Cut Release Tag
 # workflow_dispatch is intentionally allowed. release.yml still owns all
 # validation, tests and PyPI publishing.
 on:
-  push:
-    branches: [main]
-    paths:
-      - pyproject.toml
-      - CHANGELOG.md
-      - .github/workflows/cut-release-tag.yml
+  workflow_run:
+    workflows: ["Full Main Validation"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -26,17 +23,38 @@ concurrency:
 jobs:
   tag:
     name: Tag release-ready main
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
+    env:
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.RELEASE_SHA }}
           fetch-depth: 0
+
+      - name: Candidate must still be current main
+        id: current
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          main_sha="$(git rev-parse origin/main)"
+          if [ "$RELEASE_SHA" != "$main_sha" ]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "Validated commit $RELEASE_SHA is stale; current main is $main_sha. A newer validation will decide the release."
+            exit 0
+          fi
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Resolve and validate release version
+        if: steps.current.outputs.eligible == 'true'
         id: release
         run: |
           python - <<'PY'
@@ -62,6 +80,7 @@ jobs:
           PY
 
       - name: Create immutable version tag if absent
+        if: steps.current.outputs.eligible == 'true'
         id: tag
         env:
           VERSION: ${{ steps.release.outputs.version }}
@@ -75,12 +94,12 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$tag" -m "Openshard $tag" "$GITHUB_SHA"
+          git tag -a "$tag" -m "Openshard $tag" "$RELEASE_SHA"
           git push origin "refs/tags/$tag"
           echo "created=true" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch the verified release workflow
-        if: steps.tag.outputs.created == 'true'
+        if: steps.current.outputs.eligible == 'true' && steps.tag.outputs.created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.release.outputs.version }}
