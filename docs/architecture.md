@@ -107,7 +107,7 @@ trust or use receipts, and the receipt path does not depend on them.
 | Routing and model registry | `routing/`, `models/` | Model selection and policy for the native pipeline. Advisory for external-agent receipts. |
 | OSN (proof pipeline) | `osn/`, `history/proof_contract.py` | Proof-contract sections and status for native runs; surfaces as `Proof:` and `openshard proof`. |
 | Trust Score | `history/trust_score.py`, `openshard trust` | A heuristic over recorded proof signals. Diagnostic only; not a receipt signal. |
-| Evals | `evals/`, `openshard eval` | Local eval harness for the native pipeline. |
+| Evals | `evals/`, `openshard eval` | Local eval harness for the native pipeline. `python -m openshard.evals.receipt_honesty` checks that Receipts claim only what their evidence supports. |
 | Workflow packs, review domains | `packs/`, `review/` | Repeatable review prompts for native runs. |
 | TUI | `tui/` | Interactive front-end over the same history. |
 | Telemetry | `telemetry/` | Privacy-safe counters (`docs/telemetry.md`); never receipt contents. |
