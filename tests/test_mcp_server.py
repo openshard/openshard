@@ -99,7 +99,7 @@ class TestToolRegistration:
         names = {t.name for t in tools}
         assert names == {
             "recent_shards", "get_shard", "get_receipt", "get_receipts_by_task",
-            "search_history", "relevant_context", "learning_signals",
+            "search_history", "relevant_context", "learning_signals", "authority_snapshot",
         }
 
     def test_each_tool_has_a_description(self, server):
@@ -391,6 +391,83 @@ class TestJsonSerialization:
         _, structured = _call(server, "get_receipt", {"shard_id": "shard-a"})
         # Every value must already be JSON-serializable (no dataclasses/objects).
         json.dumps(structured)
+
+
+# ---------------------------------------------------------------------------
+# Agent-native authority: same source as OSN, read-only
+# ---------------------------------------------------------------------------
+
+class TestAuthoritySnapshot:
+    def test_local_only_snapshot_is_explicit_and_cannot_self_approve(self, history: Path, monkeypatch):
+        monkeypatch.delenv("OPENSHARD_PLATFORM_URL", raising=False)
+        monkeypatch.delenv("OPENSHARD_PLATFORM_ORG", raising=False)
+        monkeypatch.delenv("OPENSHARD_PLATFORM_KEY", raising=False)
+        server = build_server(repo_path=history)
+        _content, structured = _call(server, "authority_snapshot", {})
+        result = structured["result"]
+        assert result["schema_version"] == "openshard.authority.v1"
+        assert result["enforcement_boundary"] == "openshard_native"
+        assert result["organisation_policy"]["linked"] is False
+        assert result["approval"]["agent_can_self_approve"] is False
+        assert result["external_agent_control"].startswith("observed_or_advisory")
+
+    def test_snapshot_uses_the_same_organisation_policy_combination_as_osn(self, history: Path, monkeypatch):
+        from openshard.sync.policies import OrganisationPolicyState
+
+        document = {
+            "schema_version": 1,
+            "models": {
+                "allowed_models": [],
+                "blocked_models": ["openai/gpt-5.6-sol"],
+                "allowed_providers": [],
+                "blocked_providers": [],
+                "max_cost_class": "mid",
+                "allow_specialist": False,
+                "allow_experimental": False,
+                "allow_watchlist": False,
+                "allow_deprecated": False,
+                "allow_open_weight": False,
+                "allow_fallback": False,
+                "allow_openrouter_wide": True,
+            },
+            "budgets": {
+                "max_spend_usd": 1.5,
+                "max_attempts": 3,
+                "max_commands": 8,
+                "max_writes": 12,
+            },
+            "permissions": {
+                "blocked_write_paths": ["infra/prod/**"],
+                "approval_write_paths": [".github/**"],
+                "blocked_command_prefixes": ["terraform apply"],
+            },
+        }
+        state = OrganisationPolicyState(
+            "org_test", 7, "sha256:" + "a" * 64, document, "fresh"
+        )
+        monkeypatch.setattr("openshard.sync.policies.resolve_organisation_policy", lambda: state)
+        server = build_server(repo_path=history)
+        _content, structured = _call(server, "authority_snapshot", {})
+        result = structured["result"]
+        assert result["organisation_policy"] == {
+            "linked": True,
+            "applied": True,
+            "version": 7,
+            "hash": "sha256:" + "a" * 64,
+            "source": "fresh",
+            "reason": None,
+        }
+        assert result["effective"]["models"]["blocked_models"] == ["openai/gpt-5.6-sol"]
+        assert result["effective"]["budgets"]["max_spend_usd"] == 1.5
+        assert result["effective"]["permissions"] == {
+            "blocked_write_paths": ["infra/prod/**"],
+            "approval_write_paths": [".github/**"],
+            "blocked_command_prefixes": ["terraform apply"],
+        }
+        assert result["approval"] == {
+            "required_write_paths": [".github/**"],
+            "agent_can_self_approve": False,
+        }
 
 
 # ---------------------------------------------------------------------------
