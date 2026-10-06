@@ -1,0 +1,73 @@
+name: Cut Release Tag
+
+# A release is ready only when main carries a semver package version and a
+# dated CHANGELOG section for that exact version. Creating the immutable tag
+# hands off to release.yml, which owns all validation, tests and PyPI publish.
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - CHANGELOG.md
+      - .github/workflows/cut-release-tag.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cut-release-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag release-ready main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Resolve and validate release version
+        id: release
+        run: |
+          python - <<'PY'
+          import re, tomllib
+          from pathlib import Path
+
+          with open("pyproject.toml", "rb") as fh:
+              version = tomllib.load(fh)["project"]["version"]
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:[ab]\d+|rc\d+)?", version):
+              raise SystemExit(f"invalid release version {version!r}")
+
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          heading = rf"^## {re.escape(version)} - \d{{4}}-\d{{2}}-\d{{2}}$"
+          if re.search(heading, changelog, re.M) is None:
+              raise SystemExit(f"CHANGELOG.md has no dated section for {version}")
+
+          marker = re.search(r"^<!-- release-title: .+ -->$", changelog, re.M)
+          if marker is None:
+              raise SystemExit("CHANGELOG.md has no release-title marker")
+
+          with open(Path(__import__("os").environ["GITHUB_OUTPUT"]), "a", encoding="utf-8") as out:
+              out.write(f"version={version}\n")
+          PY
+
+      - name: Create immutable version tag if absent
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag already exists; nothing to do."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Openshard $tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag"
