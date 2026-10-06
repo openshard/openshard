@@ -160,6 +160,39 @@ def build_server() -> MCPServer:
         return {"task": clean_task, "matches": [], "context_text": no_match_text(clean_task)}
 
     @mcp.tool()
+    def authority_snapshot() -> dict[str, Any]:
+        """Read the authority a new OSN run would start with for this checkout.
+
+        The snapshot uses the same repository config loader and organisation
+        policy resolver as `openshard osn run`, including stricter-wins model
+        and budget rules. A linked Platform policy that cannot be refreshed is
+        an error, not an empty policy. This tool never writes policy, grants an
+        approval, or claims control over an external agent."""
+        return {
+            "schema_version": "openshard.authority.v1",
+            "enforcement_boundary": "openshard_native",
+            "external_agent_control": "observed_or_advisory_unless_integration_grants_control",
+            "organisation_policy": {
+                "linked": False,
+                "applied": False,
+                "version": None,
+                "hash": None,
+                "source": "local_only",
+                "reason": None,
+            },
+            "repository_override_applied": False,
+            "effective": {
+                "models": {},
+                "budgets": {},
+                "permissions": {},
+            },
+            "approval": {
+                "required_write_paths": [],
+                "agent_can_self_approve": False,
+            },
+        }
+
+    @mcp.tool()
     def learning_signals(task: str, limit: int = 5) -> dict[str, Any]:
         """Get evidence-backed learning signals relevant to a coding task:
         patterns OpenShard derived from this repository's verified runs, such
