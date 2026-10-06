@@ -73,7 +73,13 @@ SOURCES: frozenset[str] = frozenset({
 SURFACE_RECORD = "receipt_record"
 SURFACE_CURSOR_AGENTS_API = "cursor_cloud_agents_api"
 SURFACE_CURSOR_ADMIN_EVENTS = "cursor_admin_usage_events"
-SURFACES: frozenset[str] = frozenset({SURFACE_RECORD, SURFACE_CURSOR_AGENTS_API, SURFACE_CURSOR_ADMIN_EVENTS})
+SURFACE_OPENAI_CODEX_APP_SERVER = "openai_codex_app_server"
+SURFACES: frozenset[str] = frozenset({
+    SURFACE_RECORD,
+    SURFACE_CURSOR_AGENTS_API,
+    SURFACE_CURSOR_ADMIN_EVENTS,
+    SURFACE_OPENAI_CODEX_APP_SERVER,
+})
 
 TOKEN_KEYS: tuple[str, ...] = ("input", "output", "cache_read", "cache_write", "reasoning", "other")
 
@@ -477,7 +483,11 @@ def record_usage_attestation(repo_root: Path, attestation: dict) -> str:
 # Display
 # ---------------------------------------------------------------------------
 
-_RUNTIME_LABEL = {SURFACE_CURSOR_AGENTS_API: "Cursor", SURFACE_CURSOR_ADMIN_EVENTS: "Cursor"}
+_RUNTIME_LABEL = {
+    SURFACE_CURSOR_AGENTS_API: "Cursor",
+    SURFACE_CURSOR_ADMIN_EVENTS: "Cursor",
+    SURFACE_OPENAI_CODEX_APP_SERVER: "OpenAI",
+}
 
 
 def _source_label(source: str | None, surface: str | None) -> str:
@@ -550,6 +560,7 @@ __all__ = [
     "SURFACES",
     "SURFACE_CURSOR_ADMIN_EVENTS",
     "SURFACE_CURSOR_AGENTS_API",
+    "SURFACE_OPENAI_CODEX_APP_SERVER",
     "SURFACE_RECORD",
     "TOKEN_KEYS",
     "USAGE_VERSION",
