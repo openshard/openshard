@@ -41,7 +41,7 @@ from openshard.history.shard_contract import build_shard_receipt, render_compact
 SID = "019a4f3c-6c1e-7d2b-9c3e-2f4a5b6c7d8e"
 SID2 = "019a4f3c-6c1e-7d2b-9c3e-ffffffffffff"
 SECRET = "sk-proj-SECRETSECRET12345678901234567890abcdef"
-TRANSCRIPT = "/home/user/.codex/sessions/2026/09/rollout-abc.jsonl"
+TRANSCRIPT = str(Path.home() / ".codex" / "sessions" / "2026" / "09" / "rollout-abc.jsonl")
 
 
 def _git(repo: Path, *args: str) -> None:
