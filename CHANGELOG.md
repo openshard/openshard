@@ -2,7 +2,9 @@
 
 All notable changes to OpenShard are documented here.
 
-## Unreleased
+## 0.4.13 - 2026-10-06
+
+<!-- release-title: Openshard v0.4.13 - Claude Cloud Connected Capture -->
 
 ### Fixed
 
