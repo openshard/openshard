@@ -53,14 +53,18 @@ add evidence:
   former only feeds the scrubbed task excerpt, the latter is carried and
   never acted on.
 
-What is never read: ``transcript_path``, ``tool_response``,
+``transcript_path`` is retained only as a transient locator. At fold time
+OpenShard can read Codex's own cumulative ``token_count`` records from that
+file after it proves the session id; transcript content and the path never
+reach the Receipt. What is never read: ``tool_response``,
 ``last_assistant_message``, ``end_reason``, and every unknown key. An
 ``apply_patch`` document is read for its *file headers only* (``*** Add /
 Update / Delete File:`` and ``*** Move to:``), to learn which repository
 files Codex says it tried to change; the patch body is never looked at,
 and those paths become the ``tool.invoked`` target (status ``unknown``),
-never hook-reported file evidence. Cost and token counts are not exposed
-by Codex hooks, so a Codex record never carries them.
+never hook-reported file evidence. Token counts are not direct hook fields;
+when ``transcript_path`` is readable, the runtime's cumulative token counter
+can strengthen the same live Receipt. Otherwise usage stays Not recorded.
 """
 
 from __future__ import annotations
@@ -187,6 +191,7 @@ def extract_codex_payload(data: Mapping[str, Any], *, event_override: str | None
         agent=AGENT_CODEX,
         model_id=_str_or_none(data.get("model"), 200),
         tool_success=None,
+        transcript_path=_str_or_none(data.get("transcript_path"), 2_000),
     )
     if event == EVENT_POST_TOOL_USE:
         tool_name = _str_or_none(data.get("tool_name"), 80)
