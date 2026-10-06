@@ -31,6 +31,14 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- Connected capture accepts `OPENSHARD_CONNECTED_TOKEN=proxy-injected` for
+  environments whose egress proxy injects the real `osc_` credential (Claude
+  Cloud API Credentials). The secret never sits in the environment; the
+  marker is sent as the bearer token for the proxy to replace, the
+  connection source reads `proxy`, and a missing injection is reported as
+  the Platform's own 401 (`unauthorized`), never as success. Every other
+  value must still be a well-formed `osc_` or `osk_` token.
+
 - A Receipt honesty eval (`python -m openshard.evals.receipt_honesty`). It
   produces Receipts through real agent capture, the OSN loop and
   `openshard verify`, then checks that every local and hosted surface claims

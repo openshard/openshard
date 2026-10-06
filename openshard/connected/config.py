@@ -3,6 +3,12 @@
 A provider or IDE stores one narrow osc_ credential. Trusted local installs
 may reuse the existing osk_ Platform link. Per-run identity is separate from
 that credential, so one connection safely serves many sessions.
+
+A cloud environment whose egress proxy injects the credential (Claude Cloud
+API Credentials) keeps the osc_ token out of the environment entirely: it
+sets ``OPENSHARD_CONNECTED_TOKEN=proxy-injected`` and the proxy replaces the
+Authorization header on the way to the Platform. Nothing here can tell
+whether that injection happens; the Platform's own 401/403 does.
 """
 from __future__ import annotations
 
@@ -20,6 +26,11 @@ TOKEN_ENV = "OPENSHARD_CONNECTED_TOKEN"
 SURFACE_ENV = "OPENSHARD_CONNECTED_SURFACE"
 DISABLE_ENV = "OPENSHARD_CONNECTED_CAPTURE"
 
+# Non-secret marker: the real osc_ credential lives in the cloud provider's
+# credential store and its proxy injects it into requests to the Platform.
+PROXY_INJECTED_TOKEN = "proxy-injected"
+SOURCE_PROXY = "proxy"
+
 _FALSEY = frozenset({"0", "off", "false", "no", "disabled"})
 _TOKEN_RE = re.compile(r"^os[ck]_[A-Za-z0-9_-]{8,200}$")
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
@@ -33,6 +44,11 @@ class ConnectedConnection:
     organisation_id: str
     token: str
     source: str
+
+    @property
+    def proxy_backed(self) -> bool:
+        """True when the environment holds only the marker and a proxy supplies the credential."""
+        return self.source == SOURCE_PROXY
 
 
 @dataclass(frozen=True)
@@ -89,9 +105,17 @@ def _explicit(env: dict | os._Environ) -> ConnectedConnection | None:
     token = env.get(TOKEN_ENV)
     if endpoint is None or not isinstance(org, str) or not _UUID_RE.match(org):
         return None
-    if not isinstance(token, str) or not _TOKEN_RE.match(token.strip()):
+    if not isinstance(token, str):
         return None
-    return ConnectedConnection(endpoint, org.lower(), token.strip(), "env")
+    token = token.strip()
+    if token == PROXY_INJECTED_TOKEN:
+        # The marker is sent as the bearer token so the existing transport is
+        # unchanged; a proxy that injects the credential overwrites it, and one
+        # that does not leaves the Platform to answer 401 as for any bad token.
+        return ConnectedConnection(endpoint, org.lower(), token, SOURCE_PROXY)
+    if not _TOKEN_RE.match(token):
+        return None
+    return ConnectedConnection(endpoint, org.lower(), token, "env")
 
 
 def resolve_connection(env: dict | os._Environ | None = None) -> ConnectedConnection | None:
@@ -203,5 +227,6 @@ def sink_id(connection: ConnectedConnection, session: ConnectedSession) -> str:
 
 __all__ = [
     "ConnectedConnection", "ConnectedSession", "DISABLE_ENV", "ENDPOINT_ENV", "ORG_ENV",
-    "SURFACE_ENV", "TOKEN_ENV", "available_hint", "disabled", "resolve_connection", "session_from_entry", "sink_id",
+    "PROXY_INJECTED_TOKEN", "SOURCE_PROXY", "SURFACE_ENV", "TOKEN_ENV", "available_hint", "disabled",
+    "resolve_connection", "session_from_entry", "sink_id",
 ]
