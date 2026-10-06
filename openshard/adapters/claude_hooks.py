@@ -3309,6 +3309,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     transcript_provider = transcript_usage.get("provider") if isinstance(transcript_usage, Mapping) else None
     if provider_current is None and isinstance(transcript_provider, str) and transcript_provider:
         provider_current = transcript_provider
+        if profile.key == AGENT_CODEX:
+            buf["provider_source"] = "vendor_telemetry"
     usage_provenance = (
         buf.get("usage_provenance") if isinstance(buf.get("usage_provenance"), str) else profile.usage_provenance
     )
