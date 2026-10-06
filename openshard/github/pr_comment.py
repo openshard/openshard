@@ -233,10 +233,12 @@ def _collect_evidence(receipt: ShardReceipt, osn_sections: list[str]) -> list[st
 
 
 def _collect_checks(receipt: ShardReceipt) -> list[str]:
+    from openshard.history.shard_contract import agent_reported_suffix
+
     if receipt.check_results:
         return _cap_list(receipt.check_results, _MAX_CHECKS)
     if receipt.checks_display and receipt.checks_display not in ("Not run", "Not recorded"):
-        return [receipt.checks_display]
+        return [receipt.checks_display + agent_reported_suffix(receipt)]
     return []
 
 
@@ -342,6 +344,8 @@ def build_pr_comment_summary(entry: dict, receipt: ShardReceipt) -> PRCommentSum
     Uses only safe, structured sources. Does not read repo files, run git,
     call GitHub, or call any provider.
     """
+    from openshard.history.shard_contract import agent_reported_suffix
+
     osn_sections = _detect_osn_sections(entry)
     warnings = _collect_warnings(entry, receipt)
     evidence = _collect_evidence(receipt, osn_sections)
@@ -351,7 +355,7 @@ def build_pr_comment_summary(entry: dict, receipt: ShardReceipt) -> PRCommentSum
     next_step = _derive_recommended_next_step(entry, receipt)
 
     return PRCommentSummary(
-        run_status=_cap_text(receipt.status or ""),
+        run_status=_cap_text((receipt.status + agent_reported_suffix(receipt)) if receipt.status else ""),
         risk=_cap_text(receipt.risk or ""),
         files_changed=receipt.files_changed or 0,
         inspected_files=inspected_files,

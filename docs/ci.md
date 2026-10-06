@@ -49,7 +49,7 @@ The invariant suite is the floor for every non-docs PR: Shard/Receipt
 schema, hash, identity and proof contracts, v0.4.4 receipt identity and
 semantics, provenance, evidence filtering, verification contracts,
 history amendment integrity, the JSONL store, path/secret/shell safety,
-platform sync. The list lives in `INVARIANT_TEST_FILES` in the selector;
+platform sync, and the red-team Receipt honesty harness. The list lives in `INVARIANT_TEST_FILES` in the selector;
 `python scripts/ci/select_tests.py check` (run in every lint job) fails if
 any listed file stops existing, so a rename can never silently drop
 coverage.

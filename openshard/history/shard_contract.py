@@ -719,11 +719,21 @@ def checks_label(receipt: ShardReceipt) -> str:
         display = counts_phrase(
             block.get("checks_passed"), block.get("checks_failed"), block.get("checks_attempted"),
         ) or display
+    return display + agent_reported_suffix(receipt)
+
+
+def agent_reported_suffix(receipt: ShardReceipt) -> str:
+    """`` (agent-reported)`` when the session's check outcome is the agent's own claim, else ``""``.
+
+    ``status`` / ``checks_display`` stay source-free because they are synced;
+    every surface that prints them on their own appends this.
+    """
+    block = receipt.verification if isinstance(receipt.verification, dict) else {}
     if block.get("source") == SOURCE_AGENT_REPORTED and block.get("status") in (
         STATUS_PASSED, STATUS_FAILED, STATUS_PARTIAL,
     ):
-        return f"{display} (agent-reported)"
-    return display
+        return " (agent-reported)"
+    return ""
 
 
 def verified_label(receipt: ShardReceipt) -> str:
@@ -2173,7 +2183,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
 
     dur = f"{receipt.duration_seconds:.1f}s" if receipt.duration_seconds is not None else "-"
     lines.append(_row("Duration", dur))
-    lines.append(_row("Status", receipt.status))
+    lines.append(_row("Status", receipt.status + agent_reported_suffix(receipt)))
     if receipt.attempt_number is not None:
         lines.append(_row("Attempt", f"{receipt.attempt_number} (Shard {receipt.shard_id})"))
     lines.append("")
