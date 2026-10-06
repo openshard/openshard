@@ -105,13 +105,14 @@ CODEX_PROFILE = AgentProfile(
     hook_evidence_source="codex_hook",
     files_source_label="codex_hook_reported",
     model_source="codex_hook",
-    usage_provenance="agent_reported",
+    usage_provenance="vendor_telemetry",
     task_placeholder="Codex session (task not captured)",
     import_note=(
         "Captured automatically from Codex lifecycle hooks. "
         "Tool/file facts are as reported by Codex; files are inferred from git diff. "
-        "The model slug is the one Codex reports in its hook payloads; cost and token "
-        "counts are not exposed by Codex hooks and stay Not recorded. "
+        "The model slug is the one Codex reports in its hook payloads. When the runtime transcript "
+        "is readable, Openshard records its cumulative token counter as vendor telemetry and may "
+        "derive a dated list-rate cost estimate for a single known model; otherwise usage stays Not recorded. "
         "OpenShard does not run checks for this capture path: any check outcome here is the "
         "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
