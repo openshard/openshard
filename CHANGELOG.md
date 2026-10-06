@@ -8,6 +8,11 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- Connected cloud capture now carries repository identity and branch from the
+  first hook when git can identify them, instead of waiting for a later
+  Receipt fold. This keeps the hosted Remote attached to the repository from
+  the start; Platform can still self-heal when identity arrives later.
+
 - An external agent's record that carries only the old pass/fail flags (no
   capture detail) no longer reads as "Passed (OpenShard ran the check(s))".
   Its outcome is shown as the agent's own report, as for every other
@@ -32,6 +37,15 @@ All notable changes to OpenShard are documented here.
   comment JSON keeps `files_changed` and adds `files_observable`.
 
 ### Added
+
+- Live Codex hook capture can now use the hook-provided runtime transcript as
+  bounded usage telemetry. After the transcript proves the same session id,
+  Openshard reads only model/provider identifiers and the latest cumulative
+  `token_count`, separates cached from uncached input, and records token
+  provenance as vendor telemetry. A dated list-rate cost estimate is added
+  only when one known priced model served the cumulative usage; otherwise
+  cost stays unknown. Transcript content and the locator never enter the
+  Receipt or sync payload.
 
 - Connected capture accepts `OPENSHARD_CONNECTED_TOKEN=proxy-injected` for
   environments whose egress proxy injects the real `osc_` credential (Claude
