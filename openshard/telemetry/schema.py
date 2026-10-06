@@ -134,7 +134,10 @@ COMMANDS = (
     "other",
 )
 HISTORY_COMMANDS = ("history", "context", "search", "relevant_context", "last", "stats")
-MCP_TOOLS = ("recent_shards", "get_shard", "get_receipt", "search_history", "relevant_context")
+MCP_TOOLS = (
+    "recent_shards", "get_shard", "get_receipt", "get_receipts_by_task",
+    "search_history", "relevant_context", "learning_signals", "authority_snapshot",
+)
 SERVICE_STATES = ("started", "stopped", "idle_exit", "spawn_failed")
 CONSENT_SOURCES = ("setup", "onboarding", "cli", "env", "config")
 MODEL_FAMILIES = (
