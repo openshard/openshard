@@ -25,6 +25,7 @@ from openshard.history.shard import (
 from openshard.history.shard_hash import verify_shard_hash
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
+from openshard.history.usage_evidence import effective_usage, usage_line
 from openshard.history.verification import (
     REASON_OUTCOME_NOT_OBSERVED,
     SOURCE_AGENT_REPORTED,
@@ -632,6 +633,11 @@ class ShardReceipt:
     # execution_loop, base_commit, content_hash, session, routing, retry and
     # model_stage_metrics. Read-only projections; None for hand-built receipts.
     recorded_evidence: dict | None = None
+    # Usage and cost evidence (history/usage_evidence.py): the record's own
+    # usage, strengthened by usage attestations that name this Receipt
+    # (``.openshard/usage.jsonl``), joined by the caller at read time. The
+    # flat token/cost fields above stay exactly what the record says.
+    usage: dict | None = None
 
 
 def _verification_from_osn_contract(
@@ -942,6 +948,7 @@ def _file_line(fd: dict) -> str | None:
 
 def build_shard_receipt(
     entry: dict, index: int | None = None, *, post_session_verification: dict | None = None,
+    usage_attestations: list[dict] | None = None,
 ) -> ShardReceipt:
     """Convert a raw run-history entry dict into a ShardReceipt. Never raises.
 
@@ -949,6 +956,8 @@ def build_shard_receipt(
     summary for this record (resolved by the caller from
     ``.openshard/verifications.jsonl``); it is carried on the receipt so
     every consumer interprets the same evidence (``verification_truth``).
+    *usage_attestations* are the usage attestations naming this record
+    (``.openshard/usage.jsonl``); they only ever feed ``usage``.
     """
     stored_entry = entry
     entry = control_evidence_view(entry)
@@ -1533,6 +1542,7 @@ def build_shard_receipt(
         changes=_changes_summary(_changes_block),
         files_excluded=_files_excluded,
         recorded_evidence=project_entry_evidence(entry),
+        usage=effective_usage(entry, _own_usage_attestations(entry, usage_attestations)),
         shard=build_shard(
             entry,
             shard_id=_shard_id_val,
@@ -1541,6 +1551,26 @@ def build_shard_receipt(
             task_full=task,
         ),
     )
+
+
+# Agents whose usage normally arrives from Cursor after the Receipt is written.
+_CURSOR_USAGE_AGENTS = frozenset({"cursor", "grok_bot"})
+
+
+def _shows_usage_row(receipt: ShardReceipt) -> bool:
+    """The Usage row: on Cursor-family Receipts, and on any Receipt later usage evidence strengthened."""
+    usage = receipt.usage
+    if not isinstance(usage, dict):
+        return False
+    return bool(usage.get("reconciled_by")) or usage.get("agent") in _CURSOR_USAGE_AGENTS
+
+
+def _own_usage_attestations(entry: dict, attestations: list[dict] | None) -> list[dict]:
+    """Only attestations naming this record's receipt_id: usage never crosses Receipts."""
+    rid = entry.get("receipt_id")
+    if not isinstance(rid, str) or not rid or not isinstance(attestations, list):
+        return []
+    return [a for a in attestations if isinstance(a, dict) and a.get("receipt_id") == rid]
 
 
 def _row(label: str, value: str, width: int = _COL) -> str:
@@ -1983,6 +2013,8 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         if receipt.tokens_cache_read:
             _tok_line += f" (+{_format_token_count(receipt.tokens_cache_read)} cache read)"
         lines.append(_row("Tokens", _tok_line))
+    if _shows_usage_row(receipt):
+        lines.append(_row("Usage", usage_line(receipt.usage)))
     lines.append(_row("Result", receipt.result))
     _secret_count = sum(1 for c in receipt.evidence_capsules if c.kind == "secret_scan")
     if _secret_count:
@@ -2393,6 +2425,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         _tok_in = _format_token_count(receipt.tokens_input or 0)
         _tok_out = _format_token_count(receipt.tokens_output or 0)
         lines.append(_row("Tokens", f"{_tok_in} input / {_tok_out} output"))
+    if _shows_usage_row(receipt):
+        lines.append(_row("Usage", usage_line(receipt.usage)))
     lines.append("")
 
     lines.append(f"{_INDENT}CHECKS")

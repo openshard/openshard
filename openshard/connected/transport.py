@@ -95,5 +95,9 @@ class ConnectedCaptureClient:
         body = {**self._identity(), "receipt_id": receipt_id, "envelope": envelope}
         return self._request("/verification-evidence", body, classify_evidence_status)[0]
 
+    def send_usage(self, receipt_id: str, envelope: dict) -> SendResult:
+        body = {**self._identity(), "receipt_id": receipt_id, "envelope": envelope}
+        return self._request("/usage-evidence", body, classify_evidence_status)[0]
+
 
 __all__ = ["ConnectedCaptureClient", "TOTAL_TIMEOUT_SECONDS"]

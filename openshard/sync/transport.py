@@ -23,8 +23,10 @@ kind            HTTP         meaning for the sender
 ==============  ===========  =============================================
 
 Later verification evidence (``sync/evidence.py``) goes to a second route,
-``.../receipts/<receipt_id>/verification-evidence``, with the same
-classification except for 404, which there never means "wrong link":
+``.../receipts/<receipt_id>/verification-evidence``, and later usage
+evidence (``sync/usage.py``) to ``.../receipts/<receipt_id>/usage-evidence``.
+Both use the same classification except for 404, which there never means
+"wrong link":
 
 ==================  =====================  ================================
 ``receipt_pending``  404 receipt_not_found  the Receipt is not hosted yet:
@@ -92,6 +94,12 @@ class EvidenceTransport(Protocol):
     def send_evidence(self, receipt_id: str, envelope: dict) -> SendResult: ...
 
 
+class UsageTransport(Protocol):
+    """A transport that can also send later usage evidence for a hosted Receipt."""
+
+    def send_usage(self, receipt_id: str, envelope: dict) -> SendResult: ...
+
+
 class RecordingPlatformTransport:
     """Tests: answers from a script (cycled when exhausted) and remembers every envelope."""
 
@@ -99,6 +107,7 @@ class RecordingPlatformTransport:
 
     def __init__(
         self, results: list[SendResult] | None = None, *, evidence_results: list[SendResult] | None = None,
+        usage_results: list[SendResult] | None = None,
     ) -> None:
         self.results = list(results or [SendResult(KIND_CREATED, 201)])
         self.envelopes: list[dict] = []
@@ -106,11 +115,20 @@ class RecordingPlatformTransport:
         self.evidence_results = list(evidence_results or [SendResult(KIND_CREATED, 201)])
         self.evidence_envelopes: list[dict] = []
         self._evidence_calls = 0
+        self.usage_results = list(usage_results or [SendResult(KIND_CREATED, 201)])
+        self.usage_envelopes: list[dict] = []
+        self._usage_calls = 0
 
     def send_evidence(self, receipt_id: str, envelope: dict) -> SendResult:
         self.evidence_envelopes.append(json.loads(json.dumps(envelope)))
         result = self.evidence_results[min(self._evidence_calls, len(self.evidence_results) - 1)]
         self._evidence_calls += 1
+        return result
+
+    def send_usage(self, receipt_id: str, envelope: dict) -> SendResult:
+        self.usage_envelopes.append(json.loads(json.dumps(envelope)))
+        result = self.usage_results[min(self._usage_calls, len(self.usage_results) - 1)]
+        self._usage_calls += 1
         return result
 
     def send(self, envelope: dict) -> SendResult:
@@ -178,6 +196,12 @@ class HttpsPlatformTransport:
         import urllib.parse
 
         url = f"{self.url}/{urllib.parse.quote(receipt_id, safe='')}/verification-evidence"
+        return self._post(url, envelope, classify_evidence_status)
+
+    def send_usage(self, receipt_id: str, envelope: dict) -> SendResult:
+        import urllib.parse
+
+        url = f"{self.url}/{urllib.parse.quote(receipt_id, safe='')}/usage-evidence"
         return self._post(url, envelope, classify_evidence_status)
 
     def _post(self, url: str, envelope: dict, classify: Any) -> SendResult:

@@ -446,6 +446,24 @@ class TestMissingStaysMissing:
         zero = build_shard_receipt({"timestamp": "2026-10-01T00:00:00Z", "task": "t", "estimated_cost": 0.0})
         assert zero.cost_raw == 0.0 and zero.cost_display.startswith("$0.0")
 
+    def test_cursor_all_zero_usage_without_usage_uuid_is_not_observed_zero(self):
+        from openshard.adapters.cursor_usage import parse_agent_usage
+        from openshard.history.usage_evidence import usage_line
+
+        zeros = {"inputTokens": 0, "outputTokens": 0, "cacheWriteTokens": 0, "cacheReadTokens": 0, "totalTokens": 0}
+        pending = parse_agent_usage({"runs": [{"id": "run-1", "usage": zeros}]})
+        recorded = parse_agent_usage({"runs": [{"id": "run-1", "usageUuid": "u-1", "usage": zeros}]})
+        assert pending.outcome == "pending" and pending.tokens == {}
+        assert recorded.outcome == "recorded" and recorded.tokens["total"] == 0
+        receipt = build_shard_receipt({
+            "timestamp": "2026-10-01T00:00:00Z", "task": "t", "executor": "cursor_hooks",
+            "capture": {"agent": "cursor", "source": "cursor_hooks", "session_id": "x"},
+        })
+        text = render_compact_shard_receipt(receipt) + "\n" + usage_line(receipt.usage)
+        assert "$0" not in text
+        assert "0 tokens" not in text.lower() or "unknown" in usage_line(receipt.usage).lower()
+        assert usage_line(receipt.usage).startswith("Usage unavailable")
+
 
 # ---------------------------------------------------------------------------
 # 4. Self-report is not independent proof

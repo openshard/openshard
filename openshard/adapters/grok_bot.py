@@ -654,6 +654,7 @@ def build_otel_entry(state: dict, events: list[dict], record: dict, repo_root: P
             "evidence_level": "platform_observed",
             "observer": OBSERVER_OTEL,
             "session_id": state["conversation_id"],
+            "cursor_conversation_id": state["conversation_id"],
             "status": "in_progress",
             "session_end_observed": False,
             "session_end_reason": None,
