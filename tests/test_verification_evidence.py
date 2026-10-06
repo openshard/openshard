@@ -380,6 +380,37 @@ class TestOldReceipts:
         assert r.verification_status == ""  # honestly nothing: null over the wire
         assert _receipt_json(self.PRE_STAMPING)["verification_status"] is None
 
+    @pytest.mark.parametrize("executor", ["codex_hooks", "cursor_hooks", "codex_history_import"])
+    @pytest.mark.parametrize(("passed", "status", "state"), [
+        (True, "passed", "agent_reported_passed"),
+        (False, "failed", "agent_reported_failed"),
+    ])
+    def test_external_booleans_without_capture_are_never_openshard_executed(self, executor, passed, status, state):
+        from openshard.history.verification_truth import interpret_receipt
+
+        entry = {"timestamp": "2026-01-01T00:00:00Z", "task": "t", "executor": executor,
+                 "verification_attempted": True, "verification_passed": passed}
+        r = build_shard_receipt(entry)
+        assert (r.verification["status"], r.verification["source"]) == (status, "agent_reported")
+        assert r.verification["observation_mode"] == "legacy_boolean"
+        truth = interpret_receipt(r)
+        assert truth.state == state and truth.authority == "agent_reported"
+        assert truth.effective_status == ("failed" if status == "failed" else "unknown")
+
+    @pytest.mark.parametrize("attempted", [False, True])
+    def test_external_booleans_without_an_outcome_stay_unknown(self, attempted):
+        entry = {"timestamp": "2026-01-01T00:00:00Z", "task": "t", "executor": "codex_hooks",
+                 "verification_attempted": attempted, "verification_passed": None}
+        ev = v.derive_verification(entry)
+        assert ev.status == "unknown" and ev.source is None
+        assert ("outcome_not_observed" in ev.incomplete_reasons) is attempted
+
+    def test_openshard_pipeline_booleans_stay_openshard_executed(self):
+        entry = {"timestamp": "2026-01-01T00:00:00Z", "task": "t", "retry_triggered": False,
+                 "verification_attempted": True, "verification_passed": True}
+        ev = v.derive_verification(entry)
+        assert (ev.status, ev.source, ev.observation_mode) == ("passed", "directly_observed", "openshard_executed")
+
     @pytest.mark.parametrize("name", ["OLD_HOOK", "OLD_IMPORT", "PRE_STAMPING"])
     def test_reading_never_rewrites_the_stored_record(self, name):
         entry = copy.deepcopy(getattr(self, name))

@@ -6,6 +6,11 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- An external agent's record that carries only the old pass/fail flags (no
+  capture detail) no longer reads as "Passed (OpenShard ran the check(s))".
+  Its outcome is shown as the agent's own report, as for every other
+  hook-captured session.
+
 - Receipts for external or historical runs (Claude Code, Codex, Cursor,
   OpenCode and other observed agents, and imported history) no longer show
   OpenShard control evidence, even when the stored record carries it: no
@@ -23,6 +28,15 @@ All notable changes to OpenShard are documented here.
   `unknown / not_observable` instead of `present / no_file_changes`, and
   `openshard pr comment` shows "not observable" instead of `0`. The PR
   comment JSON keeps `files_changed` and adds `files_observable`.
+
+### Added
+
+- A Receipt honesty eval (`python -m openshard.evals.receipt_honesty`). It
+  produces Receipts through real agent capture, the OSN loop and
+  `openshard verify`, then checks that every local and hosted surface claims
+  only what the evidence supports: agent-reported passes stay unverified,
+  failures are never hidden, missing cost and tokens stay missing, and free
+  and paid runs get the same evidence. It tests Receipts, not models.
 
 ## 0.4.12 - 2026-10-05
 

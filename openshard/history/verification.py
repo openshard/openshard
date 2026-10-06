@@ -50,6 +50,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from openshard.history.shard import (
+    ORIGIN_EXTERNAL_OBSERVED,
+    ORIGIN_HISTORICAL_IMPORT,
+    derive_shard_identity,
+)
+
 VERIFICATION_BLOCK_VERSION = 1
 
 STATUS_PASSED = "passed"
@@ -554,6 +560,9 @@ def _derive_legacy(entry: dict) -> VerificationEvidence:
     if attempted is None:
         return VerificationEvidence(status=STATUS_UNKNOWN, observation_mode=MODE_NONE)
 
+    if derive_shard_identity(entry)[1] in (ORIGIN_EXTERNAL_OBSERVED, ORIGIN_HISTORICAL_IMPORT):
+        return _external_legacy(attempted, passed)
+
     # Native / pipeline records: OpenShard itself ran (or decided not to
     # run) the verification plan and read its exit status.
     if not attempted:
@@ -585,6 +594,30 @@ def _derive_legacy(entry: dict) -> VerificationEvidence:
     ev.mark_incomplete(REASON_OUTCOME_NOT_OBSERVED)
     if ev.checks:
         _fill_counts(ev)
+    return ev
+
+
+def _external_legacy(attempted: object, passed: object) -> VerificationEvidence:
+    """Bare booleans on an external agent's (or imported) record that has no capture block.
+
+    OpenShard ran nothing for such a session, so no outcome here is
+    ``directly_observed``. A recorded outcome is the agent's account: a
+    claimed pass is never verified, a claimed failure still lowers confidence.
+    """
+    if attempted and isinstance(passed, bool):
+        return VerificationEvidence(
+            status=STATUS_PASSED if passed else STATUS_FAILED,
+            source=SOURCE_AGENT_REPORTED,
+            observation_mode=MODE_LEGACY_BOOLEAN,
+            reason="An external agent's record states this outcome; OpenShard did not run the check.",
+        )
+    ev = VerificationEvidence(
+        status=STATUS_UNKNOWN,
+        observation_mode=MODE_LEGACY_BOOLEAN,
+        reason="An external agent's record without capture detail; verification was not observed.",
+    )
+    if attempted:
+        ev.mark_incomplete(REASON_OUTCOME_NOT_OBSERVED)
     return ev
 
 
