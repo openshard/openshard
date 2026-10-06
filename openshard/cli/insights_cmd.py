@@ -102,7 +102,7 @@ def insights_agents(as_json: bool) -> None:
 
 
 @insights_group.command("costs")
-@click.option("--by", type=click.Choice(["model", "agent", "task"]), default="model", show_default=True)
+@click.option("--by", type=click.Choice(["model", "agent", "task", "provider", "product", "surface"]), default="model", show_default=True)
 @click.option("--json", "as_json", is_flag=True, default=False)
 def insights_costs(by: str, as_json: bool) -> None:
     """Show recorded cost without treating unknown as zero."""
