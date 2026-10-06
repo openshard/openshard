@@ -299,6 +299,37 @@ class TestSectionStatuses(unittest.TestCase):
         contract = build_shard_proof_contract(entry)
         self.assertEqual(_section(contract, "files")["status"], "partial")
 
+    def _unobservable_files_entry(self, **kwargs) -> dict:
+        entry = _strong_entry(**kwargs)
+        entry.pop("files_detail")
+        entry["files_created"] = 0
+        entry["files_updated"] = 0
+        entry["changes"] = {"agent_reported": 0, "git_observed": 0, "files_observable": False}
+        return entry
+
+    def test_unobservable_file_changes_are_not_claimed_as_no_changes(self) -> None:
+        contract = build_shard_proof_contract(self._unobservable_files_entry())
+        actions = _section(contract, "actions")
+        self.assertEqual((actions["status"], actions["detail"]), ("partial", "file_changes_not_observable"))
+        files = _section(contract, "files")
+        self.assertEqual((files["status"], files["detail"]), ("unknown", "not_observable"))
+        self.assertNotEqual(contract["overall_status"], OVERALL_STRONG)
+        self.assertIn("files", contract["weak_recommended_sections"])
+
+    def test_unobservable_file_changes_without_result_is_unknown_required(self) -> None:
+        contract = build_shard_proof_contract(self._unobservable_files_entry(summary=""))
+        actions = _section(contract, "actions")
+        self.assertEqual((actions["status"], actions["detail"]), ("unknown", "not_observable"))
+        self.assertIn("actions", contract["missing_required_sections"])
+
+    def test_zero_files_on_observable_capture_is_still_no_file_changes(self) -> None:
+        entry = self._unobservable_files_entry()
+        entry["changes"] = {"agent_reported": 0, "git_observed": 0}
+        contract = build_shard_proof_contract(entry)
+        actions = _section(contract, "actions")
+        self.assertEqual((actions["status"], actions["detail"]), ("present", "no_file_changes"))
+        self.assertEqual(_section(contract, "files")["status"], "missing")
+
     def test_missing_required_section_drives_partial_overall(self) -> None:
         entry = _strong_entry()
         entry["task"] = ""

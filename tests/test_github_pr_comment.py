@@ -154,6 +154,27 @@ def test_files_changed_maps_from_receipt():
     receipt = _minimal_receipt(files_changed=7)
     summary = build_pr_comment_summary(_minimal_entry(), receipt)
     assert summary.files_changed == 7
+    assert summary.files_observable is True
+    assert "**Files changed:** 7" in render_pr_comment(summary)
+
+
+def test_unobservable_file_changes_are_not_rendered_as_zero():
+    receipt = _minimal_receipt(
+        files_changed=0, changes={"agent_reported": 0, "git_observed": 0, "files_observable": False},
+    )
+    summary = build_pr_comment_summary(_minimal_entry(), receipt)
+    assert summary.files_observable is False
+    assert dataclasses.asdict(summary)["files_changed"] == 0  # existing JSON field kept
+    md = render_pr_comment(summary)
+    assert "**Files changed:** not observable" in md
+    assert "**Files changed:** 0" not in md
+
+
+def test_zero_files_on_observable_capture_still_renders_zero():
+    receipt = _minimal_receipt(files_changed=0, changes={"agent_reported": 0, "git_observed": 0})
+    summary = build_pr_comment_summary(_minimal_entry(), receipt)
+    assert summary.files_observable is True
+    assert "**Files changed:** 0" in render_pr_comment(summary)
 
 
 def test_inspected_files_capped():

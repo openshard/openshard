@@ -4,6 +4,16 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- A Receipt whose integration cannot see file changes (Grok Bot's Action
+  Recording export) no longer reads as "no files changed" outside the
+  Receipt itself. The proof contract reports `actions` as
+  `partial / file_changes_not_observable` and `files` as
+  `unknown / not_observable` instead of `present / no_file_changes`, and
+  `openshard pr comment` shows "not observable" instead of `0`. The PR
+  comment JSON keeps `files_changed` and adds `files_observable`.
+
 ## 0.4.12 - 2026-10-05
 
 <!-- release-title: Openshard v0.4.12 - The Next Run Release -->
