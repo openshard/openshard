@@ -7836,12 +7836,16 @@ def remote_status(as_json: bool) -> None:
         click.echo(json.dumps(_machine_envelope(
             "remote.status", "attached" if attachment else "connected" if connection else "not_attached",
             attachment=attachment.to_public_dict() if attachment else None, local=local, hosted=hosted,
-            connected=connection is not None, sessions=sessions,
+            connected=connection is not None, connection_source=connection.source if connection else None,
+            sessions=sessions,
         ), indent=2))
         return
     if attachment is None:
         if connection is not None:
             click.echo(f"Connected capture: {len(sessions)} session(s), {local['pending']} event(s) queued")
+            click.echo(f"  credential: from {connection.source}"
+                       + (" (the proxy injects it; OpenShard cannot see whether it did)"
+                          if connection.proxy_backed else ""))
             click.echo(f"  local:     {local['spooled'] or 0} captured, {local['sent'] or 0} sent")
             if not sessions:
                 click.echo("  No captured session has been recorded in this environment yet.")

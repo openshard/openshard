@@ -140,6 +140,41 @@ the survival and reconciliation proofs ran in disposable containers with
 the same hooks and the same collector. Treat the table as what the
 providers document, not as verified behaviour.
 
+## Claude Cloud: a persistent connection without the secret in the environment
+
+A connected-capture credential (`osc_...`, created once under **Settings ->
+Agents -> Claude Cloud**) lets every Claude Code on the web session stream
+without a per-run `remote create`. Claude Cloud can hold that secret in its
+**API Credentials** store and inject it, through its egress proxy, into
+requests to the Platform host only. Set it up so that the token never sits
+in an environment variable or a file:
+
+1. In Claude Cloud **API Credentials**, store the real `osc_` token for
+   `api.openshard.dev` (the Platform host the connection was created on).
+2. In the environment, set the non-secret marker and the other three values the
+   Agents page shows:
+
+   ```
+   OPENSHARD_CONNECTED_TOKEN=proxy-injected
+   OPENSHARD_CONNECTED_ENDPOINT=https://api.openshard.dev
+   OPENSHARD_CONNECTED_ORG_ID=<organisation id>
+   OPENSHARD_CONNECTED_SURFACE=claude-code-web
+   ```
+
+3. Allow outbound HTTPS to the Platform host and run the usual setup script
+   (`pip install -U openshard && openshard setup --yes`).
+
+OpenShard sends `Authorization: Bearer proxy-injected` through the same
+transport as any other token and the proxy replaces it. OpenShard cannot see
+whether that happened: if nothing is injected, the Platform answers 401 and
+the collector stops with `unauthorized`, exactly as for an expired token
+(see **Failure handling**); if a credential of the wrong kind is injected,
+the Platform answers 403 and nothing is accepted. `remote status` reports
+the connection source as `proxy`. Only the literal `proxy-injected` is
+treated this way; any other value must still be a well-formed `osc_` or
+`osk_` token. Do not put the real token in a normal environment variable or
+a file in the environment: agent-generated code can read both.
+
 ## Fallback: Git and CI only
 
 Where OpenShard cannot run, be installed, reach the network or install
