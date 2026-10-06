@@ -184,7 +184,7 @@ def _telemetry_status_for_agents() -> dict:
 
 _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Getting Started", ("connect", "setup", "doctor")),
-    ("Receipts", ("last", "history", "report", "context", "learn", "insights")),
+    ("Receipts", ("last", "history", "usage", "report", "context", "learn", "insights")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
     ("Integrations", ("mcp", "capture", "sync", "remote", "import", "ingest", "wrap", "adapters", "telemetry")),
     # Everything else (run, plan, models, roster, eval, packs, ...) falls
@@ -1731,6 +1731,7 @@ def metrics():
 
 def _render_log_entry(
     entry: dict, detail: str, index: int | None = None, *, post_session_verification: dict | None = None,
+    usage_attestations: list[dict] | None = None,
 ) -> None:
     """Render a stored run log entry at the requested detail level.
 
@@ -1844,7 +1845,10 @@ def _render_log_entry(
             render_compact_shard_receipt,
             render_full_shard_receipt,
         )
-        _shard = build_shard_receipt(entry, index, post_session_verification=post_session_verification)
+        _shard = build_shard_receipt(
+            entry, index, post_session_verification=post_session_verification,
+            usage_attestations=usage_attestations,
+        )
         click.echo("")
         click.echo(render_compact_shard_receipt(_shard))
         click.echo("")
@@ -2088,7 +2092,10 @@ def _render_log_entry(
             build_shard_receipt,
             render_compact_shard_receipt,
         )
-        _shard = build_shard_receipt(entry, index, post_session_verification=post_session_verification)
+        _shard = build_shard_receipt(
+            entry, index, post_session_verification=post_session_verification,
+            usage_attestations=usage_attestations,
+        )
         click.echo("")
         click.echo(render_compact_shard_receipt(_shard))
 
@@ -2201,7 +2208,10 @@ def last(more: bool, full: bool, as_json: bool):
         # (sidecar, OpenShard-executed); None when never re-verified. It is
         # carried on the receipt so trust, proof and quality all read it.
         _post = _post_session_verification_for(entry, log_path)
-        receipt = build_shard_receipt(entry, index=len(entries) - 1, post_session_verification=_post)
+        _usage_atts = _usage_attestations_for(entry, log_path)
+        receipt = build_shard_receipt(
+            entry, index=len(entries) - 1, post_session_verification=_post, usage_attestations=_usage_atts,
+        )
         from openshard.history.proof_contract import build_shard_proof_contract
         from openshard.history.shard_quality import build_shard_quality_summary
         from openshard.history.trust_score import evaluate_trust_score
@@ -2230,6 +2240,7 @@ def last(more: bool, full: bool, as_json: bool):
             verification_truth=interpret_receipt(receipt).to_dict(),
             verification_view=build_verification_view(receipt),
             post_session_verification=_post,
+            usage=receipt.usage,
             **_content_hash_fields(entry),
         )
         click.echo(json.dumps(payload, indent=2))
@@ -2247,7 +2258,10 @@ def last(more: bool, full: bool, as_json: bool):
     for line in repo_note_lines(loc):
         click.echo(line)
     _post_verification = _post_session_verification_for(entries[-1], log_path)
-    _render_log_entry(entries[-1], detail, index=len(entries) - 1, post_session_verification=_post_verification)
+    _render_log_entry(
+        entries[-1], detail, index=len(entries) - 1, post_session_verification=_post_verification,
+        usage_attestations=_usage_attestations_for(entries[-1], log_path),
+    )
     _echo_verification_view(entries[-1], len(entries) - 1, _post_verification)
     if _post_verification is not None and _post_verification.get("verification") is not None:
         from openshard.verification.post_session import display_line
@@ -2287,6 +2301,19 @@ def _post_session_verification_for(entry: dict, log_path: Path) -> dict | None:
         return latest_for_entry(entry, load_attestations(log_path.parent))
     except Exception:
         return None
+
+
+def _usage_attestations_for(entry: dict, log_path: Path) -> list[dict]:
+    """The usage attestations naming *entry* (``usage.jsonl`` next to runs.jsonl), oldest first."""
+    try:
+        from openshard.history.usage_evidence import (
+            load_usage_attestations,
+            usage_attestations_for_entry,
+        )
+
+        return usage_attestations_for_entry(entry, load_usage_attestations(log_path.parent))
+    except Exception:
+        return []
 
 
 def _select_entry(entries: list[dict], ref: str | None) -> dict | None:
@@ -7553,6 +7580,13 @@ def sync_now(limit: int, as_json: bool) -> None:
         click.echo(evidence + ".")
     if report.evidence_unsupported:
         click.echo("Verification evidence: not sent; this Platform does not accept later evidence yet.")
+    if report.usage_sent:
+        usage = f"Usage evidence: {report.usage_recorded} Receipt(s) updated"
+        if report.usage_not_accepted:
+            usage += f", {report.usage_not_accepted} not accepted (see `openshard sync status --json`)"
+        click.echo(usage + ".")
+    if report.usage_unsupported:
+        click.echo("Usage evidence: not sent; this Platform does not accept later usage yet.")
 
 
 # ---------------------------------------------------------------------------
@@ -7753,6 +7787,8 @@ def remote_flush(background: bool, as_json: bool) -> None:
         line += f" Receipts delivered: {report.receipts['created']} new, {report.receipts['duplicate']} already hosted."
     if report.receipts and report.receipts.get("evidence_recorded"):
         line += f" Verification evidence updated for {report.receipts['evidence_recorded']} Receipt(s)."
+    if report.receipts and report.receipts.get("usage_recorded"):
+        line += f" Usage evidence updated for {report.receipts['usage_recorded']} Receipt(s)."
     if report.stopped:
         line += f" Stopped: {report.stopped}."
     click.echo(line)
@@ -8354,11 +8390,13 @@ from openshard.cli.ingest import ingest_group  # noqa: E402
 from openshard.cli.insights_cmd import insights_group  # noqa: E402
 from openshard.cli.learn_cmd import learn_group  # noqa: E402
 from openshard.cli.osn_cmd import osn_group  # noqa: E402
+from openshard.cli.usage_cmd import usage_group  # noqa: E402
 
 cli.add_command(ingest_group)
 cli.add_command(insights_group)
 cli.add_command(osn_group)
 cli.add_command(learn_group)
+cli.add_command(usage_group)
 
 from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
 

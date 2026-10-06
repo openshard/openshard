@@ -78,8 +78,14 @@ Confirmed against Cursor's hooks reference (``cursor.com/docs/agent/hooks``):
   the Tab hooks, and ``workspaceOpen``.
 
 Cost and token counts are not exposed by Cursor hooks, so a Cursor record
-never carries them. The model provider is not exposed either and is never
-guessed from the model name.
+never carries them at capture time. Later Cursor-reported usage can be
+attached to the same Receipt by ``openshard usage reconcile`` (Cloud Agents
+``GET /v1/agents/{id}/usage`` or Admin usage events). Until then the Usage
+row stays unknown or pending, never an observed $0. An all-zero Cloud
+Agents usage response without ``usageUuid`` is pending, not a measured
+zero. The model provider is not exposed either and is never guessed from
+the model name or from the agent (Cursor is not a model; Grok Bot is not
+Grok).
 """
 
 from __future__ import annotations
@@ -240,6 +246,9 @@ def extract_cursor_payload(data: Mapping[str, Any], *, event_override: str | Non
         model_id=_model(data),
         tool_success=None,
     )
+    generation_id = _str_or_none(data.get("generation_id"), 80)
+    if generation_id:
+        payload.attrs["cursor_generation_id"] = generation_id
 
     if name == "beforeSubmitPrompt":
         payload.prompt = _str_or_none(data.get("prompt"))

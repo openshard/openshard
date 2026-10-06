@@ -14,12 +14,14 @@ call                   route        answers that matter
                                     again later
 ``send``               POST receipts   the receipt-sync answers (201/200/409/4xx)
 ``send_evidence``      POST receipts/<id>/verification-evidence
+``send_usage``         POST receipts/<id>/usage-evidence
 =====================  ===========  ==========================================
 
-``send`` and ``send_evidence`` make this a ``PlatformTransport``, so the
-ordinary sync flush (``sync/client.py``) delivers the session's Receipt and
-its later verification evidence through the capture, with the same outbox
-and the same idempotency, and without an organisation API key in the runtime.
+``send``, ``send_evidence`` and ``send_usage`` make this a
+``PlatformTransport``, so the ordinary sync flush (``sync/client.py``)
+delivers the session's Receipt and its later verification and usage
+evidence through the capture, with the same outbox and the same
+idempotency, and without an organisation API key in the runtime.
 """
 
 from __future__ import annotations
@@ -98,6 +100,12 @@ class RemoteCaptureClient:
         import urllib.parse
 
         path = f"/receipts/{urllib.parse.quote(receipt_id, safe='')}/verification-evidence"
+        return self._request("POST", path, envelope, classify_evidence_status)[0]
+
+    def send_usage(self, receipt_id: str, envelope: dict) -> SendResult:
+        import urllib.parse
+
+        path = f"/receipts/{urllib.parse.quote(receipt_id, safe='')}/usage-evidence"
         return self._request("POST", path, envelope, classify_evidence_status)[0]
 
 

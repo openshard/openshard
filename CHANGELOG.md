@@ -38,6 +38,15 @@ All notable changes to OpenShard are documented here.
   failures are never hidden, missing cost and tokens stay missing, and free
   and paid runs get the same evidence. It tests Receipts, not models.
 
+- Usage and cost evidence on the same Receipt (`openshard last`,
+  `openshard usage show`, `.openshard/usage.jsonl`). Cursor hooks still
+  capture no tokens or cost; Grok Bot OpenTelemetry tokens stay
+  vendor-telemetry. Later Cursor usage (Cloud Agents `GET /v1/agents/{id}/usage`
+  and Admin usage events) can be reconciled onto the existing Receipt by
+  `openshard usage reconcile`. An all-zero Cloud Agents response without
+  `usageUuid` is pending, not observed $0. Hosted copies get a separate
+  `usage-evidence` route; the receipt-sync payload is unchanged.
+
 ## 0.4.12 - 2026-10-05
 
 <!-- release-title: Openshard v0.4.12 - The Next Run Release -->

@@ -210,6 +210,15 @@ def observe(entry: dict, attestations: list[dict]) -> dict[str, Any]:
         "hosted_origin": hosted["origin"],
         "hosted_cost_usd": hosted["cost_usd"],
         "hosted_tokens_input": hosted["tokens_input"],
+        "hosted_has_usage": "usage" in hosted,
+        "usage_tokens_status": (receipt.usage or {}).get("tokens", {}).get("status")
+        if isinstance(receipt.usage, dict) else None,
+        "usage_tokens_total": (receipt.usage or {}).get("tokens", {}).get("total")
+        if isinstance(receipt.usage, dict) else None,
+        "usage_cost_status": (receipt.usage or {}).get("cost", {}).get("status")
+        if isinstance(receipt.usage, dict) else None,
+        "usage_cost_usd": (receipt.usage or {}).get("cost", {}).get("usd")
+        if isinstance(receipt.usage, dict) else None,
         "hosted_state": (
             {k: hosted_state.get(k) for k in ("state", "authority", "effective_status", "basis")}
             if isinstance(hosted_state, dict) else None
@@ -357,6 +366,14 @@ def check_rules(
         obs["tokens_input"] is not None or obs["tokens_output"] is not None
     ):
         out.append(Violation(RULE_MISSING_NOT_ZERO, "no token provenance but Receipt states token counts"))
+    if obs.get("hosted_has_usage"):
+        out.append(Violation(RULE_SURFACES_AGREE, "hosted receipt-sync payload carries usage; that contract is closed"))
+    if (
+        not isinstance(entry.get("tokens_provenance"), str)
+        and obs.get("usage_tokens_total") == 0
+        and obs.get("usage_tokens_status") in ("observed", "reconciled")
+    ):
+        out.append(Violation(RULE_MISSING_NOT_ZERO, "no token provenance but usage states observed/reconciled 0"))
     cost = entry.get("estimated_cost")
     if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost == 0 and obs["cost_usd"] != 0.0:
         out.append(Violation(RULE_ZERO_NOT_MISSING, f"recorded $0 cost became {obs['cost_usd']!r}"))

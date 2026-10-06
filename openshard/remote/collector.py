@@ -217,7 +217,7 @@ def _deliver(env: dict | os._Environ | None, link: Any, client: Any, state: dict
     """Deliver finalised Receipts and later verification through the selected capture transport."""
     from openshard.sync import client as sync_client
     totals: dict[str, Any] = {"sent": 0, "created": 0, "duplicate": 0, "conflict": 0, "rejected": 0, "pending": 0,
-                              "in_progress": 0, "evidence_recorded": 0, "stopped": None}
+                              "in_progress": 0, "evidence_recorded": 0, "usage_recorded": 0, "stopped": None}
     for repo in [r for r in (state.get("repos") or []) if isinstance(r, str)]:
         root = Path(repo)
         if not (root / ".openshard" / "runs.jsonl").is_file():
@@ -226,7 +226,8 @@ def _deliver(env: dict | os._Environ | None, link: Any, client: Any, state: dict
                                 if isinstance(item, dict) and isinstance(item.get("receipt_id"), str))
         report = sync_client.flush(root, env=env, link=link, transport=client,
                                    limit=spool.MAX_LINKS, receipt_ids=receipt_ids)
-        for key in ("sent", "created", "duplicate", "conflict", "rejected", "pending", "in_progress", "evidence_recorded"):
+        for key in ("sent", "created", "duplicate", "conflict", "rejected", "pending", "in_progress",
+                    "evidence_recorded", "usage_recorded"):
             totals[key] += int(getattr(report, key, 0) or 0)
         totals["stopped"] = totals["stopped"] or report.stopped
     return totals
