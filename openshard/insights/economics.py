@@ -74,7 +74,11 @@ def allocate_subscription_cost(monthly_usd: object, units: object, total_units: 
     Callers choose the unit (receipts, credits, active minutes, etc.) and should
     record that choice in metadata.
     """
-    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in (monthly_usd, units, total_units)):
+    if isinstance(monthly_usd, bool) or not isinstance(monthly_usd, (int, float)):
+        return None
+    if isinstance(units, bool) or not isinstance(units, (int, float)):
+        return None
+    if isinstance(total_units, bool) or not isinstance(total_units, (int, float)):
         return None
     monthly, used, total = float(monthly_usd), float(units), float(total_units)
     if not all(math.isfinite(v) for v in (monthly, used, total)) or monthly < 0 or used < 0 or total <= 0 or used > total:
