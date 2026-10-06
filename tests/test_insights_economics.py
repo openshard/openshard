@@ -1,6 +1,11 @@
 from openshard.insights.economics import (
-    COST_ALLOCATED, COST_EQUIVALENT, COST_PROVIDER,
-    allocate_subscription_cost, canonical_surface, cost_evidence, strongest_cost,
+    COST_ALLOCATED,
+    COST_EQUIVALENT,
+    COST_PROVIDER,
+    allocate_subscription_cost,
+    canonical_surface,
+    cost_evidence,
+    strongest_cost,
 )
 
 
