@@ -134,6 +134,50 @@ def derive_shard_identity(entry: dict) -> tuple[str, str, str]:
     return "OpenShard", ORIGIN_UNKNOWN, CAPTURE_UNKNOWN
 
 
+# Fields only an OpenShard-controlled run can truthfully carry: they say what
+# OpenShard's own gates, approvals, sandbox, budgets, organisation policy and
+# routing decided. On an external or historical record OpenShard controlled
+# none of that (hooks only observe; ``runs.jsonl`` is a plain file the
+# observed agent can write), so such values are never read as evidence.
+OPENSHARD_CONTROL_KEYS: frozenset[str] = frozenset({
+    "policy_decisions",
+    "approval_request",
+    "approval_receipt",
+    "permission_evidence",
+    "sandbox",
+    "allowed_paths",
+    "blocked_paths",
+    "blocked_commands",
+    "osn_loop",
+    "osn_loop_summary",
+    "osn_progress_memory",
+    "agent_budgets",
+    "organisation_policy",
+    "capability_snapshot",
+    "adaptive_routing",
+    "supervisor_routing",
+})
+_UNCONTROLLED_ORIGINS = frozenset({ORIGIN_EXTERNAL_OBSERVED, ORIGIN_HISTORICAL_IMPORT})
+
+
+def control_evidence_view(entry: dict) -> dict:
+    """*entry* as control evidence may read it. Pure, never raises, never mutates.
+
+    Records with a positive external/historical origin lose every
+    ``OPENSHARD_CONTROL_KEYS`` field (a shallow copy); every other record is
+    returned unchanged. Integrity checks must use the stored record itself.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    try:
+        _, origin, _ = derive_shard_identity(entry)
+    except Exception:
+        return entry
+    if origin not in _UNCONTROLLED_ORIGINS or OPENSHARD_CONTROL_KEYS.isdisjoint(entry):
+        return entry
+    return {k: v for k, v in entry.items() if k not in OPENSHARD_CONTROL_KEYS}
+
+
 def build_shard(
     entry: dict,
     *,

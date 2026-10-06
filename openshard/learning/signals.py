@@ -428,8 +428,11 @@ def observe(entry: object) -> Observation | None:
 def _observe(entry: object) -> Observation | None:
     if not isinstance(entry, dict):
         return None
+    from openshard.history.shard import control_evidence_view
     from openshard.history.verification import MODE_IMPORTED_TRANSCRIPT
     from openshard.routing.adaptive.outcome import outcome_from_receipt
+
+    entry = control_evidence_view(entry)
 
     receipt_id = _str(entry.get("receipt_id"))
     if receipt_id is None:

@@ -97,6 +97,7 @@ from openshard.history.shard import (
     CAPTURE_FULL,
     ORIGIN_EXTERNAL_OBSERVED,
     ORIGIN_OPENSHARD_ROUTED,
+    control_evidence_view,
     derive_shard_identity,
 )
 from openshard.history.shard_schema import SHARD_BLOCKED_FIELDS
@@ -1047,6 +1048,7 @@ def events_from_entry(entry: object) -> list[Event]:
     try:
         if "events" in entry:
             return _embedded_events_from_entry(entry.get("events"))
+        entry = control_evidence_view(entry)
 
         run_ref = entry.get("shard_id") or entry.get("timestamp") or "unknown-run"
         if not isinstance(run_ref, str) or not run_ref.strip():
