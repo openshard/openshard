@@ -89,6 +89,9 @@ jobs:
           required_shas="$shas"
           backfill_shas='[]'
           while IFS= read -r request_sha; do
+            request_message=$(git show -s --format=%B "$request_sha")
+            request_pr_body=$(pr_body_for_sha "$request_sha" || true)
+            request_metadata=$(printf '%s\n%s\n' "$request_message" "$request_pr_body")
             while IFS= read -r capture_sha; do
               if [[ ! "$capture_sha" =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$capture_sha" "$request_sha"; then
                 echo "Receipt backfill must name an ancestor commit."
@@ -103,7 +106,7 @@ jobs:
                 echo "At most ten Receipt backfills are allowed per run."
                 exit 1
               fi
-            done < <(git show -s --format=%B "$request_sha" | sed -n 's/^Openshard-Capture-Commit:[[:space:]]*//Ip')
+            done < <(printf '%s\n' "$request_metadata" | sed -n 's/^Openshard-Capture-Commit:[[:space:]]*//Ip')
           done < <(jq -r '.[]' <<<"$required_shas")
           shas=$(jq -cn --argjson backfill "$backfill_shas" --argjson required "$required_shas" '$required + $backfill | reduce .[] as $sha ([]; if index($sha) then . else . + [$sha] end)')
 
