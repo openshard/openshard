@@ -16,12 +16,12 @@ from typing import Any
 import duckdb
 
 from openshard.history.failures import classify_failure
-from openshard.insights.economics import canonical_surface
 from openshard.history.run_cost import run_total_cost
 from openshard.history.shard import control_evidence_view
 from openshard.history.shard_contract import build_shard_receipt
 from openshard.history.store import load_history
 from openshard.history.views import receipt_to_dict
+from openshard.insights.economics import canonical_surface
 from openshard.learning.signals import task_category_for
 from openshard.routing.adaptive.outcome import outcome_from_receipt
 
