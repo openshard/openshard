@@ -112,6 +112,7 @@ def _explicit(env: dict | os._Environ) -> ConnectedConnection | None:
         return None
     if not isinstance(token, str):
         return None
+    raw_token = token
     token = token.strip()
     mode = env.get(CREDENTIAL_MODE_ENV)
     mode = mode.strip().lower() if isinstance(mode, str) else None
@@ -126,7 +127,7 @@ def _explicit(env: dict | os._Environ) -> ConnectedConnection | None:
         # placeholder and explicitly reject a real Openshard token in proxy
         # mode: a user who accidentally puts the real osc_/osk_ secret in the
         # sandbox should fail closed rather than silently expose it.
-        if _TOKEN_RE.match(token) or not (1 <= len(token) <= 512):
+        if raw_token != token or _TOKEN_RE.match(token) or not (1 <= len(token) <= 512):
             return None
         if any(ord(ch) < 33 or ord(ch) > 126 for ch in token):
             return None
