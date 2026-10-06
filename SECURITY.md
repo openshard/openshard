@@ -35,10 +35,13 @@ for security are below, with what each one trusts.
   instance id; it authorises nothing.
 * What the service stores outside `runs.jsonl`: per-session queue lines
   containing only the *reduced* payload (scrubbed 300-character prompt
-  excerpt, repo-relative paths, a 100-character summarized command), and,
-  since v0.4.4, bounded copies of queue lines that could not be decoded
-  under `.openshard/claude_sessions/quarantine/`. Never transcripts, tool
-  output, file contents, environment variables or absolute paths.
+  excerpt, repo-relative file targets, a 100-character summarized command)
+  plus, when the agent exposes one, a transient local transcript locator used
+  only to read bounded usage metadata. The locator is never copied into a
+  Receipt, sync payload or hosted storage. Since v0.4.4, bounded copies of
+  queue lines that could not be decoded may also live under
+  `.openshard/claude_sessions/quarantine/`. Transcript contents, tool output,
+  file contents and environment values are never stored there.
 * `openshard capture rotate-token` replaces the token; re-run
   `openshard setup` in each repository that captures Claude Code.
 
