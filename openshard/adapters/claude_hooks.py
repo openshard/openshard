@@ -178,6 +178,7 @@ from openshard.adapters.agent_env import agent_provider_or_none as _agent_provid
 from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
 from openshard.adapters.capture_agents import (
     AGENT_CLAUDE_CODE,
+    AGENT_CODEX,
     CLAUDE_CODE_PROFILE,
     AgentProfile,
     agent_for_executor,
