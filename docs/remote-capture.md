@@ -102,43 +102,54 @@ A partial capture keeps its journal and the Receipt identity it was told
 about. If that Receipt is ever synced by any route, the capture links to
 it. A Receipt is never manufactured from a journal.
 
-## Providers (official documentation, checked 2026-09-30)
+## Providers (official documentation, checked 2026-10-06)
 
-| | Codex cloud | Claude Code on the web | Cursor cloud agents |
+The cloud runtimes do not expose identical evidence. Openshard uses the
+provider-native hook/runtime path that actually exists and leaves unavailable
+fields unknown.
+
+| | Codex Cloud / ChatGPT Work coding runtime | Claude Code on the web | Cursor Cloud Agents |
 |---|---|---|---|
-| setup script with network | yes (install script / start skill) | yes (setup script, runs before Claude Code) | yes (`.cursor/environment.json` install/start) |
-| secrets in the agent phase | partial: environment variables are passed to programs; "network secrets" are substituted by a proxy for allowed domains only | partial: environment variables, readable by anyone using the environment | yes: runtime secrets, redacted in transcripts |
-| outbound HTTPS to the Platform during the agent phase | needs the host on the allowed domains | needs Custom network access with the host allowed | yes by default |
-| repository hooks honoured | **not documented** (cloud orchestration is documented as not running command hooks) | yes, from `.claude/settings.json`, single-repository sessions only | yes, from `.cursor/hooks.json`; `sessionStart` / `sessionEnd` do not fire |
-| process may stay alive beside the agent | partial (start skill) | yes, until the VM is reclaimed | yes (tmux terminals) |
-| reliable session-end event | no | no (idle reclaim; not documented) | no (`stop` only) |
-| observable from outside | diff, PR | branch push, PR, CI | branch push, PR |
-| env var identifying a cloud run | not documented | `CLAUDE_CODE_REMOTE=true` | `CURSOR_CODE_REMOTE` |
+| reusable cloud setup | yes: published Codex Cloud environments | yes | yes |
+| repository lifecycle hooks | yes in the Codex runtime, including ChatGPT Work, when the hook scripts exist in the execution environment and the user trusts them; ordinary Chat does **not** run these hooks | yes | yes: project command hooks; cloud/background agents may omit session start/end |
+| secret safe from agent code | OpenAI-hosted vault environment credential: sandbox sees an opaque placeholder and the network proxy supplies the real secret only to approved hosts | API Credentials host-scoped proxy | Cursor Runtime Secrets are redacted from agent outputs/transcripts but still exist as environment variables inside the VM |
+| outbound Platform access | allow `api.openshard.dev` in the environment network policy | allow the Platform host | allow the Platform host |
+| model evidence | hook `model`; matching runtime transcript can also name provider/model | hook/status/transcript | hook `model` / `model_id` |
+| token/cost evidence | matching runtime transcript cumulative `token_count`; list-rate estimate only when one known priced model served the aggregate | transcript usage plus Claude Code estimate / list-rate fallback | hooks expose neither; official Cursor usage can be reconciled later when a strong run id matches |
+| session-end reliability | use the lifecycle hook when delivered; destroyed/aborted environments can still leave partial capture | cloud VM reclaim may leave a partial session | cloud/background agents may omit `sessionEnd`; partial is honest |
 
-What this means for each:
+Current official references:
+- OpenAI Codex Cloud environments: reusable prepared environments can be used from desktop, web and mobile.
+- OpenAI plugin/hook docs: lifecycle hooks run in the Codex runtime, including
+  ChatGPT Work and Codex; hook scripts must exist in the execution environment
+  and be trusted. Ordinary Chat does not run these handlers.
+- OpenAI sandbox/vault docs: an environment-variable credential gives sandbox
+  code only a placeholder; a network proxy replaces it for approved HTTPS hosts.
+- Cursor Cloud Agents docs: project command hooks run in cloud workspaces;
+  Runtime Secrets are redacted from agent-visible outputs but exist in the VM.
 
-- **Claude Code on the web.** Set the two variables in the environment, allow
-  the Platform host, run `pip install openshard && openshard remote attach`
-  in the setup script, and commit OpenShard's hooks in the repository's
-  `.claude/settings.json` (or run `openshard setup --yes` in the setup
-  script). Tool calls, file changes, checks and the Receipt stream out; when
-  the VM is reclaimed without a `SessionEnd`, the capture ends as Partial
-  and a later sync can still reconcile the Receipt.
-- **Cursor cloud agents.** Same variables as runtime secrets, `openshard
-  remote attach` in `install`, `openshard capture install cursor` committed.
-  No session start or end hooks fire in the cloud, so a run reads as
-  Partial unless its Receipt is delivered; tool and file evidence still
-  streams.
-- **Codex cloud.** Repository hooks in cloud tasks are not documented, so
-  tool-level capture may not be available. What is observable is the
-  branch, the PR and its CI: run `openshard verify --ci` against the
-  resulting commit from a trusted checkout. A capture can still be opened
-  to hold whatever a setup script chooses to run.
+What this means:
 
-None of these was exercised against a live cloud session in this release;
-the survival and reconciliation proofs ran in disposable containers with
-the same hooks and the same collector. Treat the table as what the
-providers document, not as verified behaviour.
+- **Claude Code on the web.** Use the persistent connected-capture flow below.
+  Once the environment is configured, normal Claude work streams events and
+  the completed Receipt automatically. If the host never delivers a final
+  lifecycle event, Openshard keeps the evidence and labels the capture partial.
+- **Codex Cloud / ChatGPT Work coding tasks.** Install Openshard and its Codex
+  project hooks in the published environment, trust the hooks, and use an
+  OpenAI-hosted vault environment credential named
+  `OPENSHARD_CONNECTED_TOKEN`, scoped to `api.openshard.dev`. Set
+  `OPENSHARD_CONNECTED_CREDENTIAL_MODE=proxy`; the vault's opaque placeholder
+  is sent unchanged and OpenAI's proxy supplies the real `osc_` credential.
+  Current-task transcript usage is read only after the transcript proves the
+  same Codex session id. Ordinary Chat is not claimed as passive capture.
+- **Cursor Cloud Agents.** Install project hooks in the cloud environment and
+  store `OPENSHARD_CONNECTED_TOKEN` as a Cursor Runtime Secret. The hook stream
+  creates the Receipt; later official Cursor usage evidence can strengthen that
+  same Receipt when its run identity matches.
+
+These provider capabilities still need live dogfood before Openshard may claim
+the complete stranger journey as proven. The table describes the current
+provider contracts, not proof that our end-to-end integration has passed.
 
 ## Claude Cloud: a persistent connection without the secret in the environment
 
@@ -170,10 +181,12 @@ whether that happened: if nothing is injected, the Platform answers 401 and
 the collector stops with `unauthorized`, exactly as for an expired token
 (see **Failure handling**); if a credential of the wrong kind is injected,
 the Platform answers 403 and nothing is accepted. `remote status` reports
-the connection source as `proxy`. Only the literal `proxy-injected` is
-treated this way; any other value must still be a well-formed `osc_` or
-`osk_` token. Do not put the real token in a normal environment variable or
-a file in the environment: agent-generated code can read both.
+the connection source as `proxy`. The fixed marker is the Claude path. Providers whose secure vault exposes an
+opaque placeholder can instead set
+`OPENSHARD_CONNECTED_CREDENTIAL_MODE=proxy`; proxy mode deliberately rejects
+a real `osc_`/`osk_` value so an accidentally exposed secret fails closed.
+Do not put the real token in a normal environment variable or file: agent
+generated code can read them.
 
 ## Fallback: Git and CI only
 
