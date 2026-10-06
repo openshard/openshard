@@ -1,0 +1,46 @@
+name: PR Hygiene
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review, assigned, unassigned]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  check:
+    name: PR Hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check PR metadata
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const requiredHeadings = [
+              "## What changed",
+              "## Why",
+              "## Verification",
+              "## Still open",
+            ];
+
+            if (!pr.assignees.some((assignee) => assignee.login === "MichaelObasa")) {
+              await github.rest.issues.addAssignees({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                assignees: ["MichaelObasa"],
+              });
+            }
+
+            const body = pr.body ?? "";
+            const missing = requiredHeadings.filter((heading) => !body.includes(heading));
+            if (missing.length > 0) {
+              core.setFailed(`PR body is missing: ${missing.join(", ")}`);
+            }
+
+            if (pr.title.trim().length === 0 || pr.title.length > 100) {
+              core.setFailed("PR title must be plain English and 1-100 characters.");
+            }
