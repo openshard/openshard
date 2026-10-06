@@ -235,7 +235,7 @@ def _collect_evidence(receipt: ShardReceipt, osn_sections: list[str]) -> list[st
 
 
 def _collect_checks(receipt: ShardReceipt) -> list[str]:
-    from openshard.history.shard_contract import agent_reported_suffix, file_changes_unobservable
+    from openshard.history.shard_contract import agent_reported_suffix
 
     if receipt.check_results:
         return _cap_list(receipt.check_results, _MAX_CHECKS)
@@ -346,7 +346,7 @@ def build_pr_comment_summary(entry: dict, receipt: ShardReceipt) -> PRCommentSum
     Uses only safe, structured sources. Does not read repo files, run git,
     call GitHub, or call any provider.
     """
-    from openshard.history.shard_contract import agent_reported_suffix
+    from openshard.history.shard_contract import agent_reported_suffix, file_changes_unobservable
 
     osn_sections = _detect_osn_sections(entry)
     warnings = _collect_warnings(entry, receipt)
