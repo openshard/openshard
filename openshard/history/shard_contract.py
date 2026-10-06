@@ -880,11 +880,25 @@ def integrity_display(entry: dict) -> str:
     return integrity_label(integrity_status(entry))
 
 
+def file_changes_unobservable(receipt: ShardReceipt) -> bool:
+    """True when the capture path cannot see file changes and none were recorded.
+
+    A count of 0 on such a Receipt means "unknown", never "no files changed".
+    """
+    changes = receipt.changes
+    return (
+        receipt.files_changed == 0
+        and not receipt.files_detail
+        and isinstance(changes, dict)
+        and changes.get("files_observable") is False
+    )
+
+
 def changed_files_display(receipt: ShardReceipt) -> str:
     """``2 files (1 agent-reported, 1 git-observed)`` when provenance is known, else ``2 files``."""
     n = receipt.files_changed
     changes = receipt.changes
-    if n == 0 and changes and changes.get("files_observable") is False:
+    if file_changes_unobservable(receipt):
         return "Not observable (this integration exports no file changes)"
     text = f"{n} file{'s' if n != 1 else ''}"
     if changes and n > 0:

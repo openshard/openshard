@@ -293,6 +293,31 @@ class TestOtelIngest:
         assert "OpenShard did not execute or verify" in text
         assert all(e.evidence == "directly_observed" for e in events_from_entry(entry))
 
+    def test_unobservable_files_stay_unknown_on_proof_and_pr_comment(
+        self, repo: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        gb.ingest_otlp_bytes(encode_logs_protobuf(_fixture_records()), repo)
+        monkeypatch.chdir(repo)
+        runner = CliRunner()
+
+        last = runner.invoke(cli, ["last", "--json"])
+        assert last.exit_code == 0, last.output
+        sections = {s["name"]: s for s in json.loads(last.output)["proof_contract"]["sections"]}
+        assert (sections["actions"]["status"], sections["actions"]["detail"]) == (
+            "partial", "file_changes_not_observable",
+        )
+        assert (sections["files"]["status"], sections["files"]["detail"]) == ("unknown", "not_observable")
+
+        comment = runner.invoke(cli, ["pr", "comment"])
+        assert comment.exit_code == 0, comment.output
+        assert "**Files changed:** not observable" in comment.output
+        assert "**Files changed:** 0" not in comment.output
+
+        as_json = runner.invoke(cli, ["pr", "comment", "--json"])
+        summary = json.loads(as_json.output)["summary"]
+        assert summary["files_observable"] is False
+        assert summary["files_changed"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Consumer path: self-report

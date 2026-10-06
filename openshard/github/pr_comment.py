@@ -65,6 +65,8 @@ class PRCommentSummary:
     run_status: str = ""
     risk: str = ""
     files_changed: int = 0
+    # False when the capture path cannot see file changes: files_changed is then unknown, not zero.
+    files_observable: bool = True
     inspected_files: list[str] = field(default_factory=list)
     checks: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -344,7 +346,7 @@ def build_pr_comment_summary(entry: dict, receipt: ShardReceipt) -> PRCommentSum
     Uses only safe, structured sources. Does not read repo files, run git,
     call GitHub, or call any provider.
     """
-    from openshard.history.shard_contract import agent_reported_suffix
+    from openshard.history.shard_contract import agent_reported_suffix, file_changes_unobservable
 
     osn_sections = _detect_osn_sections(entry)
     warnings = _collect_warnings(entry, receipt)
@@ -358,6 +360,7 @@ def build_pr_comment_summary(entry: dict, receipt: ShardReceipt) -> PRCommentSum
         run_status=_cap_text((receipt.status + agent_reported_suffix(receipt)) if receipt.status else ""),
         risk=_cap_text(receipt.risk or ""),
         files_changed=receipt.files_changed or 0,
+        files_observable=not file_changes_unobservable(receipt),
         inspected_files=inspected_files,
         checks=checks,
         warnings=warnings,
@@ -381,7 +384,10 @@ def render_pr_comment(summary: PRCommentSummary) -> str:
     lines.append("")
     lines.append(f"**Status:** {summary.run_status or 'unknown'}")
     lines.append(f"**Risk:** {summary.risk or 'unknown'}")
-    lines.append(f"**Files changed:** {summary.files_changed}")
+    if summary.files_observable:
+        lines.append(f"**Files changed:** {summary.files_changed}")
+    else:
+        lines.append("**Files changed:** not observable (this integration exports no file changes)")
     lines.append(f"**Manual review:** {'yes' if summary.manual_review_required else 'no'}")
 
     if summary.osn_sections or summary.evidence:

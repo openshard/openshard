@@ -33,7 +33,11 @@ from dataclasses import asdict, dataclass, field
 
 from openshard.history.proof_signals import secret_scan_finding_count
 from openshard.history.provenance import build_provenance_from_entry
-from openshard.history.shard_contract import ShardReceipt, build_shard_receipt
+from openshard.history.shard_contract import (
+    ShardReceipt,
+    build_shard_receipt,
+    file_changes_unobservable,
+)
 from openshard.history.shard_schema import (
     SHARD_BLOCKED_FIELDS,
     coerce_shard_entry,
@@ -375,7 +379,10 @@ def _eval_actions(receipt: ShardReceipt, entry: dict) -> tuple[str, str]:
     if shard_changes_made(receipt):
         return PRESENT, f"{receipt.files_changed or 0} file change(s)"
     result = (receipt.result or "").strip()
-    if result and result != "Not recorded":
+    result_recorded = bool(result) and result != "Not recorded"
+    if file_changes_unobservable(receipt):
+        return (PARTIAL, "file_changes_not_observable") if result_recorded else (UNKNOWN, "not_observable")
+    if result_recorded:
         return PRESENT, "no_file_changes"
     return MISSING, "not_recorded"
 
@@ -385,6 +392,8 @@ def _eval_files(receipt: ShardReceipt, entry: dict) -> tuple[str, str]:
         return PRESENT, f"{len(receipt.files_detail)} changed"
     if receipt.file_evidence or receipt.inspected_files:
         return PARTIAL, "inspected_only"
+    if file_changes_unobservable(receipt):
+        return UNKNOWN, "not_observable"
     return MISSING, "not_recorded"
 
 
