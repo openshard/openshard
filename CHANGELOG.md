@@ -2,6 +2,28 @@
 
 All notable changes to OpenShard are documented here.
 
+## 0.4.14 - 2026-10-06
+
+<!-- release-title: Openshard v0.4.14 - Cloud Capture -->
+
+### Fixed
+
+- Windows release validation now uses a platform-native synthetic Codex
+  transcript path. The production Codex transcript validator was already
+  correct; the hard-coded Linux test fixture was what failed on Windows.
+- Automated immutable version tags now explicitly dispatch the existing
+  release workflow. GitHub does not start a new push-triggered workflow when
+  a tag is created with the repository GITHUB_TOKEN, so the previous
+  tag-only handoff could stop before build and PyPI publishing.
+
+### Included
+
+- This patch includes the full 0.4.13 cloud-capture candidate: secure
+  proxy-injected Claude Cloud credentials, first-hook repository identity,
+  live Codex model/provider/token usage from a matching runtime transcript,
+  and the connected-capture foundations used by the hosted Claude, Codex and
+  Cursor setup flows.
+
 ## 0.4.13 - 2026-10-06
 
 <!-- release-title: Openshard v0.4.13 - Claude Cloud Connected Capture -->
