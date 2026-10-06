@@ -4199,6 +4199,12 @@ def apply_reduced_hook(
             detail, should_fold, should_delete = _apply(payload, buf, repo_root, now=now)
             _mark_applied(buf, dedup_id)
             remote_events = _remote_capture_new_events(buf)
+            if remote_events is not None:
+                # Remote/connected capture names the repository from the first
+                # hook, not the first fold: cache the identity on the buffer now
+                # so the SessionStart batch already carries it (see
+                # connected.config.session_from_entry).
+                _cached_repo_identity(buf, repo_root)
             if buf.get("ended") and _has_activity(buf):
                 # An ended buffer (this SessionEnd, or a buffer an older
                 # version left behind): snapshot and drop it rather than
@@ -4251,6 +4257,12 @@ def apply_reduced_hook(
             remote_record = dict(record)
             remote_record["session_id"] = payload.session_id
             remote_record["agent"] = payload.agent
+            identity = buf.get("repo_identity")
+            if isinstance(identity, str) and identity:
+                remote_record.setdefault("repo_identity", identity)
+            branch = buf.get("git_branch")
+            if isinstance(branch, str) and branch:
+                remote_record.setdefault("branch", branch)
             provider = buf.get("provider_current")
             if isinstance(provider, str) and provider:
                 remote_record["provider"] = provider
