@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,21 @@ class TestConnectedCollector:
         assert state["capture_id"].startswith("connected-")
         assert state["connected"]["surface"] == "claude-code-web"
         assert state["connected"]["external_session_id"] == SID
+        assert spool.pending_count() > 0
+
+    def test_first_hook_already_names_the_repository_and_branch(self, home, repo, monkeypatch):
+        """The hosted capture row is created from the first batch, before any fold has
+        run, so the identity must travel with the SessionStart Event, not the Receipt."""
+        _connected_env(monkeypatch)
+        _hook(repo, "SessionStart", source="startup")
+
+        state = spool.read_state()
+        assert state is not None
+        connected = state["connected"]
+        assert connected["repo_identity"] == "github.com/openshard/widget"
+        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, check=True,
+                                capture_output=True, text=True).stdout.strip()
+        assert connected["branch"] == branch
         assert spool.pending_count() > 0
 
     def test_offline_keeps_evidence_then_retry_drains_it(self, home, repo, monkeypatch):
