@@ -261,8 +261,9 @@ def build_server(*, repo_path: Path | None = None) -> MCPServer:
             root = repo_path or Path.cwd()
             repo_config, valid, config_path = load_config_safe(cwd=root)
             if not valid:
+                config_name = config_path.name if config_path is not None else "OpenShard config"
                 raise ToolError(
-                    f"{config_path.name} could not be parsed; authority is unknown until it is fixed."
+                    f"{config_name} could not be parsed; authority is unknown until it is fixed."
                 )
             try:
                 organisation = resolve_organisation_policy()
@@ -308,7 +309,9 @@ def build_server(*, repo_path: Path | None = None) -> MCPServer:
             "enforcement_boundary": "openshard_native",
             "external_agent_control": "observed_or_advisory_unless_integration_grants_control",
             "organisation_policy": org,
-            "repository_override_applied": repository_override_present(repo_config),
+            "repository_override_applied": repository_override_present(
+                repo_config, has_config_file=config_path is not None
+            ),
             "effective": {
                 "models": model_view,
                 "budgets": budgets.to_dict(),
