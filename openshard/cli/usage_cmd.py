@@ -132,20 +132,20 @@ def usage_reconcile_group() -> None:
     """Attach usage Cursor reported later to the Receipt that carries the same Cursor id."""
 
 
-def _finish(ctx: click.Context, result: Any, as_json: bool) -> None:
-    from openshard.adapters.cursor_usage import OUTCOME_PENDING, OUTCOME_RECORDED, OUTCOME_UNCHANGED
+def _finish(ctx: click.Context, result: Any, as_json: bool, *, product: str = "Cursor") -> None:
+    from openshard.history.usage_evidence import OUTCOME_RECORDED, OUTCOME_UNCHANGED
 
     if as_json:
         click.echo(json.dumps(result.to_dict(), indent=2))
     elif result.outcome == OUTCOME_RECORDED:
-        click.echo(f"Recorded Cursor usage for Receipt {result.receipt_id}.")
+        click.echo(f"Recorded {product} usage for Receipt {result.receipt_id}.")
     elif result.outcome == OUTCOME_UNCHANGED:
         click.echo(f"Already recorded for Receipt {result.receipt_id}; nothing new.")
-    elif result.outcome == OUTCOME_PENDING:
+    elif result.outcome == "pending":
         click.echo(f"Pending: {result.detail}. Nothing recorded; usage stays unknown. Try again later.")
     else:
         click.echo(f"Not recorded ({result.outcome}): {result.detail}. Usage stays unknown.")
-    if result.outcome not in (OUTCOME_RECORDED, OUTCOME_UNCHANGED, OUTCOME_PENDING):
+    if result.outcome not in (OUTCOME_RECORDED, OUTCOME_UNCHANGED, "pending"):
         ctx.exit(_EXIT_REFUSED)
 
 
@@ -154,6 +154,31 @@ def _api_key(env_name: str) -> str:
     if not key:
         raise click.ClickException(f"set {env_name} (or pass --from-file with a saved API response)")
     return key
+
+
+@usage_reconcile_group.command("codex-app-server")
+@click.option("--from-file", "from_file", required=True, metavar="PATH",
+              help="Saved thread/tokenUsage/updated JSON notification ('-' for stdin).")
+@click.option("--receipt", "receipt_ref", default=None, metavar="ID",
+              help="Refuse unless this Receipt carries the notification's exact Codex thread id.")
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.pass_context
+def reconcile_codex_app_server(
+    ctx: click.Context, from_file: str, receipt_ref: str | None, as_json: bool,
+) -> None:
+    """Attach exact Codex App Server thread token counters to the same Receipt.
+
+    The notification's threadId must exactly equal the session id OpenShard
+    observed through Codex hooks. Regular ChatGPT chats are never inferred to
+    be Codex threads. Dollars, when derivable, are dated list-rate estimates,
+    not ChatGPT subscription charges or an invoice.
+    """
+    from openshard.adapters.openai_usage import reconcile_app_server_usage
+
+    root, entries = _history()
+    body = _read_json(from_file)
+    result = reconcile_app_server_usage(root, entries, body, receipt_ref=receipt_ref)
+    _finish(ctx, result, as_json, product="OpenAI Codex")
 
 
 @usage_reconcile_group.command("cursor-agent")

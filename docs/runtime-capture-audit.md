@@ -8,7 +8,7 @@ A commit's author/model label cannot replace runtime usage evidence.
 | Runtime adapter | Model evidence | Token evidence | Cost evidence |
 |---|---|---|---|
 | Claude Code | Hook, status line or readable session transcript | Provider usage in readable session transcript | Reported status-line estimate, or Openshard estimate from complete transcript usage and known pricing |
-| Codex hooks | Active model slug in hooks; provider from a matching runtime transcript when present | Cumulative runtime `token_count` from the hook-provided transcript after session-id validation | Dated list-rate estimate only when cumulative usage belongs to one known priced model; otherwise unknown |
+| Codex hooks / App Server | Active model slug in hooks; provider from a matching runtime transcript when present | Cumulative runtime `token_count` from the hook-provided transcript, or App Server `thread/tokenUsage/updated` after exact thread/session-id validation | Dated list-rate estimate only when cumulative usage belongs to one known priced model; otherwise unknown |
 | OpenCode | Assistant message reports | Per-message reports | Per-message reports; unpriced zero is unknown |
 | Cursor hooks | Model reported by hook | Not exposed by this adapter's hooks | Not exposed by this adapter's hooks |
 | Antigravity hooks | Model reported by hook | Not exposed by this adapter's hooks | Not exposed by this adapter's hooks |
@@ -19,6 +19,36 @@ Readable Claude and Codex historical logs also have ingestion parsers. Their
 availability on a local machine does not imply availability in ChatGPT Work,
 mobile Codex or another cloud session. Destroyed sessions cannot be recreated
 from commits alone.
+
+## OpenAI surfaces and economics
+
+ChatGPT Chat, ChatGPT Work and Codex are not collapsed into one execution
+surface. They can be rolled up into the OpenAI product family for Insights,
+while the Receipt keeps the exact agent/surface and model that evidence named.
+
+Work and Codex share OpenAI's usage structure. Codex runtime evidence can be
+captured from hooks/transcripts and, when available, reconciled later from the
+App Server's cumulative thread token notification. The App Server path binds
+only when its thread id exactly equals a Codex session id already observed by
+Openshard; timing, PR, branch and task similarity never create a match.
+
+Regular Chat is different. A ChatGPT conversation that happens to edit GitHub
+through a connector is not promoted to a Codex thread. GitHub/CI evidence can
+prove the resulting commit, but without provider/runtime token evidence its
+token usage and execution cost remain unknown. This is a provider visibility
+boundary, not a reason to invent a number.
+
+For ROI, three concepts must remain separate:
+
+* **reported/reconciled cost** — dollars or credits the execution/provider
+  surface actually reported for the bound run;
+* **estimated compute cost** — token usage multiplied by a dated public list
+  rate, always labelled estimated and never presented as a ChatGPT invoice;
+* **unknown cost** — no defensible per-run economic evidence exists.
+
+A future subscription/seat allocation may add an accounting view, but it must
+not overwrite execution cost: allocating a fixed monthly plan fee across tasks
+is useful economics, not provider-reported model spend.
 
 ## Confirmed defect and fix
 
