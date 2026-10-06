@@ -298,7 +298,7 @@ class TestCanonicalRecord:
         assert str(transcript) not in json.dumps(entry)
         receipt = build_shard_receipt(entry)
         assert receipt.tokens_input == 1_000 and receipt.tokens_output == 300
-        assert receipt.cost_usd == pytest.approx(0.0116)
+        assert receipt.cost_raw == pytest.approx(0.0116)
 
     def test_live_transcript_must_match_the_hook_session(self, repo, tmp_path):
         transcript = tmp_path / ".codex" / "rollout.jsonl"
