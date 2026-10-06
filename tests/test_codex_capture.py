@@ -240,7 +240,10 @@ class TestTranslator:
         ))
         reduced = reduce_hook_payload(p, repo)
         blob = json.dumps(reduced.to_dict())
-        assert SECRET not in blob and TRANSCRIPT not in blob and "def add" not in blob
+        assert SECRET not in blob and "def add" not in blob
+        # The transcript locator is transient queue state (as for Claude Code);
+        # its content/path never reaches the final Receipt.
+        assert reduced.transcript_path == TRANSCRIPT
         assert reduced.agent == "codex" and reduced.model_id == "gpt-5-codex"
         assert [t["path"] for t in reduced.file_targets] == ["calc.py", "README.md", "old.txt"]
         assert reduced.file_target == "calc.py"
@@ -258,6 +261,60 @@ class TestTranslator:
 
 
 class TestCanonicalRecord:
+    def test_live_transcript_adds_tokens_provider_and_list_rate_cost(self, repo, tmp_path):
+        transcript = tmp_path / ".codex" / "rollout.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("\n".join([
+            json.dumps({"timestamp": "2026-10-06T12:00:00Z", "type": "session_meta",
+                        "payload": {"id": SID, "model_provider": "openai"}}),
+            json.dumps({"timestamp": "2026-10-06T12:00:01Z", "type": "turn_context",
+                        "payload": {"model": "gpt-5.6-sol"}}),
+            json.dumps({"timestamp": "2026-10-06T12:00:02Z", "type": "event_msg",
+                        "payload": {"type": "token_count", "info": {"total_token_usage": {
+                            "input_tokens": 5_000, "cached_input_tokens": 4_000,
+                            "output_tokens": 300, "reasoning_output_tokens": 100,
+                            "total_tokens": 5_300,
+                        }}}}),
+        ]) + "\n", encoding="utf-8")
+
+        def event(name: str, **fields):
+            return handle_hook(_doc(
+                name, repo, transcript_path=str(transcript), model="gpt-5.6-sol", **fields
+            ), env={}, agent="codex")
+
+        event("SessionStart", source="startup")
+        event("UserPromptSubmit", prompt="Add the requested change")
+        event("Stop")
+        event("SessionEnd", reason="other")
+
+        entry = _lines(repo)[0]
+        assert entry["prompt_tokens"] == 1_000
+        assert entry["completion_tokens"] == 300
+        assert entry["cache_read_tokens"] == 4_000
+        assert entry["tokens_provenance"] == "vendor_telemetry"
+        assert entry["capture"]["provider"] == "openai"
+        assert entry["estimated_cost"] == pytest.approx(0.0116)
+        assert entry["cost_provenance"] == "official_rate_estimate"
+        assert str(transcript) not in json.dumps(entry)
+        receipt = build_shard_receipt(entry)
+        assert receipt.tokens_input == 1_000 and receipt.tokens_output == 300
+        assert receipt.cost_usd == pytest.approx(0.0116)
+
+    def test_live_transcript_must_match_the_hook_session(self, repo, tmp_path):
+        transcript = tmp_path / ".codex" / "rollout.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("\n".join([
+            json.dumps({"type": "session_meta", "payload": {"id": SID2, "model_provider": "openai"}}),
+            json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}}),
+            json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 20}
+            }}}),
+        ]) + "\n", encoding="utf-8")
+        handle_hook(_doc("UserPromptSubmit", repo, transcript_path=str(transcript), prompt="x"), env={}, agent="codex")
+        handle_hook(_doc("Stop", repo, transcript_path=str(transcript)), env={}, agent="codex")
+        entry = _lines(repo)[0]
+        assert "prompt_tokens" not in entry and "estimated_cost" not in entry
+
     def test_session_becomes_one_codex_shard(self, repo):
         _drive_inline(repo)
         lines = _lines(repo)
@@ -496,7 +553,8 @@ class TestServicePath:
         assert line["kind"] == "hook" and line["data"]["agent"] == "codex"
         assert line["data"]["model_id"] == "gpt-5-codex" and line["data"]["tool_success"] is None
         text = queue_file.read_text(encoding="utf-8")
-        assert SECRET not in text and TRANSCRIPT not in text and "def add" not in text
+        assert SECRET not in text and "def add" not in text
+        assert line["data"]["transcript_path"] == TRANSCRIPT
         service.server.recorder.resume_processing()
 
     def test_blocking_path_stays_within_budget(self, service, repo):
