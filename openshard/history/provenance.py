@@ -394,6 +394,9 @@ def build_provenance_from_entry(entry: object) -> list[ProvenanceRecord]:
     if not isinstance(entry, dict):
         return []
     try:
+        from openshard.history.shard import control_evidence_view
+
+        entry = control_evidence_view(entry)
         run_ref: str = (
             entry.get("shard_id")
             or entry.get("timestamp")

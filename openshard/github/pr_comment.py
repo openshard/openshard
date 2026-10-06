@@ -81,8 +81,17 @@ def _detect_osn_sections(entry: dict) -> list[str]:
     """Detect which OSN sections are present in a run entry.
 
     Explicit metadata keys take priority. Fallbacks are used only when the
-    explicit key is absent.
+    explicit key is absent. An external or historical record never has OSN
+    sections, whatever keys it carries.
     """
+    from openshard.history.shard import (
+        ORIGIN_EXTERNAL_OBSERVED,
+        ORIGIN_HISTORICAL_IMPORT,
+        derive_shard_identity,
+    )
+
+    if derive_shard_identity(entry)[1] in (ORIGIN_EXTERNAL_OBSERVED, ORIGIN_HISTORICAL_IMPORT):
+        return []
     sections: list[str] = []
 
     # OSN OBSERVATION
@@ -346,8 +355,10 @@ def build_pr_comment_summary(entry: dict, receipt: ShardReceipt) -> PRCommentSum
     Uses only safe, structured sources. Does not read repo files, run git,
     call GitHub, or call any provider.
     """
+    from openshard.history.shard import control_evidence_view
     from openshard.history.shard_contract import agent_reported_suffix, file_changes_unobservable
 
+    entry = control_evidence_view(entry)
     osn_sections = _detect_osn_sections(entry)
     warnings = _collect_warnings(entry, receipt)
     evidence = _collect_evidence(receipt, osn_sections)

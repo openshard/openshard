@@ -17,6 +17,7 @@ import duckdb
 
 from openshard.history.failures import classify_failure
 from openshard.history.run_cost import run_total_cost
+from openshard.history.shard import control_evidence_view
 from openshard.history.shard_contract import build_shard_receipt
 from openshard.history.store import load_history
 from openshard.history.views import receipt_to_dict
@@ -148,7 +149,7 @@ class ReceiptWarehouse:
                 continue
 
             learning = _dict(entry.get("learning"))
-            adaptive = _dict(entry.get("adaptive_routing"))
+            adaptive = _dict(control_evidence_view(entry).get("adaptive_routing"))
             routing_applied = outcome.record_mode == "applied" or adaptive.get("applied") is True
             model = outcome.final_model or _text(entry.get("execution_model"))
             if model is None:

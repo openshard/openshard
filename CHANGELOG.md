@@ -6,6 +6,16 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- Receipts for external or historical runs (Claude Code, Codex, Cursor,
+  OpenCode and other observed agents, and imported history) no longer show
+  OpenShard control evidence, even when the stored record carries it: no
+  policy decisions, approvals, permissions, sandbox, budgets, organisation
+  policy, capabilities, adaptive/supervisor routing or OSN loop. This covers
+  local Receipts, hosted projections, Events, provenance, learning signals,
+  Insights and PR comments. OpenShard only observes these agents and cannot
+  block them, so the full Receipt now says so in its POLICY section. Stored
+  records are not rewritten, and their checksum is still verified as written.
+
 - A Receipt whose integration cannot see file changes (Grok Bot's Action
   Recording export) no longer reads as "no files changed" outside the
   Receipt itself. The proof contract reports `actions` as

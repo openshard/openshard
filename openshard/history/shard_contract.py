@@ -19,6 +19,7 @@ from openshard.history.shard import (
     ORIGIN_HISTORICAL_IMPORT,
     Shard,
     build_shard,
+    control_evidence_view,
     derive_shard_identity,
 )
 from openshard.history.shard_hash import verify_shard_hash
@@ -949,6 +950,8 @@ def build_shard_receipt(
     ``.openshard/verifications.jsonl``); it is carried on the receipt so
     every consumer interprets the same evidence (``verification_truth``).
     """
+    stored_entry = entry
+    entry = control_evidence_view(entry)
     timestamp = entry.get("timestamp") or ""
     task = entry.get("task") or ""
 
@@ -1418,7 +1421,7 @@ def build_shard_receipt(
         if isinstance(_task_status_raw, str)
         else None
     )
-    _integrity_status_val = integrity_status(entry)
+    _integrity_status_val = integrity_status(stored_entry)
     _integrity_val = integrity_label(_integrity_status_val)
 
     # Token usage -- only ever surfaced on the receipt when a producer stamped
@@ -1738,6 +1741,10 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
         rows.append(_row("Gaps", gaps_display(block)))
     return rows
 
+
+_UNCONTROLLED_CONTROL_TEXT = (
+    f"None {_EM} OpenShard only observed this agent; it could not block, approve or sandbox its actions"
+)
 
 # Historical Ingestion v1: the "Reconstructed from history" badge.
 _HISTORICAL_CAPTURE_TEXT = "Reconstructed from history; OpenShard did not observe this session live"
@@ -2408,6 +2415,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     if receipt.blocked_commands:
         lines.append(_row("Commands", f"{len(receipt.blocked_commands)} blocked"))
     lines.append(_row("Approval", receipt.approval))
+    if receipt.shard is not None and receipt.shard.origin in (ORIGIN_EXTERNAL_OBSERVED, ORIGIN_HISTORICAL_IMPORT):
+        lines.append(_row("Control", _UNCONTROLLED_CONTROL_TEXT))
     lines.append("")
 
     if receipt.approval_required:
