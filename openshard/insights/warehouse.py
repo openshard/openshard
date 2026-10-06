@@ -16,6 +16,7 @@ from typing import Any
 import duckdb
 
 from openshard.history.failures import classify_failure
+from openshard.insights.economics import canonical_surface
 from openshard.history.run_cost import run_total_cost
 from openshard.history.shard import control_evidence_view
 from openshard.history.shard_contract import build_shard_receipt
@@ -78,6 +79,9 @@ class ReceiptWarehouse:
                 created_at TIMESTAMP,
                 owner VARCHAR,
                 agent VARCHAR,
+                provider_family VARCHAR,
+                product_family VARCHAR,
+                surface VARCHAR,
                 model VARCHAR,
                 repo VARCHAR,
                 repo_identity VARCHAR,
@@ -142,6 +146,12 @@ class ReceiptWarehouse:
                 receipt = build_shard_receipt(entry, index=index)
                 projected = receipt_to_dict(receipt, extended=True)
                 outcome = outcome_from_receipt(entry)
+                capture = _dict(entry.get("capture"))
+                identity = canonical_surface(
+                    agent=projected.get("agent"),
+                    surface=capture.get("surface") or capture.get("agent_surface"),
+                    provider=capture.get("provider"),
+                )
                 task_category, _category_source = task_category_for(entry)
                 failure = classify_failure(entry, receipt)
                 cost_usd, cost_complete = run_total_cost(entry)
@@ -163,6 +173,9 @@ class ReceiptWarehouse:
                     _text(projected.get("created_at")),
                     _text(projected.get("owner")),
                     _text(projected.get("agent")),
+                    identity.get("provider_family"),
+                    identity.get("product_family"),
+                    identity.get("surface"),
                     model,
                     _text(projected.get("repo")),
                     _text(projected.get("repo_identity")),
@@ -217,7 +230,7 @@ class ReceiptWarehouse:
 
         if receipt_rows:
             self.conn.executemany(
-                "INSERT INTO receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 receipt_rows,
             )
         if file_rows:
@@ -312,10 +325,10 @@ class ReceiptWarehouse:
         )
 
     def costs(self, *, by: str = "model") -> list[dict[str, Any]]:
-        columns = {"model": "model", "agent": "agent", "task": "task_category"}
+        columns = {"model": "model", "agent": "agent", "task": "task_category", "provider": "provider_family", "product": "product_family", "surface": "surface"}
         column = columns.get(by)
         if column is None:
-            raise ValueError("by must be model, agent, or task")
+            raise ValueError("by must be model, agent, task, provider, product, or surface")
         return _rows(
             self.conn.execute(
                 f"""
