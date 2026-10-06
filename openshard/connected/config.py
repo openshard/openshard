@@ -214,9 +214,12 @@ def session_from_entry(
         external_session_id=sid,
         agent=agent[:80],
         provider=opt(provider, 80),
-        repo_identity=opt(entry_dict.get("repo_identity")),
-        repo=opt(entry_dict.get("repo")),
-        branch=opt(entry_dict.get("branch")),
+        # The folded record names the repository once a fold has happened; the
+        # hook's own record carries what the buffer already knows at session
+        # start, so the capture is identified from its first Event.
+        repo_identity=opt(entry_dict.get("repo_identity") or record_dict.get("repo_identity")),
+        repo=opt(entry_dict.get("repo") or record_dict.get("repo")),
+        branch=opt(entry_dict.get("branch") or record_dict.get("git_branch") or record_dict.get("branch")),
     )
 
 
