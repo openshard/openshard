@@ -43,7 +43,7 @@ Shard / Receipt record         .openshard/runs.jsonl (one JSON line per record)
         ▼
 Local history + rendering      history/query.py, views.py, shard_contract.py
                                cli: last · history · context · stats · doctor
-                               mcp/server.py (read-only tools for agents)
+                               mcp/server.py (read-only evidence + authority tools for agents)
 ```
 
 ### The stages
