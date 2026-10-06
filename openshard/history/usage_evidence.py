@@ -396,7 +396,8 @@ def _replaces(candidate: dict[str, Any], current: dict[str, Any], ranks: dict[st
 def effective_usage(entry: dict, attestations: list[dict] | None = None) -> dict[str, Any]:
     """The record's usage, strengthened by usage attestations that name it (oldest first)."""
     block = usage_from_record(entry)
-    for item in attestations or []:
+    named = usage_attestations_for_entry(entry, attestations or [])
+    for item in named:
         try:
             parsed = parse_usage_block(item.get("usage")) if isinstance(item, dict) else None
             if parsed is None:

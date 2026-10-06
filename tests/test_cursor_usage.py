@@ -180,7 +180,7 @@ def _cursor_doc(event: str, repo: Path, sid: str, **fields: object) -> dict:
     return base
 
 
-def _cursor_session(repo: Path, sid: str = AGENT, *, generation_id: str = RUN) -> dict:
+def _cursor_session(repo: Path, sid: str = AGENT, *, generation_id: str = RUN, ended: bool = False) -> dict:
     """A Cloud Agent-shaped Cursor session: bc- conversation id, run- generation id."""
     def send(event: str, **fields: object) -> None:
         handle_hook(_cursor_doc(event, repo, sid, generation_id=generation_id, **fields), env={}, agent="cursor")
@@ -188,6 +188,8 @@ def _cursor_session(repo: Path, sid: str = AGENT, *, generation_id: str = RUN) -
     send("beforeSubmitPrompt", prompt="implement the change")
     send("postToolUse", tool_name="Shell", tool_input={"command": "python -m pytest -q"})
     send("stop", status="completed")
+    if ended:
+        send("sessionEnd", session_id=sid, reason="completed", duration_ms=1000, final_status="completed")
     return load_history(repo / ".openshard" / "runs.jsonl", coerce=False)[-1]
 
 
@@ -394,7 +396,7 @@ class TestUsageFromRecord:
             "tokens_provenance": "provider_reported",
             "prompt_tokens": 100, "completion_tokens": 20,
             "retry_triggered": True,
-            "retry_attempts": [{"prompt_tokens": 50, "completion_tokens": 10}],
+            "retry_attempts": [{"model": "claude-sonnet-5-5", "prompt_tokens": 50, "completion_tokens": 10}],
         })
         assert complete["tokens"]["input"] == 150 and complete["tokens"]["output"] == 30
         assert complete["tokens"]["complete"] is True
@@ -594,7 +596,7 @@ class TestUsageFlush:
         client.configure(transport=None, repo_config=None)
 
     def test_usage_follows_an_already_synced_receipt_and_is_sent_once(self, repo, env, link, recording):
-        entry = _cursor_session(repo)
+        entry = _cursor_session(repo, ended=True)
         first = client.flush(repo, env=env)
         assert (first.created, first.usage_sent) == (1, 0)
         reconcile_agent_usage(repo, [entry], AGENT, _agent_body(_run(RUN, _counts(8, 2))))
@@ -609,7 +611,7 @@ class TestUsageFlush:
         assert record["usage_hash"] == sync_usage.usage_hash(recording.usage_envelopes[0])
 
     def test_a_platform_without_the_route_is_skipped_quietly(self, repo, env, link):
-        entry = _cursor_session(repo)
+        entry = _cursor_session(repo, ended=True)
         reconcile_agent_usage(repo, [entry], AGENT, _agent_body(_run(RUN, _counts(8, 2))))
         rt = transport.RecordingPlatformTransport(
             usage_results=[transport.SendResult(transport.KIND_UNSUPPORTED, 404)],
