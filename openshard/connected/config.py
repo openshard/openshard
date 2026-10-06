@@ -4,11 +4,14 @@ A provider or IDE stores one narrow osc_ credential. Trusted local installs
 may reuse the existing osk_ Platform link. Per-run identity is separate from
 that credential, so one connection safely serves many sessions.
 
-A cloud environment whose egress proxy injects the credential (Claude Cloud
-API Credentials) keeps the osc_ token out of the environment entirely: it
-sets ``OPENSHARD_CONNECTED_TOKEN=proxy-injected`` and the proxy replaces the
-Authorization header on the way to the Platform. Nothing here can tell
-whether that injection happens; the Platform's own 401/403 does.
+A cloud environment whose egress proxy injects the credential keeps the
+osc_ token outside the agent runtime. Claude Cloud can use the fixed
+``OPENSHARD_CONNECTED_TOKEN=proxy-injected`` marker. Environments that put
+their own opaque placeholder in the token variable (for example an
+OpenAI-hosted vault credential) set
+``OPENSHARD_CONNECTED_CREDENTIAL_MODE=proxy``. The placeholder is passed
+unchanged so the provider proxy can replace it. Nothing here can tell
+whether injection happened; the Platform's own 401/403 does.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ from openshard.sync.config import normalise_endpoint, resolve_link
 ENDPOINT_ENV = "OPENSHARD_CONNECTED_ENDPOINT"
 ORG_ENV = "OPENSHARD_CONNECTED_ORG_ID"
 TOKEN_ENV = "OPENSHARD_CONNECTED_TOKEN"
+CREDENTIAL_MODE_ENV = "OPENSHARD_CONNECTED_CREDENTIAL_MODE"
 SURFACE_ENV = "OPENSHARD_CONNECTED_SURFACE"
 DISABLE_ENV = "OPENSHARD_CONNECTED_CAPTURE"
 
@@ -33,6 +37,7 @@ SOURCE_PROXY = "proxy"
 
 _FALSEY = frozenset({"0", "off", "false", "no", "disabled"})
 _TOKEN_RE = re.compile(r"^os[ck]_[A-Za-z0-9_-]{8,200}$")
+_PROXY_MODE = "proxy"
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
 _SURFACE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,63}$")
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -107,11 +112,25 @@ def _explicit(env: dict | os._Environ) -> ConnectedConnection | None:
         return None
     if not isinstance(token, str):
         return None
+    raw_token = token
     token = token.strip()
+    mode = env.get(CREDENTIAL_MODE_ENV)
+    mode = mode.strip().lower() if isinstance(mode, str) else None
     if token == PROXY_INJECTED_TOKEN:
         # The marker is sent as the bearer token so the existing transport is
         # unchanged; a proxy that injects the credential overwrites it, and one
         # that does not leaves the Platform to answer 401 as for any bad token.
+        return ConnectedConnection(endpoint, org.lower(), token, SOURCE_PROXY)
+    if mode == _PROXY_MODE:
+        # Some hosted sandboxes expose an opaque placeholder supplied by their
+        # vault instead of a fixed marker. Accept only a bounded visible-ASCII
+        # placeholder and explicitly reject a real Openshard token in proxy
+        # mode: a user who accidentally puts the real osc_/osk_ secret in the
+        # sandbox should fail closed rather than silently expose it.
+        if raw_token != token or _TOKEN_RE.match(token) or not (1 <= len(token) <= 512):
+            return None
+        if any(ord(ch) < 33 or ord(ch) > 126 for ch in token):
+            return None
         return ConnectedConnection(endpoint, org.lower(), token, SOURCE_PROXY)
     if not _TOKEN_RE.match(token):
         return None
@@ -229,7 +248,7 @@ def sink_id(connection: ConnectedConnection, session: ConnectedSession) -> str:
 
 
 __all__ = [
-    "ConnectedConnection", "ConnectedSession", "DISABLE_ENV", "ENDPOINT_ENV", "ORG_ENV",
+    "ConnectedConnection", "ConnectedSession", "CREDENTIAL_MODE_ENV", "DISABLE_ENV", "ENDPOINT_ENV", "ORG_ENV",
     "PROXY_INJECTED_TOKEN", "SOURCE_PROXY", "SURFACE_ENV", "TOKEN_ENV", "available_hint", "disabled",
     "resolve_connection", "session_from_entry", "sink_id",
 ]

@@ -314,7 +314,8 @@ Confirmed against OpenAI's Codex hooks reference
 | `tool_input.command` as an argv list | pre-hooks tool shape, unconfirmed on the wire | tolerated: joined into the scrubbed command summary only |
 | `tool_input.patch` | community hook templates only, unconfirmed | tolerated after `command`; headers only |
 | `prompt`, `stop_hook_active` | Claude Code field names Codex's vocabulary mirrors, not shown in the reference examples | `prompt` feeds only the scrubbed task excerpt; `stop_hook_active` is carried, never acted on |
-| `turn_id`, `tool_use_id`, `permission_mode`, `tool_response`, `transcript_path` | documented | never read |
+| `turn_id`, `tool_use_id`, `permission_mode`, `tool_response` | documented | never read |
+| `transcript_path` | documented; transcript format is explicitly unstable | retained only as a transient locator; at fold time Openshard reads session identity, model/provider identifiers and cumulative `token_count` numbers, then discards the locator |
 
 Every unconfirmed shape can only *under*-report: a malformed or unknown
 `tool_input` yields a tool record with no file targets and no command,
@@ -357,8 +358,7 @@ never invented evidence.
   is stored. The status line's `context_window.current_usage` is the last
   API call only and is never recorded as session totals: without a
   readable transcript tokens stay unknown with
-  `capture.tokens_not_recorded_reason: transcript_unavailable`. Codex hooks expose neither, so a Codex record never carries
-  `estimated_cost`/`prompt_tokens` (receipt shows *Not recorded*). OpenCode
+  `capture.tokens_not_recorded_reason: transcript_unavailable`. Codex hooks do not carry token counters directly, but they do expose `transcript_path`: when that runtime transcript proves the same session id, Openshard reads only its cumulative `token_count`, model and provider identifiers. Tokens are `vendor_telemetry`; cached input is separated from uncached input, and a dated list-rate cost estimate is produced only when one known model served the cumulative usage. Otherwise tokens/cost stay *Not recorded* rather than guessed. OpenCode
   reports `cost` and `tokens` on each assistant message; the buffer keeps
   the latest report per message id and sums them, so a message re-reported
   while streaming replaces rather than adds; stamped `agent_reported` and

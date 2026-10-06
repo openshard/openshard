@@ -8,6 +8,11 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- Connected cloud capture now carries repository identity and branch from the
+  first hook when git can identify them, instead of waiting for a later
+  Receipt fold. This keeps the hosted Remote attached to the repository from
+  the start; Platform can still self-heal when identity arrives later.
+
 - An external agent's record that carries only the old pass/fail flags (no
   capture detail) no longer reads as "Passed (OpenShard ran the check(s))".
   Its outcome is shown as the agent's own report, as for every other
@@ -33,13 +38,23 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
-- Connected capture accepts `OPENSHARD_CONNECTED_TOKEN=proxy-injected` for
-  environments whose egress proxy injects the real `osc_` credential (Claude
-  Cloud API Credentials). The secret never sits in the environment; the
-  marker is sent as the bearer token for the proxy to replace, the
-  connection source reads `proxy`, and a missing injection is reported as
-  the Platform's own 401 (`unauthorized`), never as success. Every other
-  value must still be a well-formed `osc_` or `osk_` token.
+- Live Codex hook capture can now use the hook-provided runtime transcript as
+  bounded usage telemetry. After the transcript proves the same session id,
+  Openshard reads only model/provider identifiers and the latest cumulative
+  `token_count`, separates cached from uncached input, and records token
+  provenance as vendor telemetry. A dated list-rate cost estimate is added
+  only when one known priced model served the cumulative usage; otherwise
+  cost stays unknown. Transcript content and the locator never enter the
+  Receipt or sync payload.
+
+- Connected capture supports provider-managed credential proxies without
+  putting the real `osc_` secret in the agent runtime. Claude Cloud can use
+  the fixed `OPENSHARD_CONNECTED_TOKEN=proxy-injected` marker; hosted
+  sandboxes whose vault supplies its own opaque placeholder can set
+  `OPENSHARD_CONNECTED_CREDENTIAL_MODE=proxy`. Proxy mode rejects real
+  `osc_` / `osk_` values so an accidentally exposed Openshard token fails
+  closed. A missing or wrong proxy injection is still reported as the
+  Platform's own 401/403, never as success.
 
 - A Receipt honesty eval (`python -m openshard.evals.receipt_honesty`). It
   produces Receipts through real agent capture, the OSN loop and

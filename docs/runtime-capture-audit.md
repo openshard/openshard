@@ -8,7 +8,7 @@ A commit's author/model label cannot replace runtime usage evidence.
 | Runtime adapter | Model evidence | Token evidence | Cost evidence |
 |---|---|---|---|
 | Claude Code | Hook, status line or readable session transcript | Provider usage in readable session transcript | Reported status-line estimate, or Openshard estimate from complete transcript usage and known pricing |
-| Codex hooks | Active model slug in hooks | Not exposed by this adapter's hooks | Not exposed by this adapter's hooks |
+| Codex hooks | Active model slug in hooks; provider from a matching runtime transcript when present | Cumulative runtime `token_count` from the hook-provided transcript after session-id validation | Dated list-rate estimate only when cumulative usage belongs to one known priced model; otherwise unknown |
 | OpenCode | Assistant message reports | Per-message reports | Per-message reports; unpriced zero is unknown |
 | Cursor hooks | Model reported by hook | Not exposed by this adapter's hooks | Not exposed by this adapter's hooks |
 | Antigravity hooks | Model reported by hook | Not exposed by this adapter's hooks | Not exposed by this adapter's hooks |

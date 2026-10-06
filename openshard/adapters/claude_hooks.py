@@ -178,6 +178,7 @@ from openshard.adapters.agent_env import agent_provider_or_none as _agent_provid
 from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
 from openshard.adapters.capture_agents import (
     AGENT_CLAUDE_CODE,
+    AGENT_CODEX,
     CLAUDE_CODE_PROFILE,
     AgentProfile,
     agent_for_executor,
@@ -842,13 +843,23 @@ def _transcript_roots() -> list[Path]:
     return roots
 
 
-def _valid_transcript_path(raw: object, session_id: str | None) -> str | None:
-    """*raw* when it is this session's own ``<session_id>.jsonl`` under Claude Code's projects dir.
+def _valid_transcript_path(
+    raw: object,
+    session_id: str | None,
+    *,
+    agent: str = AGENT_CLAUDE_CODE,
+) -> str | None:
+    """Return a validated transient transcript locator for this agent/session.
 
-    Anything else -- another file name, a relative or UNC path, a path
-    outside ``~/.claude/projects`` (or ``$CLAUDE_CONFIG_DIR/projects``) -- is
-    None and never read.
+    Claude Code has a stable projects-directory layout. Codex exposes a
+    ``transcript_path`` hook field whose hosted/local location can differ, so
+    its validator checks the Codex-owned path shape and the reader later
+    proves the embedded session id before trusting usage.
     """
+    if agent == AGENT_CODEX:
+        from openshard.adapters.codex_transcript import valid_codex_transcript_path
+
+        return valid_codex_transcript_path(raw, session_id)
     if not isinstance(raw, str) or not raw or len(raw) > 2_000 or not isinstance(session_id, str) or not session_id:
         return None
     if raw.startswith(("\\\\", "//")):
@@ -1062,14 +1073,36 @@ def read_transcript_usage(path: Path, *, since: datetime | str | None = None) ->
 
 
 def _transcript_usage(buf: dict) -> dict | None:
-    """This receipt's transcript usage, reading only what was appended since the last fold.
+    """This receipt's transcript usage, using the active agent's runtime log.
 
-    The incremental state lives on the (transient) buffer; a transcript that
-    shrank starts it over. When the transcript cannot be read now, the last
-    summary (if any) stands. Never raises.
+    Claude Code uses the incremental API-usage reader below. Codex exposes a
+    cumulative token counter in its runtime transcript; that path is read
+    fail-closed and cached by file size/mtime. The transcript content and
+    locator never reach ``runs.jsonl``.
     """
     cached = buf.get("transcript_usage") if isinstance(buf.get("transcript_usage"), dict) else None
-    raw = _valid_transcript_path(buf.get("transcript_path"), buf.get("session_id"))
+    agent_raw = buf.get("agent")
+    agent = agent_raw if isinstance(agent_raw, str) else AGENT_CLAUDE_CODE
+    raw = _valid_transcript_path(buf.get("transcript_path"), buf.get("session_id"), agent=agent)
+    if agent == AGENT_CODEX:
+        if raw is None:
+            return cached
+        try:
+            path = Path(raw)
+            stat = path.stat()
+            marker = [stat.st_size, stat.st_mtime_ns]
+            if buf.get("codex_transcript_marker") == marker and cached is not None:
+                return cached
+            from openshard.adapters.codex_transcript import read_codex_transcript_usage
+
+            usage = read_codex_transcript_usage(path, str(buf.get("session_id") or ""))
+        except Exception:
+            return cached
+        if usage is None:
+            return cached
+        buf["codex_transcript_marker"] = marker
+        buf["transcript_usage"] = usage
+        return usage
     if raw is None:
         return cached
     try:
@@ -1514,7 +1547,7 @@ class ReducedHookPayload:
             git_write=data.get("git_write") is True,
             correlation=correlation_block(data.get("correlation")),
             task_id=stored_task_id(data),
-            transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
+            transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id, agent=agent_key),
             agent_provider=_agent_provider_or_none(data.get("agent_provider")),
             effort_level=_effort_level(data.get("effort_level")),
             agent_surface=_agent_surface_or_none(data.get("agent_surface")),
@@ -1577,7 +1610,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         attrs=_clean_attrs(payload.attrs),
         correlation=correlation_block(payload.correlation),
         task_id=payload.task_id if is_task_id(payload.task_id) else None,
-        transcript_path=_valid_transcript_path(payload.transcript_path, payload.session_id),
+        transcript_path=_valid_transcript_path(payload.transcript_path, payload.session_id, agent=payload.agent),
         agent_provider=_agent_provider_or_none(payload.agent_provider),
         effort_level=_effort_level(payload.effort_level),
         agent_surface=_agent_surface_or_none(payload.agent_surface),
@@ -3275,6 +3308,11 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             models_seen = transcript_models[:5]
     execution_model = model_current or "unknown"
     provider_current = buf.get("provider_current") if isinstance(buf.get("provider_current"), str) else None
+    transcript_provider = transcript_usage.get("provider") if isinstance(transcript_usage, Mapping) else None
+    if provider_current is None and isinstance(transcript_provider, str) and transcript_provider:
+        provider_current = transcript_provider
+        if profile.key == AGENT_CODEX:
+            buf["provider_source"] = "vendor_telemetry"
     usage_provenance = (
         buf.get("usage_provenance") if isinstance(buf.get("usage_provenance"), str) else profile.usage_provenance
     )

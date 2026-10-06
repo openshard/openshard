@@ -65,7 +65,7 @@ def home(tmp_path: Path, monkeypatch) -> Path:
     for name in (
         rconfig.URL_ENV, rconfig.TOKEN_ENV, rconfig.DISABLE_ENV,
         cconfig.ENDPOINT_ENV, cconfig.ORG_ENV, cconfig.TOKEN_ENV,
-        cconfig.SURFACE_ENV, cconfig.DISABLE_ENV,
+        cconfig.CREDENTIAL_MODE_ENV, cconfig.SURFACE_ENV, cconfig.DISABLE_ENV,
         sconfig.ENDPOINT_ENV, sconfig.ORG_ENV, sconfig.API_KEY_ENV,
     ):
         monkeypatch.delenv(name, raising=False)
@@ -184,6 +184,23 @@ class TestConnectedConfig:
         sconfig.save_link(endpoint=ENDPOINT, organisation_id=ORG, api_key=OSK)
         linked = cconfig.resolve_connection()
         assert linked is not None and linked.proxy_backed is False
+
+    def test_opaque_hosted_vault_placeholder_can_be_proxy_backed(self, home, monkeypatch):
+        _connected_env(monkeypatch, "codex-cloud")
+        monkeypatch.setenv(cconfig.TOKEN_ENV, "vault-placeholder-opaque-123")
+        monkeypatch.setenv(cconfig.CREDENTIAL_MODE_ENV, "proxy")
+        connection = cconfig.resolve_connection()
+        assert connection is not None
+        assert connection.token == "vault-placeholder-opaque-123"
+        assert connection.source == cconfig.SOURCE_PROXY
+        assert connection.proxy_backed is True
+
+    @pytest.mark.parametrize("bad", [OSC, OSK, "has whitespace", "line\nbreak", "\tbad", ""])
+    def test_proxy_mode_rejects_real_tokens_and_unsafe_placeholders(self, home, monkeypatch, bad):
+        _connected_env(monkeypatch, "codex-cloud")
+        monkeypatch.setenv(cconfig.CREDENTIAL_MODE_ENV, "proxy")
+        monkeypatch.setenv(cconfig.TOKEN_ENV, bad)
+        assert cconfig.resolve_connection() is None
 
     @pytest.mark.parametrize("token", [
         "Proxy-Injected", "proxy_injected", "proxy-injected-1", "proxy", "injected",

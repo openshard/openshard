@@ -10,7 +10,7 @@ Today OpenShard creates receipts only going forward:
 - native runs
 - Grok Bot OTLP/self-report ingest
 
-Nothing reads past sessions. The hook translators deliberately refuse `transcript_path`, and `SHARD_BLOCKED_FIELDS` strips `transcript`, `raw_prompt` and similar fields (`history/shard_schema.py`).
+Nothing in live capture imports past sessions. Claude Code and Codex may expose the current session's `transcript_path`; live capture uses that transient locator only for bounded usage metadata and never copies transcript content or the locator into the Receipt. `SHARD_BLOCKED_FIELDS` still strips `transcript`, `raw_prompt` and similar fields (`history/shard_schema.py`).
 
 A new user therefore starts with an empty history, even though months of Claude Code, Codex, and other sessions already exist on disk, in cloud drives, and in CI.
 
