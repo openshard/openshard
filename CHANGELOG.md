@@ -47,13 +47,14 @@ All notable changes to OpenShard are documented here.
   cost stays unknown. Transcript content and the locator never enter the
   Receipt or sync payload.
 
-- Connected capture accepts `OPENSHARD_CONNECTED_TOKEN=proxy-injected` for
-  environments whose egress proxy injects the real `osc_` credential (Claude
-  Cloud API Credentials). The secret never sits in the environment; the
-  marker is sent as the bearer token for the proxy to replace, the
-  connection source reads `proxy`, and a missing injection is reported as
-  the Platform's own 401 (`unauthorized`), never as success. Every other
-  value must still be a well-formed `osc_` or `osk_` token.
+- Connected capture supports provider-managed credential proxies without
+  putting the real `osc_` secret in the agent runtime. Claude Cloud can use
+  the fixed `OPENSHARD_CONNECTED_TOKEN=proxy-injected` marker; hosted
+  sandboxes whose vault supplies its own opaque placeholder can set
+  `OPENSHARD_CONNECTED_CREDENTIAL_MODE=proxy`. Proxy mode rejects real
+  `osc_` / `osk_` values so an accidentally exposed Openshard token fails
+  closed. A missing or wrong proxy injection is still reported as the
+  Platform's own 401/403, never as success.
 
 - A Receipt honesty eval (`python -m openshard.evals.receipt_honesty`). It
   produces Receipts through real agent capture, the OSN loop and
