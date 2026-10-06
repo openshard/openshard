@@ -23,8 +23,9 @@ replay of an already-synced receipt is free (the Platform answers
 Later verification evidence (``sync/evidence.py``) rides on the same line:
 ``evidence_hash`` is the hash of the evidence + state last decided with the
 Platform and ``evidence_state`` how that went (``synced`` / ``conflict`` /
-``rejected``). A new attestation changes the hash, so it is sent again;
-the same hash is never sent twice.
+``rejected``). Later usage evidence (``sync/usage.py``) uses ``usage_hash``
+and ``usage_state`` the same way. A new attestation changes the hash, so
+it is sent again; the same hash is never sent twice.
 
 A record keyed to a different endpoint or organisation than the current
 link is treated as unsynced for the current link, so reconnecting to a
@@ -54,6 +55,7 @@ STATES: frozenset[str] = frozenset({STATE_SYNCED, STATE_STALE, STATE_CONFLICT, S
 TERMINAL_STATES: frozenset[str] = frozenset({STATE_CONFLICT, STATE_REJECTED})
 
 EVIDENCE_KEYS: tuple[str, ...] = ("evidence_hash", "evidence_state", "evidence_at", "evidence_error")
+USAGE_KEYS: tuple[str, ...] = ("usage_hash", "usage_state", "usage_at", "usage_error")
 
 _LOCK_TIMEOUT_SECONDS = 5.0
 _MAX_DETAIL_ITEMS = 20
@@ -158,7 +160,7 @@ def make_record(
     }
     # Evidence bookkeeping belongs to the hosted copy it was sent for.
     if prev.get("endpoint") == endpoint and prev.get("organisation_id") == organisation_id:
-        for key in EVIDENCE_KEYS:
+        for key in EVIDENCE_KEYS + USAGE_KEYS:
             if key in prev:
                 record[key] = prev[key]
     if state == STATE_SYNCED:
@@ -190,6 +192,30 @@ def with_evidence(
     out["evidence_state"] = state
     out["evidence_at"] = now
     out["evidence_error"] = (
+        None if state == STATE_SYNCED
+        else {"status": status, "code": code, "details": _bounded_details(details), "at": now}
+    )
+    return out
+
+
+def with_usage(
+    record: dict,
+    state: str,
+    *,
+    usage_hash: str,
+    status: int | None = None,
+    code: str | None = None,
+    details: object = None,
+) -> dict[str, Any]:
+    """*record* with the outcome of sending its later usage evidence. The receipt's own state is untouched."""
+    if state not in (STATE_SYNCED, STATE_CONFLICT, STATE_REJECTED):
+        raise ValueError(f"unknown usage state: {state!r}")
+    now = _now()
+    out = dict(record)
+    out["usage_hash"] = usage_hash
+    out["usage_state"] = state
+    out["usage_at"] = now
+    out["usage_error"] = (
         None if state == STATE_SYNCED
         else {"status": status, "code": code, "details": _bounded_details(details), "at": now}
     )

@@ -1870,6 +1870,9 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "schema_version": BUFFER_SCHEMA_VERSION,
         "agent": agent_for_executor(entry.get("executor")),
         "session_id": session_id,
+        "cursor_generation_id": (
+            capture.get("cursor_generation_id") if isinstance(capture.get("cursor_generation_id"), str) else None
+        ),
         "started_at": capture.get("started_at") or entry.get("timestamp") or _now(),
         "last_activity_at": capture.get("last_activity_at") or _now(),
         "start_source": capture.get("start_source"),
@@ -2846,6 +2849,25 @@ def _bind_task_context(buf: dict, payload: ReducedHookPayload, *, now: str) -> N
         buf["task_context_conflicts"] = _stored_count(buf.get("task_context_conflicts")) + 1
 
 
+def _stamp_cursor_ids(entry: dict, buf: dict) -> None:
+    """Keep Cursor conversation / cloud-agent / generation ids the hooks actually delivered.
+
+    Used later to match Cursor usage to this Receipt. A generation id that
+    looks like a Cloud Agents run id is also stored as ``cursor_run_id``.
+    """
+    capture = entry.get("capture")
+    if not isinstance(capture, dict) or capture.get("agent") != "cursor":
+        return
+    session_id = buf.get("session_id")
+    if isinstance(session_id, str) and session_id.startswith("bc-") and len(session_id) == 39:
+        capture["cursor_cloud_agent_id"] = session_id
+    generation_id = buf.get("cursor_generation_id")
+    if isinstance(generation_id, str) and generation_id:
+        capture["cursor_generation_id"] = generation_id
+        if generation_id.startswith("run-") and 5 <= len(generation_id) <= 68:
+            capture["cursor_run_id"] = generation_id
+
+
 def _stamp_task_context(entry: dict, buf: dict) -> None:
     """Persist the bound task and its declared-context provenance on *entry*.
 
@@ -3405,6 +3427,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "last_status_ping_at": buf.get("status_last_seen_at"),
         },
     }
+    _stamp_cursor_ids(entry, buf)
     if "owner" not in buf:
         # Resolved once per receipt (never re-read on later folds) from the
         # explicit ``identity.owner`` config; never inferred.
@@ -3694,6 +3717,11 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         # OpenCode: the user message's selected model). Recorded as observed.
         source = "claude_hook" if payload.agent == AGENT_CLAUDE_CODE else profile.model_source
         _observe_model(buf, payload.model_id, payload.provider_id, source)
+    generation_id = payload.attrs.get("cursor_generation_id")
+    if isinstance(generation_id, str) and generation_id and not buf.get("cursor_generation_id"):
+        # Cursor's generation/run id, kept so later usage can be scoped to
+        # this Receipt's run instead of every run on the same cloud agent.
+        buf["cursor_generation_id"] = generation_id
 
     if event == EVENT_MODEL_SWITCH:
         return "session model changed", bool(buf.get("record")), False

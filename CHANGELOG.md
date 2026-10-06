@@ -31,12 +31,29 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- Connected capture accepts `OPENSHARD_CONNECTED_TOKEN=proxy-injected` for
+  environments whose egress proxy injects the real `osc_` credential (Claude
+  Cloud API Credentials). The secret never sits in the environment; the
+  marker is sent as the bearer token for the proxy to replace, the
+  connection source reads `proxy`, and a missing injection is reported as
+  the Platform's own 401 (`unauthorized`), never as success. Every other
+  value must still be a well-formed `osc_` or `osk_` token.
+
 - A Receipt honesty eval (`python -m openshard.evals.receipt_honesty`). It
   produces Receipts through real agent capture, the OSN loop and
   `openshard verify`, then checks that every local and hosted surface claims
   only what the evidence supports: agent-reported passes stay unverified,
   failures are never hidden, missing cost and tokens stay missing, and free
   and paid runs get the same evidence. It tests Receipts, not models.
+
+- Usage and cost evidence on the same Receipt (`openshard last`,
+  `openshard usage show`, `.openshard/usage.jsonl`). Cursor hooks still
+  capture no tokens or cost; Grok Bot OpenTelemetry tokens stay
+  vendor-telemetry. Later Cursor usage (Cloud Agents `GET /v1/agents/{id}/usage`
+  and Admin usage events) can be reconciled onto the existing Receipt by
+  `openshard usage reconcile`. An all-zero Cloud Agents response without
+  `usageUuid` is pending, not observed $0. Hosted copies get a separate
+  `usage-evidence` route; the receipt-sync payload is unchanged.
 
 ## 0.4.12 - 2026-10-05
 

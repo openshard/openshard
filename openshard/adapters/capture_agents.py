@@ -159,7 +159,8 @@ CURSOR_PROFILE = AgentProfile(
         "Captured automatically from Cursor agent hooks. "
         "Tool/file facts are as reported by Cursor; files are inferred from git diff. "
         "The model name is the one Cursor reports in its hook payloads; cost and token "
-        "counts are not exposed by Cursor hooks and stay Not recorded. "
+        "counts are not exposed by Cursor hooks and stay Not recorded until later "
+        "Cursor usage is reconciled onto the same Receipt. "
         "OpenShard does not run checks for this capture path: any check outcome here is the "
         "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),

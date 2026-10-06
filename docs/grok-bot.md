@@ -26,8 +26,8 @@ and the receipts label them differently.
 | Computer use | action / screenshot counts and duration | only what the Bot reports |
 | Files changed | **not observable** | the Bot's claim |
 | Checks | invoked, outcome **unknown** | the Bot's claim (`verification.source = agent_reported`, `observation_mode = agent_claim`) |
-| Tokens / model | from `api_request` logs (`tokens_provenance = vendor_telemetry`); not recorded when any `api_request` lacks its input/output counts | model name if the Bot states it |
-| Cost | not recorded (Cursor exports cost only as a metric) | not recorded |
+| Tokens / model | from `api_request` logs (`tokens_provenance = vendor_telemetry`); not recorded when any `api_request` lacks its input/output counts. Agent and model stay separate: Grok Bot never implies a Grok model. Later Cursor usage can be reconciled onto the same Receipt. | model name if the Bot states it |
+| Cost | not recorded (Cursor exports cost only as a metric; Grok is not on OpenShard's list-rate card). Later Admin usage events can be reconciled onto the same Receipt when a strong Cursor id matches; until then cost stays unknown, never $0. | not recorded |
 | Conversation end | not exported | the report itself |
 
 Neither path makes OpenShard the observer. For the Enterprise path, Cursor

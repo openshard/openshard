@@ -1,8 +1,10 @@
 """Persistent connected capture: one account connection, many agent sessions."""
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,8 @@ from openshard.sync import config as sconfig
 from openshard.sync.transport import (
     KIND_CREATED,
     KIND_DUPLICATE,
+    KIND_FORBIDDEN,
+    KIND_UNAUTHORIZED,
     KIND_UNAVAILABLE,
     SendResult,
 )
@@ -82,6 +86,50 @@ def _connected_env(monkeypatch, surface: str = "claude-code-web") -> None:
     monkeypatch.setenv(cconfig.SURFACE_ENV, surface)
 
 
+def _proxy_env(monkeypatch, surface: str = "claude-code-web") -> None:
+    """Claude Cloud: the osc_ token is in the provider's credential store, not the environment."""
+    monkeypatch.setenv(cconfig.ENDPOINT_ENV, ENDPOINT)
+    monkeypatch.setenv(cconfig.ORG_ENV, ORG)
+    monkeypatch.setenv(cconfig.TOKEN_ENV, cconfig.PROXY_INJECTED_TOKEN)
+    monkeypatch.setenv(cconfig.SURFACE_ENV, surface)
+
+
+class _Response:
+    """A minimal ``urlopen`` success for the transport under test."""
+
+    def __init__(self, status: int, body: bytes = b"{}") -> None:
+        self.status = status
+        self._body = body
+
+    def read(self, _n: int = -1) -> bytes:
+        return self._body
+
+    def __enter__(self) -> _Response:
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        return None
+
+
+def _http_error(status: int, code: str) -> urllib.error.HTTPError:
+    body = json.dumps({"error": {"code": code, "message": code}}).encode("utf-8")
+    return urllib.error.HTTPError(ENDPOINT, status, code, {}, io.BytesIO(body))  # type: ignore[arg-type]
+
+
+def _capture_urlopen(monkeypatch, outcome):
+    """Replace ``urlopen``; record each Request; return the recorded list."""
+    seen: list = []
+
+    def fake(request, timeout=None):
+        seen.append(request)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    return seen
+
+
 def _hook(repo: Path, event: str, **extra) -> None:
     payload = {"session_id": SID, "cwd": str(repo), "hook_event_name": event, **extra}
     handle_claude_hook(payload, env={"CLAUDE_PROJECT_DIR": str(repo)})
@@ -117,6 +165,48 @@ class TestConnectedConfig:
         assert connection.source == "platform_link"
         assert connection.token == OSK
 
+    def test_proxy_injected_marker_is_a_proxy_backed_connection(self, home, monkeypatch):
+        _proxy_env(monkeypatch)
+        connection = cconfig.resolve_connection()
+        assert connection is not None
+        assert connection.endpoint == ENDPOINT
+        assert connection.organisation_id == ORG
+        assert connection.token == "proxy-injected"
+        assert connection.source == cconfig.SOURCE_PROXY == "proxy"
+        assert connection.proxy_backed is True
+        assert cconfig.available_hint() is True
+
+    def test_real_tokens_are_not_proxy_backed(self, home, monkeypatch):
+        _connected_env(monkeypatch)
+        connection = cconfig.resolve_connection()
+        assert connection is not None and connection.proxy_backed is False
+        monkeypatch.delenv(cconfig.TOKEN_ENV)
+        sconfig.save_link(endpoint=ENDPOINT, organisation_id=ORG, api_key=OSK)
+        linked = cconfig.resolve_connection()
+        assert linked is not None and linked.proxy_backed is False
+
+    @pytest.mark.parametrize("token", [
+        "Proxy-Injected", "proxy_injected", "proxy-injected-1", "proxy", "injected",
+        "bogus", "osc_short", "osk_" + "!" * 40, "Bearer " + OSC, "",
+    ])
+    def test_only_the_exact_marker_or_a_well_formed_token_is_accepted(self, home, monkeypatch, token):
+        _connected_env(monkeypatch)
+        monkeypatch.setenv(cconfig.TOKEN_ENV, token)
+        assert cconfig.resolve_connection() is None
+
+    def test_marker_tolerates_surrounding_whitespace_like_real_tokens(self, home, monkeypatch):
+        _proxy_env(monkeypatch)
+        monkeypatch.setenv(cconfig.TOKEN_ENV, "  proxy-injected\n")
+        connection = cconfig.resolve_connection()
+        assert connection is not None and connection.proxy_backed is True
+        assert connection.token == "proxy-injected"
+
+    def test_proxy_marker_still_yields_to_disable_switch(self, home, monkeypatch):
+        _proxy_env(monkeypatch)
+        monkeypatch.setenv(cconfig.DISABLE_ENV, "off")
+        assert cconfig.resolve_connection() is None
+        assert cconfig.available_hint() is False
+
     def test_remote_cloud_surface_is_inferred_without_per_run_setup(self, home, monkeypatch):
         _connected_env(monkeypatch)
         monkeypatch.delenv(cconfig.SURFACE_ENV)
@@ -133,7 +223,76 @@ class TestConnectedConfig:
         assert session.external_session_id == SID
 
 
+class TestProxyBackedTransport:
+    """The marker travels through the unchanged transport; the Platform's answer is reported as is."""
+
+    def _client(self, monkeypatch):
+        from openshard.connected.transport import ConnectedCaptureClient
+
+        _proxy_env(monkeypatch)
+        connection = cconfig.resolve_connection()
+        assert connection is not None and connection.proxy_backed
+        session = cconfig.ConnectedSession("claude-code-web", SID, "claude_code", None, None, None, None)
+        return ConnectedCaptureClient(connection, session, user_agent="openshard/test")
+
+    def test_marker_is_sent_as_the_bearer_for_the_proxy_to_replace(self, home, monkeypatch):
+        client = self._client(monkeypatch)
+        seen = _capture_urlopen(monkeypatch, _Response(201, b'{"accepted":0}'))
+        result = client.send_events({"source": "claude_hooks", "collector_id": "c1", "events": []})
+        assert result.kind == KIND_CREATED
+        assert len(seen) == 1
+        assert seen[0].full_url == f"{ENDPOINT}/v1/orgs/{ORG}/connected-captures/events"
+        assert seen[0].get_header("Authorization") == "Bearer proxy-injected"
+
+    def test_missing_injection_is_reported_as_unauthorized_not_accepted(self, home, monkeypatch):
+        client = self._client(monkeypatch)
+        _capture_urlopen(monkeypatch, _http_error(401, "unauthenticated"))
+        result = client.send_events({"source": "claude_hooks", "collector_id": "c1", "events": []})
+        assert result.accepted is False
+        assert result.kind == KIND_UNAUTHORIZED
+        assert result.status == 401
+        assert result.code == "unauthenticated"
+
+    def test_wrong_injected_credential_is_reported_as_forbidden(self, home, monkeypatch):
+        client = self._client(monkeypatch)
+        _capture_urlopen(monkeypatch, _http_error(403, "forbidden"))
+        result = client.send({"receipt_id": "rcpt_x"})
+        assert result.accepted is False
+        assert result.kind == KIND_FORBIDDEN
+        assert result.status == 403
+
+
 class TestConnectedCollector:
+    def test_proxy_backed_session_streams_and_stops_honestly_when_nothing_is_injected(
+        self, home, repo, monkeypatch,
+    ):
+        _proxy_env(monkeypatch)
+        _work(repo)
+        pending = spool.pending_count()
+        assert pending > 0
+
+        # The proxy did not replace the marker: the Platform refuses it.
+        _capture_urlopen(monkeypatch, _http_error(401, "unauthenticated"))
+        report = collector.flush(now=100.0)
+        assert report.attached is True
+        assert report.stopped == "unauthorized"
+        assert report.events_sent == 0
+        assert spool.pending_count() == pending
+        state = spool.read_state()
+        assert state is not None and state["stopped"] == "unauthorized"
+
+    def test_proxy_backed_session_drains_through_the_proxy(self, home, repo, monkeypatch):
+        _proxy_env(monkeypatch)
+        _work(repo)
+        pending = spool.pending_count()
+        seen = _capture_urlopen(monkeypatch, _Response(201, b'{"accepted":1}'))
+        report = collector.flush(now=100.0)
+        assert report.stopped is None
+        assert report.events_sent == pending
+        assert spool.pending_count() == 0
+        assert seen and all(r.get_header("Authorization") == "Bearer proxy-injected" for r in seen)
+
+
     def test_connected_session_spools_without_remote_create_or_attach(self, home, repo, monkeypatch):
         _connected_env(monkeypatch)
         assert rconfig.resolve_attachment() is None
@@ -292,9 +451,27 @@ class TestConcurrentConnectedSessions:
         assert len(body["sessions"]) == 1
         assert body["local"]["pending"] == pending
         assert OSC not in result.output
+        assert body["connection_source"] == "env"
         plain = CliRunner().invoke(cli, ["remote", "status"])
         assert "Connected capture: 1 session(s)" in plain.output
+        assert "credential: from env" in plain.output
         assert "not attached" not in plain.output
+
+    def test_status_names_a_proxy_backed_credential_without_claiming_injection(self, home, repo, monkeypatch):
+        from click.testing import CliRunner
+
+        from openshard.cli.main import cli
+
+        _proxy_env(monkeypatch)
+        _work(repo)
+        result = CliRunner().invoke(cli, ["remote", "status", "--json"])
+        assert result.exit_code == 0
+        body = json.loads(result.output)
+        assert body["status"] == "connected"
+        assert body["connection_source"] == "proxy"
+        plain = CliRunner().invoke(cli, ["remote", "status"])
+        assert "credential: from proxy" in plain.output
+        assert "cannot see whether it did" in plain.output
 
     def test_legacy_connected_journal_survives_new_session_and_receives_delivery_request(self, home, repo, monkeypatch):
         import shutil

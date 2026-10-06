@@ -226,6 +226,10 @@ class FlushReport:
     evidence_recorded: int = 0
     evidence_not_accepted: int = 0
     evidence_unsupported: bool = False
+    usage_sent: int = 0
+    usage_recorded: int = 0
+    usage_not_accepted: int = 0
+    usage_unsupported: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -333,6 +337,7 @@ def flush(
                 report.stopped = "paused: unavailable"
                 return report
         _flush_evidence(root, link, sender, report, env=env, version=version, stamp=stamp, limit=limit, receipt_ids=receipt_ids)
+        _flush_usage(root, link, sender, report, env=env, version=version, stamp=stamp, limit=limit, receipt_ids=receipt_ids)
         return report
     except Exception:
         report.stopped = report.stopped or "error"
@@ -410,6 +415,85 @@ def _flush_evidence(
             continue
         elif result.kind == _transport.KIND_UNSUPPORTED:
             report.evidence_unsupported = True
+            return
+        elif result.kind in _transport.LINK_KINDS:
+            _transport.record_link_failure(result.kind, env, now=stamp)
+            report.stopped = f"paused: {result.kind}"
+            return
+        else:
+            _transport.record_failure(env, now=stamp)
+            report.stopped = "paused: unavailable"
+            return
+
+
+def _flush_usage(
+    root: Path,
+    link: PlatformLink,
+    sender: Any,
+    report: FlushReport,
+    *,
+    env: dict | os._Environ,
+    version: str,
+    stamp: float | None,
+    limit: int,
+    receipt_ids: frozenset[str] | None = None,
+) -> None:
+    """Send later usage evidence for Receipts whose hosted copy is the local one.
+
+    Same derivation as verification evidence: compare ``usage_hash`` with the
+    outbox. A Platform without the route is skipped quietly.
+    """
+    send_usage = getattr(sender, "send_usage", None)
+    if not callable(send_usage):
+        return
+    from openshard.history.usage_evidence import load_usage_attestations
+    from openshard.sync.usage import build_usage_envelope, usage_hash
+
+    attestations = load_usage_attestations(root / HISTORY_RELPATH.parent)
+    if not attestations:
+        return
+    records = _outbox.load_outbox(root)
+    entries = load_history(root / HISTORY_RELPATH, coerce=True)
+    budget = max(0, int(limit))
+    for entry in entries:
+        if budget <= 0:
+            return
+        rid = stored_receipt_id(entry)
+        if receipt_ids is not None and rid not in receipt_ids:
+            continue
+        record = records.get(rid) if rid is not None else None
+        if rid is None or record is None or record.get("state") != _outbox.STATE_SYNCED:
+            continue
+        if not _outbox.matches_link(record, endpoint=link.endpoint, organisation_id=link.organisation_id):
+            continue
+        synced_hash = record.get("record_hash")
+        current_hash = stored_shard_hash(entry)
+        if isinstance(synced_hash, str) and current_hash is not None and current_hash != synced_hash:
+            continue
+        envelope = build_usage_envelope(entry, attestations, core_version=version)
+        if envelope is None:
+            continue
+        digest = usage_hash(envelope)
+        if record.get("usage_hash") == digest:
+            continue
+        result = send_usage(rid, envelope)
+        budget -= 1
+        report.usage_sent += 1
+        if result.accepted:
+            _transport.clear_backoff(env)
+            report.usage_recorded += 1
+            _outbox.put(root, _outbox.with_usage(record, _outbox.STATE_SYNCED, usage_hash=digest))
+        elif result.kind in (_transport.KIND_CONFLICT, _transport.KIND_REJECTED):
+            report.usage_not_accepted += 1
+            state = _outbox.STATE_CONFLICT if result.kind == _transport.KIND_CONFLICT else _outbox.STATE_REJECTED
+            _outbox.put(root, _outbox.with_usage(
+                record, state, usage_hash=digest,
+                status=result.status, code=result.code, details=result.details,
+            ))
+        elif result.kind == _transport.KIND_RECEIPT_PENDING:
+            continue
+        elif result.kind == _transport.KIND_UNSUPPORTED:
+            report.usage_unsupported = True
             return
         elif result.kind in _transport.LINK_KINDS:
             _transport.record_link_failure(result.kind, env, now=stamp)

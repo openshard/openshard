@@ -163,6 +163,39 @@ line (`evidence_hash`, `evidence_state`).
 Evidence is sent only for a Receipt whose hosted copy is still the local
 one: a Receipt that is "changed locally" (below) gets none.
 
+## Usage evidence that arrives after sync
+
+A hosted Receipt is never resent, and usage can get stronger after it
+synced: `openshard usage reconcile cursor-agent` attaches Cloud Agents
+token counts, and `openshard usage reconcile cursor-events` attaches Admin
+usage events (tokens, model, charged cost) for the exact Cursor id the
+capture observed. That evidence is sent on its own route, beside the
+Receipt, not inside it — the receipt-sync contract is closed and rejects
+unknown keys:
+
+```
+POST <endpoint>/v1/orgs/<org>/receipts/<receipt_id>/usage-evidence
+```
+
+| Sent | From |
+|---|---|
+| `usage` | `history/usage_evidence.effective_usage` over the Receipt plus the attestations that name it: tokens, cost and model, each with status/source |
+| `evidence[]` | each attestation in `.openshard/usage.jsonl` that names the Receipt: id, time, kind, the correlation keys, and the usage block it carried |
+
+The Receipt payload does not change. A Cloud Agents all-zero `/usage`
+response that omits `usageUuid` is pending and is recorded nowhere, so
+nothing is sent for it. Status `observed` / `reconciled` / `estimated` /
+`pending` / `unknown` is preserved; unknown is never sent as $0.
+
+`openshard sync now` and the background sync pick this up on their own:
+every flush compares the usage this machine would send with what it last
+decided with the Platform. The outcome is kept on the Receipt's outbox
+line (`usage_hash`, `usage_state`). HTTP answers match verification
+evidence: 201/200 recorded; 404 `receipt_not_found` retried; other 404/405
+skipped quietly; 409/400/422 recorded once for this usage set.
+
+Usage is sent only for a Receipt whose hosted copy is still the local one.
+
 ## Capabilities (experimental features the Platform has switched on)
 
 The Platform can enable private, experimental capabilities per organisation (all off by default).
