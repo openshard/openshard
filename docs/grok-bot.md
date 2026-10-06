@@ -26,7 +26,7 @@ and the receipts label them differently.
 | Computer use | action / screenshot counts and duration | only what the Bot reports |
 | Files changed | **not observable** | the Bot's claim |
 | Checks | invoked, outcome **unknown** | the Bot's claim (`verification.source = agent_reported`, `observation_mode = agent_claim`) |
-| Tokens / model | from `api_request` logs (`tokens_provenance = vendor_telemetry`) | model name if the Bot states it |
+| Tokens / model | from `api_request` logs (`tokens_provenance = vendor_telemetry`); not recorded when any `api_request` lacks its input/output counts | model name if the Bot states it |
 | Cost | not recorded (Cursor exports cost only as a metric) | not recorded |
 | Conversation end | not exported | the report itself |
 

@@ -30,7 +30,13 @@ from openshard.history.shard import (
     ORIGIN_HISTORICAL_IMPORT,
     ORIGIN_OPENSHARD_ROUTED,
 )
-from openshard.history.shard_contract import _EM, _UNICODE_OK, ShardReceipt, _format_token_count
+from openshard.history.shard_contract import (
+    _EM,
+    _UNICODE_OK,
+    ShardReceipt,
+    _format_token_count,
+    agent_reported_suffix,
+)
 from openshard.history.stats import HistoryStats
 from openshard.history.views import receipt_to_dict, relevant_match_to_dict
 
@@ -125,12 +131,14 @@ def status_label(receipt: ShardReceipt) -> str:
     if status.startswith("Checks:"):
         # Review-style checks carry their detail in the checks column already.
         return "Failed" if verification_status_from_receipt(receipt) == "failed" else "Passed"
-    return status
+    return status + agent_reported_suffix(receipt)
 
 
 def checks_label(receipt: ShardReceipt) -> str:
     display = (receipt.checks_display or "Not recorded").strip()
-    return display[:1].lower() + display[1:] if display else "not recorded"
+    if not display:
+        return "not recorded"
+    return display[:1].lower() + display[1:] + agent_reported_suffix(receipt)
 
 
 def model_label(receipt: ShardReceipt) -> str:

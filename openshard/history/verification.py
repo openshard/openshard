@@ -120,6 +120,9 @@ REASON_CHECK_NOT_COMPLETED = "check_not_completed"
 # CI evidence (``openshard verify --ci``): the CI run for the commit was
 # cancelled, so it states no verdict.
 REASON_CI_CANCELLED = "ci_cancelled"
+# A stored block names an observing source for an outcome its observation
+# mode cannot produce; read as the agent's account.
+REASON_SOURCE_INCONSISTENT = "source_inconsistent_with_mode"
 
 MAX_CHECKS = 20
 MAX_NAME = 120
@@ -128,6 +131,14 @@ MAX_REASONS = 8
 
 _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 _STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?$")
+
+_OBSERVING_SOURCES: frozenset[str] = frozenset(
+    {SOURCE_DIRECTLY_OBSERVED, SOURCE_GIT_VERIFIED, SOURCE_INDEPENDENTLY_VERIFIED}
+)
+# Modes whose outcomes are only ever the agent's account (or nothing at all).
+_CLAIM_ONLY_MODES: frozenset[str] = frozenset(
+    {MODE_HOOK_TOOL_EVENT, MODE_AGENT_CLAIM, MODE_IMPORTED_TRANSCRIPT, MODE_NOT_OBSERVABLE, MODE_LEGACY_BOOLEAN}
+)
 
 # Executors whose capture path cannot observe checks at all.
 _NOT_OBSERVABLE_EXECUTORS: frozenset[str] = frozenset({"claude_code_import", "claude_code_wrap"})
@@ -428,6 +439,17 @@ def _parse_dict(raw: dict) -> VerificationEvidence:
     if not _consistent(ev):
         ev.status = STATUS_UNKNOWN
         ev.mark_incomplete(REASON_INCONSISTENT)
+    if (
+        ev.source in _OBSERVING_SOURCES
+        and ev.observation_mode in _CLAIM_ONLY_MODES
+        and ev.status in (STATUS_PASSED, STATUS_FAILED, STATUS_PARTIAL)
+    ):
+        # No producer can observe an outcome this way: a hook, transcript or
+        # agent claim only carries the agent's account, and a missing/invalid
+        # mode (read as legacy_boolean) proves nothing. Keep the outcome, never
+        # the stronger source.
+        ev.source = SOURCE_AGENT_REPORTED
+        ev.mark_incomplete(REASON_SOURCE_INCONSISTENT)
     return ev
 
 
@@ -728,6 +750,7 @@ __all__ = [
     "MODE_NOT_OBSERVABLE",
     "MODE_OPENSHARD_EXECUTED",
     "REASON_CI_CANCELLED",
+    "REASON_SOURCE_INCONSISTENT",
     "SOURCES",
     "SOURCE_AGENT_REPORTED",
     "SOURCE_DIRECTLY_OBSERVED",

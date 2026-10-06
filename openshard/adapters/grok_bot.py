@@ -290,7 +290,8 @@ def normalize_record(rec: LogRecord, *, team_id: int | None = None) -> Observati
             ("cache_read", "cursor.api.request.cache_read_tokens"),
             ("cache_creation", "cursor.api.request.cache_creation_tokens"),
         ):
-            f[short] = max(0, _int(attrs.get(key)) or 0)
+            value = _int(attrs.get(key))
+            f[short] = max(0, value) if value is not None else None
         f["model"] = _str(attrs.get("cursor.model.name"), 120)
     elif kind == KIND_API_ERROR:
         f["model"] = _str(attrs.get("cursor.model.name"), 120)
@@ -373,7 +374,7 @@ def _new_state(conversation_id: str) -> dict:
         "counts": {
             KIND_SHELL: 0, "shell_blocked": 0, KIND_MCP: 0, "mcp_failed": 0,
             KIND_BROWSER: 0, KIND_COMPUTER_USE: 0, KIND_API_REQUEST: 0, KIND_API_ERROR: 0,
-            "shell_on_user_machine": 0,
+            "shell_on_user_machine": 0, "api_request_without_tokens": 0,
         },
         "provenance": {"client": 0, "server": 0},
         "turn_ids": [],
@@ -514,8 +515,12 @@ def _apply_observation(obs: Observation, state: dict, events: list[dict], record
         if model and model not in state["models_seen"] and len(state["models_seen"]) < _MAX_MODELS:
             state["models_seen"].append(model)
         if obs.kind == KIND_API_REQUEST:
-            for key in state["tokens"]:
-                state["tokens"][key] += int(f.get(key) or 0)
+            if f.get("input") is None or f.get("output") is None:
+                # A request without its counts makes the conversation total unknown, not smaller.
+                counts["api_request_without_tokens"] = int(counts.get("api_request_without_tokens") or 0) + 1
+            else:
+                for key in state["tokens"]:
+                    state["tokens"][key] += int(f.get(key) or 0)
         return True
     if obs.kind == KIND_SHELL:
         if f.get("allowed") is False:
@@ -669,7 +674,7 @@ def build_otel_entry(state: dict, events: list[dict], record: dict, repo_root: P
     }
     if isinstance(record.get("receipt_id"), str) and record["receipt_id"]:
         entry["receipt_id"] = record["receipt_id"]
-    if c.get(KIND_API_REQUEST):
+    if c.get(KIND_API_REQUEST) and not c.get("api_request_without_tokens"):
         entry["prompt_tokens"] = tokens["input"]
         entry["completion_tokens"] = tokens["output"]
         entry["total_tokens"] = tokens["input"] + tokens["output"]

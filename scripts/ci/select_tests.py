@@ -132,6 +132,7 @@ INVARIANT_TEST_FILES: tuple[str, ...] = (
     "tests/test_stack_guard.py",
     "tests/test_platform_sync.py",
     "tests/test_run_history.py",
+    "tests/test_redteam_receipt_honesty.py",
 )
 
 # Any change under these prefixes runs the full PR suite. These are the
