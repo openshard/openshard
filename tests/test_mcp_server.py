@@ -404,7 +404,7 @@ class TestAuthoritySnapshot:
         monkeypatch.delenv("OPENSHARD_PLATFORM_KEY", raising=False)
         server = build_server(repo_path=history)
         _content, structured = _call(server, "authority_snapshot", {})
-        result = structured["result"]
+        result = structured
         assert result["schema_version"] == "openshard.authority.v1"
         assert result["enforcement_boundary"] == "openshard_native"
         assert result["organisation_policy"]["linked"] is False
@@ -448,7 +448,7 @@ class TestAuthoritySnapshot:
         monkeypatch.setattr("openshard.sync.policies.resolve_organisation_policy", lambda: state)
         server = build_server(repo_path=history)
         _content, structured = _call(server, "authority_snapshot", {})
-        result = structured["result"]
+        result = structured
         assert result["organisation_policy"] == {
             "linked": True,
             "applied": True,
