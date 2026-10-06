@@ -3,6 +3,11 @@ name: Openshard Cloud Receipts
 on:
   push:
   workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Optional ancestor commit to verify and capture"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -41,28 +46,59 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OPENSHARD_API_BASE: https://api.openshard.dev
           OPENSHARD_OIDC_AUDIENCE: openshard-cloud-capture
+          OPENSHARD_CAPTURE_COMMIT_SHA: ${{ inputs.commit_sha }}
         shell: bash
         run: |
           set -uo pipefail
 
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            shas=$(jq -cn --arg sha "$GITHUB_SHA" '[$sha]')
+            capture_sha="${OPENSHARD_CAPTURE_COMMIT_SHA:-$GITHUB_SHA}"
+            if [[ ! "$capture_sha" =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$capture_sha" "$GITHUB_SHA"; then
+              echo "Requested capture commit must be an ancestor of this workflow ref."
+              exit 1
+            fi
+            shas=$(jq -cn --arg sha "$capture_sha" '[$sha]')
           else
-            shas=$(jq -c '[.commits[]? | select((.message // "") | test("(?im)^Openshard-Agent:[[:space:]]*")) | .id]' "$GITHUB_EVENT_PATH")
+            # A commit may carry explicit Openshard metadata either in its own
+            # trailers or in the associated PR body. Inspect every pushed commit
+            # and fail closed later when neither source names an agent.
+            shas=$(jq -c '[.commits[]?.id]' "$GITHUB_EVENT_PATH")
           fi
+
+          pr_body_for_sha() {
+            local target_sha="$1" prs
+            prs=$(curl -fsSL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${target_sha}/pulls") || return 1
+            jq -r 'map(select(.merged_at != null)) as $merged | ($merged[0].body // .[0].body // empty)' <<<"$prs"
+          }
+
+          has_agent_metadata() {
+            local target_sha="$1" commit_message pr_body
+            commit_message=$(git show -s --format=%B "$target_sha") || return 1
+            if grep -qi '^Openshard-Agent:[[:space:]]*' <<<"$commit_message"; then
+              return 0
+            fi
+            pr_body=$(pr_body_for_sha "$target_sha") || return 1
+            grep -qi '^Openshard-Agent:[[:space:]]*' <<<"$pr_body"
+          }
 
           # An explicit trailer can recover a missed Receipt without rewriting
           # history. Only tagged ancestors of the requesting commit are allowed.
           required_shas="$shas"
           backfill_shas='[]'
           while IFS= read -r request_sha; do
+            request_message=$(git show -s --format=%B "$request_sha")
+            request_pr_body=$(pr_body_for_sha "$request_sha" || true)
+            request_metadata=$(printf '%s\n%s\n' "$request_message" "$request_pr_body")
             while IFS= read -r capture_sha; do
               if [[ ! "$capture_sha" =~ ^[0-9a-f]{40}$ ]] || ! git merge-base --is-ancestor "$capture_sha" "$request_sha"; then
                 echo "Receipt backfill must name an ancestor commit."
                 exit 1
               fi
-              if ! git show -s --format=%B "$capture_sha" | grep -qi '^Openshard-Agent:[[:space:]]*'; then
-                echo "Receipt backfill must name a tagged cloud-agent commit."
+              if ! has_agent_metadata "$capture_sha"; then
+                echo "Receipt backfill must name a commit with explicit Openshard-Agent metadata in the commit or associated PR."
                 exit 1
               fi
               backfill_shas=$(jq -c --arg sha "$capture_sha" '. + [$sha] | unique' <<<"$backfill_shas")
@@ -70,7 +106,7 @@ jobs:
                 echo "At most ten Receipt backfills are allowed per run."
                 exit 1
               fi
-            done < <(git show -s --format=%B "$request_sha" | sed -n 's/^Openshard-Capture-Commit:[[:space:]]*//Ip')
+            done < <(printf '%s\n' "$request_metadata" | sed -n 's/^Openshard-Capture-Commit:[[:space:]]*//Ip')
           done < <(jq -r '.[]' <<<"$required_shas")
           shas=$(jq -cn --argjson backfill "$backfill_shas" --argjson required "$required_shas" '$required + $backfill | reduce .[] as $sha ([]; if index($sha) then . else . + [$sha] end)')
 
@@ -150,20 +186,33 @@ jobs:
             added=$(jq '.stats.additions // 0' <<<"$commit")
             removed=$(jq '.stats.deletions // 0' <<<"$commit")
 
-            owner=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Owner:[[:space:]]*//Ip' | tail -1)
-            agent=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Agent:[[:space:]]*//Ip' | tail -1)
-            model=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Model:[[:space:]]*//Ip' | tail -1)
-            provider=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Provider:[[:space:]]*//Ip' | tail -1)
-            surface=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Surface:[[:space:]]*//Ip' | tail -1)
-            cost=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Cost-USD:[[:space:]]*//Ip' | tail -1)
-            tokens_in=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Input:[[:space:]]*//Ip' | tail -1)
-            tokens_out=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Output:[[:space:]]*//Ip' | tail -1)
-            tokens_cache_read=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Cache-Read:[[:space:]]*//Ip' | tail -1)
-            tokens_cache_creation=$(printf '%s\n' "$message" | sed -n 's/^Openshard-Tokens-Cache-Creation:[[:space:]]*//Ip' | tail -1)
+            prs=$(curl -fsSL               -H "Authorization: Bearer $GH_TOKEN"               -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" || echo '[]')
+            pr_body=$(jq -r 'map(select(.merged_at != null)) as $merged | ($merged[0].body // .[0].body // empty)' <<<"$prs")
+            pr_url=$(jq -r 'map(select(.merged_at != null)) as $merged | ($merged[0].html_url // .[0].html_url // empty)' <<<"$prs")
+
+            metadata_value() {
+              local key="$1" value
+              value=$(printf '%s\n' "$message" | sed -n "s/^${key}:[[:space:]]*//Ip" | tail -1)
+              if [[ -z "$value" && -n "$pr_body" ]]; then
+                value=$(printf '%s\n' "$pr_body" | sed -n "s/^${key}:[[:space:]]*//Ip" | tail -1)
+              fi
+              printf '%s' "$value"
+            }
+
+            owner=$(metadata_value "Openshard-Owner")
+            agent=$(metadata_value "Openshard-Agent")
+            model=$(metadata_value "Openshard-Model")
+            provider=$(metadata_value "Openshard-Provider")
+            surface=$(metadata_value "Openshard-Surface")
+            cost=$(metadata_value "Openshard-Cost-USD")
+            tokens_in=$(metadata_value "Openshard-Tokens-Input")
+            tokens_out=$(metadata_value "Openshard-Tokens-Output")
+            tokens_cache_read=$(metadata_value "Openshard-Tokens-Cache-Read")
+            tokens_cache_creation=$(metadata_value "Openshard-Tokens-Cache-Creation")
 
             [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
             if [[ -z "$agent" ]]; then
-              echo "::warning::Skipping $sha because Openshard-Agent is empty."
+              echo "::notice::Skipping $sha because neither the commit nor associated PR declares Openshard-Agent."
               echo "::endgroup::"
               continue
             fi
@@ -181,9 +230,6 @@ jobs:
               fi
             fi
             [[ -n "$cost_provenance" ]] || cost_provenance="not_exposed_by_cloud_runtime"
-
-            prs=$(curl -fsSL               -H "Authorization: Bearer $GH_TOKEN"               -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" || echo '[]')
-            pr_url=$(jq -r '.[0].html_url // empty' <<<"$prs")
 
             git checkout --force "$sha" >/dev/null 2>&1
 
