@@ -22,6 +22,16 @@ All notable changes to OpenShard are documented here.
   with an `interrupted` event naming the run to resume. It is the same engine
   callback the terminal renderer consumes, never prompts, and writes nothing
   else to stdout. `--json` and text output are unchanged.
+- OSN reads the repository's `AGENTS.md` and `CLAUDE.md` (the maintainers'
+  instructions for coding agents) and gives them, bounded (8,000 characters
+  per file, 12,000 in all, truncation marked), to every role on every turn
+  inside a `<project_instructions>` block; the system prompts describe it as
+  guidance to follow where it does not conflict with the task, the action
+  contract or OpenShard policy, and say it never grants authority. The run's
+  header lists the files (`Context AGENTS.md (2.1 KB) shown to every role`)
+  and the Receipt records them under `osn_loop.project_instructions` (path,
+  bytes, sha256, truncated, chars shown): that the agent was given them,
+  never that it followed them.
 - `openshard osn apply <osn-id> [--commit] [--yes] [--json]`: put a completed
   run's verified result into the repository later, without re-running the
   model. A verified run that was not promoted keeps exactly the bytes

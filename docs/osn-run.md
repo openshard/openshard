@@ -43,6 +43,18 @@ A reply that is not a valid action list is re-asked once (its spend is recorded)
 ends in `error`. A turn may carry at most 8 actions; anything after `finish` is ignored.
 `--loop writes` keeps the original behaviour: one whole-file proposal per attempt.
 
+### Project instructions
+
+If the repository has an `AGENTS.md` or `CLAUDE.md` at its root, OSN gives it to every role
+(planner, explorers, executor, workers) on every turn, bounded to 8,000 characters per file and
+12,000 in all (a truncation is marked in the text), inside a `<project_instructions file="...">`
+block. The system prompts describe the block as the maintainers' guidance for coding agents, to
+follow where it does not conflict with the task, the action contract or OpenShard policy, and
+say it never grants authority OpenShard has not; repository text shown as tool output stays in
+`<untrusted>` blocks as before. The header lists the files (`Context AGENTS.md (2.1 KB) shown to
+every role`) and the Receipt records them under `osn_loop.project_instructions` (path, bytes,
+sha256, truncated, chars shown): that the agent was given them, never that it followed them.
+
 ### What the terminal shows while it runs
 
 The loop emits structured progress events (`progress=` callback on `run_bounded_loop`); the CLI
