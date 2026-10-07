@@ -12,6 +12,17 @@ All notable changes to OpenShard are documented here.
   test's output, the output was lost and the run reported the check as
   failed: an environment failure recorded as the change's. Found by running
   OSN on OpenShard's own test suite.
+- An OSN Receipt's content hash is stamped last, over the record as written.
+  The run entry was stamped when built and then gained the fields only the
+  run knows at the end (verification command source, project instructions,
+  repository state, a resume, the commit OpenShard created), so a record
+  nobody edited read as `Checksum mismatch (record edited after it was
+  written)`. Receipts written before this fix keep their stored hash and
+  still report a mismatch; they were not tampered with.
+
+- The OpenRouter client returns an empty string instead of `None` when a
+  reasoning model spends its whole output budget thinking and the API reports
+  `content: null`.
 
 ### Added
 
@@ -100,12 +111,6 @@ All notable changes to OpenShard are documented here.
   boilerplate scoring preference). `deepseek/deepseek-v4-flash`, the 0423
   snapshot OpenRouter still serves under the old id, is deprecated: kept for
   history and explicit selection, never chosen as a routing default.
-
-### Fixed
-
-- The OpenRouter client returns an empty string instead of `None` when a
-  reasoning model spends its whole output budget thinking and the API reports
-  `content: null`.
 
 ### Added
 
