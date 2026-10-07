@@ -4,6 +4,24 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Added
+
+- `openshard osn apply <osn-id> [--commit] [--yes] [--json]`: put a completed
+  run's verified result into the repository later, without re-running the
+  model. A verified run that was not promoted keeps exactly the bytes
+  OpenShard verified under its checkpoint (`verified_files`, the Receipt's
+  hashes; `base_files`, what the repository held at those paths). Applying
+  goes through the same file-mutation policy gate as `--promote`, re-checks
+  the hashes, logs a sandbox-apply receipt and marks the checkpoint
+  `applied`; `--commit` commits exactly those files and binds a
+  re-verification to the commit through the post-session path. It refuses,
+  naming the rule, when the run did not complete, did not verify or was
+  promoted, was applied already, HEAD moved, a target file changed since the
+  run, or the kept bytes no longer match. In an interactive terminal a
+  verified, unpromoted run now ends by asking once whether to apply; piped
+  and `--json` runs are told the command. `openshard osn runs` shows each
+  completed run's result state.
+
 ### Changed
 
 - `openshard osn run` shows more of what is happening while it happens: the
