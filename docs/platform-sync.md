@@ -223,6 +223,26 @@ Today three capabilities are consumed by `openshard osn run`: `agent_budgets`,
 `adaptive_routing` and `supervisor_routing` (see `docs/osn-run.md`). A run takes one fresh
 capability snapshot at its start and keeps that answer for the whole run.
 
+## Organisation policy
+
+`openshard osn run` also reads the organisation's policy with the same link and key:
+
+```
+GET {endpoint}/v1/orgs/{organisation_id}/policy
+```
+
+The answer is `{organisation_id, version, hash, policy, updated_at}`. `policy` is either `null` (no
+policy) or a closed `schema_version: 1` document with `models`, `budgets` and optional
+`permissions`. Any other shape, a missing `sha256:` hash, a version below 1 or another
+organisation's answer is refused, and a linked run then refuses to start. What each rule enforces
+is in `docs/osn-run.md`.
+
+The hosted Receipt carries five bounded OSN control blocks: `agent_budgets`, `adaptive_routing`,
+`supervisor_routing`, `capability_snapshot` and `organisation_policy`. The last one holds the
+policy's version and hashes, never its rules. They sit beside `policy_decisions`, `approval_detail`
+and `permissions`. All of these are `null` for Receipts OpenShard did not control: hook-observed
+external-agent sessions and historical imports.
+
 ## Not done, on purpose
 
 - **Task grouping.** `task_id` (`task_` + UUIDv7, minted only by

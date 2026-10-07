@@ -423,6 +423,13 @@ def _verification_result_lines(data: dict) -> list[str]:
     return lines
 
 
+def _stdin_is_tty() -> bool:
+    try:
+        return bool(sys.stdin.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
 def _resolve_provider(name: str | None, model: str):
     from openshard.providers.manager import ProviderManager
 
@@ -485,7 +492,8 @@ def _resolve_provider(name: str | None, model: str):
                    "verification command on that exact commit so the Receipt's verification is bound to it "
                    "(requires a clean working tree apart from the promoted files).")
 @click.option("--yes", "assume_yes", is_flag=True, default=False,
-              help="Approve policy 'ask' paths during the OSN run and promotion without prompting.")
+              help="Approve organisation 'ask' paths during the OSN run, and policy 'ask' paths at promotion, "
+                   "without prompting. Built-in 'ask' paths are never approved inside the run.")
 @click.option("--no-learning", "no_learning", is_flag=True, default=False,
               help="Do not consult learning signals from this repository's prior OpenShard runs.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
@@ -686,8 +694,6 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     def run_approver(rel, _decision):
         if assume_yes:
             return True, "flag_yes"
-        if machine:
-            return False, "json_no_prompt"
         try:
             granted = click.confirm(f"Policy requires approval to write {rel}. Continue in the isolated workspace?", default=False)
         except click.Abort:
@@ -763,7 +769,10 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             planner=planner_hook,
             verifier=verifier_hook,
             workers=workers_hook,
-            organisation_approver=run_approver,
+            # With no --yes and nobody who can answer a prompt (--json / --json-events,
+            # or no terminal), there is no approver: the write fails closed and the
+            # Receipt says approval was unanswered -- never that someone refused.
+            organisation_approver=run_approver if assume_yes or (not machine and _stdin_is_tty()) else None,
             blocked_write_patterns=permissions.blocked_write_paths,
             approval_write_patterns=permissions.approval_write_paths,
             blocked_command_prefixes=permissions.blocked_command_prefixes,

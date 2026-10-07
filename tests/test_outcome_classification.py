@@ -421,6 +421,14 @@ def test_classify_entry_approval_and_policy():
     assert classify_entry(deny).outcome == oc.POLICY_BLOCKED
 
 
+@pytest.mark.parametrize("outcome", ["unanswered", "approver_error"])
+def test_nobody_refused_is_never_a_user_denial(outcome):
+    c = classify_entry(_entry(approval_receipt={"granted": False, "outcome": outcome}))
+    assert (c.outcome, c.cause) == (oc.APPROVAL_UNAVAILABLE, "harness")
+    refused = classify_entry(_entry(approval_receipt={"granted": False, "outcome": "refused"}))
+    assert (refused.outcome, refused.cause) == (oc.APPROVAL_DENIED, "user")
+
+
 @pytest.mark.parametrize("bad", [None, "x", 1, [], {"error_class": 5, "verification": "junk"}])
 def test_classify_entry_never_raises(bad):
     assert not classify_entry(bad).routing_eligible

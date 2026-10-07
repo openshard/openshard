@@ -139,6 +139,34 @@ def test_organisation_command_prefix_can_only_tighten():
     assert evaluate_command(["git", "status"], blocked_prefixes=("npm run build",)).decision == "allow"
 
 
+@pytest.mark.parametrize(("argv", "prefix"), [
+    ([sys.executable, "-m", "pytest", "-q"], "python -m pytest"),  # what OSN runs for a bare `python`
+    ([r"C:\Python311\python.exe", "-m", "pytest"], "python -m pytest"),
+    (["/usr/bin/python3.12", "-m", "pytest"], "python"),
+    (["pythonw", "script.py"], "python"),
+    (["npm.cmd", "run", "deploy"], "npm run deploy"),
+    ([r"C:\Program Files\Git\cmd\GIT.EXE", "push"], "git push"),
+    (["./deploy.sh"], "deploy.sh"),
+    (["npm", "run", "deploy"], "npm.cmd run deploy"),  # the rule's own suffix is not identity either
+])
+def test_organisation_prefix_matches_the_program_not_its_spelling(argv, prefix):
+    from openshard.policy.command_execution import organisation_command_blocked
+
+    assert organisation_command_blocked(argv, (prefix,))
+
+
+@pytest.mark.parametrize(("argv", "prefix"), [
+    (["npm", "run", "build"], "npm run deploy"),
+    (["pythonista", "x"], "python"),
+    (["py", "-m", "pytest"], "python"),  # the py launcher is a different program
+    (["git", "status"], "git push"),
+])
+def test_organisation_prefix_does_not_overmatch(argv, prefix):
+    from openshard.policy.command_execution import organisation_command_blocked
+
+    assert not organisation_command_blocked(argv, (prefix,))
+
+
 def test_batch_script_with_cmd_metachar_denied():
     assert evaluate_command(["tool.cmd", "a&calc"]).decision == "deny"
 
