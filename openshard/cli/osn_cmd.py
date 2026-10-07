@@ -12,6 +12,7 @@ import json
 import os
 import shlex
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -56,6 +57,8 @@ class _OsnProgressRenderer:
 
         self._spinner = _Spinner() if getattr(sys.stdout, "isatty", lambda: False)() else None
         self._spinning = False
+        # Workers and explorers call back from their own threads.
+        self._lock = threading.RLock()
 
     def _stop(self) -> None:
         if self._spinner is not None and self._spinning:
@@ -74,9 +77,22 @@ class _OsnProgressRenderer:
         self._stop()
 
     def __call__(self, event: str, data: dict) -> None:
+        with self._lock:
+            self._render(event, data)
+
+    def _render(self, event: str, data: dict) -> None:
         from openshard.cli.run_output import _safe_console_text
 
+        worker = data.get("worker_id")
+        tag = f"[{worker}] " if isinstance(worker, str) and worker else ""
+
         def echo(text: str) -> None:
+            if tag:
+                # A worker's line keeps the run's indentation and carries its id,
+                # so lines from concurrent workers never read as one agent's.
+                stripped = text.lstrip("\n")
+                lead = len(stripped) - len(stripped.lstrip(" "))
+                text = text[: len(text) - len(stripped)] + " " * lead + tag + stripped.lstrip(" ")
             click.echo(_safe_console_text(text))
 
         if event == "workspace_ready":
@@ -84,10 +100,10 @@ class _OsnProgressRenderer:
         elif event == "attempt_start":
             self._stop()
             model = _friendly_model(data.get("model"))
-            tag = " · recovery after independent review" if data.get("review_recovery") else ""
+            tag_text = " · recovery after independent review" if data.get("review_recovery") else ""
             if data.get("after_workers"):
-                tag = " · resolving what synthesis could not"
-            echo(f"\nAttempt {data.get('attempt')} · {model}{tag}")
+                tag_text = " · resolving what synthesis could not"
+            echo(f"\nAttempt {data.get('attempt')} · {model}{tag_text}")
             self._start(f"Calling {model}")
         elif event == "stage_start":
             self._stop()
@@ -131,17 +147,15 @@ class _OsnProgressRenderer:
             self._stop()
             if not data.get("in_turn"):
                 echo("\nVerification")
-            self._start("Running verification" + (" (requested by the model)" if data.get("in_turn") else ""))
+            label = "Running verification" + (" (requested by the model)" if data.get("in_turn") else "")
+            if tag:
+                echo(f"  {label}...")
+            else:
+                self._start(label)
         elif event == "verification_result":
             self._stop()
-            status = data.get("status")
-            if status == "passed":
-                echo("  ✓ PASSED")
-            elif status == "failed":
-                code = data.get("exit_code")
-                echo("  ✗ FAILED" + (f" · exit {code}" if code is not None else ""))
-            else:
-                echo("  ? UNKNOWN · verification did not produce a verdict")
+            for line in _verification_result_lines(data):
+                echo(line)
         elif event == "recovery_decision":
             self._stop()
             echo("\nRecovery")
@@ -161,11 +175,23 @@ class _OsnProgressRenderer:
             self._stop()
             echo(f"  ✗ Turn {data.get('turn')} · the model's reply was not a usable action list"
                  + (f" ({data.get('message')})" if data.get("message") else "") + " · attempt ends")
+        elif event == "malformed_attempt":
+            self._stop()
+            echo(f"  ✗ Attempt {data.get('attempt')} wrote nothing usable · "
+                 f"moving to attempt {data.get('next_attempt')} with the next model")
+        elif event == "checkpoint_failed":
+            self._stop()
+            echo(f"  ! Checkpoint not written ({data.get('phase') or 'unknown phase'}) · "
+                 "this run cannot be resumed if interrupted")
         elif event == "turn_start":
             self._stop()
             role = data.get("role")
             prefix = f"{role.capitalize()} turn" if isinstance(role, str) and role != "executor" else "Turn"
-            self._start(f"{prefix} {data.get('turn')}/{data.get('max_turns')} · {_friendly_model(data.get('model'))}")
+            label = f"{prefix} {data.get('turn')}/{data.get('max_turns')} · {_friendly_model(data.get('model'))}"
+            if tag:
+                echo(f"  {label}...")
+            else:
+                self._start(label)
         elif event == "explore_start":
             self._stop()
             n = data.get("questions") or 0
@@ -191,6 +217,8 @@ class _OsnProgressRenderer:
             if role == "planner":
                 if status == "ran" and data.get("has_plan"):
                     echo("  ✓ Plan ready" + (f" · {role_model}" if role_model else ""))
+                    for line in _plan_lines(data):
+                        echo(line)
                 else:
                     echo(f"  ? Planner {status or 'did not run'}" + (f" · {data.get('reason')}" if data.get("reason") else "")
                          + " · continuing without a plan")
@@ -224,6 +252,59 @@ class _OsnProgressRenderer:
         elif event == "verification_reused":
             echo("\nVerification")
             echo("  ✓ Already observed on the final files (not run again)")
+
+
+MAX_PLAN_LINES = 8
+
+
+def _plan_lines(data: dict) -> list[str]:
+    """The planner's bounded plan as it was handed to the executor: steps, then files."""
+    lines: list[str] = []
+    summary = data.get("plan_summary")
+    if isinstance(summary, str) and summary.strip():
+        lines.append(f"    {summary.strip()}")
+    steps = [s for s in (data.get("plan_steps") or []) if isinstance(s, str) and s.strip()]
+    for i, step in enumerate(steps[:MAX_PLAN_LINES], 1):
+        lines.append(f"    {i}. {step.strip()}")
+    if len(steps) > MAX_PLAN_LINES:
+        lines.append(f"    … {len(steps) - MAX_PLAN_LINES} more step(s)")
+    files = [f for f in (data.get("plan_files") or []) if isinstance(f, str) and f.strip()]
+    if files:
+        shown = ", ".join(files[:6]) + (f" … +{len(files) - 6}" if len(files) > 6 else "")
+        lines.append(f"    Files likely to change: {shown}")
+    subtasks = [s for s in (data.get("plan_subtasks") or []) if isinstance(s, str)]
+    if subtasks:
+        lines.append(f"    Independent subtasks proposed: {', '.join(subtasks)}")
+    return lines
+
+
+def _verification_result_lines(data: dict) -> list[str]:
+    """What OpenShard observed from the verification command, and why when it did not pass."""
+    status = data.get("status")
+    if status == "passed":
+        return ["  ✓ PASSED"]
+    lines: list[str] = []
+    code = data.get("exit_code")
+    if data.get("tainted"):
+        lines.append("  ✗ INVALID · the verifier rewrote the files it was checking, so this pass proves nothing")
+    elif data.get("setup_failure"):
+        lines.append(f"  ? NOT RUN · the verifier itself could not run ({data.get('setup_failure')}) · "
+                     "no verdict on the change")
+    elif status == "failed":
+        lines.append("  ✗ FAILED" + (f" · exit {code}" if code is not None else ""))
+    elif status == "not_run":
+        lines.append("  ? NOT RUN · the verification command did not start")
+    else:
+        lines.append("  ? UNKNOWN · verification did not produce a verdict (timed out)")
+    failed_tests = [t for t in (data.get("failed_tests") or []) if isinstance(t, str)]
+    if failed_tests:
+        shown = ", ".join(failed_tests[:5]) + (f" … +{len(failed_tests) - 5}" if len(failed_tests) > 5 else "")
+        lines.append(f"    Failing: {shown}")
+    tail = data.get("output_tail")
+    if isinstance(tail, str) and tail.strip():
+        lines.append("    Output (last lines):")
+        lines.extend(f"      {ln}" for ln in tail.splitlines())
+    return lines
 
 
 def _resolve_provider(name: str | None, model: str):
@@ -782,6 +863,9 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         click.echo(f"  Not promoted. Review the copy at {receipt.sandbox_path}, or re-run with --promote.")
     if skipped:
         click.echo(f"  Blocked by policy/skipped: {', '.join(skipped)}")
+    receipt_id = entry.get("receipt_id")
+    if receipt_id:
+        click.echo(f"\nReceipt  {receipt_id} · `openshard last` shows it · run {checkpoint_id}")
 
 
 def _lookup_learning(repo_root: Path, repo_config: dict) -> LearningSnapshot:
