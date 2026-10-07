@@ -31,6 +31,34 @@ A reply that is not a valid action list is re-asked once (its spend is recorded)
 ends in `error`. A turn may carry at most 8 actions; anything after `finish` is ignored.
 `--loop writes` keeps the original behaviour: one whole-file proposal per attempt.
 
+## Roles: planner, executor, verifier
+
+`--roles auto` (default) can put three roles on one run; each is recorded with its own model,
+provider, calls, tokens, cost (with provenance) and duration, and a role that did not run says
+`skipped` and why.
+
+| Role | What it does | When it runs (`auto`) | Model |
+|---|---|---|---|
+| planner | up to 3 read-only turns in the isolated copy (writes and verification requests are refused), ending in a short plan: summary, likely files, steps, what verification must show | the task's routing category is `complex` or `security`, or the repository has more than 12 files; a trivial task pays for no planner | `--planner-model`, else Routing V2 over the run's candidate pool (`deep_reasoning`) when the capability applied, else the native planner tier if the catalog knows it, else the executor's model |
+| executor | the turn loop above, with the plan as advisory context | always | as before (`--model`, Routing V2, or keyword routing, with the escalation ladder) |
+| verifier | one call after an attempt OpenShard itself verified: task, plan, a bounded diff, the verification evidence; replies `pass`, `warn` or `fail` with concerns | the same non-trivial rule as the planner, and a model other than the executor's is available (`--verifier-model`, Routing V2's `verifier` class with the executor's model excluded, or the native validator tier when the catalog knows it); a self-review is not paid for in `auto` | as listed; `--roles full` runs it even on the executor's own model and records `independent: false` |
+
+The verdict is **model-reported evidence** beside the deterministic result and never changes the
+verification status. A `fail` buys at most one bounded executor recovery attempt on the same
+model (no escalation: nothing failed deterministically) whose result is verified like any other;
+if it does not verify, its changes are undone and the verified state stands
+(`recovery_outcome: reverted_to_verified_state`). At most two reviews per run. `--roles executor`
+disables both roles.
+
+The Receipt carries `osn_loop.roles` (per-role status, reason, requested and reported model,
+provider, calls, turns, tokens, cost, `cost_source`, duration), `osn_loop.plan`, `osn_loop.reviews`
+(verdict, summary, concerns, whether a recovery was requested and how it ended), `stage_runs`
+(planning / implementation / review, the per-stage usage every Receipt surface already shows) and a
+`tier_dispatch_receipt` whose `*_model_actual` fields are set only for a role that really called a
+model, so `openshard history` shows which roles were dispatched. The run's `execution_model` stays
+the executor's. The full local Receipt gets `ROLES`, `PLAN` and `REVIEW` sections; the hosted
+projection is unchanged until the Platform contract learns these blocks.
+
 - The model is called through the existing provider layer (`BaseProvider.execute`), so any
   configured provider works. Without `--model`, the existing keyword routing picks the first model.
 - Writes go only to an isolated copy of the repository (local secrets and agent state such as

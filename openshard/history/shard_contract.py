@@ -1857,6 +1857,77 @@ def _osn_actions(entry: dict) -> list[dict]:
     return out
 
 
+def _role_line(role: str, rec: dict) -> str:
+    """One role on one line: model, turns/calls, cost with provenance; or why it did not run."""
+    status = rec.get("status")
+    if status != "ran":
+        why = rec.get("reason") or status or "not recorded"
+        return _row(role.capitalize(), f"{status or 'not run'} ({why})", width=12)
+    model = rec.get("model")
+    parts = [_display_model_name(model) if isinstance(model, str) else "model unknown"]
+    if isinstance(rec.get("turns"), int):
+        parts.append(f"{rec['turns']} turn{'s' if rec['turns'] != 1 else ''}")
+    elif isinstance(rec.get("calls"), int):
+        parts.append(f"{rec['calls']} call{'s' if rec['calls'] != 1 else ''}")
+    tokens = rec.get("total_tokens")
+    if tokens is None and (rec.get("prompt_tokens") is not None or rec.get("completion_tokens") is not None):
+        tokens = (rec.get("prompt_tokens") or 0) + (rec.get("completion_tokens") or 0)
+    if isinstance(tokens, int):
+        parts.append(_format_token_count(tokens) + " tokens")
+    cost = rec.get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        label = {"provider_reported": "provider-reported", "list_rate_estimate": "list-rate estimate"}.get(
+            str(rec.get("cost_source") or ""), "origin not recorded",
+        )
+        parts.append(f"${cost:.4f} ({label})")
+    else:
+        parts.append("cost unknown")
+    if rec.get("independent") is True:
+        parts.append("independent")
+    elif rec.get("independent") is False and role == "verifier":
+        parts.append("same model as executor")
+    return _row(role.capitalize(), " · ".join(parts), width=12)
+
+
+def _render_osn_roles(receipt: ShardReceipt, *, detail: str = "compact") -> list[str]:
+    """ROLES / PLAN / REVIEW sections for an OSN run with role evidence."""
+    evidence = receipt.recorded_evidence or {}
+    agent_loop_raw = evidence.get("agent_loop")
+    agent_loop: dict = agent_loop_raw if isinstance(agent_loop_raw, dict) else {}
+    roles = agent_loop.get("roles") if isinstance(agent_loop.get("roles"), dict) else None
+    if not roles:
+        return []
+    lines = [f"{_INDENT}ROLES"]
+    for role in ("planner", "executor", "verifier"):
+        rec = roles.get(role)
+        if isinstance(rec, dict):
+            lines.append(_role_line(role, rec))
+    lines.append("")
+    if detail == "full":
+        plan = agent_loop.get("plan") if isinstance(agent_loop.get("plan"), dict) else None
+        if plan and plan.get("summary"):
+            lines.append(f"{_INDENT}PLAN")
+            lines.append(_row("Summary", str(plan["summary"]), width=12))
+            if plan.get("file_count") is not None:
+                lines.append(_row("Scope", f"{plan['file_count']} file(s), {plan.get('step_count') or 0} step(s)", width=12))
+            lines.append("")
+        reviews = agent_loop.get("reviews") if isinstance(agent_loop.get("reviews"), list) else []
+        if reviews:
+            lines.append(f"{_INDENT}REVIEW")
+            for r in reviews:
+                verdict = str(r.get("verdict") or "unknown").upper()
+                model = r.get("model")
+                head = f"{verdict} (model-reported" + (f", {_display_model_name(model)}" if isinstance(model, str) else "") + ")"
+                lines.append(_row(f"Attempt {r.get('attempt')}", head, width=12))
+                if r.get("summary"):
+                    lines.append(_row("", str(r["summary"]), width=12))
+                if r.get("recovery_requested"):
+                    lines.append(_row("Recovery", str(r.get("recovery_outcome") or "requested"), width=12))
+            lines.append(_row("Note", "A review never changes the verification result above.", width=12))
+            lines.append("")
+    return lines
+
+
 def _render_osn_actions(receipt: ShardReceipt) -> list[str]:
     """The OSN ACTIONS section of the full Receipt: what the agent asked, what OpenShard decided and saw."""
     if not receipt.osn_actions:
@@ -1951,6 +2022,10 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
         lines.append(f"{_INDENT}  ↓ verification passed")
     elif receipt.verification_status == "failed":
         lines.append(f"{_INDENT}  ↓ verification failed")
+
+    _role_lines = _render_osn_roles(receipt)
+    if _role_lines:
+        lines += ["", *_role_lines[:-1]]
 
     lines += [
         "",
@@ -2564,6 +2639,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
             lines.append(f"{_INDENT}  +{len(receipt.policy_decisions) - _pd_cap} more")
         lines.append("")
 
+    lines.extend(_render_osn_roles(receipt, detail="full"))
     lines.extend(_render_osn_actions(receipt))
 
     _budget = (receipt.recorded_evidence or {}).get("agent_budgets")

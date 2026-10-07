@@ -28,8 +28,14 @@ from openshard.osn.model_provider import AttemptUsage
 EXECUTOR = "osn_loop"
 
 
+def _effective_attempts(receipt: LoopReceipt) -> list:
+    """Attempts whose effects remain (a reverted review recovery describes bytes that were undone)."""
+    getter = getattr(receipt, "effective_attempts", None)
+    return list(getter()) if callable(getter) else list(receipt.attempts)
+
+
 def _verification_block(receipt: LoopReceipt) -> dict[str, Any]:
-    last = next((a.verification for a in reversed(receipt.attempts) if a.verification), None)
+    last = next((a.verification for a in reversed(_effective_attempts(receipt)) if a.verification), None)
     if last is None or not last.ran:
         # No outcome was observed: nothing ran, or the verifier could not even
         # be started. That is unknown evidence, never a pass or a model failure.
@@ -89,6 +95,89 @@ def _sum_costs(usage: list[AttemptUsage]) -> float | None:
     if not usage or any(u.cost_usd is None for u in usage):
         return None
     return sum(u.cost_usd for u in usage if u.cost_usd is not None)
+
+
+_STAGE_FOR_ROLE = {"planner": "planning", "executor": "implementation", "verifier": "review"}
+_ROLE_ORDER = {"planner": 0, "executor": 1, "verifier": 2}
+
+
+def _ordered_usage(usage: list[AttemptUsage]) -> list[AttemptUsage]:
+    """Model calls in run order: the planner's (attempt 0), then per attempt the executor's calls, then its review."""
+    indexed = list(enumerate(usage))
+    indexed.sort(key=lambda iu: (iu[1].attempt, _ROLE_ORDER.get(getattr(iu[1], "role", "executor"), 1), iu[0]))
+    return [u for _, u in indexed]
+
+
+def _record_roles(entry: dict, receipt: LoopReceipt, usage: list[AttemptUsage], final_model: str) -> None:
+    """Role evidence: ``osn_loop.roles`` (executor filled from its calls), ``stage_runs`` and a tier dispatch receipt.
+
+    ``stage_runs`` (planning / implementation / review) is the existing per-stage
+    usage record every Receipt surface already renders; ``tier_dispatch_receipt``
+    is the existing role-dispatch truth, with ``*_model_actual`` set only for a
+    role that really made a call. A role that did not run says ``skipped`` and
+    why; usage a provider did not report stays ``None``.
+    """
+    from openshard.osn.roles import ROLE_EXECUTOR, RoleRun
+
+    roles: dict[str, Any] = dict(entry["osn_loop"].get("roles") or {})
+    executor = RoleRun.from_usage(ROLE_EXECUTOR, usage, choice=None, provider=None)
+    executor_record = executor.to_record()
+    executor_record.pop("actions", None)
+    executor_record["turns"] = entry["osn_loop"].get("turns_total")
+    executor_record["source"] = "routing"
+    roles[ROLE_EXECUTOR] = executor_record
+    entry["osn_loop"]["roles"] = roles
+    if len(roles) == 1 and receipt.mode != "turns" and not usage:
+        return
+
+    stage_runs: list[dict[str, Any]] = []
+    for role in ("planner", "executor", "verifier"):
+        rec = roles.get(role)
+        if not isinstance(rec, dict) or rec.get("status") != "ran" or not rec.get("model"):
+            continue
+        duration = rec.get("duration_ms")
+        stage_runs.append({
+            "stage_type": _STAGE_FOR_ROLE[role],
+            "model": rec["model"],
+            "duration": round(duration / 1000.0, 3) if isinstance(duration, int) else None,
+            "cost": rec.get("cost_usd"),
+            "summary": f"OSN {role}",
+            "tokens_input": rec.get("prompt_tokens"),
+            "tokens_output": rec.get("completion_tokens"),
+        })
+    if len(stage_runs) > 1:
+        # One stage alone is the plain execution model; several stages are worth listing.
+        entry["stage_runs"] = stage_runs
+
+    planner, verifier = roles.get("planner"), roles.get("verifier")
+    if isinstance(planner, dict) or isinstance(verifier, dict):
+        def _model(rec: Any) -> str | None:
+            return rec.get("requested_model") or rec.get("model") if isinstance(rec, dict) else None
+
+        def _actual(rec: Any) -> str | None:
+            return rec.get("model") if isinstance(rec, dict) and rec.get("status") == "ran" else None
+
+        validator_status = (
+            "applied" if isinstance(verifier, dict) and verifier.get("status") == "ran" else "skipped"
+        )
+        entry["tier_dispatch_receipt"] = {
+            "enabled": True,
+            "applied": True,
+            "tier_source": "osn_roles",
+            "planner_tier": (planner or {}).get("source") or "",
+            "planner_model": _model(planner),
+            "executor_tier": "routing",
+            "executor_model": final_model,
+            "validator_tier": (verifier or {}).get("source") or "",
+            "validator_model": _model(verifier),
+            "planner_model_actual": _actual(planner),
+            "executor_model_actual": final_model if usage else None,
+            "validator_model_actual": _actual(verifier),
+            "validator_dispatch_status": validator_status,
+            "fallback_used": False,
+            "fallback_reason": "",
+            "warnings": [],
+        }
 
 
 def _cost_provenance(usage: list[AttemptUsage]) -> str | None:
@@ -321,9 +410,15 @@ def build_osn_run_entry(
 
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     safe_task = _sanitize_task(task, placeholder="OSN loop task", cap=500)
-    first_model = _sanitize_model(usage[0].model) if usage else "unknown"
-    final_model = _sanitize_model(usage[-1].model) if usage else "unknown"
-    verified_attempts = [a for a in receipt.attempts if a.verification is not None and a.verification.ran]
+    # The run's model is the executor's: planner and verifier calls are recorded
+    # per role and per call, never flattened into the execution model.
+    usage = _ordered_usage(usage)
+    executor_usage = [u for u in usage if getattr(u, "role", "executor") == "executor"] or list(usage)
+    first_model = _sanitize_model(executor_usage[0].model) if executor_usage else "unknown"
+    final_model = _sanitize_model(executor_usage[-1].model) if executor_usage else "unknown"
+    verified_attempts = [
+        a for a in _effective_attempts(receipt) if a.verification is not None and a.verification.ran
+    ]
     retry = len(receipt.attempts) > 1
     verification = _verification_block(receipt)
     files_detail, files_created, files_updated = _file_effects(receipt.changed_files, repo_path)
@@ -379,7 +474,9 @@ def build_osn_run_entry(
         entry["agent_budgets"] = dict(budget_record)
     if retry and usage:
         entry["fixer_model"] = final_model if final_model != first_model else None
-        first_cost = _sum_costs([u for u in usage if u.attempt == 1])
+        # Attempt 1 carries the planner's calls (attempt 0) and any verifier call
+        # made for it, so the first-attempt cost is the whole run minus retries.
+        first_cost = _sum_costs([u for u in usage if u.attempt <= 1])
         retry_cost = _sum_costs([u for u in usage if u.attempt > 1])
         entry["estimated_cost"] = first_cost
         entry["retry_estimated_cost"] = retry_cost
@@ -388,6 +485,7 @@ def build_osn_run_entry(
             entry["retry_attempts"] = attempts
     else:
         entry["estimated_cost"] = _sum_costs(usage)
+    _record_roles(entry, receipt, usage, final_model)
     entry["prompt_tokens"] = sum(u.prompt_tokens for u in usage)
     entry["completion_tokens"] = sum(u.completion_tokens for u in usage)
     entry["total_tokens"] = entry["prompt_tokens"] + entry["completion_tokens"]

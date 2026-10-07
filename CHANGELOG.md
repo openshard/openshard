@@ -31,6 +31,25 @@ All notable changes to OpenShard are documented here.
   `OSN ACTIONS` section; the hosted projection carries counts and model calls
   only, never paths or output.
 
+- `openshard osn run --roles auto|executor|full`: planner → executor → verifier
+  as real runtime behaviour. The planner takes up to three read-only turns in
+  the isolated copy (writes refused by the harness) and ends with a short
+  plan the executor receives as advisory context; it runs only when the task
+  is not trivial. The verifier reviews a result OpenShard itself verified
+  (task, plan, bounded diff, verification evidence) on an independent model
+  when one is available; its `pass` / `warn` / `fail` verdict is recorded as
+  model-reported evidence and never changes the verification status. A
+  `fail` buys one bounded executor recovery attempt on the same model; if it
+  does not verify, its changes are undone and the verified state stands.
+  Role models come from `--planner-model` / `--verifier-model`, Routing V2
+  over the run's candidate pool (`deep_reasoning`; the `verifier` class with
+  the executor's model excluded), the native role tiers, or, recorded as not
+  independent, the executor's model. The Receipt names every role's model,
+  provider, calls, tokens, cost (with provenance) and duration, says
+  `skipped` and why for a role that did not run, and gains `stage_runs`
+  (planning / implementation / review) and a `tier_dispatch_receipt` so
+  existing surfaces show which roles were dispatched.
+
 ### Changed
 
 - Model cost provenance is explicit: `UsageStats.cost_source` says whether a

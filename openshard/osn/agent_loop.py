@@ -161,6 +161,7 @@ class AttemptOutcome:
     verification_state: str | None = None  # fingerprint of changed files when it ran
     verifications_run: int = 0
     final_note: str = ""
+    plan: dict[str, Any] | None = None  # the last structured plan a turn carried (planner role)
 
     @property
     def finished(self) -> bool:
@@ -197,6 +198,11 @@ def state_fingerprint(root: Path, rels: list[str]) -> str:
         h.update(digest.encode())
         h.update(b"\x1e")
     return h.hexdigest()
+
+
+def sandbox_diff_text(repo_root: Path, sandbox: Path, rels: list[str], *, limit: int = DIFF_LIMIT_CHARS) -> str:
+    """Unified diff of *rels* between the real repository and the isolated copy. Bounded."""
+    return _sandbox_diff(repo_root, sandbox, rels, limit=limit)
 
 
 def _sandbox_diff(repo_root: Path, sandbox: Path, rels: list[str], *, limit: int) -> str:
@@ -262,11 +268,14 @@ def run_attempt_turns(
     approval_write_patterns: tuple[str, ...] = (),
     initial_observations: list[Observation] | None = None,
     repo_files: list[str] | None = None,
+    read_only: bool = False,
 ) -> AttemptOutcome:
     """Run one attempt of the iterative loop inside *sandbox*. Never touches *repo_root*.
 
     Returns what happened; the caller (``run_bounded_loop``) decides the
-    attempt's verification, retry and the Receipt status from it.
+    attempt's verification, retry and the Receipt status from it. With
+    ``read_only`` (the planner role) every write and verification request is
+    refused as invalid and reported back; nothing in the copy changes.
     """
     max_turns = max(1, min(int(max_turns), MAX_TURNS_HARD_CAP))
     max_verifications = max(0, min(int(max_verifications), MAX_VERIFICATIONS_HARD_CAP))
@@ -314,7 +323,7 @@ def run_attempt_turns(
             previous_failure=previous_failure, verifications_left=max_verifications - out.verifications_run,
             writes_applied=len(out.applied), last_verification=last_verification,
         )
-        _emit(progress, "turn_start", attempt=attempt, turn=turn, max_turns=max_turns, model=model_name())
+        _emit(progress, "turn_start", attempt=attempt, turn=turn, max_turns=max_turns, model=model_name(), role=role)
         started = time.monotonic()
         try:
             result = provider.turn(state)
@@ -338,12 +347,22 @@ def run_attempt_turns(
             out.error_message = sanitize_text(str(exc), 180)
             return out
         out.model_calls += 1
+        if result.plan is not None:
+            out.plan = result.plan
         _emit(progress, "turn_response", attempt=attempt, turn=turn, actions=len(result.actions),
-              note=result.note, duration_ms=int((time.monotonic() - started) * 1000))
+              note=result.note, duration_ms=int((time.monotonic() - started) * 1000), role=role)
 
         finished = False
         for action in result.actions:
             t0 = time.monotonic()
+            if read_only and action.kind in (KIND_WRITE_FILE, KIND_RUN_VERIFICATION):
+                rec = record(action, turn, decision=DECISION_INVALID, error_class=ERROR_CAP_REACHED)
+                rec.decision_source, rec.decision_reason = "role_policy", f"the {role} role is read-only"
+                rec.duration_ms = 0
+                if action.kind == KIND_WRITE_FILE:
+                    out.proposed.append(action.target)
+                observe(rec, "refused", f"{action.kind} refused: the {role} role is read-only")
+                continue
             if action.kind == KIND_FINISH:
                 rec = record(action, turn, decision=DECISION_NOT_APPLICABLE, executed=True, ok=True)
                 rec.duration_ms = 0
@@ -625,5 +644,6 @@ __all__ = [
     "TurnProvider",
     "TurnState",
     "run_attempt_turns",
+    "sandbox_diff_text",
     "state_fingerprint",
 ]
