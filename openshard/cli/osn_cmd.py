@@ -864,6 +864,8 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     entry["osn_loop"]["project_instructions"] = (
         project_instructions.to_record() if project_instructions is not None else []
     )
+    # Files from the plan the executor was shown on its first turn (repo-relative).
+    entry["osn_loop"]["plan_context_files"] = list(getattr(action_provider, "plan_context_files", []) or [])
     if prior_checkpoint is not None:
         prior_costs = [u.cost_usd for u in prior_usage]
         entry["osn_loop"]["resumed"] = {
