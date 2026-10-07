@@ -179,8 +179,29 @@ start, the plan and role records, every finished attempt with its verification r
 calls so far with their cost provenance, the budget ledger's counters) and `files/`, the changed
 files' bytes as the last finished attempt left them. It is written when the run starts, after
 planning, after the parallel-workers stage and after every attempt the run will continue from;
-Ctrl-C or an exception marks it `interrupted`, a run that wrote its Receipt marks it `completed`
-(and drops `files/`). A process that dies without warning leaves `running` with a dead pid.
+Ctrl-C or an exception marks it `interrupted`, a run that wrote its Receipt marks it `completed`.
+A process that dies without warning leaves `running` with a dead pid.
+
+### Applying a verified result later: `osn apply`
+
+A run that verified but was not promoted (`--promote` not given) does not lose its work. The
+checkpoint keeps exactly the bytes OpenShard verified (`files/`, with `verified_files` holding the
+same hashes the Receipt verified, and `base_files` holding what the repository had at those paths
+when the run finished). In an interactive terminal the run ends by asking once, `Apply N verified
+file(s) to the repository now?`; piped or `--json` runs are told the command instead:
+`openshard osn apply <osn-id> [--commit] [--yes] [--json]`. Applying goes through the same
+file-mutation policy gate as `--promote` (deny / ask / allow, organisation write-path patterns),
+re-checks the hashes, records a sandbox-apply receipt and marks the checkpoint `applied`;
+`--commit` then commits exactly those files and re-runs the run's own verification command on
+that commit through the post-session path, so the evidence is bound to the commit as with
+`osn run --promote --commit`. The Receipt of the run is not rewritten; the later evidence is.
+`osn apply` refuses, naming the rule, when the run did not complete (`osn resume` is the path),
+did not verify or was promoted already (`no_verified_files_retained`), was applied already,
+HEAD moved since the run (`repository_changed_since_run_started`), a target file changed since
+the run finished (`target_file_changed_since_run`, unrelated edits elsewhere are fine), or the
+kept bytes no longer match the verified hashes (`checkpoint_files_missing`). `openshard osn runs`
+shows each completed run as applied, `verified, not applied` with the command, or not applicable.
+Applied or promoted runs keep no bytes.
 
 `openshard osn runs` lists them with whether each can be resumed. `openshard osn resume <osn-id>
 [--promote] [--commit] [--yes] [--json]` continues the run: a **fresh** isolated copy with the

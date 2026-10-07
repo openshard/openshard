@@ -743,14 +743,22 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     run_checkpoint.status = ckpt.STATUS_COMPLETED
     run_checkpoint.phase = ckpt.PHASE_COMPLETED
     run_checkpoint.receipt_id = entry.get("receipt_id")
-    run_checkpoint.files = {}
+    # A verified result that did not reach the repository is kept (its verified
+    # bytes, under the checkpoint) so `osn apply <run-id>` can apply it later
+    # without re-running the model. Anything else is discarded.
+    retained = False
+    if receipt.status == "verified" and not promoted and receipt.changed_files:
+        try:
+            retained = ckpt.retain_verified(repo_root, run_checkpoint, Path(receipt.sandbox_path),
+                                            list(receipt.changed_files), dict(receipt.verified_file_hashes))
+        except OSError:
+            retained = False
+    if not retained:
+        run_checkpoint.files = {}
+        run_checkpoint.verified_files = None
+        ckpt.discard_retained(repo_root, checkpoint_id)
     try:
         ckpt.write_checkpoint(repo_root, run_checkpoint)
-        files_dir = ckpt.checkpoint_dir(repo_root, checkpoint_id) / ckpt.FILES_DIR
-        if files_dir.exists():
-            import shutil
-
-            shutil.rmtree(files_dir, ignore_errors=True)
     except OSError:
         pass
 
@@ -860,12 +868,55 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
                 click.echo(f"  Re-verified after commit: {status}; NOT bound to the commit "
                            f"({bound_verification.get('reason') or 'working tree not clean'}).")
     elif receipt.status == "verified":
-        click.echo(f"  Not promoted. Review the copy at {receipt.sandbox_path}, or re-run with --promote.")
+        click.echo(f"  Not applied to the repository. Review the copy at {receipt.sandbox_path}.")
     if skipped:
         click.echo(f"  Blocked by policy/skipped: {', '.join(skipped)}")
     receipt_id = entry.get("receipt_id")
     if receipt_id:
         click.echo(f"\nReceipt  {receipt_id} · `openshard last` shows it · run {checkpoint_id}")
+    if retained:
+        _offer_apply(repo_root, run_checkpoint, receipt, entry, permissions, assume_yes)
+
+
+def _offer_apply(repo_root: Path, run_checkpoint, receipt, entry: dict, permissions, assume_yes: bool) -> None:
+    """After a verified, unpromoted run in an interactive terminal: ask once whether to apply now.
+
+    Applying goes through the same policy gate as `--promote`. Without a
+    terminal (piped, CI, an agent driving the CLI) nothing is asked; the
+    command to apply later is printed instead. `--yes` never answers this
+    question: it approves policy 'ask' paths, not the decision to change the
+    repository.
+    """
+    from openshard.osn import checkpoint as ckpt
+
+    n = len(receipt.changed_files)
+    later = f"  Apply later with: openshard osn apply {run_checkpoint.run_id} [--commit]"
+    interactive = getattr(sys.stdin, "isatty", lambda: False)() and getattr(sys.stdout, "isatty", lambda: False)()
+    if not interactive:
+        click.echo(later)
+        return
+    try:
+        wanted = click.confirm(f"\nApply {n} verified file(s) to the repository now?", default=False)
+    except click.Abort:
+        wanted = False
+    if not wanted:
+        click.echo(later)
+        return
+    applied, skipped = _promote(repo_root, receipt, entry, assume_yes, permissions)
+    run_checkpoint.applied = {
+        "at": ckpt.now_stamp(), "how": "end_of_run_prompt", "files_applied": list(applied),
+        "files_skipped": list(skipped), "commit": None, "bound_verification": None,
+    }
+    run_checkpoint.files, run_checkpoint.verified_files = {}, None
+    try:
+        ckpt.write_checkpoint(repo_root, run_checkpoint)
+        ckpt.discard_retained(repo_root, run_checkpoint.run_id)
+    except OSError:
+        pass
+    click.echo(f"  Applied {len(applied)} file(s) into the repository (not re-verified there)."
+               + (f" Skipped by policy: {', '.join(skipped)}." if skipped else ""))
+    if applied:
+        click.echo("  Review with `git diff`; commit when you are satisfied.")
 
 
 def _lookup_learning(repo_root: Path, repo_config: dict) -> LearningSnapshot:
@@ -1370,10 +1421,16 @@ def osn_runs(as_json):
     rows = []
     for cp in ckpt.list_checkpoints(repo_root):
         verdict = ckpt.check_resumable(cp, repo_root)
+        if cp.applied is not None:
+            result = "applied"
+        elif cp.verified_files:
+            result = "verified_not_applied" if ckpt.check_applicable(cp, repo_root).ok else "verified_not_applicable"
+        else:
+            result = None
         rows.append({
             "run_id": cp.run_id, "status": cp.status, "phase": cp.phase, "attempts_done": cp.attempts_done,
             "updated_at": cp.updated_at, "receipt_id": cp.receipt_id, "resumable": verdict.ok,
-            "refusal": verdict.reason, "task": cp.task[:80],
+            "refusal": verdict.reason, "task": cp.task[:80], "result": result,
         })
     if as_json:
         click.echo(json.dumps(rows, indent=2))
@@ -1382,10 +1439,118 @@ def osn_runs(as_json):
         click.echo("No checkpointed OSN runs under .openshard/osn-runs/.")
         return
     for r in rows:
-        state = "resumable" if r["resumable"] else f"not resumable ({r['refusal']})"
+        if r["status"] == ckpt.STATUS_COMPLETED:
+            state = {"applied": "applied to the repository",
+                     "verified_not_applied": f"verified, not applied: openshard osn apply {r['run_id']}",
+                     "verified_not_applicable": "verified, not applied (repository changed since)"}.get(
+                str(r["result"]), "completed")
+        else:
+            state = "resumable" if r["resumable"] else f"not resumable ({r['refusal']})"
         click.echo(f"{r['run_id']}  {r['status']}/{r['phase']}  attempts {r['attempts_done']}  {r['updated_at']}  "
                    f"{state}" + (f"  receipt {r['receipt_id']}" if r["receipt_id"] else ""))
         click.echo(f"    {r['task']}")
+
+
+@osn_group.command("apply")
+@click.argument("run_id")
+@click.option("--commit", "commit_result", is_flag=True, default=False,
+              help="Commit the applied files on the current branch, then re-run the run's verification command "
+                   "on that commit so the evidence is bound to it (requires an otherwise clean working tree).")
+@click.option("--yes", "assume_yes", is_flag=True, default=False, help="Approve policy 'ask' paths without prompting.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def osn_apply(run_id, commit_result, assume_yes, as_json):
+    """Put a completed run's verified result into the repository, without re-running anything.
+
+    The bytes applied are exactly the ones OpenShard verified (kept under the
+    run's checkpoint; hashes re-checked here). Refused when the run did not
+    complete, did not verify, was already applied or promoted, the repository's
+    HEAD moved since the run, or a target file changed since the run finished.
+    Every write goes through the file-mutation policy, as `--promote` does.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    from openshard.cli.ingest import _repo_root
+    from openshard.history.metrics import load_runs
+    from openshard.history.receipt_identity import stored_receipt_id
+    from openshard.osn import checkpoint as ckpt
+    from openshard.sync.policies import (
+        PolicyUnavailable,
+        organisation_permissions,
+        resolve_organisation_policy,
+    )
+
+    repo_root = _repo_root(None, False)
+    try:
+        cp = ckpt.read_checkpoint(repo_root, run_id)
+    except FileNotFoundError:
+        raise click.ClickException(f"No checkpoint for run '{run_id}' under .openshard/osn-runs/ "
+                                   f"({ckpt.REFUSE_MISSING}). `openshard osn runs` lists the runs here.") from None
+    except ValueError as exc:
+        raise click.ClickException(f"Cannot apply '{run_id}': {exc}") from None
+    verdict = ckpt.check_applicable(cp, repo_root)
+    if not verdict.ok:
+        detail = f" ({verdict.detail})" if verdict.detail else ""
+        raise click.ClickException(f"Refusing to apply '{run_id}': {verdict.reason}{detail}.")
+    try:
+        permissions = organisation_permissions(resolve_organisation_policy())
+    except PolicyUnavailable as exc:
+        raise click.ClickException(
+            f"Organisation policy could not be refreshed ({exc}); refusing to apply under unknown permissions."
+        ) from None
+    files = list(cp.verified_files or {})
+    staging = Path(tempfile.mkdtemp(prefix="osn-apply-")) / "work"
+    staging.mkdir()
+    try:
+        ckpt.restore_changed(repo_root, run_id, {rel: cp.verified_files[rel] for rel in files}, staging)
+    except FileNotFoundError as exc:
+        raise click.ClickException(f"Refusing to apply '{run_id}': {exc}.") from None
+    entry = next((e for e in load_runs(repo_root) if cp.receipt_id and stored_receipt_id(e) == cp.receipt_id), None)
+    entry = entry or {"receipt_id": cp.receipt_id, "timestamp": cp.updated_at, "task": cp.task}
+    verified = SimpleNamespace(sandbox_path=str(staging), changed_files=files,
+                               verified_file_hashes=dict(cp.verified_files or {}))
+    applied, skipped = _promote(repo_root, verified, entry, assume_yes, permissions)
+    commit_record: dict | None = None
+    bound: dict | None = None
+    if commit_result and applied:
+        commit_record = _commit_promoted(repo_root, applied, cp.task, entry)
+        if commit_record.get("sha"):
+            bound = _bind_verification(repo_root, entry, list(cp.verify_argv), as_json=as_json)
+    cp.applied = {
+        "at": ckpt.now_stamp(), "how": "osn_apply", "files_applied": list(applied), "files_skipped": list(skipped),
+        "commit": commit_record, "bound_verification": bound,
+    }
+    cp.files, cp.verified_files = {}, None
+    try:
+        ckpt.write_checkpoint(repo_root, cp)
+        ckpt.discard_retained(repo_root, run_id)
+    except OSError:
+        pass
+    if as_json:
+        click.echo(json.dumps({"run_id": run_id, "receipt_id": cp.receipt_id, "applied": applied, "skipped": skipped,
+                               "commit": commit_record, "bound_verification": bound}, indent=2))
+        return
+    click.echo(f"Applied {len(applied)} verified file(s) from run {run_id} into the repository"
+               + (f" (Receipt {cp.receipt_id})" if cp.receipt_id else "") + ".")
+    for f in applied:
+        click.echo(f"  applied: {f}")
+    if skipped:
+        click.echo(f"  Skipped by policy: {', '.join(skipped)}")
+    if commit_record:
+        if commit_record.get("sha"):
+            click.echo(f"  Committed {commit_record['sha'][:12]} on {commit_record.get('branch') or 'HEAD'}"
+                       f" ({len(commit_record.get('files') or [])} file(s)).")
+        else:
+            click.echo(f"  Not committed: {commit_record.get('reason') or 'unknown reason'}.")
+    if bound:
+        if bound.get("bound"):
+            click.echo(f"  Re-verified on commit {str(bound.get('artifact_sha') or '')[:12]}: {bound.get('status')}"
+                       " (evidence bound to the commit).")
+        else:
+            click.echo(f"  Re-verified after commit: {bound.get('status')}; NOT bound to the commit "
+                       f"({bound.get('reason') or 'working tree not clean'}).")
+    elif applied and not commit_result:
+        click.echo("  Not re-verified in the repository. Review with `git diff`; commit when you are satisfied.")
 
 
 def _resolve_workers(*, loop_mode, topology_request, max_workers, planner_enabled, verifier_enabled, task,

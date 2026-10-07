@@ -256,8 +256,10 @@ class TestResumeCommand:
         assert entry["retry_estimated_cost"] == pytest.approx(0.001)  # attempt 2: this process's call
         assert entry["execution_model"] == "b/m"
         done = ckpt.read_checkpoint(repo, cp.run_id)
-        assert done.status == "completed" and done.receipt_id == entry["receipt_id"] and done.files == {}
-        assert not (ckpt.checkpoint_dir(repo, cp.run_id) / "files").exists()
+        assert done.status == "completed" and done.receipt_id == entry["receipt_id"]
+        # Verified but not promoted: the verified bytes are kept for `osn apply`.
+        assert done.verified_files == {"out.txt": done.files["out.txt"]} and done.applied is None
+        assert (ckpt.checkpoint_dir(repo, cp.run_id) / "files" / "out.txt").read_text() == "ok"
 
         again = CliRunner().invoke(cli, ["osn", "resume", cp.run_id])
         assert again.exit_code != 0 and "run_already_completed" in again.output
