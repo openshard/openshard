@@ -218,3 +218,39 @@ def test_policy_summary_masks_unsafe_paths_on_every_platform(repo):
     # POSIX; either way the stored receipt must not carry the raw path.
     rec = run_bounded_loop(repo, "t", lambda c: [FileWriteAction("C:/Windows/evil.txt", "x")], CHECK)
     assert "Windows" not in json.dumps(rec.to_dict())
+
+
+# The credential classes the verifier scrub removes. The guarantee is exactly
+# these classes -- a least-privilege scrub, not process isolation.
+_SCRUBBED = {
+    "OPENSHARD_PLATFORM_API_KEY": "osk_x", "OPENSHARD_PLATFORM_ORG_ID": "org", "OPENSHARD_PLATFORM_ENDPOINT": "e",
+    "OPENSHARD_GROK_BOT_OTLP_TOKEN": "t",
+    "OPENROUTER_API_KEY": "k", "ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "GEMINI_API_KEY": "k",
+    "SOME_VENDOR_APIKEY": "k",
+    "GITHUB_TOKEN": "t", "GH_TOKEN": "t", "GITLAB_TOKEN": "t", "NPM_TOKEN": "t", "NODE_AUTH_TOKEN": "t",
+    "PYPI_TOKEN": "t", "TWINE_PASSWORD": "p", "TWINE_USERNAME": "u", "AWS_SECRET_ACCESS_KEY": "s",
+    "AWS_SESSION_TOKEN": "t", "AZURE_CLIENT_SECRET": "s", "GOOGLE_APPLICATION_CREDENTIALS": "/c.json",
+    "HF_TOKEN": "t", "HUGGING_FACE_HUB_TOKEN": "t", "SSH_AUTH_SOCK": "/tmp/agent",
+}
+_KEPT = {"PATH": "/bin", "HOME": "/h", "VIRTUAL_ENV": "/v", "OPENSHARD_HOME": "/o", "CI": "1",
+         "DATABASE_PASSWORD": "dummy", "DJANGO_SECRET_KEY": "dummy", "PYTEST_ADDOPTS": "-q"}
+
+
+def test_verification_env_scrubs_exactly_the_documented_credential_classes():
+    from openshard.osn.loop import verification_env
+
+    env = verification_env({**_SCRUBBED, **_KEPT})
+    assert env == _KEPT
+
+
+def test_the_verify_command_cannot_read_scrubbed_credentials(repo, monkeypatch):
+    for name, value in _SCRUBBED.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("DATABASE_PASSWORD", "dummy")
+    names = sorted(_SCRUBBED)
+    check = [PY, "-c", (
+        f"import os, sys; leaked = [n for n in {names!r} if n in os.environ]; "
+        "sys.exit(1 if leaked or 'PATH' not in os.environ or os.environ.get('DATABASE_PASSWORD') != 'dummy' else 0)"
+    )]
+    rec = run_bounded_loop(repo, "t", lambda c: [FileWriteAction("out.txt", "ok")], check)
+    assert rec.status == "verified", rec.attempts[0].verification

@@ -16,19 +16,21 @@ Evidence semantics: actions come from an agent/provider and are *declared*;
 policy decisions, file effects and verification are *observed* by OpenShard.
 Applying a change is never treated as verifying it. Changes are made only in
 an isolated copy (a filesystem copy, not a process sandbox: the verify command
-runs with host permissions and may execute agent-written code); promoting them
+runs with host permissions and may execute agent-written code, with only a
+least-privilege credential scrub, see ``verification_env``); promoting them
 to the real repo is a separate, policy-gated step (see
 openshard.native.sandbox_apply.apply_sandbox_changes).
 """
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import tempfile
 import unicodedata
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -408,6 +410,40 @@ def _as_text(v: str | bytes | None) -> str:
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
 
 
+# Least-privilege credential scrub for the verify command. This is not process
+# isolation: the verifier still runs with the user's permissions and every other
+# variable. It can run agent-written code, so it never receives the credentials
+# OpenShard itself holds (the Platform link, the model-provider keys) nor these
+# well-known VCS / package-registry / cloud credentials. Generic *_PASSWORD and
+# *_SECRET names are deliberately kept: application test suites commonly read
+# local dummy values from them.
+_VERIFIER_SCRUBBED_PREFIXES = ("OPENSHARD_PLATFORM_",)
+_VERIFIER_SCRUBBED_SUFFIXES = ("API_KEY", "APIKEY")
+_VERIFIER_SCRUBBED_NAMES = frozenset({
+    "OPENSHARD_GROK_BOT_OTLP_TOKEN",
+    "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN",
+    "NPM_TOKEN", "NODE_AUTH_TOKEN", "PYPI_TOKEN", "TWINE_PASSWORD", "TWINE_USERNAME",
+    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AZURE_CLIENT_SECRET",
+    "GOOGLE_APPLICATION_CREDENTIALS", "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN",
+    "SSH_AUTH_SOCK",
+})
+
+
+def _scrubbed(name: str) -> bool:
+    upper = name.upper()
+    return (
+        upper in _VERIFIER_SCRUBBED_NAMES
+        or upper.startswith(_VERIFIER_SCRUBBED_PREFIXES)
+        or upper.endswith(_VERIFIER_SCRUBBED_SUFFIXES)
+    )
+
+
+def verification_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment the verify command runs with: *base* (the host's) minus scrubbed credentials."""
+    source = os.environ if base is None else base
+    return {k: v for k, v in source.items() if not _scrubbed(k)}
+
+
 def _run_verification(command: list[str], cwd: Path, timeout: float) -> tuple[VerificationResult, str]:
     try:
         # Decode as UTF-8 with replacement on every platform: with the locale codec
@@ -416,7 +452,7 @@ def _run_verification(command: list[str], cwd: Path, timeout: float) -> tuple[Ve
         # reported as the change's, not the environment's.
         proc = subprocess.run(
             command, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout,
+            timeout=timeout, env=verification_env(),
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         code: int | None = proc.returncode
