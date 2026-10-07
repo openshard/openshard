@@ -81,39 +81,6 @@ All notable changes to OpenShard are documented here.
   and `--json` runs are told the command. `openshard osn runs` shows each
   completed run's result state.
 
-### Changed
-
-- `openshard osn run` no longer requires `--verify-cmd`. Without it the run
-  uses the repository's verification contract (`verification_commands` in
-  `.openshard/config.yml`), else the test command OpenShard detects for the
-  repository, and refuses to start when none is known (OSN never reports work
-  verified without a check it ran itself). A configured or detected command
-  that the command-safety classifier would not run silently is refused with
-  the reason; `--verify-cmd` remains the user's explicit authority. The
-  run's header, the Receipt (`osn_loop.verification_command`: label and
-  source `user` / `config` / `detected`) and the checkpoint name where the
-  command came from.
-
-- `openshard osn run` shows more of what is happening while it happens: the
-  planner's plan as the executor received it (summary, steps, files, proposed
-  subtasks); each verification's failing test ids and the last lines of the
-  command's output when it did not pass (and whether the verifier could not
-  run or rewrote the files it checked); checkpoint write failures and attempts
-  that ended on an unusable reply; and, at the end, the Receipt id, the
-  `openshard last` pointer and the run id. Progress events from parallel
-  workers and candidates now carry `worker_id` / `subtask_id`, and the
-  renderer prefixes their lines with it so concurrent workers never read as
-  one agent. The `verification_result` event carries `failed_tests`,
-  `setup_failure`, `tainted` and (never on a pass) a redacted `output_tail`.
-
-- Model roster: `deepseek/deepseek-v4.1-flash` is the curated cheap default
-  (routing class `cheap_coding`, Ask Mode, the `cheap` tier fallback and the
-  boilerplate scoring preference). `deepseek/deepseek-v4-flash`, the 0423
-  snapshot OpenRouter still serves under the old id, is deprecated: kept for
-  history and explicit selection, never chosen as a routing default.
-
-### Added
-
 - `openshard osn run` is now an iterative agent loop by default (`--loop agent`).
   Instead of one whole-file proposal per attempt, the model takes bounded
   turns (`--max-turns`, default 12) choosing typed actions from what the
@@ -222,6 +189,35 @@ All notable changes to OpenShard are documented here.
   duration.
 
 ### Changed
+
+- `openshard osn run` no longer requires `--verify-cmd`. Without it the run
+  uses the repository's verification contract (`verification_commands` in
+  `.openshard/config.yml`), else the test command OpenShard detects for the
+  repository, and refuses to start when none is known (OSN never reports work
+  verified without a check it ran itself). A configured or detected command
+  that the command-safety classifier would not run silently is refused with
+  the reason; `--verify-cmd` remains the user's explicit authority. The
+  run's header, the Receipt (`osn_loop.verification_command`: label and
+  source `user` / `config` / `detected`) and the checkpoint name where the
+  command came from.
+
+- `openshard osn run` shows more of what is happening while it happens: the
+  planner's plan as the executor received it (summary, steps, files, proposed
+  subtasks); each verification's failing test ids and the last lines of the
+  command's output when it did not pass (and whether the verifier could not
+  run or rewrote the files it checked); checkpoint write failures and attempts
+  that ended on an unusable reply; and, at the end, the Receipt id, the
+  `openshard last` pointer and the run id. Progress events from parallel
+  workers and candidates now carry `worker_id` / `subtask_id`, and the
+  renderer prefixes their lines with it so concurrent workers never read as
+  one agent. The `verification_result` event carries `failed_tests`,
+  `setup_failure`, `tainted` and (never on a pass) a redacted `output_tail`.
+
+- Model roster: `deepseek/deepseek-v4.1-flash` is the curated cheap default
+  (routing class `cheap_coding`, Ask Mode, the `cheap` tier fallback and the
+  boilerplate scoring preference). `deepseek/deepseek-v4-flash`, the 0423
+  snapshot OpenRouter still serves under the old id, is deprecated: kept for
+  history and explicit selection, never chosen as a routing default.
 
 - Model cost provenance is explicit: `UsageStats.cost_source` says whether a
   call's cost is the provider's own figure or OpenShard's list-rate
