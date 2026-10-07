@@ -872,6 +872,11 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     run_checkpoint.status = ckpt.STATUS_COMPLETED
     run_checkpoint.phase = ckpt.PHASE_COMPLETED
     run_checkpoint.receipt_id = entry.get("receipt_id")
+    run_checkpoint.result = {
+        "status": receipt.status, "stop_reason": receipt.stop_reason,
+        "verification_state": receipt.verification_state, "attempts": len(receipt.attempts),
+        "changed_files": list(receipt.changed_files),
+    }
     # A verified result that did not reach the repository is kept (its verified
     # bytes, under the checkpoint) so `osn apply <run-id>` can apply it later
     # without re-running the model. Anything else is discarded.
@@ -1563,8 +1568,10 @@ def osn_runs(as_json):
             result = "verified_not_applied" if ckpt.check_applicable(cp, repo_root).ok else "verified_not_applicable"
         else:
             result = None
+        attempts = (cp.result or {}).get("attempts") if cp.status == ckpt.STATUS_COMPLETED else None
         rows.append({
-            "run_id": cp.run_id, "status": cp.status, "phase": cp.phase, "attempts_done": cp.attempts_done,
+            "run_id": cp.run_id, "status": cp.status, "phase": cp.phase,
+            "attempts_done": attempts if isinstance(attempts, int) else cp.attempts_done,
             "updated_at": cp.updated_at, "receipt_id": cp.receipt_id, "resumable": verdict.ok,
             "refusal": verdict.reason, "task": cp.task[:80], "result": result,
         })
@@ -1585,6 +1592,51 @@ def osn_runs(as_json):
         click.echo(f"{r['run_id']}  {r['status']}/{r['phase']}  attempts {r['attempts_done']}  {r['updated_at']}  "
                    f"{state}" + (f"  receipt {r['receipt_id']}" if r["receipt_id"] else ""))
         click.echo(f"    {r['task']}")
+
+
+@osn_group.command("diff")
+@click.argument("run_id")
+@click.option("--max-chars", default=200_000, type=click.IntRange(1_000, 2_000_000), show_default=True,
+              help="Bound on the printed diff.")
+def osn_diff(run_id, max_chars):
+    """Show what a completed run's verified result would change in the repository, before applying it.
+
+    A unified diff of the retained verified bytes against the repository as it
+    is now. Refused when the run kept no verified result (not verified, promoted,
+    or applied already: `git diff` shows an applied result).
+    """
+    import tempfile
+
+    from openshard.cli.ingest import _repo_root
+    from openshard.osn import checkpoint as ckpt
+    from openshard.osn.agent_loop import sandbox_diff_text
+
+    repo_root = _repo_root(None, False)
+    try:
+        cp = ckpt.read_checkpoint(repo_root, run_id)
+    except FileNotFoundError:
+        raise click.ClickException(f"No checkpoint for run '{run_id}' under .openshard/osn-runs/ "
+                                   f"({ckpt.REFUSE_MISSING}). `openshard osn runs` lists the runs here.") from None
+    except ValueError as exc:
+        raise click.ClickException(f"Cannot read '{run_id}': {exc}") from None
+    if cp.applied is not None:
+        raise click.ClickException(f"Run '{run_id}' was applied at {cp.applied.get('at')}; `git diff` shows it.")
+    if not cp.verified_files:
+        raise click.ClickException(f"Run '{run_id}' kept no verified result ({ckpt.REFUSE_NO_VERIFIED_FILES}): "
+                                   "it did not verify, or was promoted already.")
+    files = list(cp.verified_files)
+    staging = Path(tempfile.mkdtemp(prefix="osn-diff-")) / "work"
+    staging.mkdir()
+    try:
+        ckpt.restore_changed(repo_root, run_id, dict(cp.verified_files), staging)
+    except FileNotFoundError as exc:
+        raise click.ClickException(f"Cannot show '{run_id}': {exc}.") from None
+    verdict = ckpt.check_applicable(cp, repo_root)
+    click.echo(f"Verified result of run {run_id}" + (f" (Receipt {cp.receipt_id})" if cp.receipt_id else "")
+               + f" against the repository now · {len(files)} file(s)"
+               + ("" if verdict.ok else f" · not applicable: {verdict.reason}"
+                  + (f" ({verdict.detail})" if verdict.detail else "")))
+    click.echo(sandbox_diff_text(repo_root, staging, files, limit=max_chars))
 
 
 @osn_group.command("apply")
