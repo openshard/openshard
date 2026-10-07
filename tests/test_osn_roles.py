@@ -207,6 +207,16 @@ class TestPlannerRole:
 
 
 class TestVerifierRole:
+    def test_review_prompt_includes_instructions_only_when_given_after_task(self):
+        args = (TASK, PLAN, "+ok", {"status": "passed"}, ["src/app.txt"])
+        block = '<project_instructions file="AGENTS.md">\nUse pytest.\n</project_instructions>'
+        with_instructions = roles.build_review_prompt(*args, instructions=block)
+        without_instructions = roles.build_review_prompt(*args)
+        assert with_instructions.index(TASK) < with_instructions.index(block) < with_instructions.index(
+            "Plan from the planning role"
+        )
+        assert block not in without_instructions
+
     def test_verifier_parses_a_verdict_with_one_reask_and_records_usage(self):
         fake = FakeModel(["not json", json.dumps({"verdict": "pass", "summary": "fine", "concerns": []})])
         review, usage, err = roles.run_verifier_call(

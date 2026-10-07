@@ -1502,7 +1502,9 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
 
         def verifier_hook(sandbox, changed, result, attempt):  # noqa: E306
             from openshard.osn.agent_loop import sandbox_diff_text
+            from openshard.osn.instructions import load_project_instructions
 
+            project_instructions = load_project_instructions(repo_root)
             diff_text = sandbox_diff_text(repo_root, sandbox, changed, limit=osn_roles.MAX_REVIEW_DIFF_CHARS)
             verification = {
                 "status": "passed" if result.passed else "failed", "exit_code": result.exit_code,
@@ -1511,7 +1513,7 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
             review, usage, err = osn_roles.run_verifier_call(
                 provider_obj, verifier_choice.model, task=task, plan=getattr(action_provider, "plan", None),
                 diff_text=diff_text, verification=verification, changed_files=list(changed), attempt=attempt,
-                budget=budget,
+                budget=budget, instructions=project_instructions.text if project_instructions else None,
             )
             role_usage.extend(usage)
             role = osn_roles.RoleRun.from_usage(
