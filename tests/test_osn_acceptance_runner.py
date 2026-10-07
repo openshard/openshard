@@ -40,6 +40,8 @@ def test_expectations_are_checked_against_the_result_object():
     assert check_expectation({"changed_at_least": 3}, _result()) == (False, "changed 2 < 3")
     assert check_expectation({"writes_applied": 0}, _result(status="blocked", action_summary={"writes_applied": 0}))[0]
     assert check_expectation({"status": "blocked"}, None) == (False, "no result object")
+    assert check_expectation({"status_in": ["blocked", "no_actions"]}, _result(status="no_actions")) == (True, "met")
+    assert check_expectation({"status_in": ["blocked"]}, _result()) == (False, "status 'verified' not in ['blocked']")
     assert check_expectation(None, None) == (True, "no expectation")
 
 

@@ -101,6 +101,9 @@ def check_expectation(expect: dict[str, Any] | None, result: dict[str, Any] | No
     checks: list[tuple[bool, str]] = []
     if "status" in expect:
         checks.append((result.get("status") == expect["status"], f"status {result.get('status')!r} != {expect['status']!r}"))
+    if "status_in" in expect:
+        allowed = [str(s) for s in expect["status_in"]]
+        checks.append((result.get("status") in allowed, f"status {result.get('status')!r} not in {allowed}"))
     if "max_attempts" in expect:
         checks.append((int(result.get("attempts") or 0) <= int(expect["max_attempts"]),
                        f"attempts {result.get('attempts')} > {expect['max_attempts']}"))
