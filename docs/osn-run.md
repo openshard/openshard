@@ -237,6 +237,8 @@ re-checks the hashes, records a sandbox-apply receipt and marks the checkpoint `
 `--commit` then commits exactly those files and re-runs the run's own verification command on
 that commit through the post-session path, so the evidence is bound to the commit as with
 `osn run --promote --commit`. The Receipt of the run is not rewritten; the later evidence is.
+`openshard osn diff <osn-id>` prints, read-only, the unified diff that result would make against
+the repository as it is now (and says when it is no longer applicable, and why).
 `osn apply` refuses, naming the rule, when the run did not complete (`osn resume` is the path),
 did not verify or was promoted already (`no_verified_files_retained`), was applied already,
 HEAD moved since the run (`repository_changed_since_run_started`), a target file changed since

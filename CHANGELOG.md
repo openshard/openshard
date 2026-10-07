@@ -6,6 +6,15 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- `openshard osn diff <osn-id>`: the unified diff a completed run's verified
+  result would make against the repository as it is now, read-only, before
+  `osn apply`; it names why a result is no longer applicable (HEAD moved, a
+  target file changed) and refuses for runs that kept no verified result or
+  were applied already (`git diff` shows those). The checkpoint of a completed
+  run now records its outcome (`result`: status, stop reason, verification
+  state, attempts, changed files), so `openshard osn runs` shows a finished
+  run's real attempt count instead of the number of attempts it could have
+  resumed from.
 - `openshard osn run --json-events` (and `osn resume --json-events`): the
   run's progress events as NDJSON on stdout, one `{"event", "seq",
   "elapsed_s", "data"}` object per line as they happen, ending with

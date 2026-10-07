@@ -312,3 +312,49 @@ def test_old_checkpoints_without_the_new_fields_still_load(tmp_path, field):
     assert getattr(loaded, field) is None
     assert ckpt.check_applicable(loaded, repo).reason in (ckpt.REFUSE_NOT_COMPLETED,)
     assert isinstance(Path(path), Path)
+
+
+class TestDiffAndListing:
+    def test_diff_shows_what_the_verified_result_would_change(self, tmp_path, monkeypatch):
+        repo = _repo(tmp_path)
+        _run(monkeypatch, repo)
+        cp = _only_checkpoint(repo)
+        r = CliRunner().invoke(cli, ["osn", "diff", cp.run_id])
+        assert r.exit_code == 0, r.output
+        assert f"Verified result of run {cp.run_id} (Receipt {cp.receipt_id}) against the repository now · 1 file(s)" in r.output
+        assert "--- a/out.txt" in r.output and "+++ b/out.txt" in r.output
+        assert "-bad" in r.output and "+ok" in r.output
+        assert (repo / "out.txt").read_text() == "bad"  # read-only
+
+    def test_diff_names_why_a_result_is_not_applicable_and_refuses_applied_or_absent_results(self, tmp_path, monkeypatch):
+        repo = _repo(tmp_path)
+        _run(monkeypatch, repo)
+        cp = _only_checkpoint(repo)
+        (repo / "out.txt").write_text("edited meanwhile")
+        r = CliRunner().invoke(cli, ["osn", "diff", cp.run_id])
+        assert r.exit_code == 0, r.output
+        assert f"not applicable: {ckpt.REFUSE_TARGET_CHANGED} (out.txt)" in r.output and "-edited meanwhile" in r.output
+        (repo / "out.txt").write_text("bad")
+        assert CliRunner().invoke(cli, ["osn", "apply", cp.run_id]).exit_code == 0
+        applied = CliRunner().invoke(cli, ["osn", "diff", cp.run_id])
+        assert applied.exit_code != 0 and "was applied at" in applied.output and "git diff" in applied.output
+        missing = CliRunner().invoke(cli, ["osn", "diff", "osn-nope"])
+        assert missing.exit_code != 0 and ckpt.REFUSE_MISSING in missing.output
+
+        promoted_repo = tmp_path / "p"
+        promoted_repo.mkdir()
+        _run(monkeypatch, _repo(promoted_repo), "--promote", "--json")
+        cp2 = _only_checkpoint(promoted_repo / "proj")
+        none = CliRunner().invoke(cli, ["osn", "diff", cp2.run_id])
+        assert none.exit_code != 0 and ckpt.REFUSE_NO_VERIFIED_FILES in none.output
+
+    def test_a_completed_run_lists_its_real_attempt_count(self, tmp_path, monkeypatch):
+        repo = _repo(tmp_path)
+        _run(monkeypatch, repo)
+        cp = _only_checkpoint(repo)
+        assert cp.result == {"status": "verified", "stop_reason": "verification_passed", "verification_state": "passed",
+                             "attempts": 1, "changed_files": ["out.txt"]}
+        listing = CliRunner().invoke(cli, ["osn", "runs", "--json"])
+        row = json.loads(listing.output)[0]
+        assert row["attempts_done"] == 1 and row["result"] == "verified_not_applied"
+        assert "attempts 1" in CliRunner().invoke(cli, ["osn", "runs"]).output

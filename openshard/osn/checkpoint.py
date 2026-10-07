@@ -154,6 +154,9 @@ class RunCheckpoint:
     verified_files: dict[str, str] | None = None
     base_files: dict[str, str | None] | None = None
     applied: dict[str, Any] | None = None  # the apply record once the result reached the repository
+    # A completed run's outcome (status, stop reason, attempts, changed files): the loop only
+    # checkpoints attempts it will continue from, so ``state`` alone undercounts a finished run.
+    result: dict[str, Any] | None = None
 
     @property
     def attempts_done(self) -> int:
