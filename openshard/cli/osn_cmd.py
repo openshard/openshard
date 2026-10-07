@@ -887,6 +887,13 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         "applied": bool(promoted), "files_applied": list(promoted), "files_skipped": list(skipped),
         "how": "promote" if promote and receipt.status == "verified" else None,
     }
+    # The record is stamped when it is built, but the run adds what only it knows at
+    # the end (verification command source, project instructions, repository
+    # state, resume, the commit it created). Stamp last, over the record as
+    # written, or the stored hash reads as "edited after it was written".
+    from openshard.history.shard_hash import SHARD_HASH_FIELD, compute_shard_hash
+
+    entry[SHARD_HASH_FIELD] = compute_shard_hash(entry)
     append_jsonl(runs_path, entry)
     run_checkpoint.status = ckpt.STATUS_COMPLETED
     run_checkpoint.phase = ckpt.PHASE_COMPLETED
