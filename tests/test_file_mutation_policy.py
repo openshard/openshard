@@ -117,6 +117,27 @@ def test_apply_ask_declined_does_not_write(tmp_path):
     assert res.applied is False
 
 
+def test_apply_refuses_a_path_that_lands_elsewhere_through_a_symlinked_directory(tmp_path):
+    """`docs/workflows/ci.yml` must not reach `.github/workflows/` with an "allow" decision."""
+    repo = tmp_path / "repo"
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    try:
+        (repo / "docs").symlink_to(repo / ".github", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        try:  # Windows without symlink rights: a directory junction is the same alias
+            import _winapi
+
+            _winapi.CreateJunction(str(repo / ".github"), str(repo / "docs"))
+        except (ImportError, OSError):
+            pytest.skip("neither symlinks nor junctions available")
+    sb = _sandbox(tmp_path, {"docs/workflows/ci.yml": "on: push", "a.py": "1"})
+    res = apply_sandbox_changes(repo, sb, explicit_files=["docs/workflows/ci.yml", "a.py"],
+                                approver=lambda r, d: (True, "flag_yes"))
+    assert res.files_applied == ["a.py"]
+    assert not (repo / ".github" / "workflows" / "ci.yml").exists()
+    assert any(s.startswith("docs/workflows/ci.yml (unsafe:") for s in res.files_skipped)
+
+
 def test_receipt_policy_roundtrip_and_backcompat():
     r = SandboxApplyReceipt(policy={"denied": [".env"], "verification": "not_run"})
     d = _receipt_to_dict(r)

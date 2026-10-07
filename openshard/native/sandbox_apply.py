@@ -1,6 +1,7 @@
 """Promote files from a native run sandbox/worktree into the real repo."""
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -156,6 +157,16 @@ def filter_sandbox_changed_files(
     return result
 
 
+def _same_repo_path(repo_root: Path, dest: Path, rel: str) -> bool:
+    """True when the resolved *dest* is exactly the repository path *rel* names."""
+    try:
+        resolved_rel = dest.relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return False
+    requested = Path(rel.replace("\\", "/")).as_posix()
+    return os.path.normcase(resolved_rel) == os.path.normcase(requested)
+
+
 def apply_sandbox_changes(
     repo_root: Path,
     sandbox_path: Path,
@@ -203,6 +214,12 @@ def apply_sandbox_changes(
             dest = resolve_safe_repo_path(repo_root, rel)
         except UnsafePathError as exc:
             result.files_skipped.append(f"{rel} (unsafe: {exc})")
+            continue
+        if not _same_repo_path(repo_root, dest, rel):
+            # A directory on the way is a symlink (or an alias such as an 8.3
+            # short name): the policy decision for *rel* would not be the
+            # decision for where the bytes actually land.
+            result.files_skipped.append(f"{rel} (unsafe: resolves to a different repository path)")
             continue
 
         if not gate.authorize(rel):
