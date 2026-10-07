@@ -105,6 +105,21 @@ def test_unknown_cost_stays_unknown(repo):
     assert ap.total_cost_usd is None
 
 
+def test_run_index_controls_shard_id_and_default_is_unchanged(repo):
+    ap = ModelActionProvider(FakeProvider([_writes("out.txt", "ok")]), ["m"], repo)
+    receipt = run_bounded_loop(repo, "t", ap, CHECK)
+    kwargs = dict(task="t", usage=ap.usage, duration_seconds=0.1, repo_path=repo)
+
+    default_entry = build_osn_run_entry(receipt, **kwargs)
+    first_entry = build_osn_run_entry(receipt, run_index=0, **kwargs)
+    second_entry = build_osn_run_entry(receipt, run_index=1, **kwargs)
+    date = default_entry["timestamp"][:10].replace("-", "")
+
+    assert default_entry["shard_id"] == f"shard-{date}-0001"
+    assert first_entry["shard_id"] == f"shard-{date}-0001"
+    assert second_entry["shard_id"] == f"shard-{date}-0002"
+
+
 def test_blocked_or_error_run_records_not_run_never_passed(repo):
     fp = FakeProvider([_writes(".env", "S=1")])
     ap = ModelActionProvider(fp, ["m"], repo)
