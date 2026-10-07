@@ -32,6 +32,20 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **OSN Shard identity under the lock.** An OSN run's `shard_id` was minted from an unlocked
+  line count, so two runs writing at the same moment could share one and `history`, MCP
+  `get_shard` and the hosted Receipt would merge unrelated runs into one Shard. The id is now
+  minted under the history lock from the file position (`shard-YYYYMMDD-NNNN`, as every other
+  writer) and never repeats an id a remaining record holds; the content hash is stamped over the
+  record as written. Existing records are unchanged.
+- **History queries carry later verification.** `history.query` (MCP `get_shard` / `get_receipt`
+  / `recent_shards` / `search_history`, `list_receipts_by_task`) now joins the latest
+  `openshard verify` attestation to each Receipt, as the CLI and TUI readers already did, so
+  every reader interprets the same evidence. History is never rewritten.
+- **Hosted `base_commit` for historical imports** is `null`. The importer's stored commit is the
+  one the session produced, not its starting HEAD.
+- **Routing outcome attempt counts** are exact for OSN runs (one per attempt OSN ran) instead of
+  unknown whenever a retry happened; a legacy retry flag alone still leaves the count unknown.
 - **Approval evidence.** An organisation `ask` path in `--json` / `--json-events` mode (or with no
   terminal) was recorded as `refused` although nobody refused. It is now `unanswered`, and an
   approver that failed classifies as approval unavailable rather than a user denial. The `--yes`

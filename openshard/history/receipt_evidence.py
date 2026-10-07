@@ -1082,7 +1082,15 @@ def supervisor_routing_block(entry: dict) -> dict[str, Any] | None:
 
 
 def base_commit_value(entry: dict) -> str | None:
-    """HEAD at run/session start (every producer records it then): a base, not a result."""
+    """HEAD at run/session start (every live producer records it then): a base, not a result.
+
+    A historical import stores the commit its session *produced* (git-verified)
+    under the same field, so for imports the base is unknown, not that commit.
+    """
+    from openshard.history.shard import HISTORICAL_IMPORT_EXECUTORS
+
+    if entry.get("executor") in HISTORICAL_IMPORT_EXECUTORS:
+        return None
     value = entry.get("git_head_commit_hash")
     if not isinstance(value, str):
         return None

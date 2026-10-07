@@ -516,11 +516,11 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     import uuid
 
     from openshard.cli.ingest import _repo_root
-    from openshard.history.jsonl_store import append_jsonl
+    from openshard.history.jsonl_store import append_jsonl_with
     from openshard.osn import checkpoint as ckpt
     from openshard.osn.loop import create_isolated_copy, run_bounded_loop
     from openshard.osn.model_provider import IterativeModelProvider, ModelActionProvider
-    from openshard.osn.run_entry import build_osn_run_entry
+    from openshard.osn.run_entry import assign_history_shard_id, build_osn_run_entry
 
     repo_root = _repo_root(None, False)
     if not machine:
@@ -906,7 +906,11 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     from openshard.history.shard_hash import SHARD_HASH_FIELD, compute_shard_hash
 
     entry[SHARD_HASH_FIELD] = compute_shard_hash(entry)
-    append_jsonl(runs_path, entry)
+    # The final shard_id is minted under the history lock from the file's real
+    # length (and past any id a remaining record holds), so concurrent runs never
+    # share one; the hash is re-stamped over the record as written.
+    built = entry
+    entry = append_jsonl_with(runs_path, lambda lines: assign_history_shard_id(built, lines))
     run_checkpoint.status = ckpt.STATUS_COMPLETED
     run_checkpoint.phase = ckpt.PHASE_COMPLETED
     run_checkpoint.receipt_id = entry.get("receipt_id")

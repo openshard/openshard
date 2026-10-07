@@ -457,6 +457,14 @@ class TestPrivacy:
         assert receipt["verification"]["observation_mode"] == "imported_transcript"
         assert receipt["verification"]["source"] == "agent_reported"
         assert receipt["tokens_provenance"] == "imported_transcript"
+        # Reconstructed evidence is never upgraded on the wire: no OpenShard
+        # execution, control or permission evidence, and no claimed base commit.
+        assert receipt["verification"]["source"] != "directly_observed"
+        assert receipt["verification"]["observation_mode"] != "openshard_executed"
+        for key in ("policy_decisions", "permissions", "approval_detail", "sandbox_detail", "execution_loop",
+                    "agent_budgets", "adaptive_routing", "supervisor_routing", "organisation_policy",
+                    "base_commit"):
+            assert receipt[key] is None, key
         projected = json.dumps(receipt)
         assert "locator_display" not in projected
         assert "source_sha256" not in projected

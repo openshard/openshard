@@ -114,6 +114,7 @@ from openshard.history.shard_contract import (
     build_shard_receipt,
 )
 from openshard.safety.sanitize import is_absolute_path, sanitize_text
+from openshard.verification.post_session import latest_for_entry, load_attestations
 
 __all__ = [
     "DEFAULT_CONTEXT_LIMIT",
@@ -170,6 +171,8 @@ class _ShardGroup:
 
     shard_id: str
     attempts: list[tuple[int, dict]]  # (file_index, entry)
+    # Every ``openshard verify`` attestation in the store; joined per Receipt at read time.
+    attestations: list[dict] = field(default_factory=list)
 
     @property
     def latest(self) -> tuple[int, dict]:
@@ -202,31 +205,46 @@ def _entry_shard_id(entry: dict, index: int) -> str:
     return _make_shard_id(entry.get("timestamp") or "", index)
 
 
-def _group_entries(entries: list[dict]) -> list[_ShardGroup]:
+def _group_entries(entries: list[dict], *, attestations: list[dict] | None = None) -> list[_ShardGroup]:
     """Group run entries by shard_id, preserving first-seen order."""
     groups: dict[str, _ShardGroup] = {}
     for idx, entry in enumerate(entries):
         sid = _entry_shard_id(entry, idx)
         group = groups.get(sid)
         if group is None:
-            group = _ShardGroup(shard_id=sid, attempts=[])
+            group = _ShardGroup(shard_id=sid, attempts=[], attestations=attestations or [])
             groups[sid] = group
         group.attempts.append((idx, entry))
     return list(groups.values())
 
 
 def _load_groups(repo_path: Path | None, repo: str | None) -> list[_ShardGroup]:
-    """Load, group, filter by repo, and order newest-first."""
-    groups = _group_entries(load_runs(repo_path))
+    """Load, group, filter by repo, and order newest-first.
+
+    Later ``openshard verify`` attestations (``.openshard/verifications.jsonl``)
+    are loaded alongside so every Receipt built here carries the latest one
+    for its record, as the CLI and TUI readers do; history is never rewritten.
+    """
+    history_dir = (repo_path or Path.cwd()) / ".openshard"
+    groups = _group_entries(load_runs(repo_path), attestations=_load_attestations(history_dir))
     if repo:
         groups = [g for g in groups if entry_matches_repo(g.latest[1], repo)]
     groups.sort(key=lambda g: g.sort_key, reverse=True)
     return groups
 
 
+def _load_attestations(history_dir: Path) -> list[dict]:
+    try:
+        return load_attestations(history_dir)
+    except Exception:
+        return []  # unreadable later evidence never hides the Receipts themselves
+
+
 def _receipt_for(group: _ShardGroup, attempt: tuple[int, dict] | None = None) -> ShardReceipt:
     idx, entry = attempt if attempt is not None else group.latest
-    return build_shard_receipt(entry, index=idx)
+    return build_shard_receipt(
+        entry, index=idx, post_session_verification=latest_for_entry(entry, group.attestations),
+    )
 
 
 def _shard_for(group: _ShardGroup) -> Shard:
@@ -346,7 +364,7 @@ def get_shard(shard_id: str, *, repo_path: Path | None = None) -> Shard:
     Raises ``UnknownShardError`` when no persisted entry carries that id;
     never falls back to an unrelated run.
     """
-    groups = _group_entries(load_runs(repo_path))
+    groups = _load_groups(repo_path, None)
     return _shard_for(_find_group(groups, shard_id))
 
 
@@ -375,8 +393,7 @@ def get_receipt(
     if not shard_id and not run_id:
         raise ValueError("get_receipt() requires a shard_id or a run_id")
 
-    entries = load_runs(repo_path)
-    groups = _group_entries(entries)
+    groups = _load_groups(repo_path, None)
 
     if shard_id and is_receipt_id(shard_id):
         for group in groups:

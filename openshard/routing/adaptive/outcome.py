@@ -12,8 +12,9 @@ Only observed values are populated. In particular:
   observed by OpenShard or an independent system; an agent's own claim, an
   unknown status or no checks leave it ``None``. The raw status and source
   stay on the outcome so a consumer can apply a different threshold.
-* ``attempts`` is exact only when no retry happened; Receipts record that a
-  retry occurred, not how many models the escalation loop tried.
+* ``attempts`` is exact when OSN recorded its attempts (``osn_loop.attempts``,
+  one per execution attempt it ran) or when a Receipt records that no retry
+  happened. A legacy retry flag alone does not specify a count.
 * ``cost_usd`` sums recorded estimates; if a retry happened but its cost was
   not recorded, the total is unknown rather than understated.
 * ``human_correction`` is ``None``: Receipts do not record corrections yet.
@@ -96,6 +97,9 @@ def outcome_from_receipt(entry: object) -> RoutingOutcome:
     retry = entry.get("retry_triggered")
     retry_observed = retry if isinstance(retry, bool) else None
     attempts = 1 if retry_observed is False else None
+    loop_attempts = _dict(entry.get("osn_loop")).get("attempts")
+    if isinstance(loop_attempts, list) and loop_attempts:
+        attempts = len(loop_attempts)  # OSN observes every execution attempt it runs
 
     cost = _float(entry.get("estimated_cost"))
     if retry_observed:

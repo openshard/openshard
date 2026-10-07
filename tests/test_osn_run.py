@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -165,6 +166,36 @@ def test_cli_run_and_promote_end_to_end(tmp_path, monkeypatch):
     assert runs[-1]["executor"] == "osn_loop"
     apply_rcpt = (repo / ".openshard" / "sandbox_apply_receipts.jsonl").read_text()
     assert '"verification": "not_run"' in apply_rcpt
+
+
+def test_each_cli_run_is_its_own_shard(tmp_path, monkeypatch):
+    """Same-day OSN runs must not share a shard_id (history groups on it), even when
+    a remaining record already holds the id the line count would mint."""
+    from openshard.history.query import recent_shards
+    from openshard.history.shard_hash import verify_shard_hash
+
+    repo = _git_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr("openshard.cli.ingest._repo_root", lambda a, b: repo.resolve())
+    store = repo / ".openshard"
+    store.mkdir()
+    today = datetime.now(UTC).strftime("%Y%m%d")
+    # A pre-existing record already holding the id a line count of 1 would produce.
+    (store / "runs.jsonl").write_text(json.dumps({"timestamp": "2026-01-01T00:00:00Z",
+                                                  "shard_id": f"shard-{today}-0002"}) + "\n")
+    for _ in range(2):
+        fp = FakeProvider([_writes("out.txt", "ok")])
+        monkeypatch.setattr("openshard.cli.osn_cmd._resolve_provider", lambda n, m, fp=fp: ("fake", fp))
+        r = CliRunner().invoke(cli, ["osn", "run", "make out ok", "--model", "fake/m",
+                                     "--verify-cmd", f'"{PY}" -c "pass"', "--json"])
+        assert r.exit_code == 0, r.output
+    runs = [json.loads(x) for x in (store / "runs.jsonl").read_text().splitlines()]
+    ids = [e["shard_id"] for e in runs]
+    assert len(set(ids)) == 3 and ids[1] == f"shard-{today}-0003" and ids[2] == f"shard-{today}-0004"
+    assert all(verify_shard_hash(e)["status"] == "valid" for e in runs[1:])  # hash covers the final id
+    page = recent_shards(repo_path=repo, limit=None)
+    osn_shards = [s for s in page.items if s.shard.shard_id != f"shard-{today}-0002"]
+    assert len(osn_shards) == 2 and all(s.attempt_count == 1 for s in osn_shards)
 
 
 def test_cli_promote_blocked_path_never_written(tmp_path, monkeypatch):

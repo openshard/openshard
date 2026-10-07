@@ -563,6 +563,14 @@ class TestOutcome:
         assert o.cost_usd is None
         assert o.escalation_model == "anthropic/claude-opus-4.7"
 
+    def test_osn_attempt_count_is_exact_even_after_a_retry(self):
+        loop = {"status": "verified", "attempts": [{"n": 1, "actions": []}, {"n": 2, "actions": []},
+                                                   {"n": 3, "actions": []}]}
+        o = outcome_from_receipt({**LEGACY_RECEIPT, "retry_triggered": True, "osn_loop": loop})
+        assert o.attempts == 3  # OSN ran every attempt itself
+        # A legacy retry flag alone still does not specify a count.
+        assert outcome_from_receipt({**LEGACY_RECEIPT, "retry_triggered": True, "osn_loop": {}}).attempts is None
+
     def test_agent_reported_pass_is_not_verified_success(self):
         rec = {**LEGACY_RECEIPT, "verification": {
             "version": 1, "status": "passed", "source": "agent_reported",
