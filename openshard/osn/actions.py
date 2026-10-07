@@ -32,11 +32,13 @@ KIND_READ_FILE = "read_file"
 KIND_SEARCH_REPO = "search_repo"
 KIND_GET_DIFF = "get_diff"
 KIND_WRITE_FILE = "write_file"
+KIND_EDIT_FILE = "edit_file"  # exact-match replacement inside an existing file
 KIND_RUN_VERIFICATION = "run_verification"
 KIND_FINISH = "finish"
 
 READ_ONLY_KINDS: frozenset[str] = frozenset({KIND_LIST_FILES, KIND_READ_FILE, KIND_SEARCH_REPO, KIND_GET_DIFF})
-MUTATING_KINDS: frozenset[str] = frozenset({KIND_WRITE_FILE})
+MUTATING_KINDS: frozenset[str] = frozenset({KIND_WRITE_FILE, KIND_EDIT_FILE})
+MAX_READ_LINES = 2000
 CONTROL_KINDS: frozenset[str] = frozenset({KIND_RUN_VERIFICATION, KIND_FINISH})
 ALL_KINDS: frozenset[str] = READ_ONLY_KINDS | MUTATING_KINDS | CONTROL_KINDS
 
@@ -128,7 +130,26 @@ def _parse_one(raw: Any, index: int) -> AgentAction:
         return AgentAction(kind, subdir, None, intent)
     if kind == KIND_READ_FILE:
         path = _require_str(raw, "path", MAX_TARGET_CHARS, what=what)
-        return AgentAction(kind, path, None, intent)
+        read_args: dict[str, Any] = {}
+        start = raw.get("start_line")
+        if isinstance(start, int) and not isinstance(start, bool) and start >= 1:
+            read_args["start_line"] = start
+        count = raw.get("max_lines")
+        if isinstance(count, int) and not isinstance(count, bool) and 1 <= count <= MAX_READ_LINES:
+            read_args["max_lines"] = count
+        return AgentAction(kind, path, None, intent, read_args)
+    if kind == KIND_EDIT_FILE:
+        path = _require_str(raw, "path", MAX_TARGET_CHARS, what=what)
+        old = raw.get("old_string")
+        new = raw.get("new_string")
+        if not isinstance(old, str) or not old:
+            raise ActionParseError(f"{what} needs a non-empty string 'old_string' (the exact text to replace)")
+        if not isinstance(new, str):
+            raise ActionParseError(f"{what} needs string 'new_string'")
+        if len(old.encode("utf-8", "replace")) > MAX_CONTENT_BYTES or len(new.encode("utf-8", "replace")) > MAX_CONTENT_BYTES:
+            raise ActionParseError(f"{what} edit text too large")
+        replace_all = raw.get("replace_all")
+        return AgentAction(kind, path, new, intent, {"old_string": old, "replace_all": replace_all is True})
     if kind == KIND_SEARCH_REPO:
         query = _require_str(raw, "query", MAX_QUERY_CHARS, what=what)
         args: dict[str, Any] = {}
@@ -327,7 +348,7 @@ def summarize_actions(records: list[ActionRecord]) -> dict[str, int]:
             out["listings"] += 1
         elif r.kind == KIND_GET_DIFF:
             out["diffs"] += 1
-        elif r.kind == KIND_WRITE_FILE:
+        elif r.kind in (KIND_WRITE_FILE, KIND_EDIT_FILE):
             out["writes_proposed"] += 1
             if r.executed and r.ok:
                 out["writes_applied"] += 1
@@ -350,6 +371,7 @@ __all__ = [
     "DECISION_DENY",
     "DECISION_INVALID",
     "DECISION_NOT_APPLICABLE",
+    "KIND_EDIT_FILE",
     "KIND_FINISH",
     "KIND_GET_DIFF",
     "KIND_LIST_FILES",

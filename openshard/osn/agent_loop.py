@@ -44,6 +44,7 @@ from openshard.osn.actions import (
     DECISION_DENY,
     DECISION_INVALID,
     DECISION_NOT_APPLICABLE,
+    KIND_EDIT_FILE,
     KIND_FINISH,
     KIND_GET_DIFF,
     KIND_LIST_FILES,
@@ -374,7 +375,7 @@ def run_attempt_turns(
         finished = False
         for action in result.actions:
             t0 = time.monotonic()
-            if read_only and action.kind in (KIND_WRITE_FILE, KIND_RUN_VERIFICATION):
+            if read_only and action.kind in (KIND_WRITE_FILE, KIND_EDIT_FILE, KIND_RUN_VERIFICATION):
                 rec = record(action, turn, decision=DECISION_INVALID, error_class=ERROR_CAP_REACHED)
                 rec.decision_source, rec.decision_reason = "role_policy", f"the {role} role is read-only"
                 rec.duration_ms = 0
@@ -399,7 +400,7 @@ def run_attempt_turns(
                 observe(rec, status, rec.result.pop("_text", ""))
                 continue
 
-            if action.kind == KIND_WRITE_FILE:
+            if action.kind in (KIND_WRITE_FILE, KIND_EDIT_FILE):
                 out.proposed.append(action.target)
                 rec = record(action, turn, decision=DECISION_INVALID)
                 try:
@@ -447,7 +448,13 @@ def run_attempt_turns(
                         out.stop, out.budget_stop = STOP_BUDGET, exc
                         _emit(progress, "budget_stop", attempt=attempt, reason=exc.stop_reason)
                         return out
-                call = NativeToolCall("write_file", {"path": action.target, "content": action.content}, approved=True)
+                if action.kind == KIND_EDIT_FILE:
+                    call = NativeToolCall("edit_file", {
+                        "path": action.target, "old_string": action.args.get("old_string"),
+                        "new_string": action.content, "replace_all": bool(action.args.get("replace_all")),
+                    }, approved=True)
+                else:
+                    call = NativeToolCall("write_file", {"path": action.target, "content": action.content}, approved=True)
                 res = runner.run(call)
                 rec.executed, rec.ok = True, res.ok
                 rec.duration_ms = int((time.monotonic() - t0) * 1000)
@@ -467,6 +474,7 @@ def run_attempt_turns(
                         "sha256_after": md.get("sha256_after"),
                         "lines_added": md.get("lines_added"),
                         "lines_removed": md.get("lines_removed"),
+                        "occurrences": md.get("occurrences"),
                         "summary": res.output,
                     }
                     observe(rec, "ok", res.output)
@@ -617,7 +625,12 @@ def _execute_read(
     if action.kind == KIND_LIST_FILES:
         call = NativeToolCall("list_files", {"subdir": target or "."})
     elif action.kind == KIND_READ_FILE:
-        call = NativeToolCall("read_file", {"path": target, "limit": READ_LIMIT_CHARS})
+        read_args: dict[str, Any] = {"path": target, "limit": READ_LIMIT_CHARS}
+        if action.args.get("start_line"):
+            read_args["start_line"] = action.args["start_line"]
+        if action.args.get("max_lines"):
+            read_args["max_lines"] = action.args["max_lines"]
+        call = NativeToolCall("read_file", read_args)
     else:
         call = NativeToolCall("search_repo", {"query": target, "max_matches": action.args.get("max_matches", 50)})
     res = runner.run(call)
@@ -635,7 +648,11 @@ def _execute_read(
     elif action.kind == KIND_READ_FILE:
         md = res.metadata or {}
         rec.result = {"chars": md.get("chars", len(text)), "truncated": bool(md.get("truncated")),
-                      "summary": f"{md.get('chars', len(text))} chars", "_text": text}
+                      "total_lines": md.get("total_lines"), "start_line": md.get("start_line"),
+                      "end_line": md.get("end_line"),
+                      "summary": (f"lines {md['start_line']}-{md['end_line']} of {md.get('total_lines')}"
+                                  if md.get("start_line") else f"{md.get('chars', len(text))} chars"),
+                      "_text": text}
     else:
         md = res.metadata or {}
         text = compact_tool_result(text, SEARCH_LIMIT_CHARS)

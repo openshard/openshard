@@ -5,6 +5,7 @@ from pathlib import Path
 from openshard.native.tools import (
     NativeToolCall,
     NativeToolResult,
+    _exec_edit_file,
     _exec_get_git_diff,
     _exec_list_files,
     _exec_read_file,
@@ -70,7 +71,25 @@ class NativeToolRunner:
             limit = args.get("limit", 4000)
             if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
                 limit = 4000
-            return _exec_read_file(self._repo_root, args.get("path", ""), limit=limit)
+            start_line = args.get("start_line")
+            max_lines = args.get("max_lines")
+            return _exec_read_file(
+                self._repo_root, args.get("path", ""), limit=limit,
+                start_line=start_line if isinstance(start_line, int) and not isinstance(start_line, bool) else None,
+                max_lines=max_lines if isinstance(max_lines, int) and not isinstance(max_lines, bool) else None,
+            )
+
+        if call.tool_name == "edit_file":
+            return _exec_edit_file(
+                self._repo_root,
+                args.get("path", ""),
+                args.get("old_string"),
+                args.get("new_string"),
+                approved=call.approved,
+                replace_all=bool(args.get("replace_all")),
+                blocked_patterns=self._blocked_write_patterns,
+                approval_patterns=self._approval_write_patterns,
+            )
 
         if call.tool_name == "search_repo":
             return _exec_search_repo(

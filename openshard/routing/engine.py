@@ -77,8 +77,15 @@ _BOILERPLATE_KW = {
 # ---------------------------------------------------------------------------
 
 def _matches(lower: str, kw_set: set[str]) -> bool:
-    """True if any keyword in *kw_set* appears as a substring of *lower*."""
-    return any(kw in lower for kw in kw_set)
+    """True if any keyword in *kw_set* appears in *lower* at the start of a word.
+
+    A keyword must begin where a word begins, so ``ui`` matches ``ui layer`` and
+    ``ui-kit`` but not ``build`` or ``guide``; prefix keywords such as
+    ``restructur`` still match ``restructuring``.
+    """
+    import re
+
+    return any(re.search(r"(?<![a-z0-9])" + re.escape(kw), lower) for kw in kw_set)
 
 
 def route(task: str) -> RoutingDecision:

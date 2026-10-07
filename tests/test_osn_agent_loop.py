@@ -287,6 +287,42 @@ class TestIterativeAttempt:
         assert rec.attempts[0].turns == 2 and rec.attempts[0].turn_stop == "max_turns"
         assert rec.status == "verified" and len(model.replies) == 1
 
+    def test_edit_file_replaces_an_exact_span_and_fails_closed_otherwise(self, repo):
+        (repo / "src" / "app.txt").write_bytes(b"bad\nbad\n")  # bytes: no newline translation on Windows
+        with pytest.raises(ActionParseError):  # an empty old_string is refused by the contract itself
+            parse_turn(_turn(_a("edit_file", path="src/app.txt", old_string="", new_string="ok")))
+        model = ScriptedTurns([
+            _turn(_a("edit_file", path="src/app.txt", old_string="missing", new_string="x"),
+                  _a("edit_file", path="src/app.txt", old_string="bad", new_string="ok"),
+                  _a("edit_file", path="src/app.txt", old_string="bad\n", new_string="", replace_all=True)),
+            _turn(_a("write_file", path="src/app.txt", content="ok"), _a("finish")),
+        ])
+        rec = run_bounded_loop(repo, TASK, model, CHECK, max_attempts=1)
+        acts = rec.attempts[0].actions
+        assert acts[0]["kind"] == "edit_file" and acts[0]["executed"] and acts[0]["ok"] is False  # not found
+        assert acts[1]["ok"] is False  # ambiguous: two occurrences without replace_all
+        assert acts[2]["ok"] is True and acts[2]["result"]["occurrences"] == 2 and acts[2]["result"]["lines_removed"] == 2
+        assert acts[3]["kind"] == "write_file"
+        obs = [o for o in model.states[1].observations if o.turn == 1]
+        assert "not found" in obs[0].text and "occurs 2 times" in obs[1].text
+        assert rec.status == "verified" and rec.attempts[0].decisions[0]["decision"] == "allow"
+        blob = json.dumps(rec.to_dict())
+        assert "old_string" not in blob and "new_string" not in blob  # edit text never stored
+
+    def test_read_file_ranges_are_bounded_and_labelled(self, repo):
+        (repo / "big.txt").write_text("".join(f"line {i}\n" for i in range(1, 501)))
+        model = ScriptedTurns([
+            _turn(_a("read_file", path="big.txt", start_line=100, max_lines=5), _a("read_file", path="big.txt")),
+            _turn(_a("write_file", path="src/app.txt", content="ok"), _a("finish")),
+        ])
+        rec = run_bounded_loop(repo, TASK, model, CHECK, max_attempts=1)
+        obs = [o for o in model.states[1].observations if o.turn == 1]
+        assert obs[0].text.startswith("[lines 100-104 of 500]\nline 100\n") and "line 105" not in obs[0].text
+        assert obs[1].text.startswith("line 1\n")
+        acts = rec.attempts[0].actions
+        assert acts[0]["result"]["start_line"] == 100 and acts[0]["result"]["end_line"] == 104
+        assert rec.status == "verified"
+
     def test_no_writes_is_no_actions(self, repo):
         model = ScriptedTurns([_turn(_a("read_file", path="README.md"), _a("finish", intent="nothing to do"))])
         rec = run_bounded_loop(repo, TASK, model, CHECK)

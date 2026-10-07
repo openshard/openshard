@@ -31,6 +31,7 @@ _EXPECTED_BUILTIN_NAMES = {
     "search_repo",
     "get_git_diff",
     "write_file",
+    "edit_file",
     "run_verification",
     "run_command",
 }
