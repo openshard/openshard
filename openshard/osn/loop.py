@@ -46,6 +46,7 @@ from openshard.osn.agent_loop import (
     STOP_VERIFIER_TIMEOUT,
     run_attempt_turns,
     state_fingerprint,
+    verification_progress_fields,
 )
 from openshard.osn.budget import STATUS_BUDGET_EXHAUSTED, BudgetExhausted, BudgetLedger
 from openshard.policy.command_execution import organisation_command_blocked
@@ -113,6 +114,27 @@ REVIEW_EVIDENCE = "model_reported"
 RECOVERY_VERIFIED = "verified"  # the recovery attempt changed files and verification passed again
 RECOVERY_NO_CHANGE = "no_change"  # the executor made no change; the verified state stands
 RECOVERY_REVERTED = "reverted_to_verified_state"  # the recovery did not verify; its changes were undone
+
+
+def _plan_progress_fields(plan: dict[str, Any] | None) -> dict[str, Any]:
+    """The bounded, already-parsed plan as a progress payload: summary, steps, files, subtasks.
+
+    These are the planner's own words (parsed and capped by ``parse_plan``),
+    shown so the user sees what the executor was told to do, never the
+    planner's deliberation.
+    """
+    if not isinstance(plan, dict):
+        return {}
+    steps = [s for s in (plan.get("steps") or []) if isinstance(s, str)]
+    files = [f for f in (plan.get("files") or []) if isinstance(f, str)]
+    subtasks = [s.get("id") for s in (plan.get("subtasks") or []) if isinstance(s, dict) and s.get("id")]
+    return {
+        "plan_summary": plan.get("summary") if isinstance(plan.get("summary"), str) else None,
+        "plan_steps": steps,
+        "plan_files": files,
+        "plan_subtasks": subtasks,
+        "plan_simple": bool(plan.get("simple")),
+    }
 
 
 def _emit_progress(progress: ProgressCallback | None, event: str, **data: Any) -> None:
@@ -740,7 +762,8 @@ def run_bounded_loop(
             plan = None
         roles["planner"] = dict(planner_record)
         _emit_progress(progress, "role_end", role="planner", status=planner_record.get("status"),
-                       model=planner_record.get("model"), has_plan=plan is not None)
+                       model=planner_record.get("model"), has_plan=plan is not None,
+                       reason=planner_record.get("reason"), **_plan_progress_fields(plan))
         if plan is not None:
             set_plan = getattr(provider, "set_plan", None)
             if callable(set_plan):
@@ -821,11 +844,7 @@ def run_bounded_loop(
                 rec.reverted = True
                 return False, RECOVERY_REVERTED
         rec.verification = result
-        _emit_progress(
-            progress, "verification_result", attempt=n,
-            status=("unknown" if result.timed_out else "passed" if result.passed else "failed"),
-            exit_code=result.exit_code, ran=result.ran,
-        )
+        _emit_progress(progress, "verification_result", attempt=n, **verification_progress_fields(result, _output))
         if result.passed and not result.tainted:
             return True, RECOVERY_VERIFIED
         _restore(sandbox, snapshot, changed)
@@ -1157,11 +1176,7 @@ def run_bounded_loop(
             except BudgetExhausted as exc:
                 return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         rec.verification = result
-        _emit_progress(
-            progress, "verification_result", attempt=n,
-            status=("unknown" if result.timed_out else "passed" if result.passed else "failed"),
-            exit_code=result.exit_code, ran=result.ran,
-        )
+        _emit_progress(progress, "verification_result", attempt=n, **verification_progress_fields(result, output))
         if result.tainted:
             # A pass on files the verifier itself rewrote proves nothing about
             # the proposed change, and those bytes must never be promoted.

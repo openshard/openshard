@@ -31,6 +31,20 @@ A reply that is not a valid action list is re-asked once (its spend is recorded)
 ends in `error`. A turn may carry at most 8 actions; anything after `finish` is ignored.
 `--loop writes` keeps the original behaviour: one whole-file proposal per attempt.
 
+### What the terminal shows while it runs
+
+The loop emits structured progress events (`progress=` callback on `run_bounded_loop`); the CLI
+renders them as they happen and never prints model reasoning, only decisions and observable
+actions. In text mode you see: the route and why; the planner's plan as the executor received it
+(summary, numbered steps, files likely to change, any independent subtasks it proposed); every
+turn's actions (reads, searches, writes with size deltas, refused writes with the policy
+decision); each verification with its verdict and, when it did not pass, the failing test ids and
+the last lines of the command's output; retries, escalations and supervisor decisions; a
+checkpoint that could not be written; and, at the end, the Receipt id with `openshard last` and
+the run id for `osn resume`. Lines from parallel workers or candidates are prefixed with the
+worker id (`[worker-1]`) because they run concurrently. `--json` prints one final object and no
+progress lines.
+
 ## Roles: planner, executor, verifier
 
 `--roles auto` (default) can put three roles on one run; each is recorded with its own model,

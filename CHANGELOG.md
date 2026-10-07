@@ -6,6 +6,18 @@ All notable changes to OpenShard are documented here.
 
 ### Changed
 
+- `openshard osn run` shows more of what is happening while it happens: the
+  planner's plan as the executor received it (summary, steps, files, proposed
+  subtasks); each verification's failing test ids and the last lines of the
+  command's output when it did not pass (and whether the verifier could not
+  run or rewrote the files it checked); checkpoint write failures and attempts
+  that ended on an unusable reply; and, at the end, the Receipt id, the
+  `openshard last` pointer and the run id. Progress events from parallel
+  workers and candidates now carry `worker_id` / `subtask_id`, and the
+  renderer prefixes their lines with it so concurrent workers never read as
+  one agent. The `verification_result` event carries `failed_tests`,
+  `setup_failure`, `tainted` and (never on a pass) a redacted `output_tail`.
+
 - Model roster: `deepseek/deepseek-v4.1-flash` is the curated cheap default
   (routing class `cheap_coding`, Ask Mode, the `cheap` tier fallback and the
   boilerplate scoring preference). `deepseek/deepseek-v4-flash`, the 0423

@@ -208,6 +208,22 @@ def _usage_summary(usage: list[AttemptUsage]) -> dict[str, Any]:
     }
 
 
+def _worker_progress(progress: Any, spec: WorkerSpec) -> Any:
+    """The run's progress callback, with every event stamped with the worker it came from.
+
+    Workers run concurrently and share one callback, so without the stamp their
+    turn and action lines interleave indistinguishably. Events pass through
+    otherwise unchanged; a renderer that ignores ``worker_id`` sees what it saw before.
+    """
+    if progress is None:
+        return None
+
+    def _stamped(event: str, data: dict[str, Any]) -> None:
+        progress(event, {**data, "worker_id": spec.worker_id, "subtask_id": spec.subtask.id})
+
+    return _stamped
+
+
 def _run_one(
     spec: WorkerSpec,
     *,
@@ -242,7 +258,8 @@ def _run_one(
     outcome = run_attempt_turns(
         repo_root=repo_root, sandbox=sandbox, task=worker_text, attempt=1, provider=turn_provider, gate=gate,
         verify=_verify, budget=None, previous_failure=None, blocked_seen=[], changed_so_far=[],
-        max_turns=spec.max_turns, max_verifications=spec.max_verifications, progress=progress,
+        max_turns=spec.max_turns, max_verifications=spec.max_verifications,
+        progress=_worker_progress(progress, spec),
         role=ROLE_WORKER, model_label=lambda: spec.model, repo_files=repo_files,
         blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
     )

@@ -273,7 +273,7 @@ class TestWorkersInTheLoop:
         planner.usage = []
         return planner
 
-    def _workers(self, fake, repo, *, exclude_models=()):
+    def _workers(self, fake, repo, *, exclude_models=(), progress=None):
         from openshard.osn.topology import decide_topology as _decide
 
         def hook(sandbox, plan, files):
@@ -287,7 +287,7 @@ class TestWorkersInTheLoop:
             specs = [WorkerSpec(f"worker-{i + 1}", st, models[i], provider_name="fake")
                      for i, st in enumerate(dec.parallel_subtasks[: decision.worker_count])]
             results, usage = run_workers(specs, provider=fake, task=TASK, plan=plan, repo_root=repo,
-                                         base_sandbox=sandbox, verify=_ok_verify)
+                                         base_sandbox=sandbox, verify=_ok_verify, progress=progress)
             hook.usage.extend(usage)
             synth = synthesize(results, main_sandbox=sandbox,
                                scopes={s.worker_id: s.subtask.allowed_write_paths for s in specs})
@@ -310,10 +310,11 @@ class TestWorkersInTheLoop:
         })
         provider = IterativeModelProvider(fake, ["exec/m"], repo)
         planner = self._planner(fake)
-        workers = self._workers(fake, repo)
         events: list = []
+        progress = lambda kind, data: events.append((kind, data))  # noqa: E731
+        workers = self._workers(fake, repo, progress=progress)
         rec = run_bounded_loop(repo, TASK, provider, CHECK, max_attempts=2, planner=planner, workers=workers,
-                               progress=lambda kind, data: events.append((kind, data)))
+                               progress=progress)
         assert rec.status == "verified", rec.stop_reason
         assert "PLANNER_DECOMPOSE" not in fake.calls[0][1] and "subtasks" in fake.calls[0][1]  # the note reached the planner
         assert not any(c[0] == "exec/m" for c in fake.calls)  # synthesis was clean: no executor turns
@@ -324,6 +325,16 @@ class TestWorkersInTheLoop:
         assert rec.attempts[0].turns == 0 and rec.attempts[0].parallel_stage
         assert any(e[0] == "stage_start" and e[1]["stage"] == "workers" for e in events)
         assert any(e[0] == "stage_end" and e[1]["workers"] == 2 and e[1]["applied"] == 2 for e in events)
+        # Live transparency: every event a worker emits says which worker it came
+        # from, so a renderer can label concurrent workers' lines; the planner's
+        # role_end carries the bounded plan the executor and workers were given.
+        worker_events = [d for e, d in events if e in ("turn_start", "action", "turn_response")]
+        assert worker_events and all(d.get("worker_id") in ("worker-1", "worker-2") for d in worker_events)
+        assert {d["worker_id"] for d in worker_events} == {"worker-1", "worker-2"}
+        assert all(d.get("subtask_id") in ("a", "b") for d in worker_events)
+        planner_end = next(d for e, d in events if e == "role_end" and d["role"] == "planner")
+        assert planner_end["has_plan"] and planner_end["plan_steps"] == PLAN["steps"]
+        assert planner_end["plan_subtasks"] == ["a", "b"] and planner_end["plan_files"] == PLAN["files"]
 
         entry = build_osn_run_entry(rec, task=TASK, usage=[*planner.usage, *workers.usage], duration_seconds=2.0,
                                     repo_path=repo)
