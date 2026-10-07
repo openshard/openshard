@@ -244,15 +244,21 @@ def _resolve_provider(name: str | None, model: str):
 @click.option("--task-id", default=None, help="Explicit task id (from `openshard task new`).")
 @click.option("--promote", is_flag=True, default=False,
               help="After verified success, copy changed files into the repo through the policy gate.")
+@click.option("--commit", "commit_result", is_flag=True, default=False,
+              help="With --promote: commit the promoted files on the current branch, then re-run the "
+                   "verification command on that exact commit so the Receipt's verification is bound to it "
+                   "(requires a clean working tree apart from the promoted files).")
 @click.option("--yes", "assume_yes", is_flag=True, default=False,
               help="Approve policy 'ask' paths during the OSN run and promotion without prompting.")
 @click.option("--no-learning", "no_learning", is_flag=True, default=False,
               help="Do not consult learning signals from this repository's prior OpenShard runs.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_attempts, loop_mode, max_turns,
-            roles_mode, planner_model, verifier_model, explore, task_id, promote, assume_yes, no_learning,
-            as_json):
+            roles_mode, planner_model, verifier_model, explore, task_id, promote, commit_result, assume_yes,
+            no_learning, as_json):
     """Run TASK through the bounded OSN loop."""
+    if commit_result and not promote:
+        raise click.UsageError("--commit requires --promote: only promoted files can be committed.")
     from openshard.cli.ingest import _repo_root
     from openshard.history.jsonl_store import append_jsonl
     from openshard.osn.loop import run_bounded_loop
@@ -489,16 +495,29 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     }
     store = repo_root / ".openshard"
     store.mkdir(parents=True, exist_ok=True)
-    append_jsonl(store / "runs.jsonl", entry)
 
+    # Promotion (and the optional commit) happen before the Receipt is written, so
+    # the Receipt can carry the commit OpenShard itself created and observed.
     promoted: list[str] = []
     skipped: list[str] = []
+    commit_record: dict | None = None
     if promote:
         if receipt.status != "verified":
             if not as_json:
                 click.echo(f"Not promoting: loop status is '{receipt.status}'.")
         else:
             promoted, skipped = _promote(repo_root, receipt, entry, assume_yes, permissions)
+            if commit_result and promoted:
+                commit_record = _commit_promoted(repo_root, promoted, task, entry)
+                _attach_commit(entry, commit_record)
+    append_jsonl(store / "runs.jsonl", entry)
+
+    bound_verification: dict | None = None
+    if commit_record and commit_record.get("sha"):
+        # Re-run the run's own verification command on the committed tree and record
+        # it as later evidence bound to that commit (verifications.jsonl), the same
+        # path `openshard verify` uses. The Receipt itself is not modified.
+        bound_verification = _bind_verification(repo_root, entry, argv, as_json=as_json)
 
     if as_json:
         click.echo(json.dumps({
@@ -508,6 +527,8 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "provider": provider_name, "models": models, "attempts": len(receipt.attempts),
             "changed_files": receipt.changed_files, "promoted": promoted, "skipped": skipped,
             "sandbox_path": receipt.sandbox_path,
+            "commit": commit_record,
+            "bound_verification": bound_verification,
             "mode": receipt.mode,
             "turns": entry["osn_loop"].get("turns_total"),
             "action_summary": entry["osn_loop"].get("action_summary"),
@@ -556,7 +577,22 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         if receipt.verification_state == "not_run":
             click.echo("  Verification did not run.")
     if promote and promoted:
-        click.echo(f"  Promoted {len(promoted)} file(s) into the repository (not re-verified there).")
+        click.echo(f"  Promoted {len(promoted)} file(s) into the repository"
+                   + ("." if commit_record else " (not re-verified there)."))
+        if commit_record:
+            if commit_record.get("sha"):
+                click.echo(f"  Committed {commit_record['sha'][:12]} on {commit_record.get('branch') or 'HEAD'}"
+                           f" ({len(commit_record.get('files') or [])} file(s)).")
+            else:
+                click.echo(f"  Not committed: {commit_record.get('reason') or 'unknown reason'}.")
+        if bound_verification:
+            status = bound_verification.get("status")
+            if bound_verification.get("bound"):
+                click.echo(f"  Re-verified on commit {str(bound_verification.get('artifact_sha') or '')[:12]}: "
+                           f"{status} (evidence bound to the commit).")
+            else:
+                click.echo(f"  Re-verified after commit: {status}; NOT bound to the commit "
+                           f"({bound_verification.get('reason') or 'working tree not clean'}).")
     elif receipt.status == "verified":
         click.echo(f"  Not promoted. Review the copy at {receipt.sandbox_path}, or re-run with --promote.")
     if skipped:
@@ -1092,6 +1128,133 @@ def _budget_line(record: dict | None) -> str | None:
     if record.get("action") and record["action"] != "none":
         tail += f"; {record['action']}"
     return f"enforced ({limits}); used {used}{tail}"
+
+
+_COMMIT_TITLE_CAP = 72
+
+
+def _commit_promoted(repo_root: Path, files: list[str], task: str, entry: dict) -> dict:
+    """Commit exactly the promoted *files* on the current branch. Never raises.
+
+    Returns ``{"sha", "branch", "files", "reason"}``: ``sha`` is None with a
+    reason when nothing was committed (nothing staged, git identity missing,
+    a hook refused). Only the promoted paths are staged, so unrelated local
+    changes are never swept into the commit.
+    """
+    from openshard.util.git import run_git
+
+    title = " ".join(task.split())[:_COMMIT_TITLE_CAP].rstrip(" .") or "OSN change"
+    receipt_id = entry.get("receipt_id") or ""
+    message = f"{title}\n\nMade by Openshard Native (OSN) from an isolated, verified copy.\nReceipt: {receipt_id}\n"
+    branch = (run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip() or None
+    record: dict = {"sha": None, "branch": branch, "files": list(files), "reason": None}
+    if run_git(repo_root, ["add", "--", *files]) is None:
+        record["reason"] = "git_add_failed"
+        return record
+    staged = run_git(repo_root, ["diff", "--cached", "--name-only"])
+    if staged is None or not staged.strip():
+        record["reason"] = "nothing_staged"
+        return record
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["git", "commit", "-q", "-F", "-"], cwd=str(repo_root), input=message, text=True,
+            capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        record["reason"] = f"git_commit_failed:{type(exc).__name__}"
+        return record
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        record["reason"] = "git_commit_refused:" + (tail[-1][:120] if tail else f"exit {proc.returncode}")
+        return record
+    sha = (run_git(repo_root, ["rev-parse", "HEAD"]) or "").strip().lower()
+    record["sha"] = sha if len(sha) >= 40 else None
+    if record["sha"] is None:
+        record["reason"] = "head_unreadable_after_commit"
+    return record
+
+
+def _attach_commit(entry: dict, commit_record: dict | None) -> None:
+    """Record the commit OpenShard created on the Receipt, in the shape capture uses for git-observed commits."""
+    if not commit_record or not commit_record.get("sha"):
+        if commit_record:
+            entry["osn_commit"] = {"attempted": True, "sha": None, "reason": commit_record.get("reason")}
+        return
+    sha = commit_record["sha"]
+    entry["git_end_head"] = sha
+    entry["session_commits"] = {"source": "git_observed", "shas": [sha], "truncated": False}
+    entry["osn_commit"] = {
+        "attempted": True, "sha": sha, "branch": commit_record.get("branch"),
+        "files": list(commit_record.get("files") or []), "source": "openshard_committed",
+    }
+
+
+def _bind_verification(repo_root: Path, entry: dict, argv: list[str], *, as_json: bool) -> dict:
+    """Run the run's verify command on the committed tree and record it as evidence bound to that commit.
+
+    Uses the post-session verification path (``openshard verify``): the check
+    is OpenShard-executed, ``directly_observed``, and bound to HEAD only when
+    the tree was clean before and after. Nothing is claimed otherwise.
+    """
+    from openshard.cli.main import _utc_stamp
+    from openshard.history.verification import CHECK_FAILED, CHECK_PASSED, CHECK_UNKNOWN
+    from openshard.osn.loop import _run_verification
+    from openshard.verification.plan import VerificationSource
+    from openshard.verification.post_session import (
+        CheckRun,
+        _planned,
+        build_attestation,
+        record_attestation,
+        summarize_attestation,
+        tree_state,
+    )
+
+    # The run's --verify-cmd is an explicit user command that OpenShard already
+    # executed in the isolated copy (organisation command policy was applied at
+    # run start); it is executed here the same way, never through a shell. The
+    # generic post-session classifier is not re-applied to it.
+    planned = _planned(list(argv), "osn_run", VerificationSource.user)
+    started = _utc_stamp()
+    before = tree_state(repo_root)
+    t0 = time.monotonic()
+    observed, _output = _run_verification(list(argv), repo_root, 600.0)
+    duration = round(time.monotonic() - t0, 2)
+    if observed.timed_out:
+        results = [CheckRun(planned, CHECK_UNKNOWN, duration_seconds=duration, note="timed out; no exit code")]
+    elif not observed.ran:
+        results = [CheckRun(planned, CHECK_UNKNOWN, duration_seconds=duration, note="could not start")]
+    else:
+        results = [CheckRun(planned, CHECK_PASSED if observed.passed else CHECK_FAILED,
+                            exit_code=observed.exit_code, duration_seconds=duration)]
+    after = tree_state(repo_root)
+    attestation = build_attestation(entry, results, before=before, after=after, started_at=started,
+                                    completed_at=_utc_stamp())
+    record_attestation(repo_root, attestation)
+    summary = summarize_attestation(attestation)
+    verification = summary.get("verification") if isinstance(summary, dict) else {}
+    verification = verification if isinstance(verification, dict) else {}
+    sha = verification.get("artifact_sha")
+    reason = None
+    if not sha:
+        if before.head is None:
+            reason = "no_git_head"
+        elif before.dirty or (after.tracked_dirty if after.tracked_dirty is not None else after.dirty):
+            reason = "working_tree_not_clean"
+        elif after.head != before.head:
+            reason = "head_moved_during_verification"
+        else:
+            reason = "not_bound"
+    return {
+        "attestation_id": attestation.get("attestation_id"),
+        "status": verification.get("status"),
+        "source": verification.get("source"),
+        "artifact_sha": sha,
+        "bound": bool(sha),
+        "reason": reason,
+        "checks": [{"name": r.check.name, "status": r.status, "exit_code": r.exit_code} for r in results],
+    }
 
 
 def _promote(repo_root: Path, receipt, entry: dict, assume_yes: bool, permissions) -> tuple[list[str], list[str]]:
