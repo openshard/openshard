@@ -1103,7 +1103,11 @@ def _agent_loop_line(loop: dict | None, entry: dict) -> str | None:
     parts.append(f"{acts.get('verifications', 0)} model-requested verification(s)")
     calls = loop.get("model_calls") or []
     if calls:
-        cost = entry.get("estimated_cost")
+        from openshard.history.run_cost import run_total_cost
+
+        cost, complete = run_total_cost(entry)  # first attempt plus every retry, or None when any is unknown
+        if cost is not None and not complete:
+            cost = None
         prov = entry.get("cost_provenance")
         label = {"provider_reported": "provider-reported", "official_rate_estimate": "list-rate estimate"}.get(
             prov or "", "origin not recorded",

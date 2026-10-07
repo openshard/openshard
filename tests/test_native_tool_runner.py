@@ -454,6 +454,23 @@ class TestNativeToolRunnerWriteFile(unittest.TestCase):
         self.assertFalse((self.root / ".env").exists())
         self.assertFalse(self._write("a.py", None).ok)  # type: ignore[arg-type]
 
+    def test_edit_and_write_keep_a_crlf_files_line_endings(self):
+        (self.root / "win.py").write_bytes(b"a = 1\r\nb = 2\r\nc = 3\r\n")
+        res = self.runner.run(NativeToolCall(
+            "edit_file", {"path": "win.py", "old_string": "b = 2\n", "new_string": "b = 20\nb2 = 21\n"}, approved=True,
+        ))
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual((self.root / "win.py").read_bytes(), b"a = 1\r\nb = 20\r\nb2 = 21\r\nc = 3\r\n")
+        self.assertEqual((res.metadata["lines_added"], res.metadata["lines_removed"]), (2, 1))
+        res = self._write("win.py", "x = 1\ny = 2\n")
+        self.assertTrue(res.ok)
+        self.assertEqual((self.root / "win.py").read_bytes(), b"x = 1\r\ny = 2\r\n")
+        missing = self.runner.run(NativeToolCall(
+            "edit_file", {"path": "win.py", "old_string": "nope", "new_string": "x"}, approved=True,
+        ))
+        self.assertFalse(missing.ok)
+        self.assertEqual(missing.metadata["occurrences"], 0)
+
     def test_organisation_blocked_patterns_apply(self):
         org = NativeToolRunner(self.root, blocked_write_patterns=("src/**",))
         res = self._write("src/g.py", "x", runner=org)

@@ -488,6 +488,9 @@ def _exec_write_file(
             tool_name="write_file", ok=False, error="write target exists and is not a regular file",
             metadata={"policy_decision": decision.decision, "raw_content_stored": False},
         )
+    if before_text is not None and "\r\n" in before_text and "\r" not in content:
+        # Keep an existing CRLF file's line endings when the model writes LF text.
+        content = content.replace("\n", "\r\n")
     raw_after = content.encode("utf-8")
     sha_after = hashlib.sha256(raw_after).hexdigest()
     if sha_before == sha_after:
@@ -570,8 +573,14 @@ def _exec_edit_file(
         raw_before = dest.read_bytes()
     except OSError as exc:
         return NativeToolResult(tool_name="edit_file", ok=False, error=str(exc), metadata={"raw_content_stored": False})
-    before = raw_before.decode("utf-8", "replace")
-    count = before.count(old_string)
+    before_raw_text = raw_before.decode("utf-8", "replace")
+    # Models see LF text (reads use universal newlines); a CRLF file is matched
+    # and edited in LF form and written back with its own line endings.
+    crlf = "\r\n" in before_raw_text
+    before = before_raw_text.replace("\r\n", "\n") if crlf else before_raw_text
+    old_norm = old_string.replace("\r\n", "\n")
+    new_norm = new_string.replace("\r\n", "\n")
+    count = before.count(old_norm)
     if count == 0:
         return NativeToolResult(tool_name="edit_file", ok=False,
                                 error="old_string was not found in the file (match the current text exactly).",
@@ -580,8 +589,8 @@ def _exec_edit_file(
         return NativeToolResult(tool_name="edit_file", ok=False,
                                 error=f"old_string occurs {count} times; include more context or set replace_all.",
                                 metadata={"occurrences": count, "raw_content_stored": False})
-    after = before.replace(old_string, new_string) if replace_all else before.replace(old_string, new_string, 1)
-    raw_after = after.encode("utf-8")
+    after = before.replace(old_norm, new_norm) if replace_all else before.replace(old_norm, new_norm, 1)
+    raw_after = (after.replace("\n", "\r\n") if crlf else after).encode("utf-8")
     sha_before = hashlib.sha256(raw_before).hexdigest()
     sha_after = hashlib.sha256(raw_after).hexdigest()
     if sha_before == sha_after:
