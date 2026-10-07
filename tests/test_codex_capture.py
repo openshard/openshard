@@ -219,7 +219,13 @@ class TestTranslator:
         reduced = reduce_hook_payload(p, repo)
         assert [(t["path"], t["change_type"]) for t in reduced.file_targets] == [("pkg/a.py", "create"), ("README.md", "delete")]
         assert reduced.file_dropped is True  # the two paths outside the repository were dropped entirely
-        assert "\\" not in json.dumps(reduced.to_dict()) and "someone" not in json.dumps(reduced.to_dict())
+        queued = reduced.to_dict()
+        # transcript_path is an intentional transient queue field and may use
+        # native Windows separators. The reduced file evidence itself must not
+        # retain either outside path.
+        queued.pop("transcript_path", None)
+        blob = json.dumps(queued)
+        assert "\\" not in blob and "someone" not in blob
         if sys.platform == "win32":
             rel = cx.extract_codex_payload(_doc(
                 "PostToolUse", repo, tool_name="apply_patch",
