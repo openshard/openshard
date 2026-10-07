@@ -289,6 +289,22 @@ AGENT_SYSTEM_PROMPT = (
 MAX_TURN_PROMPT_CHARS = 160_000
 
 
+def render_plan_context(plan: dict[str, Any] | None) -> str:
+    """The planner's plan as advisory context for the executor's prompt (and the verifier's)."""
+    if not plan:
+        return ""
+    lines = ["Plan from the planning role (advisory; the task and policy still govern):"]
+    if plan.get("summary"):
+        lines.append(f"Summary: {plan['summary']}")
+    if plan.get("files"):
+        lines.append("Likely files: " + ", ".join(str(f) for f in plan["files"]))
+    for i, step in enumerate(plan.get("steps") or [], start=1):
+        lines.append(f"{i}. {step}")
+    if plan.get("verification"):
+        lines.append("Verification must show: " + "; ".join(str(v) for v in plan["verification"]))
+    return "\n".join(lines)
+
+
 @dataclass
 class IterativeModelProvider(ModelActionProvider):
     """A turn provider for the agent loop over any ``BaseProvider``.
@@ -302,8 +318,13 @@ class IterativeModelProvider(ModelActionProvider):
     """
 
     system_prompt: str = AGENT_SYSTEM_PROMPT
+    # The planner's plan, when a planner ran; rendered into every executor turn as advisory context.
+    plan: dict[str, Any] | None = None
     _attempt_model: str | None = field(default=None, repr=False)
     _attempt_n: int = field(default=0, repr=False)
+
+    def set_plan(self, plan: dict[str, Any] | None) -> None:
+        self.plan = plan
 
     def begin_attempt(self, attempt: int) -> None:
         """Fix this attempt's model: a pending supervisor override, else the ladder's rung."""
@@ -322,7 +343,7 @@ class IterativeModelProvider(ModelActionProvider):
     def turn(self, state: TurnState) -> TurnResult:
         model = self._model_for_turn(state)
         learning = self._learning_for(model)
-        prompt = build_turn_prompt(state, self.repo_root, self.context_files, learning=learning)
+        prompt = build_turn_prompt(state, self.repo_root, self.context_files, learning=learning, plan=self.plan)
         content = self._ask(state.attempt, model, prompt, learning=bool(learning), turn=state.turn)
         try:
             return parse_turn(content)
@@ -348,9 +369,13 @@ def build_turn_prompt(
     repo_root: Path,
     context_files: list[str],
     learning: str | None = None,
+    plan: dict[str, Any] | None = None,
 ) -> str:
     """The prompt for one turn: task, bounded repository view, observations so far, constraints."""
     parts = [f"Task:\n{state.task}\n"]
+    plan_text = render_plan_context(plan)
+    if plan_text:
+        parts.append(plan_text)
     parts.append(
         f"Attempt {state.attempt}. Turn {state.turn} of {state.max_turns}. "
         f"Verification requests left this attempt: {state.verifications_left}. "

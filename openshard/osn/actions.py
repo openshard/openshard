@@ -84,6 +84,8 @@ class TurnResult:
     note: str = ""
     # A legacy ``{"writes": [...]}`` reply, accepted as writes + finish.
     legacy_writes: bool = False
+    # The planner role's structured plan, when the reply carried one (raw; bounded by the caller).
+    plan: dict[str, Any] | None = None
 
 
 def _clean_text(value: Any, cap: int) -> str:
@@ -171,11 +173,14 @@ def parse_turn(content: str) -> TurnResult:
     note = _clean_text(data.get("note", ""), MAX_NOTE_CHARS)
     raw_actions = data.get("actions")
     legacy = False
+    plan = data.get("plan") if isinstance(data.get("plan"), dict) else None
     if raw_actions is None and isinstance(data.get("writes"), list):
         legacy = True
         raw_actions = [
             {"kind": KIND_WRITE_FILE, **w} if isinstance(w, dict) else w for w in data["writes"]
         ] + [{"kind": KIND_FINISH}]
+    if raw_actions is None and plan is not None:
+        raw_actions = [{"kind": KIND_FINISH}]  # a plan alone ends the planner's turns
     if not isinstance(raw_actions, list):
         raise ActionParseError("reply has no 'actions' list")
     if not raw_actions:
@@ -192,7 +197,7 @@ def parse_turn(content: str) -> TurnResult:
         out.append(a)
         if a.kind == KIND_FINISH:
             break
-    return TurnResult(out, note, legacy)
+    return TurnResult(out, note, legacy, plan)
 
 
 @dataclass

@@ -295,12 +295,88 @@ def agent_loop_block(entry: dict) -> dict[str, Any] | None:
         "attempts": attempts or None,
         "model_calls": model_calls_block(loop.get("model_calls")),
         "model_calls_truncated": _bool(loop.get("model_calls_truncated")),
+        "roles": roles_block(loop.get("roles")),
+        "plan": plan_block(loop.get("plan")),
+        "reviews": reviews_block(loop.get("reviews")),
         "evidence": {
             "actions": _text(ev.get("actions"), 64),
             "action_results": _text(ev.get("action_results"), 64),
+            "reviews": "model_reported" if loop.get("reviews") else None,
         },
     }
     return block
+
+
+_ROLE_STATUSES = frozenset({"ran", "skipped", "failed"})
+
+
+def roles_block(raw: Any) -> dict[str, Any] | None:
+    """Per-role evidence: status (ran / skipped / failed and why), model, provider, usage, cost provenance."""
+    d = _dict(raw)
+    if not d:
+        return None
+    out: dict[str, Any] = {}
+    for role in ("planner", "executor", "verifier"):
+        rec = _dict(d.get(role))
+        if not rec:
+            continue
+        status = rec.get("status")
+        out[role] = {
+            "status": status if status in _ROLE_STATUSES else None,
+            "reason": _text(rec.get("reason"), 64),
+            "model": _text(rec.get("model"), 256),
+            "requested_model": _text(rec.get("requested_model"), 256),
+            "provider": _text(rec.get("provider"), 64),
+            "source": _text(rec.get("source"), 32),
+            "independent": _bool(rec.get("independent")),
+            "calls": _count(rec.get("calls")),
+            "turns": _count(rec.get("turns")),
+            "prompt_tokens": _count(rec.get("prompt_tokens")),
+            "completion_tokens": _count(rec.get("completion_tokens")),
+            "cost_usd": _number(rec.get("cost_usd")),
+            "cost_source": _text(rec.get("cost_source"), 32),
+            "duration_ms": _count(rec.get("duration_ms")),
+            "usage_complete": _bool(rec.get("usage_complete")),
+        }
+    return out or None
+
+
+def plan_block(raw: Any) -> dict[str, Any] | None:
+    d = _dict(raw)
+    if not d:
+        return None
+    raw_steps, raw_files = d.get("steps"), d.get("files")
+    return {
+        "summary": _text(d.get("summary"), MAX_TEXT),
+        "file_count": len(raw_files) if isinstance(raw_files, list) else None,
+        "step_count": len(raw_steps) if isinstance(raw_steps, list) else 0,
+        "simple": _bool(d.get("simple")),
+    }
+
+
+_VERDICTS = frozenset({"pass", "warn", "fail"})
+
+
+def reviews_block(raw: Any) -> list[dict[str, Any]] | None:
+    """Independent model reviews: verdict, summary, whether a recovery attempt followed and how it ended."""
+    if not isinstance(raw, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for r in raw[:4]:
+        if not isinstance(r, dict) or r.get("verdict") not in _VERDICTS:
+            continue
+        out.append({
+            "attempt": _count(r.get("attempt")),
+            "verdict": r["verdict"],
+            "summary": _text(r.get("summary"), MAX_TEXT),
+            "concern_count": len(r["concerns"]) if isinstance(r.get("concerns"), list) else None,
+            "model": _text(r.get("model"), 256),
+            "independent": _bool(r.get("independent")),
+            "evidence": "model_reported",
+            "recovery_requested": _bool(r.get("recovery_requested")),
+            "recovery_outcome": _text(r.get("recovery_outcome"), 40),
+        })
+    return out or None
 
 
 _ACTION_COUNT_KEYS = (
