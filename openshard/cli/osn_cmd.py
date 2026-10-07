@@ -530,6 +530,13 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     argv, verify_source = _resolve_verify_argv(verify_cmd, repo_root)
     if not machine:
         click.echo(f"  Verify  {_verify_label(argv)} ({VERIFY_SOURCE_TEXT[verify_source]})")
+    from openshard.osn.instructions import load_project_instructions
+
+    project_instructions = load_project_instructions(repo_root)
+    if not machine and project_instructions is not None:
+        click.echo("  Context " + ", ".join(
+            f"{f['path']} ({f['bytes'] / 1000:.1f} KB{', truncated' if f['truncated'] else ''})"
+            for f in project_instructions.files) + " shown to every role")
     if promote and Path.cwd().resolve() != repo_root:
         raise click.ClickException("Run from the repository root to use --promote.")
     for rel in context_files:
@@ -852,6 +859,11 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     # contract, or OpenShard's detection. The Receipt names the source so a
     # reader knows whether a human chose the check.
     entry["osn_loop"]["verification_command"] = {"label": _verify_label(argv), "source": verify_source}
+    # Which instruction files every role was given (path, size, hash, truncated):
+    # that the agent was given them, never that it followed them.
+    entry["osn_loop"]["project_instructions"] = (
+        project_instructions.to_record() if project_instructions is not None else []
+    )
     if prior_checkpoint is not None:
         prior_costs = [u.cost_usd for u in prior_usage]
         entry["osn_loop"]["resumed"] = {
