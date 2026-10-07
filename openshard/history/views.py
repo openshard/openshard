@@ -253,6 +253,9 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
         "supervisor_routing": evidence.get("supervisor_routing"),
         "capability_snapshot": evidence.get("capability_snapshot"),
         "organisation_policy": evidence.get("organisation_policy"),
+        # Multi-agent OSN evidence; the sync envelope keeps it only when the
+        # organisation's ``advanced_osn`` capability is on.
+        "multi_agent": evidence.get("multi_agent"),
     }
 
 
