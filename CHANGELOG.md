@@ -20,6 +20,11 @@ All notable changes to OpenShard are documented here.
   section shows `GPT-5.6 Sol → Grok 4.3` and one indented share per model).
   Before, the record carried only the last model and credited it with every
   call's cost.
+- The compact OSN Receipt's COST section labels its first row `Attempt 1 ·
+  all roles` when more than one role made
+  calls, because that figure (the run's recorded cost minus the retries') is
+  everyone's spend; with only the executor it keeps the model name. ROLES
+  carries the per-role split.
 - The OSN executor is told when its turn budget is running out on inspection
   alone: once half the turns are spent with nothing written, every later turn
   says how many remain and asks for the change now; the last turn says only a

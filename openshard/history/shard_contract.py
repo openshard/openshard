@@ -2126,6 +2126,27 @@ def _osn_checks_display(receipt: ShardReceipt, loop: dict) -> str:
     return checks_label(receipt)
 
 
+def _first_attempt_cost_label(selected: str, evidence: dict) -> str:
+    """The COST section's first row: the first attempt's model, or 'all roles' when other roles' cost is in it.
+
+    The figure is the run's recorded cost minus the retries', so when a planner
+    or verifier made calls it is theirs too; naming only the executor's model
+    credited it with their spend. ROLES carries the per-role split.
+    """
+    agent_loop_raw = evidence.get("agent_loop")
+    agent_loop: dict = agent_loop_raw if isinstance(agent_loop_raw, dict) else {}
+    roles_raw = agent_loop.get("roles")
+    roles: dict = roles_raw if isinstance(roles_raw, dict) else {}
+    active = []
+    for r in ("planner", "executor", "verifier"):
+        rec = roles.get(r)
+        if isinstance(rec, dict) and rec.get("status") == "ran" and (rec.get("calls") or 0) > 0:
+            active.append(r)
+    if len(active) > 1:
+        return "Attempt 1 · all roles"  # which roles: the ROLES section above
+    return selected
+
+
 def _osn_repository_state_line(raw: object, files_changed: int) -> str | None:
     """Where the changed files were when the Receipt was written: the isolated copy, or the repository.
 
@@ -2243,7 +2264,7 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
     if total is not None and retry_attempts and len(retry_costs) == len(retry_attempts):
         first_cost = max(0.0, total - sum(retry_costs))
     if first_cost is not None:
-        lines.append(_row(selected, "$" + f"{first_cost:.4f}", width=28))
+        lines.append(_row(_first_attempt_cost_label(selected, evidence), "$" + f"{first_cost:.4f}", width=28))
     for attempt in retry_attempts:
         if not isinstance(attempt, dict) or not isinstance(attempt.get("model"), str):
             continue
