@@ -65,3 +65,6 @@ yc-*.md
 
 # PR13 benchmark output (workspaces, transcripts, results)
 evals/pr13/results/
+
+# OSN acceptance suite output (local benchmark runs)
+evals/osn_acceptance/results/
