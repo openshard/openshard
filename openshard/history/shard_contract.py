@@ -1962,7 +1962,23 @@ def _render_osn_parallel(receipt: ShardReceipt) -> list[str]:
     cands = agent_loop.get("candidates") if isinstance(agent_loop.get("candidates"), dict) else None
     econ = agent_loop.get("economics") if isinstance(agent_loop.get("economics"), dict) else None
     resumed = agent_loop.get("resumed") if isinstance(agent_loop.get("resumed"), dict) else None
+    graph = agent_loop.get("agents") if isinstance(agent_loop.get("agents"), dict) else None
     lines: list[str] = []
+    if graph and graph.get("nodes"):
+        lines.append(f"{_INDENT}AGENTS")
+        for n in graph["nodes"]:
+            model = n.get("model")
+            cost = n.get("cost_usd")
+            label = f"{n.get('role')}" + (f" (model {_display_model_name(model)})" if isinstance(model, str) else "")
+            detail = (str(n.get("status") or "?") + (f" · {n['outcome']}" if n.get("outcome") else "")
+                      + (f" · {n['calls']} call(s)" if n.get("calls") else "")
+                      + (f" · ${cost:.4f}" if isinstance(cost, (int, float)) else ""))
+            lines.append(_row(str(n.get("agent_id") or "agent"), f"{label} · {detail}", width=12))
+        if graph.get("edges"):
+            lines.append(_row("Edges", " · ".join(f"{e['from']} -{e['kind']}-> {e['to']}" for e in graph["edges"][:12]),
+                              width=12))
+        lines.append(_row("Evidence", str(graph.get("evidence") or "not recorded"), width=12))
+        lines.append("")
     if resumed:
         lines.append(f"{_INDENT}RESUMED")
         how = (f" after {resumed['interrupted_reason']}" if resumed.get("interrupted_reason")

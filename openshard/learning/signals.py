@@ -55,7 +55,10 @@ KIND_CHECK = "recurring_check_failure"
 KIND_TEST = "recurring_test_failure"
 KIND_FAILURE = "recurring_failure"
 KIND_POLICY = "policy_boundary"
-KINDS = (KIND_MODEL_OUTCOMES, KIND_RECOVERY, KIND_CHECK, KIND_TEST, KIND_FAILURE, KIND_POLICY)
+KIND_TOPOLOGY = "topology_outcomes"
+KIND_AGENT_MODEL = "agent_model_outcomes"
+KINDS = (KIND_MODEL_OUTCOMES, KIND_RECOVERY, KIND_CHECK, KIND_TEST, KIND_FAILURE, KIND_POLICY, KIND_TOPOLOGY,
+         KIND_AGENT_MODEL)
 
 STRENGTH_ANECDOTAL = "anecdotal"  # one Receipt: never surfaced
 STRENGTH_WEAK = "weak"
@@ -130,6 +133,19 @@ class CheckObservation:
 
 
 @dataclass(frozen=True)
+class AgentObservation:
+    """One parallel worker or candidate of an OSN run, as the run recorded it."""
+
+    agent_id: str
+    role: str  # worker | candidate
+    model: str | None
+    status: str | None  # changed | no_change | failed | blocked
+    reason: str | None
+    own_verification: str | None  # passed | failed | unknown | None (not run)
+    selected: bool  # a candidate whose implementation was chosen
+
+
+@dataclass(frozen=True)
 class Observation:
     """What one Receipt contributes to learning. Every field is observed or None."""
 
@@ -156,6 +172,9 @@ class Observation:
     approval_outcome: str | None
     learning_used: bool | None  # this run itself consulted learning (None: not recorded)
     learning_signal_ids: tuple[str, ...] = ()
+    topology: str | None = None  # the execution topology the run selected (OSN runs)
+    extra_cost_usd: float | None = None  # what parallel workers or losing candidates cost on top
+    agents: tuple[AgentObservation, ...] = ()
 
     @property
     def first_model(self) -> str | None:
@@ -425,6 +444,27 @@ def observe(entry: object) -> Observation | None:
         return None
 
 
+def _agents(entry: dict) -> tuple[AgentObservation, ...]:
+    loop = _dict(entry.get("osn_loop"))
+    candidates = _dict(loop.get("candidates"))
+    winner = _str(candidates.get("winner"))
+    out: list[AgentObservation] = []
+    for w in loop.get("workers") or []:
+        if not isinstance(w, dict):
+            continue
+        wid = _str(w.get("worker_id"))
+        if not wid:
+            continue
+        v = _dict(w.get("verification"))
+        own = _str(v.get("status")) if v.get("scope") in ("candidate_copy_observed", "worker_copy_informational") else None
+        out.append(AgentObservation(
+            agent_id=wid, role="candidate" if candidates else "worker", model=_str(w.get("model")),
+            status=_str(w.get("status")), reason=_str(w.get("reason")), own_verification=own,
+            selected=bool(winner and wid == winner),
+        ))
+    return tuple(out[:6])
+
+
 def _observe(entry: object) -> Observation | None:
     if not isinstance(entry, dict):
         return None
@@ -491,6 +531,9 @@ def _observe(entry: object) -> Observation | None:
         learning_signal_ids=tuple(
             s for s in learning.get("signal_ids") or [] if isinstance(s, str)
         )[:10],
+        topology=_str(_dict(_dict(entry.get("osn_loop")).get("topology")).get("topology_selected")),
+        extra_cost_usd=_float(_dict(_dict(entry.get("osn_loop")).get("topology")).get("actual_extra_cost_usd")),
+        agents=_agents(entry),
     )
 
 
@@ -892,6 +935,85 @@ class LearningIndex:
         return next((s for s in self.signals if s.signal_id == signal_id), None)
 
 
+def _topology_signals(obs: list[Observation], repo: str | None, now: datetime) -> list[LearningSignal]:
+    """Per (task category, selected topology): how runs ended and what the extra agents cost."""
+    accs: dict[tuple, _Acc] = {}
+    for o in obs:
+        if not o.observed or not o.topology:
+            continue
+        accs.setdefault((o.task_category, o.topology), _Acc()).add(
+            o, verified=1 if o.verified_success else 0,
+            extra_cost_known=1 if o.extra_cost_usd is not None else 0,
+        )
+    out = []
+    for (category, topology), acc in accs.items():
+        n = len(acc.obs)
+        verified = acc.counts.get("verified", 0)
+        costs = [o.cost_usd for o in acc.obs if o.verified_success and o.cost_usd is not None]
+        extra = [o.extra_cost_usd for o in acc.obs if o.extra_cost_usd is not None]
+        cpvs = round(sum(costs) / len(costs), 6) if costs and len(costs) == verified and verified else None
+        stats = {
+            "runs": n,
+            "runs_verified": verified,
+            "cost_per_verified_success_usd": cpvs,
+            "cost_basis": "provider_reported_estimates" if cpvs is not None else "insufficient_cost_evidence",
+            "median_extra_cost_usd": median(extra),
+            "median_duration_seconds": median([o.duration_seconds for o in acc.obs if o.duration_seconds is not None]),
+        }
+        text = (f"Topology {topology} reached OpenShard-observed verification in {verified} of "
+                f"{_plural(n, 'recorded run')} on {_category_phrase(category)}")
+        if cpvs is not None:
+            text += f"; about ${cpvs:.4f} per verified success"
+        if stats["median_extra_cost_usd"] is not None:
+            text += f"; parallel agents added about ${stats['median_extra_cost_usd']:.4f} per run"
+        out.append(_build(KIND_TOPOLOGY, repo, category, {"topology": topology}, acc, stats, text + ".", now))
+    return out
+
+
+def _agent_model_signals(obs: list[Observation], repo: str | None, now: datetime) -> list[LearningSignal]:
+    """Per (task category, model) as a parallel worker or candidate: did it produce a usable, verified result?"""
+    accs: dict[tuple, _Acc] = {}
+    for o in obs:
+        if not o.observed:
+            continue
+        for a in o.agents:
+            if not a.model:
+                continue
+            accs.setdefault((o.task_category, a.model, a.role), _Acc()).add(
+                o, ran=1,
+                usable=1 if a.status == "changed" else 0,
+                failed=1 if a.status in ("failed", "blocked") else 0,
+                contract_failed=1 if (a.reason or "").startswith("malformed_reply") else 0,
+                own_verified=1 if a.own_verification == "passed" else 0,
+                own_failed=1 if a.own_verification == "failed" else 0,
+                selected=1 if a.selected else 0,
+            )
+    out = []
+    for (category, model, role), acc in accs.items():
+        c = acc.counts
+        stats = {
+            "runs": len(acc.obs),
+            "agents_ran": c.get("ran", 0),
+            "usable_results": c.get("usable", 0),
+            "failed_or_blocked": c.get("failed", 0),
+            "action_contract_failures": c.get("contract_failed", 0),
+            "own_copy_verified": c.get("own_verified", 0),
+            "own_copy_failed": c.get("own_failed", 0),
+            "selected_as_winner": c.get("selected", 0),
+        }
+        text = (f"{_model_name(model)} as a parallel {role} produced a usable result in {stats['usable_results']} of "
+                f"{_plural(stats['agents_ran'], 'run')} on {_category_phrase(category)}")
+        if stats["action_contract_failures"]:
+            text += f"; {stats['action_contract_failures']} ended with replies that were not valid actions"
+        if stats["own_copy_verified"] or stats["own_copy_failed"]:
+            text += (f"; OpenShard's verification in its own copy passed {stats['own_copy_verified']} and failed "
+                     f"{stats['own_copy_failed']}")
+        if role == "candidate" and stats["agents_ran"]:
+            text += f"; chosen as the winner {stats['selected_as_winner']} time(s)"
+        out.append(_build(KIND_AGENT_MODEL, repo, category, {"model": model, "role": role}, acc, stats, text + ".", now))
+    return out
+
+
 def _sort_key(s: LearningSignal) -> tuple:
     return (KINDS.index(s.kind), s.task_category or "", -s.samples, s.signal_id)
 
@@ -932,7 +1054,7 @@ def derive_signals(
             excluded[o.excluded_reason] = excluded.get(o.excluded_reason, 0) + 1
     signals: list[LearningSignal] = []
     for builder in (_model_signals, _recovery_signals, _check_signals, _test_signals, _failure_signals,
-                    _policy_signals):
+                    _policy_signals, _topology_signals, _agent_model_signals):
         try:
             signals.extend(builder(obs, repo, now))
         except Exception:
@@ -1000,9 +1122,11 @@ def load_learning_index(repo_root: Path, *, repo: str | None = None, now: dateti
 
 __all__ = [
     "KINDS",
+    "KIND_AGENT_MODEL",
     "KIND_CHECK",
     "KIND_FAILURE",
     "KIND_MODEL_OUTCOMES",
+    "KIND_TOPOLOGY",
     "KIND_POLICY",
     "KIND_RECOVERY",
     "KIND_TEST",
