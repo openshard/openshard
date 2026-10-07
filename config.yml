@@ -36,32 +36,6 @@ workflow: auto
 approval_mode: smart
 cost_gate_threshold: 0.10
 
-# Openshard's own repository dogfoods current provider-listed successors behind
-# adaptive_routing. Capability-off/public routing keeps stable defaults.
-models:
-  mode: auto
-  dogfood_candidates:
-    fast_control:
-      - z-ai/glm-5.3-flash
-      - deepseek/deepseek-v4.1-flash
-    routine_coding:
-      - z-ai/glm-5.3-flash
-      - deepseek/deepseek-v4.1-flash
-      - z-ai/glm-5.3
-    deep_reasoning:
-      - z-ai/glm-5.3
-      - deepseek/deepseek-v4.1-flash
-    vision:
-      - z-ai/glm-5.3-flash
-      - deepseek/deepseek-v4.1-flash
-    long_context:
-      - z-ai/glm-5.3
-      - z-ai/glm-5.3-flash
-      - deepseek/deepseek-v4.1-flash
-    verifier:
-      - z-ai/glm-5.3
-      - z-ai/glm-5.3-flash
-
 # DEPRECATED: use `workflow` instead. Kept for backward compatibility.
 executor: direct
 
