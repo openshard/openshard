@@ -321,7 +321,7 @@ def roles_block(raw: Any) -> dict[str, Any] | None:
         if not rec:
             continue
         status = rec.get("status")
-        out[role] = {
+        block: dict[str, Any] = {
             "status": status if status in _ROLE_STATUSES else None,
             "reason": _text(rec.get("reason"), 64),
             "model": _text(rec.get("model"), 256),
@@ -338,7 +338,44 @@ def roles_block(raw: Any) -> dict[str, Any] | None:
             "duration_ms": _count(rec.get("duration_ms")),
             "usage_complete": _bool(rec.get("usage_complete")),
         }
+        explorers = explorers_block(rec.get("explorers"))
+        if explorers is not None:
+            block["explorers"] = explorers
+        out[role] = block
     return out or None
+
+
+_EXPLORER_STATUSES = frozenset({"answered", "no_answer", "failed"})
+
+
+def explorers_block(raw: Any) -> list[dict[str, Any]] | None:
+    """Parallel read-only exploration workers: outcome, model, usage and cost per worker; never the question text's paths or findings."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[dict[str, Any]] = []
+    for r in raw[:MAX_EXPLORERS]:
+        if not isinstance(r, dict):
+            continue
+        status = r.get("status")
+        out.append({
+            "index": _count(r.get("index")),
+            "status": status if status in _EXPLORER_STATUSES else None,
+            "reason": _text(r.get("reason"), 64),
+            "model": _text(r.get("model"), 256),
+            "turns": _count(r.get("turns")),
+            "calls": _count(r.get("calls")),
+            "findings_count": _count(r.get("findings_count")),
+            "sources_count": len(r["sources"]) if isinstance(r.get("sources"), list) else None,
+            "prompt_tokens": _count(r.get("prompt_tokens")),
+            "completion_tokens": _count(r.get("completion_tokens")),
+            "cost_usd": _number(r.get("cost_usd")),
+            "cost_source": _text(r.get("cost_source"), 32),
+            "duration_ms": _count(r.get("duration_ms")),
+        })
+    return out or None
+
+
+MAX_EXPLORERS = 3
 
 
 def plan_block(raw: Any) -> dict[str, Any] | None:

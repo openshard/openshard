@@ -148,6 +148,8 @@ class RoleRun:
     usage_complete: bool | None = None  # False: a call reported no usage; totals are partial
     # The planner's read-only actions (``ActionRecord.to_dict``), bounded; empty for other roles.
     actions: list[dict[str, Any]] = field(default_factory=list)
+    # Parallel exploration workers the planner used (``ExplorerResult.to_record``); planner only.
+    explorers: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def skipped(cls, role: str, reason: str, choice: RoleModelChoice | None = None) -> RoleRun:
@@ -215,6 +217,7 @@ class RoleRun:
             "usage_complete": self.usage_complete,
             "evidence": "provider_reported_usage" if self.calls else None,
             "actions": [dict(a) for a in self.actions] if self.actions else [],
+            "explorers": [dict(e) for e in self.explorers] if self.explorers else [],
         }
 
 
@@ -222,7 +225,8 @@ class RoleRun:
 # Role model selection
 # ---------------------------------------------------------------------------
 
-_ROLE_CLASS = {ROLE_PLANNER: "deep_reasoning", ROLE_VERIFIER: "verifier"}
+ROLE_EXPLORER = "explorer"
+_ROLE_CLASS = {ROLE_PLANNER: "deep_reasoning", ROLE_VERIFIER: "verifier", ROLE_EXPLORER: "fast_control"}
 
 
 def select_role_model(
@@ -269,7 +273,9 @@ def select_role_model(
     try:
         from openshard.native.dispatch import resolve_role
 
-        tier_model, tier, _fb, _reason = resolve_role("validator" if role == ROLE_VERIFIER else role)
+        tier_model, tier, _fb, _reason = resolve_role(
+            "validator" if role == ROLE_VERIFIER else "executor" if role == ROLE_EXPLORER else role,
+        )
     except Exception:
         tier_model, tier = None, ""
     if tier_model and catalog_knows is not None and catalog_knows(tier_model) \
@@ -398,6 +404,7 @@ def run_planner_turns(
     context_files: list[str] | None = None,
     max_turns: int = PLANNER_MAX_TURNS,
     progress: Callable[[str, dict[str, Any]], None] | None = None,
+    explorer_model: str | None = None,
 ) -> tuple[dict[str, Any] | None, RoleRun, list[AttemptUsage]]:
     """Run the planner role: a few read-only turns ending in a bounded plan.
 
@@ -405,6 +412,9 @@ def run_planner_turns(
     Writes and verification requests are refused by the harness (``read_only``);
     a planner that produces no plan is recorded as ``failed`` and the run
     continues without one. ``BudgetExhausted`` propagates before any spend.
+    With *explorer_model*, exploration questions the planner asks are answered
+    by bounded parallel read-only workers (``openshard.osn.explore``) whose
+    usage joins the planner's and whose records are kept on the role.
     """
     from openshard.osn.agent_loop import run_attempt_turns
     from openshard.osn.model_provider import IterativeModelProvider
@@ -415,15 +425,45 @@ def run_planner_turns(
         learning_context=learning_context, system_prompt=PLANNER_SYSTEM_PROMPT, role=ROLE_PLANNER,
         max_tokens=3000,
     )
+    if explorer_model:
+        turn_provider.system_prompt = PLANNER_SYSTEM_PROMPT + PLANNER_EXPLORE_NOTE
+    explorer_usage: list[AttemptUsage] = []
+    explorer_records: list[dict[str, Any]] = []
 
     def _no_verification(_paths: list[str]) -> tuple[Any, str]:  # pragma: no cover - refused before reaching here
         raise RuntimeError("the planner role cannot run verification")
+
+    def _explore(questions: list[dict[str, Any]], turn: int):
+        from openshard.osn.explore import observations_for, run_explorers
+
+        if progress is not None:
+            try:
+                progress("explore_start", {"role": ROLE_PLANNER, "questions": len(questions), "turn": turn,
+                                           "model": explorer_model})
+            except Exception:
+                pass
+        results, usage = run_explorers(
+            questions, provider=provider, model=explorer_model or model, task=task, repo_root=repo_root,
+            sandbox=sandbox, repo_files=repo_files, budget=budget,
+        )
+        explorer_usage.extend(usage)
+        records = [r.to_record() for r in results]
+        explorer_records.extend(records)
+        if progress is not None:
+            try:
+                progress("explore_end", {"role": ROLE_PLANNER, "turn": turn,
+                                         "answered": sum(1 for r in results if r.status == "answered"),
+                                         "total": len(results)})
+            except Exception:
+                pass
+        return observations_for(results, turn), records
 
     outcome = run_attempt_turns(
         repo_root=repo_root, sandbox=sandbox, task=task, attempt=0, provider=turn_provider,
         gate=FileMutationGate(), verify=_no_verification, budget=None, previous_failure=None,
         blocked_seen=[], changed_so_far=[], max_turns=max_turns, max_verifications=0, progress=progress,
         role=ROLE_PLANNER, model_label=lambda: model, repo_files=repo_files, read_only=True,
+        explore_hook=_explore if explorer_model else None,
     )
     plan = parse_plan(outcome.plan)
     if outcome.stop == "provider_error":
@@ -437,7 +477,18 @@ def run_planner_turns(
         status=status, reason=reason, turns=outcome.turns,
     )
     role.actions = [r.to_dict() for r in outcome.records[:MAX_PLANNER_ACTIONS_RECORDED]]
-    return plan, role, list(turn_provider.usage)
+    role.explorers = explorer_records
+    # Planner calls first, then the explorers' (attempt 0 as well): one usage list for the Receipt.
+    return plan, role, [*turn_provider.usage, *explorer_usage]
+
+
+PLANNER_EXPLORE_NOTE = (
+    " If the repository is large and you have up to 3 INDEPENDENT questions whose answers you need before "
+    "planning (where something is implemented, how existing tests are structured, which policy code applies), you "
+    "may add \"explore\": [{\"question\": \"<one question>\", \"paths_hint\": [\"<optional repo-relative paths>\"]}] "
+    "to a turn's reply; read-only workers answer them in parallel and their findings appear in your next turn. "
+    "Do not explore what you can read yourself in one action."
+)
 
 
 # ---------------------------------------------------------------------------

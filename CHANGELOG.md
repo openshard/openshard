@@ -50,6 +50,16 @@ All notable changes to OpenShard are documented here.
   (planning / implementation / review) and a `tier_dispatch_receipt` so
   existing surfaces show which roles were dispatched.
 
+- Bounded parallel read-only exploration for the planner (`--explore`, default
+  on): the planner may hand up to three independent questions to exploration
+  workers, each a read-only agent turn loop on the isolated copy (at most two
+  turns, writes refused), at most three at once, on a fast control-plane
+  model when routing offers one. Their compact findings come back to the
+  planner as observations; the planner remains the single reasoning owner.
+  Each worker is recorded on the planner's role record and in `model_calls`
+  with role `explorer`, with its own model, usage, cost provenance and
+  duration.
+
 ### Changed
 
 - Model cost provenance is explicit: `UsageStats.cost_source` says whether a
