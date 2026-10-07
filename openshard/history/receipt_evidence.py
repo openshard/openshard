@@ -302,6 +302,7 @@ def agent_loop_block(entry: dict) -> dict[str, Any] | None:
         "workers": workers_block(loop.get("workers")),
         "synthesis": synthesis_block(loop.get("synthesis")),
         "economics": economics_block(loop.get("economics")),
+        "resumed": resumed_block(loop.get("resumed")),
         "evidence": {
             "actions": _text(ev.get("actions"), 64),
             "action_results": _text(ev.get("action_results"), 64),
@@ -380,6 +381,28 @@ def synthesis_block(raw: Any) -> dict[str, Any] | None:
         "workers_rejected": len(d["workers_rejected"]) if isinstance(d.get("workers_rejected"), list) else None,
         "missing_required": len(d["missing_required"]) if isinstance(d.get("missing_required"), list) else None,
         "resolution": _text(d.get("resolution"), 32),
+    }
+
+
+def resumed_block(raw: Any) -> dict[str, Any] | None:
+    """A run continued from a checkpoint: what was carried over, as counts and provenance; never paths."""
+    d = _dict(raw)
+    if not d:
+        return None
+    interrupted = _dict(d.get("interrupted"))
+    return {
+        "attempts_restored": _count(d.get("attempts_restored")),
+        "plan_restored": _bool(d.get("plan_restored")),
+        "topology_restored": _bool(d.get("topology_restored")),
+        "files_restored": _count(d.get("files_restored")),
+        "checkpoint_phase": _text(d.get("checkpoint_phase"), 32),
+        "checkpoint_status": _text(d.get("checkpoint_status"), 16),
+        "interrupted_reason": _text(interrupted.get("reason"), 64) if interrupted else None,
+        "prior_model_calls": _count(d.get("prior_model_calls")),
+        "prior_cost_usd": _number(d.get("prior_cost_usd")),
+        "unsaved_progress_discarded": _bool(d.get("unsaved_progress_discarded")),
+        "times_resumed": _count(d.get("times_resumed")),
+        "evidence": _text(d.get("evidence"), 48),
     }
 
 

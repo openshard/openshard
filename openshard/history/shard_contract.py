@@ -1960,7 +1960,21 @@ def _render_osn_parallel(receipt: ShardReceipt) -> list[str]:
     workers = agent_loop.get("workers") if isinstance(agent_loop.get("workers"), list) else []
     synth = agent_loop.get("synthesis") if isinstance(agent_loop.get("synthesis"), dict) else None
     econ = agent_loop.get("economics") if isinstance(agent_loop.get("economics"), dict) else None
+    resumed = agent_loop.get("resumed") if isinstance(agent_loop.get("resumed"), dict) else None
     lines: list[str] = []
+    if resumed:
+        lines.append(f"{_INDENT}RESUMED")
+        how = (f" after {resumed['interrupted_reason']}" if resumed.get("interrupted_reason")
+               else " after the process died unannounced" if resumed.get("checkpoint_status") == "running" else "")
+        lines.append(_row("From", f"checkpoint '{resumed.get('checkpoint_phase')}'{how}", width=12))
+        prior = resumed.get("prior_cost_usd")
+        lines.append(_row("Carried", f"{resumed.get('attempts_restored') or 0} attempt(s) · "
+                          f"{resumed.get('prior_model_calls') or 0} model call(s) · "
+                          + (f"${prior:.4f}" if isinstance(prior, (int, float)) else "cost unknown")
+                          + f" · {resumed.get('files_restored') or 0} file(s)", width=12))
+        lines.append(_row("Note", "progress after the checkpoint was discarded; evidence recorded by OpenShard then",
+                          width=12))
+        lines.append("")
     if topo:
         lines.append(f"{_INDENT}TOPOLOGY")
         lines.append(_row("Selected", f"{topo.get('selected')} (requested {topo.get('requested')})", width=12))
