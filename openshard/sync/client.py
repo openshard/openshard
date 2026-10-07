@@ -64,6 +64,16 @@ def configure(*, transport: _transport.PlatformTransport | None = None, repo_con
         _repo_config_override = repo_config
 
 
+def _advanced_osn_enabled() -> bool:
+    """Whether this organisation's ``advanced_osn`` capability is on (one cached read; never assumed)."""
+    try:
+        from openshard.sync.capabilities import CAPABILITY_ADVANCED_OSN, LazyCapabilities
+
+        return bool(LazyCapabilities().enabled(CAPABILITY_ADVANCED_OSN))
+    except Exception:
+        return False
+
+
 def _version() -> str:
     try:
         from openshard import __version__
@@ -293,8 +303,10 @@ def flush(
         )
         version = _version()
         stamp = now.timestamp() if now is not None else None
+        advanced_osn = _advanced_osn_enabled()
         for candidate in found.candidates[: max(0, int(limit))]:
-            envelope = build_envelope(candidate.entry, candidate.index, core_version=version)
+            envelope = build_envelope(candidate.entry, candidate.index, core_version=version,
+                                      multi_agent=advanced_osn)
             result = sender.send(envelope)
             report.sent += 1
             previous = records.get(candidate.receipt_id)
