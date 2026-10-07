@@ -4,6 +4,14 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Added
+
+- The files the planner names as likely to change are shown to the OSN
+  executor on its first turn, as `--context-file` does: existing, within the
+  context-file size cap, not already supplied, at most four. The Receipt
+  records which under `osn_loop.plan_context_files`. The planner had already
+  read them; the executor then spent its own turns rediscovering them.
+
 ### Fixed
 
 - A role whose calls went to more than one model (an escalation ladder, a

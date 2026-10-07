@@ -31,6 +31,11 @@ from openshard.providers.base import BaseProvider
 MAX_ACTIONS = 10
 MAX_CONTENT_BYTES = 200_000
 MAX_CONTEXT_FILE_BYTES = 20_000
+# Files the planner named as likely to change are shown to the executor on its first
+# turn (the same way --context-file does), bounded: this many at most, each within
+# MAX_CONTEXT_FILE_BYTES, so a plan saves the executor its first reads without
+# flooding the prompt.
+MAX_PLAN_CONTEXT_FILES = 4
 MAX_LISTED_FILES = 200
 MAX_FAILURE_CHARS = 2_000
 MAX_LEARNING_CHARS = 3_000
@@ -346,11 +351,14 @@ class IterativeModelProvider(ModelActionProvider):
     max_tokens: int | None = 16000
     # The planner's plan, when a planner ran; rendered into every executor turn as advisory context.
     plan: dict[str, Any] | None = None
+    # Files from the plan shown on turn 1 (repo-relative), chosen by set_plan.
+    plan_context_files: list[str] = field(default_factory=list)
     _attempt_model: str | None = field(default=None, repr=False)
     _attempt_n: int = field(default=0, repr=False)
 
     def set_plan(self, plan: dict[str, Any] | None) -> None:
         self.plan = plan
+        self.plan_context_files = plan_context_files(plan, self.repo_root, self.context_files)
 
     def begin_attempt(self, attempt: int) -> None:
         """Fix this attempt's model: a pending supervisor override, else the ladder's rung."""
@@ -369,7 +377,8 @@ class IterativeModelProvider(ModelActionProvider):
     def turn(self, state: TurnState) -> TurnResult:
         model = self._model_for_turn(state)
         learning = self._learning_for(model)
-        prompt = build_turn_prompt(state, self.repo_root, self.context_files, learning=learning, plan=self.plan,
+        prompt = build_turn_prompt(state, self.repo_root, [*self.context_files, *self.plan_context_files],
+                                   learning=learning, plan=self.plan,
                                    instructions=self.project_instructions)
         content = self._ask(state.attempt, model, prompt, learning=bool(learning), turn=state.turn)
         try:
@@ -399,6 +408,36 @@ def _render_observation(obs: Observation) -> str:
         f'<untrusted turn="{obs.turn}" action="{obs.kind}" target="{obs.target}" status="{obs.status}">\n'
         f"{obs.text}\n</untrusted>"
     )
+
+
+def plan_context_files(plan: dict[str, Any] | None, repo_root: Path, already: list[str]) -> list[str]:
+    """The plan's likely files worth showing on turn 1: existing, small, not already shown, at most a few.
+
+    The planner already read them; handing the executor their content on its
+    first turn saves the reads it would otherwise spend rediscovering them. A
+    file over MAX_CONTEXT_FILE_BYTES is left for read_file with line ranges.
+    """
+    if not isinstance(plan, dict):
+        return []
+    out: list[str] = []
+    seen = {p.replace("\\", "/") for p in already}
+    for raw in plan.get("files") or []:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        rel = raw.strip().replace("\\", "/")
+        if rel in seen or rel.startswith(("/", "../")) or "/../" in rel or ":" in rel:
+            continue
+        p = repo_root / rel
+        try:
+            if not p.is_file() or p.stat().st_size > MAX_CONTEXT_FILE_BYTES:
+                continue
+        except OSError:
+            continue
+        seen.add(rel)
+        out.append(rel)
+        if len(out) >= MAX_PLAN_CONTEXT_FILES:
+            break
+    return out
 
 
 def turn_budget_nudge(state: TurnState) -> str | None:
