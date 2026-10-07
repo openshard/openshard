@@ -524,7 +524,7 @@ def test_osn_routing_receipt_is_a_five_second_summary():
     assert "rcpt_" not in out
     assert "Openshard Native (OSN)" in out
     assert "openshard-demo-routing" in out and "main" in out and "Michael Obasa" in out
-    assert "Deepseek V4.1 Flash" in out
+    assert "DeepSeek V4.1 Flash" in out
     assert "Claude Opus 5.5" in out and "not used" in out
     assert "provider failed before verification" in out.lower()
     assert "Files modified" in out and "0" in out

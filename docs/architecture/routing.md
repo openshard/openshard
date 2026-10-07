@@ -79,6 +79,12 @@ list proves nothing), and a `retired` state wins over any dogfood naming.
 
 ### How a new model enters and is promoted
 
+Current provider-listed models such as `z-ai/glm-5.3`,
+`z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash` should enter through
+discovery and dogfood evidence, not by being added to the curated public
+roster. This is deliberate: newer does not mean better, so promotion still
+waits for verified Openshard outcomes and eval evidence.
+
 1. **Discovery.** `openshard models sync-openrouter` (or any catalog command
    with a stale cache) refreshes the provider list. The model is now
    recognisable, displayable and explicitly selectable (`--model`, a pin, a

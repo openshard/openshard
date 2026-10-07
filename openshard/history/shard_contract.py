@@ -433,7 +433,7 @@ def _format_model_slug_shard(name: str) -> str:
         elif part[0].isdigit():
             tagged.append(("version", part))
         else:
-            tagged.append(("word", part.capitalize()))
+            tagged.append(("word", "DeepSeek" if lower == "deepseek" else part.capitalize()))
     def _digit(j: int) -> bool:
         return tagged[j][0] == "version" and len(tagged[j][1]) == 1 and tagged[j][1].isdigit()
 
