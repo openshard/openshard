@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from openshard.providers.base import (
+    COST_SOURCE_LIST_RATE,
     BaseProvider,
     ChatResponse,
     ModelInfo,
@@ -112,6 +113,8 @@ class OpenAIProvider(BaseProvider):
         usage.estimated_cost = compute_cost(
             or_model, usage.prompt_tokens, usage.completion_tokens
         )
+        if usage.estimated_cost is not None:
+            usage.cost_source = COST_SOURCE_LIST_RATE  # OpenShard's arithmetic, not a bill
         return ChatResponse(
             content=content, model=resolved_model, usage=usage,
             presend_secret_scan=_presend_scan,
