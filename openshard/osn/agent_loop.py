@@ -250,6 +250,55 @@ def _emit(progress: ProgressFn, event: str, **data: Any) -> None:
         pass
 
 
+VERIFICATION_TAIL_LINES = 12
+VERIFICATION_TAIL_CHARS = 1500
+
+
+def verification_progress_fields(result: Any, output: str | None) -> dict[str, Any]:
+    """What a ``verification_result`` progress event carries about one observed run.
+
+    The status is OpenShard's own classification of what it observed. The output
+    tail (the last few lines the command printed, redacted) is included only when
+    the verdict was not a pass, so a user watching the run sees *why* without the
+    renderer having to re-run anything. A pass carries no output: nothing in it
+    changes the verdict.
+    """
+    timed_out = bool(getattr(result, "timed_out", False))
+    ran = bool(getattr(result, "ran", True))
+    passed = bool(getattr(result, "passed", False))
+    if timed_out:
+        status = "unknown"
+    elif not ran:
+        status = "not_run"
+    else:
+        status = "passed" if passed else "failed"
+    fields: dict[str, Any] = {
+        "status": status,
+        "exit_code": getattr(result, "exit_code", None),
+        "ran": ran,
+        "tainted": bool(getattr(result, "tainted", False)),
+        "setup_failure": getattr(result, "setup_failure", None),
+        "failed_tests": list(getattr(result, "failed_tests", []) or [])[:10],
+    }
+    if status != "passed" and output:
+        from openshard.safety.sanitize import looks_like_secret
+
+        # Shown live to the user who owns the repository, never persisted: keep
+        # paths (they are the user's own), drop control characters and any line
+        # that looks like a credential.
+        lines = []
+        for raw in output.splitlines():
+            line = "".join(ch for ch in raw.rstrip() if ch == " " or ch.isprintable())
+            if line.strip() and not looks_like_secret(line):
+                lines.append(line[:200])
+        tail = "\n".join(lines[-VERIFICATION_TAIL_LINES:])
+        if len(tail) > VERIFICATION_TAIL_CHARS:
+            tail = tail[-VERIFICATION_TAIL_CHARS:]
+        if tail:
+            fields["output_tail"] = tail
+    return fields
+
+
 def run_attempt_turns(
     *,
     repo_root: Path,
@@ -533,8 +582,7 @@ def run_attempt_turns(
                     "summary": f"verification {status_text}",
                 }
                 _emit(progress, "verification_result", attempt=attempt, turn=turn, in_turn=True,
-                      status=status_text, exit_code=getattr(vres, "exit_code", None),
-                      ran=getattr(vres, "ran", True))
+                      **verification_progress_fields(vres, output))
                 if getattr(vres, "tainted", False):
                     out.stop = STOP_VERIFIER_TAINTED
                     observe(rec, "failed", "verification invalid: the verifier modified the files it checked")
@@ -682,4 +730,5 @@ __all__ = [
     "run_attempt_turns",
     "sandbox_diff_text",
     "state_fingerprint",
+    "verification_progress_fields",
 ]

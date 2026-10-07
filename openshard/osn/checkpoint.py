@@ -60,9 +60,21 @@ REFUSE_VERIFY_CHANGED = "verify_command_differs"
 REFUSE_NO_PROGRESS = "nothing_to_resume"
 REFUSE_FILES_MISSING = "checkpoint_files_missing"
 
+# Why applying a completed run's verified result was refused.
+REFUSE_NOT_COMPLETED = "run_not_completed"
+REFUSE_NOT_VERIFIED = "run_not_verified"
+REFUSE_NO_VERIFIED_FILES = "no_verified_files_retained"
+REFUSE_ALREADY_APPLIED = "already_applied"
+REFUSE_TARGET_CHANGED = "target_file_changed_since_run"
+
 
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def now_stamp() -> str:
+    """The checkpoint's UTC timestamp format, for records other modules attach to it."""
+    return _now()
 
 
 def runs_root(repo_root: Path) -> Path:
@@ -134,6 +146,14 @@ class RunCheckpoint:
     receipt_id: str | None = None
     interrupted: dict[str, Any] | None = None
     resumed_from: list[str] = field(default_factory=list)  # earlier checkpoints this run continued
+    # A completed, verified run that was not promoted keeps its verified bytes
+    # (``files`` manifest, same hashes the Receipt verified) so `osn apply` can put
+    # them in the repository later without re-running anything. ``base_files`` is
+    # what the repository held at those paths when the run finished (None: absent),
+    # so an apply refuses to overwrite a file someone changed since.
+    verified_files: dict[str, str] | None = None
+    base_files: dict[str, str | None] | None = None
+    applied: dict[str, Any] | None = None  # the apply record once the result reached the repository
 
     @property
     def attempts_done(self) -> int:
@@ -299,6 +319,67 @@ def check_resumable(cp: RunCheckpoint, repo_root: Path, verify_argv: list[str] |
     return Resumability(True)
 
 
+def hash_repo_files(repo_root: Path, rels: list[str]) -> dict[str, str | None]:
+    """sha256 of each repository file now (None when absent); what an apply would overwrite."""
+    out: dict[str, str | None] = {}
+    for rel in rels:
+        p = repo_root / rel
+        try:
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
+        except OSError:
+            out[rel] = None
+    return out
+
+
+def retain_verified(repo_root: Path, cp: RunCheckpoint, sandbox: Path, changed: list[str],
+                    verified_hashes: dict[str, str]) -> bool:
+    """Keep a completed run's verified bytes for a later `osn apply`. Returns whether they were kept.
+
+    The bytes are snapshotted from the isolated copy and kept only when every
+    hash equals what the Receipt verified; otherwise nothing is retained, so an
+    apply can never put unverified bytes in the repository.
+    """
+    if not changed or not verified_hashes:
+        return False
+    manifest = snapshot_changed(sandbox, changed, repo_root, cp.run_id)
+    if any(manifest.get(rel) is None or manifest.get(rel) != verified_hashes.get(rel) for rel in changed):
+        discard_retained(repo_root, cp.run_id)
+        cp.files, cp.verified_files = {}, None
+        return False
+    cp.files = dict(manifest)
+    cp.verified_files = {rel: str(manifest[rel]) for rel in changed}
+    cp.base_files = hash_repo_files(repo_root, changed)
+    return True
+
+
+def discard_retained(repo_root: Path, run_id: str) -> None:
+    files_dir = checkpoint_dir(repo_root, run_id) / FILES_DIR
+    if files_dir.exists():
+        shutil.rmtree(files_dir, ignore_errors=True)
+
+
+def check_applicable(cp: RunCheckpoint, repo_root: Path) -> Resumability:
+    """Every rule that refuses `osn apply`, in order; none applying means the verified bytes may be applied."""
+    if cp.version != CHECKPOINT_VERSION:
+        return Resumability(False, REFUSE_VERSION, f"version {cp.version}")
+    if cp.status != STATUS_COMPLETED:
+        return Resumability(False, REFUSE_NOT_COMPLETED, f"status {cp.status}; `osn resume` continues it")
+    if cp.applied is not None:
+        return Resumability(False, REFUSE_ALREADY_APPLIED, f"at {cp.applied.get('at')}")
+    if not cp.verified_files:
+        return Resumability(False, REFUSE_NO_VERIFIED_FILES, "the run did not verify, or was promoted already")
+    now = repo_fingerprint(repo_root)
+    if now.get("head") != cp.repo.get("head"):
+        return Resumability(False, REFUSE_REPO_CHANGED,
+                            f"HEAD {str(cp.repo.get('head'))[:12]} -> {str(now.get('head'))[:12]}")
+    current = hash_repo_files(repo_root, list(cp.verified_files))
+    base = cp.base_files or {}
+    for rel in cp.verified_files:
+        if current.get(rel) != base.get(rel) and current.get(rel) != cp.verified_files.get(rel):
+            return Resumability(False, REFUSE_TARGET_CHANGED, rel)
+    return Resumability(True)
+
+
 def budget_counters(budget: Any) -> dict[str, Any] | None:
     if budget is None:
         return None
@@ -366,20 +447,30 @@ __all__ = [
     "REFUSE_UNREADABLE",
     "REFUSE_VERIFY_CHANGED",
     "REFUSE_VERSION",
+    "REFUSE_ALREADY_APPLIED",
+    "REFUSE_NOT_COMPLETED",
+    "REFUSE_NOT_VERIFIED",
+    "REFUSE_NO_VERIFIED_FILES",
+    "REFUSE_TARGET_CHANGED",
     "STATUS_COMPLETED",
     "STATUS_INTERRUPTED",
     "STATUS_RUNNING",
     "Resumability",
     "RunCheckpoint",
     "budget_counters",
+    "check_applicable",
     "check_resumable",
     "checkpoint_dir",
+    "discard_retained",
+    "hash_repo_files",
     "list_checkpoints",
+    "now_stamp",
     "pid_alive",
     "read_checkpoint",
     "repo_fingerprint",
     "restore_budget",
     "restore_changed",
+    "retain_verified",
     "snapshot_changed",
     "usage_from_record",
     "usage_to_record",

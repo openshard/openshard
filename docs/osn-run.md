@@ -4,11 +4,23 @@ A bounded, policy-gated coding task with verification performed by OpenShard.
 
 ```
 openshard osn run "Implement slugify in slug.py" \
-  --verify-cmd "python -m pytest -q tests" \
+  [--verify-cmd "python -m pytest -q tests"] \
   --context-file slug.py --context-file tests/test_slug.py \
   [--model M] [--escalate-model M2 ...] [--max-attempts 2] \
   [--task-id task_...] [--promote] [--yes] [--no-learning] [--json]
 ```
+
+The verification command is, in order: `--verify-cmd` (the user's explicit choice), the
+repository's verification contract (`verification_commands` / `verification_command` in
+`.openshard/config.yml`, first command), or the test command OpenShard detects for the repository
+(`python -m pytest`, `npm test`, `cargo test`, ...). The run's header says which (`Verify ...
+(detected from the repository; pass --verify-cmd to override)`), the Receipt records it under
+`osn_loop.verification_command` (`label`, `source`: `user` / `config` / `detected`) and the
+checkpoint carries it so `osn resume` keeps the original command. A configured or detected
+command must pass the command-safety classifier (no shell metacharacters, no blocked
+executables); one it would not run silently is refused with the reason, and passing it with
+`--verify-cmd` is the way to run it anyway. With no command known the run refuses to start: OSN
+never reports work verified without a check it ran itself.
 
 ## Flow
 
@@ -30,6 +42,20 @@ them in order inside the isolated copy and shows the model only their results on
 A reply that is not a valid action list is re-asked once (its spend is recorded), then the run
 ends in `error`. A turn may carry at most 8 actions; anything after `finish` is ignored.
 `--loop writes` keeps the original behaviour: one whole-file proposal per attempt.
+
+### What the terminal shows while it runs
+
+The loop emits structured progress events (`progress=` callback on `run_bounded_loop`); the CLI
+renders them as they happen and never prints model reasoning, only decisions and observable
+actions. In text mode you see: the route and why; the planner's plan as the executor received it
+(summary, numbered steps, files likely to change, any independent subtasks it proposed); every
+turn's actions (reads, searches, writes with size deltas, refused writes with the policy
+decision); each verification with its verdict and, when it did not pass, the failing test ids and
+the last lines of the command's output; retries, escalations and supervisor decisions; a
+checkpoint that could not be written; and, at the end, the Receipt id with `openshard last` and
+the run id for `osn resume`. Lines from parallel workers or candidates are prefixed with the
+worker id (`[worker-1]`) because they run concurrently. `--json` prints one final object and no
+progress lines.
 
 ## Roles: planner, executor, verifier
 
@@ -187,8 +213,29 @@ start, the plan and role records, every finished attempt with its verification r
 calls so far with their cost provenance, the budget ledger's counters) and `files/`, the changed
 files' bytes as the last finished attempt left them. It is written when the run starts, after
 planning, after the parallel-workers stage and after every attempt the run will continue from;
-Ctrl-C or an exception marks it `interrupted`, a run that wrote its Receipt marks it `completed`
-(and drops `files/`). A process that dies without warning leaves `running` with a dead pid.
+Ctrl-C or an exception marks it `interrupted`, a run that wrote its Receipt marks it `completed`.
+A process that dies without warning leaves `running` with a dead pid.
+
+### Applying a verified result later: `osn apply`
+
+A run that verified but was not promoted (`--promote` not given) does not lose its work. The
+checkpoint keeps exactly the bytes OpenShard verified (`files/`, with `verified_files` holding the
+same hashes the Receipt verified, and `base_files` holding what the repository had at those paths
+when the run finished). In an interactive terminal the run ends by asking once, `Apply N verified
+file(s) to the repository now?`; piped or `--json` runs are told the command instead:
+`openshard osn apply <osn-id> [--commit] [--yes] [--json]`. Applying goes through the same
+file-mutation policy gate as `--promote` (deny / ask / allow, organisation write-path patterns),
+re-checks the hashes, records a sandbox-apply receipt and marks the checkpoint `applied`;
+`--commit` then commits exactly those files and re-runs the run's own verification command on
+that commit through the post-session path, so the evidence is bound to the commit as with
+`osn run --promote --commit`. The Receipt of the run is not rewritten; the later evidence is.
+`osn apply` refuses, naming the rule, when the run did not complete (`osn resume` is the path),
+did not verify or was promoted already (`no_verified_files_retained`), was applied already,
+HEAD moved since the run (`repository_changed_since_run_started`), a target file changed since
+the run finished (`target_file_changed_since_run`, unrelated edits elsewhere are fine), or the
+kept bytes no longer match the verified hashes (`checkpoint_files_missing`). `openshard osn runs`
+shows each completed run as applied, `verified, not applied` with the command, or not applicable.
+Applied or promoted runs keep no bytes.
 
 `openshard osn runs` lists them with whether each can be resumed. `openshard osn resume <osn-id>
 [--promote] [--commit] [--yes] [--json]` continues the run: a **fresh** isolated copy with the

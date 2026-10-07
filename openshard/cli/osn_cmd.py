@@ -12,6 +12,7 @@ import json
 import os
 import shlex
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,6 +41,90 @@ def _split_command(text: str) -> list[str]:
     return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p for p in parts]
 
 
+VERIFY_SOURCE_USER = "user"
+VERIFY_SOURCE_CONFIG = "config"
+VERIFY_SOURCE_DETECTED = "detected"
+VERIFY_SOURCE_TEXT = {
+    VERIFY_SOURCE_USER: "given with --verify-cmd",
+    VERIFY_SOURCE_CONFIG: "the repository's verification contract in .openshard/config.yml",
+    VERIFY_SOURCE_DETECTED: "detected from the repository; pass --verify-cmd to override",
+}
+
+
+def _resolve_verify_argv(verify_cmd: str | None, repo_root: Path) -> tuple[list[str], str]:
+    """The command OpenShard will run to verify the result, and where it came from.
+
+    Precedence: ``--verify-cmd`` (the user's explicit authority), then the
+    repository's verification contract (``verification_commands`` /
+    ``verification_command`` in ``.openshard/config.yml``; the first command,
+    as the post-session path plans it), then the test command OpenShard
+    detects for the repository. A detected or configured command must pass
+    the command-safety classifier; one that needs approval or is blocked is
+    not run silently on the user's behalf. With nothing known the run refuses
+    to start: OSN never calls work verified without a check it ran itself.
+    """
+    from openshard.verification.plan import (
+        CommandSafety,
+        VerificationSource,
+        classify_command_safety,
+    )
+
+    if verify_cmd is not None:
+        argv = _split_command(verify_cmd)
+        if not argv:
+            raise click.UsageError("--verify-cmd must not be empty")
+        source = VERIFY_SOURCE_USER
+    else:
+        argv, source = _contract_or_detected_verify(repo_root)
+        if not argv:
+            raise click.UsageError(
+                "No verification command is known for this repository. Pass --verify-cmd \"<command>\", or set "
+                "verification_commands in .openshard/config.yml. OSN never reports work verified without a "
+                "check it ran itself."
+            )
+        safety, reason = classify_command_safety(argv, VerificationSource(source))
+        if safety != CommandSafety.safe:
+            raise click.UsageError(
+                f"The {source} verification command {_verify_label(argv)!r} is not run on your behalf "
+                f"({safety.value}: {reason}). Pass it explicitly with --verify-cmd if you want it."
+            )
+    if argv[0] in ("python", "python3"):
+        # Run the verifier with the interpreter OpenShard itself runs under; a
+        # bare "python" can resolve to a different environment (e.g. one
+        # without the project's test dependencies) and fail for the wrong reason.
+        argv[0] = sys.executable
+    return argv, source
+
+
+def _contract_or_detected_verify(repo_root: Path) -> tuple[list[str], str]:
+    from openshard.config.settings import load_config_safe
+    from openshard.verification.post_session import _contract_argvs
+
+    repo_config, config_valid, _path = load_config_safe(cwd=repo_root)
+    if config_valid:
+        contract = _contract_argvs(repo_config or {})
+        if contract:
+            return list(contract[0]), VERIFY_SOURCE_CONFIG
+    try:
+        from openshard.analysis.repo import analyze_repo
+        from openshard.verification.plan import parse_command_to_argv
+
+        detected = analyze_repo(repo_root).test_command
+    except Exception:
+        detected = None
+    if detected:
+        return parse_command_to_argv(detected), VERIFY_SOURCE_DETECTED
+    return [], VERIFY_SOURCE_DETECTED
+
+
+def _verify_label(argv: list[str]) -> str:
+    """The command as shown to the user: the interpreter shortened to 'python', never a secret-like token."""
+    shown = list(argv)
+    if shown and shown[0] == sys.executable:
+        shown[0] = "python"
+    return " ".join(shown)
+
+
 def _friendly_model(model: str | None) -> str:
     if not model:
         return "unknown model"
@@ -56,6 +141,8 @@ class _OsnProgressRenderer:
 
         self._spinner = _Spinner() if getattr(sys.stdout, "isatty", lambda: False)() else None
         self._spinning = False
+        # Workers and explorers call back from their own threads.
+        self._lock = threading.RLock()
 
     def _stop(self) -> None:
         if self._spinner is not None and self._spinning:
@@ -74,9 +161,22 @@ class _OsnProgressRenderer:
         self._stop()
 
     def __call__(self, event: str, data: dict) -> None:
+        with self._lock:
+            self._render(event, data)
+
+    def _render(self, event: str, data: dict) -> None:
         from openshard.cli.run_output import _safe_console_text
 
+        worker = data.get("worker_id")
+        tag = f"[{worker}] " if isinstance(worker, str) and worker else ""
+
         def echo(text: str) -> None:
+            if tag:
+                # A worker's line keeps the run's indentation and carries its id,
+                # so lines from concurrent workers never read as one agent's.
+                stripped = text.lstrip("\n")
+                lead = len(stripped) - len(stripped.lstrip(" "))
+                text = text[: len(text) - len(stripped)] + " " * lead + tag + stripped.lstrip(" ")
             click.echo(_safe_console_text(text))
 
         if event == "workspace_ready":
@@ -84,10 +184,10 @@ class _OsnProgressRenderer:
         elif event == "attempt_start":
             self._stop()
             model = _friendly_model(data.get("model"))
-            tag = " · recovery after independent review" if data.get("review_recovery") else ""
+            tag_text = " · recovery after independent review" if data.get("review_recovery") else ""
             if data.get("after_workers"):
-                tag = " · resolving what synthesis could not"
-            echo(f"\nAttempt {data.get('attempt')} · {model}{tag}")
+                tag_text = " · resolving what synthesis could not"
+            echo(f"\nAttempt {data.get('attempt')} · {model}{tag_text}")
             self._start(f"Calling {model}")
         elif event == "stage_start":
             self._stop()
@@ -131,17 +231,15 @@ class _OsnProgressRenderer:
             self._stop()
             if not data.get("in_turn"):
                 echo("\nVerification")
-            self._start("Running verification" + (" (requested by the model)" if data.get("in_turn") else ""))
+            label = "Running verification" + (" (requested by the model)" if data.get("in_turn") else "")
+            if tag:
+                echo(f"  {label}...")
+            else:
+                self._start(label)
         elif event == "verification_result":
             self._stop()
-            status = data.get("status")
-            if status == "passed":
-                echo("  ✓ PASSED")
-            elif status == "failed":
-                code = data.get("exit_code")
-                echo("  ✗ FAILED" + (f" · exit {code}" if code is not None else ""))
-            else:
-                echo("  ? UNKNOWN · verification did not produce a verdict")
+            for line in _verification_result_lines(data):
+                echo(line)
         elif event == "recovery_decision":
             self._stop()
             echo("\nRecovery")
@@ -161,11 +259,23 @@ class _OsnProgressRenderer:
             self._stop()
             echo(f"  ✗ Turn {data.get('turn')} · the model's reply was not a usable action list"
                  + (f" ({data.get('message')})" if data.get("message") else "") + " · attempt ends")
+        elif event == "malformed_attempt":
+            self._stop()
+            echo(f"  ✗ Attempt {data.get('attempt')} wrote nothing usable · "
+                 f"moving to attempt {data.get('next_attempt')} with the next model")
+        elif event == "checkpoint_failed":
+            self._stop()
+            echo(f"  ! Checkpoint not written ({data.get('phase') or 'unknown phase'}) · "
+                 "this run cannot be resumed if interrupted")
         elif event == "turn_start":
             self._stop()
             role = data.get("role")
             prefix = f"{role.capitalize()} turn" if isinstance(role, str) and role != "executor" else "Turn"
-            self._start(f"{prefix} {data.get('turn')}/{data.get('max_turns')} · {_friendly_model(data.get('model'))}")
+            label = f"{prefix} {data.get('turn')}/{data.get('max_turns')} · {_friendly_model(data.get('model'))}"
+            if tag:
+                echo(f"  {label}...")
+            else:
+                self._start(label)
         elif event == "explore_start":
             self._stop()
             n = data.get("questions") or 0
@@ -191,6 +301,8 @@ class _OsnProgressRenderer:
             if role == "planner":
                 if status == "ran" and data.get("has_plan"):
                     echo("  ✓ Plan ready" + (f" · {role_model}" if role_model else ""))
+                    for line in _plan_lines(data):
+                        echo(line)
                 else:
                     echo(f"  ? Planner {status or 'did not run'}" + (f" · {data.get('reason')}" if data.get("reason") else "")
                          + " · continuing without a plan")
@@ -226,6 +338,59 @@ class _OsnProgressRenderer:
             echo("  ✓ Already observed on the final files (not run again)")
 
 
+MAX_PLAN_LINES = 8
+
+
+def _plan_lines(data: dict) -> list[str]:
+    """The planner's bounded plan as it was handed to the executor: steps, then files."""
+    lines: list[str] = []
+    summary = data.get("plan_summary")
+    if isinstance(summary, str) and summary.strip():
+        lines.append(f"    {summary.strip()}")
+    steps = [s for s in (data.get("plan_steps") or []) if isinstance(s, str) and s.strip()]
+    for i, step in enumerate(steps[:MAX_PLAN_LINES], 1):
+        lines.append(f"    {i}. {step.strip()}")
+    if len(steps) > MAX_PLAN_LINES:
+        lines.append(f"    … {len(steps) - MAX_PLAN_LINES} more step(s)")
+    files = [f for f in (data.get("plan_files") or []) if isinstance(f, str) and f.strip()]
+    if files:
+        shown = ", ".join(files[:6]) + (f" … +{len(files) - 6}" if len(files) > 6 else "")
+        lines.append(f"    Files likely to change: {shown}")
+    subtasks = [s for s in (data.get("plan_subtasks") or []) if isinstance(s, str)]
+    if subtasks:
+        lines.append(f"    Independent subtasks proposed: {', '.join(subtasks)}")
+    return lines
+
+
+def _verification_result_lines(data: dict) -> list[str]:
+    """What OpenShard observed from the verification command, and why when it did not pass."""
+    status = data.get("status")
+    if status == "passed":
+        return ["  ✓ PASSED"]
+    lines: list[str] = []
+    code = data.get("exit_code")
+    if data.get("tainted"):
+        lines.append("  ✗ INVALID · the verifier rewrote the files it was checking, so this pass proves nothing")
+    elif data.get("setup_failure"):
+        lines.append(f"  ? NOT RUN · the verifier itself could not run ({data.get('setup_failure')}) · "
+                     "no verdict on the change")
+    elif status == "failed":
+        lines.append("  ✗ FAILED" + (f" · exit {code}" if code is not None else ""))
+    elif status == "not_run":
+        lines.append("  ? NOT RUN · the verification command did not start")
+    else:
+        lines.append("  ? UNKNOWN · verification did not produce a verdict (timed out)")
+    failed_tests = [t for t in (data.get("failed_tests") or []) if isinstance(t, str)]
+    if failed_tests:
+        shown = ", ".join(failed_tests[:5]) + (f" … +{len(failed_tests) - 5}" if len(failed_tests) > 5 else "")
+        lines.append(f"    Failing: {shown}")
+    tail = data.get("output_tail")
+    if isinstance(tail, str) and tail.strip():
+        lines.append("    Output (last lines):")
+        lines.extend(f"      {ln}" for ln in tail.splitlines())
+    return lines
+
+
 def _resolve_provider(name: str | None, model: str):
     from openshard.providers.manager import ProviderManager
 
@@ -243,8 +408,11 @@ def _resolve_provider(name: str | None, model: str):
 
 @osn_group.command("run")
 @click.argument("task")
-@click.option("--verify-cmd", required=True,
-              help="Command OpenShard runs itself to verify the result (exit 0 = pass), e.g. \"pytest -q tests/test_x.py\". A leading python/python3 runs under the interpreter OpenShard uses.")
+@click.option("--verify-cmd", default=None,
+              help="Command OpenShard runs itself to verify the result (exit 0 = pass), e.g. \"pytest -q tests/test_x.py\". "
+                   "A leading python/python3 runs under the interpreter OpenShard uses. Without it, the repository's "
+                   "verification contract (`verification_commands` in .openshard/config.yml) is used, else the test "
+                   "command OpenShard detects for the repository; the run refuses to start when none is known.")
 @click.option("--model", default=None, help="Model for the first attempt (default: existing keyword routing).")
 @click.option("--escalate-model", "escalate", multiple=True,
               help="Model for later attempts, in order. Used only after a verification failure.")
@@ -321,14 +489,9 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
                 click.echo(f"  Branch  {git.branch}")
         except Exception:
             click.echo(f"  Repo    {repo_root.name}")
-    argv = _split_command(verify_cmd)
-    if not argv:
-        raise click.UsageError("--verify-cmd must not be empty")
-    if argv[0] in ("python", "python3"):
-        # Run the verifier with the interpreter OpenShard itself runs under; a
-        # bare "python" can resolve to a different environment (e.g. one
-        # without the project's test dependencies) and fail for the wrong reason.
-        argv[0] = sys.executable
+    argv, verify_source = _resolve_verify_argv(verify_cmd, repo_root)
+    if not as_json:
+        click.echo(f"  Verify  {_verify_label(argv)} ({VERIFY_SOURCE_TEXT[verify_source]})")
     if promote and Path.cwd().resolve() != repo_root:
         raise click.ClickException("Run from the repository root to use --promote.")
     for rel in context_files:
@@ -339,6 +502,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     if resume_from:
         prior_checkpoint = _load_resumable_checkpoint(repo_root, resume_from)
         argv = list(prior_checkpoint.verify_argv)  # the run's own command, never a new one
+        verify_source = (prior_checkpoint.args or {}).get("verify_source") or verify_source
     # The checkpoint's own id: never a task id (those are minted only by `openshard task new`).
     checkpoint_id = prior_checkpoint.run_id if prior_checkpoint else f"osn-{uuid.uuid4().hex[:12]}"
 
@@ -428,7 +592,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "loop_mode": loop_mode, "max_turns": max_turns, "roles_mode": roles_mode,
             "planner_model": planner_model, "verifier_model": verifier_model,
             "topology_request": topology_request, "max_workers": max_workers, "explore": explore,
-            "no_learning": no_learning,
+            "no_learning": no_learning, "verify_source": verify_source,
         },
         repo=ckpt.repo_fingerprint(repo_root), models=list(models), routing_record=routing.record,
     )
@@ -642,6 +806,10 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             if commit_result and promoted:
                 commit_record = _commit_promoted(repo_root, promoted, task, entry)
                 _attach_commit(entry, commit_record)
+    # Where the verification command came from: the user's flag, the repository's
+    # contract, or OpenShard's detection. The Receipt names the source so a
+    # reader knows whether a human chose the check.
+    entry["osn_loop"]["verification_command"] = {"label": _verify_label(argv), "source": verify_source}
     if prior_checkpoint is not None:
         prior_costs = [u.cost_usd for u in prior_usage]
         entry["osn_loop"]["resumed"] = {
@@ -662,14 +830,22 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     run_checkpoint.status = ckpt.STATUS_COMPLETED
     run_checkpoint.phase = ckpt.PHASE_COMPLETED
     run_checkpoint.receipt_id = entry.get("receipt_id")
-    run_checkpoint.files = {}
+    # A verified result that did not reach the repository is kept (its verified
+    # bytes, under the checkpoint) so `osn apply <run-id>` can apply it later
+    # without re-running the model. Anything else is discarded.
+    retained = False
+    if receipt.status == "verified" and not promoted and receipt.changed_files:
+        try:
+            retained = ckpt.retain_verified(repo_root, run_checkpoint, Path(receipt.sandbox_path),
+                                            list(receipt.changed_files), dict(receipt.verified_file_hashes))
+        except OSError:
+            retained = False
+    if not retained:
+        run_checkpoint.files = {}
+        run_checkpoint.verified_files = None
+        ckpt.discard_retained(repo_root, checkpoint_id)
     try:
         ckpt.write_checkpoint(repo_root, run_checkpoint)
-        files_dir = ckpt.checkpoint_dir(repo_root, checkpoint_id) / ckpt.FILES_DIR
-        if files_dir.exists():
-            import shutil
-
-            shutil.rmtree(files_dir, ignore_errors=True)
     except OSError:
         pass
 
@@ -779,9 +955,55 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
                 click.echo(f"  Re-verified after commit: {status}; NOT bound to the commit "
                            f"({bound_verification.get('reason') or 'working tree not clean'}).")
     elif receipt.status == "verified":
-        click.echo(f"  Not promoted. Review the copy at {receipt.sandbox_path}, or re-run with --promote.")
+        click.echo(f"  Not applied to the repository. Review the copy at {receipt.sandbox_path}.")
     if skipped:
         click.echo(f"  Blocked by policy/skipped: {', '.join(skipped)}")
+    receipt_id = entry.get("receipt_id")
+    if receipt_id:
+        click.echo(f"\nReceipt  {receipt_id} · `openshard last` shows it · run {checkpoint_id}")
+    if retained:
+        _offer_apply(repo_root, run_checkpoint, receipt, entry, permissions, assume_yes)
+
+
+def _offer_apply(repo_root: Path, run_checkpoint, receipt, entry: dict, permissions, assume_yes: bool) -> None:
+    """After a verified, unpromoted run in an interactive terminal: ask once whether to apply now.
+
+    Applying goes through the same policy gate as `--promote`. Without a
+    terminal (piped, CI, an agent driving the CLI) nothing is asked; the
+    command to apply later is printed instead. `--yes` never answers this
+    question: it approves policy 'ask' paths, not the decision to change the
+    repository.
+    """
+    from openshard.osn import checkpoint as ckpt
+
+    n = len(receipt.changed_files)
+    later = f"  Apply later with: openshard osn apply {run_checkpoint.run_id} [--commit]"
+    interactive = getattr(sys.stdin, "isatty", lambda: False)() and getattr(sys.stdout, "isatty", lambda: False)()
+    if not interactive:
+        click.echo(later)
+        return
+    try:
+        wanted = click.confirm(f"\nApply {n} verified file(s) to the repository now?", default=False)
+    except click.Abort:
+        wanted = False
+    if not wanted:
+        click.echo(later)
+        return
+    applied, skipped = _promote(repo_root, receipt, entry, assume_yes, permissions)
+    run_checkpoint.applied = {
+        "at": ckpt.now_stamp(), "how": "end_of_run_prompt", "files_applied": list(applied),
+        "files_skipped": list(skipped), "commit": None, "bound_verification": None,
+    }
+    run_checkpoint.files, run_checkpoint.verified_files = {}, None
+    try:
+        ckpt.write_checkpoint(repo_root, run_checkpoint)
+        ckpt.discard_retained(repo_root, run_checkpoint.run_id)
+    except OSError:
+        pass
+    click.echo(f"  Applied {len(applied)} file(s) into the repository (not re-verified there)."
+               + (f" Skipped by policy: {', '.join(skipped)}." if skipped else ""))
+    if applied:
+        click.echo("  Review with `git diff`; commit when you are satisfied.")
 
 
 def _lookup_learning(repo_root: Path, repo_config: dict) -> LearningSnapshot:
@@ -1286,10 +1508,16 @@ def osn_runs(as_json):
     rows = []
     for cp in ckpt.list_checkpoints(repo_root):
         verdict = ckpt.check_resumable(cp, repo_root)
+        if cp.applied is not None:
+            result = "applied"
+        elif cp.verified_files:
+            result = "verified_not_applied" if ckpt.check_applicable(cp, repo_root).ok else "verified_not_applicable"
+        else:
+            result = None
         rows.append({
             "run_id": cp.run_id, "status": cp.status, "phase": cp.phase, "attempts_done": cp.attempts_done,
             "updated_at": cp.updated_at, "receipt_id": cp.receipt_id, "resumable": verdict.ok,
-            "refusal": verdict.reason, "task": cp.task[:80],
+            "refusal": verdict.reason, "task": cp.task[:80], "result": result,
         })
     if as_json:
         click.echo(json.dumps(rows, indent=2))
@@ -1298,10 +1526,118 @@ def osn_runs(as_json):
         click.echo("No checkpointed OSN runs under .openshard/osn-runs/.")
         return
     for r in rows:
-        state = "resumable" if r["resumable"] else f"not resumable ({r['refusal']})"
+        if r["status"] == ckpt.STATUS_COMPLETED:
+            state = {"applied": "applied to the repository",
+                     "verified_not_applied": f"verified, not applied: openshard osn apply {r['run_id']}",
+                     "verified_not_applicable": "verified, not applied (repository changed since)"}.get(
+                str(r["result"]), "completed")
+        else:
+            state = "resumable" if r["resumable"] else f"not resumable ({r['refusal']})"
         click.echo(f"{r['run_id']}  {r['status']}/{r['phase']}  attempts {r['attempts_done']}  {r['updated_at']}  "
                    f"{state}" + (f"  receipt {r['receipt_id']}" if r["receipt_id"] else ""))
         click.echo(f"    {r['task']}")
+
+
+@osn_group.command("apply")
+@click.argument("run_id")
+@click.option("--commit", "commit_result", is_flag=True, default=False,
+              help="Commit the applied files on the current branch, then re-run the run's verification command "
+                   "on that commit so the evidence is bound to it (requires an otherwise clean working tree).")
+@click.option("--yes", "assume_yes", is_flag=True, default=False, help="Approve policy 'ask' paths without prompting.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def osn_apply(run_id, commit_result, assume_yes, as_json):
+    """Put a completed run's verified result into the repository, without re-running anything.
+
+    The bytes applied are exactly the ones OpenShard verified (kept under the
+    run's checkpoint; hashes re-checked here). Refused when the run did not
+    complete, did not verify, was already applied or promoted, the repository's
+    HEAD moved since the run, or a target file changed since the run finished.
+    Every write goes through the file-mutation policy, as `--promote` does.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    from openshard.cli.ingest import _repo_root
+    from openshard.history.metrics import load_runs
+    from openshard.history.receipt_identity import stored_receipt_id
+    from openshard.osn import checkpoint as ckpt
+    from openshard.sync.policies import (
+        PolicyUnavailable,
+        organisation_permissions,
+        resolve_organisation_policy,
+    )
+
+    repo_root = _repo_root(None, False)
+    try:
+        cp = ckpt.read_checkpoint(repo_root, run_id)
+    except FileNotFoundError:
+        raise click.ClickException(f"No checkpoint for run '{run_id}' under .openshard/osn-runs/ "
+                                   f"({ckpt.REFUSE_MISSING}). `openshard osn runs` lists the runs here.") from None
+    except ValueError as exc:
+        raise click.ClickException(f"Cannot apply '{run_id}': {exc}") from None
+    verdict = ckpt.check_applicable(cp, repo_root)
+    if not verdict.ok:
+        detail = f" ({verdict.detail})" if verdict.detail else ""
+        raise click.ClickException(f"Refusing to apply '{run_id}': {verdict.reason}{detail}.")
+    try:
+        permissions = organisation_permissions(resolve_organisation_policy())
+    except PolicyUnavailable as exc:
+        raise click.ClickException(
+            f"Organisation policy could not be refreshed ({exc}); refusing to apply under unknown permissions."
+        ) from None
+    files = list(cp.verified_files or {})
+    staging = Path(tempfile.mkdtemp(prefix="osn-apply-")) / "work"
+    staging.mkdir()
+    try:
+        ckpt.restore_changed(repo_root, run_id, {rel: cp.verified_files[rel] for rel in files}, staging)
+    except FileNotFoundError as exc:
+        raise click.ClickException(f"Refusing to apply '{run_id}': {exc}.") from None
+    entry = next((e for e in load_runs(repo_root) if cp.receipt_id and stored_receipt_id(e) == cp.receipt_id), None)
+    entry = entry or {"receipt_id": cp.receipt_id, "timestamp": cp.updated_at, "task": cp.task}
+    verified = SimpleNamespace(sandbox_path=str(staging), changed_files=files,
+                               verified_file_hashes=dict(cp.verified_files or {}))
+    applied, skipped = _promote(repo_root, verified, entry, assume_yes, permissions)
+    commit_record: dict | None = None
+    bound: dict | None = None
+    if commit_result and applied:
+        commit_record = _commit_promoted(repo_root, applied, cp.task, entry)
+        if commit_record.get("sha"):
+            bound = _bind_verification(repo_root, entry, list(cp.verify_argv), as_json=as_json)
+    cp.applied = {
+        "at": ckpt.now_stamp(), "how": "osn_apply", "files_applied": list(applied), "files_skipped": list(skipped),
+        "commit": commit_record, "bound_verification": bound,
+    }
+    cp.files, cp.verified_files = {}, None
+    try:
+        ckpt.write_checkpoint(repo_root, cp)
+        ckpt.discard_retained(repo_root, run_id)
+    except OSError:
+        pass
+    if as_json:
+        click.echo(json.dumps({"run_id": run_id, "receipt_id": cp.receipt_id, "applied": applied, "skipped": skipped,
+                               "commit": commit_record, "bound_verification": bound}, indent=2))
+        return
+    click.echo(f"Applied {len(applied)} verified file(s) from run {run_id} into the repository"
+               + (f" (Receipt {cp.receipt_id})" if cp.receipt_id else "") + ".")
+    for f in applied:
+        click.echo(f"  applied: {f}")
+    if skipped:
+        click.echo(f"  Skipped by policy: {', '.join(skipped)}")
+    if commit_record:
+        if commit_record.get("sha"):
+            click.echo(f"  Committed {commit_record['sha'][:12]} on {commit_record.get('branch') or 'HEAD'}"
+                       f" ({len(commit_record.get('files') or [])} file(s)).")
+        else:
+            click.echo(f"  Not committed: {commit_record.get('reason') or 'unknown reason'}.")
+    if bound:
+        if bound.get("bound"):
+            click.echo(f"  Re-verified on commit {str(bound.get('artifact_sha') or '')[:12]}: {bound.get('status')}"
+                       " (evidence bound to the commit).")
+        else:
+            click.echo(f"  Re-verified after commit: {bound.get('status')}; NOT bound to the commit "
+                       f"({bound.get('reason') or 'working tree not clean'}).")
+    elif applied and not commit_result:
+        click.echo("  Not re-verified in the repository. Review with `git diff`; commit when you are satisfied.")
 
 
 def _resolve_workers(*, loop_mode, topology_request, max_workers, planner_enabled, verifier_enabled, task,

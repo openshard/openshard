@@ -4,7 +4,48 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Added
+
+- `openshard osn apply <osn-id> [--commit] [--yes] [--json]`: put a completed
+  run's verified result into the repository later, without re-running the
+  model. A verified run that was not promoted keeps exactly the bytes
+  OpenShard verified under its checkpoint (`verified_files`, the Receipt's
+  hashes; `base_files`, what the repository held at those paths). Applying
+  goes through the same file-mutation policy gate as `--promote`, re-checks
+  the hashes, logs a sandbox-apply receipt and marks the checkpoint
+  `applied`; `--commit` commits exactly those files and binds a
+  re-verification to the commit through the post-session path. It refuses,
+  naming the rule, when the run did not complete, did not verify or was
+  promoted, was applied already, HEAD moved, a target file changed since the
+  run, or the kept bytes no longer match. In an interactive terminal a
+  verified, unpromoted run now ends by asking once whether to apply; piped
+  and `--json` runs are told the command. `openshard osn runs` shows each
+  completed run's result state.
+
 ### Changed
+
+- `openshard osn run` no longer requires `--verify-cmd`. Without it the run
+  uses the repository's verification contract (`verification_commands` in
+  `.openshard/config.yml`), else the test command OpenShard detects for the
+  repository, and refuses to start when none is known (OSN never reports work
+  verified without a check it ran itself). A configured or detected command
+  that the command-safety classifier would not run silently is refused with
+  the reason; `--verify-cmd` remains the user's explicit authority. The
+  run's header, the Receipt (`osn_loop.verification_command`: label and
+  source `user` / `config` / `detected`) and the checkpoint name where the
+  command came from.
+
+- `openshard osn run` shows more of what is happening while it happens: the
+  planner's plan as the executor received it (summary, steps, files, proposed
+  subtasks); each verification's failing test ids and the last lines of the
+  command's output when it did not pass (and whether the verifier could not
+  run or rewrote the files it checked); checkpoint write failures and attempts
+  that ended on an unusable reply; and, at the end, the Receipt id, the
+  `openshard last` pointer and the run id. Progress events from parallel
+  workers and candidates now carry `worker_id` / `subtask_id`, and the
+  renderer prefixes their lines with it so concurrent workers never read as
+  one agent. The `verification_result` event carries `failed_tests`,
+  `setup_failure`, `tainted` and (never on a pass) a redacted `output_tail`.
 
 - Model roster: `deepseek/deepseek-v4.1-flash` is the curated cheap default
   (routing class `cheap_coding`, Ask Mode, the `cheap` tier fallback and the
