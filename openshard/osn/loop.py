@@ -410,8 +410,13 @@ def _as_text(v: str | bytes | None) -> str:
 
 def _run_verification(command: list[str], cwd: Path, timeout: float) -> tuple[VerificationResult, str]:
     try:
+        # Decode as UTF-8 with replacement on every platform: with the locale codec
+        # (cp1252 on Windows) one non-ASCII byte in a test's output raised inside
+        # subprocess's reader thread, the output was lost and the failure was
+        # reported as the change's, not the environment's.
         proc = subprocess.run(
-            command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
+            command, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         code: int | None = proc.returncode
