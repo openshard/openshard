@@ -79,12 +79,21 @@ def eligibility(entry: dict, *, now: datetime | None = None) -> Eligibility:
     return Eligibility(False, REASON_SESSION_IN_PROGRESS)
 
 
-def receipt_payload(entry: dict, index: int) -> dict:
-    """The privacy-bounded machine receipt for the record at history position *index*."""
-    return receipt_to_dict(build_shard_receipt(entry, index=index), extended=True)
+def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> dict:
+    """The privacy-bounded machine receipt for the record at history position *index*.
+
+    ``multi_agent`` keeps the multi-agent block (Platform contract
+    ``multi_agent``); without it the key is removed entirely, so a Platform
+    that does not know the block, or an organisation that has not enabled
+    ``advanced_osn``, receives exactly the receipt it did before.
+    """
+    payload = receipt_to_dict(build_shard_receipt(entry, index=index), extended=True)
+    if not multi_agent:
+        payload.pop("multi_agent", None)
+    return payload
 
 
-def build_envelope(entry: dict, index: int, *, core_version: str) -> dict:
+def build_envelope(entry: dict, index: int, *, core_version: str, multi_agent: bool = False) -> dict:
     """The v1 sync envelope for *entry*. ``source.receipt_schema_version`` is the
     record's own stamped version (``"unknown"`` for pre-stamping records, as
     Core itself labels them), never today's."""
@@ -99,7 +108,7 @@ def build_envelope(entry: dict, index: int, *, core_version: str) -> dict:
             "version": core_version,
             "receipt_schema_version": schema_version,
         },
-        "receipt": receipt_payload(entry, index),
+        "receipt": receipt_payload(entry, index, multi_agent=multi_agent),
     }
 
 

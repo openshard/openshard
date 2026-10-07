@@ -226,6 +226,100 @@ def sandbox_detail_block(entry: dict) -> dict[str, Any] | None:
     return None if _all_none(block) else block
 
 
+def multi_agent_block(entry: dict) -> dict[str, Any] | None:
+    """The hosted ``multi_agent`` block (Platform contract ``multiAgentSchema``) of an OSN run.
+
+    Built from the same bounded local blocks the full Receipt renders
+    (topology, workers, synthesis, candidates, economics, resumed, agents):
+    identifiers, counters, decisions and costs, never a path, a prompt or
+    tool output. None for a run that decided no topology (single-executor
+    runs before the roles stage, one-shot writes). The sync layer sends it
+    only when the organisation's ``advanced_osn`` capability is on.
+    """
+    loop = _dict(entry.get("osn_loop"))
+    topo = topology_block(loop.get("topology"))
+    if not topo or not topo.get("selected"):
+        return None
+    cands = candidates_block(loop.get("candidates"))
+    winner = (cands or {}).get("winner")
+    role = "candidate" if cands else "worker"
+    workers = []
+    for w in workers_block(loop.get("workers")) or []:
+        if not w.get("worker_id"):
+            continue
+        workers.append({
+            "worker_id": w["worker_id"],
+            "role": role,
+            "status": w.get("status"),
+            "reason": w.get("reason"),
+            "model": w.get("model"),
+            "requested_model": w.get("requested_model"),
+            "model_source": w.get("model_source"),
+            "files_changed": w.get("files_changed"),
+            "turns": w.get("turns"),
+            "calls": w.get("calls"),
+            "cost_usd": w.get("cost_usd"),
+            "cost_source": w.get("cost_source"),
+            "own_copy_verification": w.get("own_copy_verification"),
+            "selected": (w["worker_id"] == winner) if cands else None,
+        })
+    synth = synthesis_block(loop.get("synthesis"))
+    econ = economics_block(loop.get("economics"))
+    resumed = resumed_block(loop.get("resumed"))
+    graph = agents_block(loop.get("agents"))
+    return {
+        "topology": {
+            "requested": topo.get("requested"),
+            "selected": topo.get("selected"),
+            "reason": topo.get("reason"),
+            "worker_count": topo.get("worker_count"),
+            "distinct_models": topo.get("distinct_models"),
+            "expected_extra_cost_usd": topo.get("expected_extra_cost_usd"),
+            "actual_extra_cost_usd": topo.get("actual_extra_cost_usd"),
+        },
+        "workers": workers[:MAX_WORKERS_PROJECTED] or None,
+        "synthesis": {
+            "applied_count": synth.get("applied_count"),
+            "conflict_count": synth.get("conflict_count"),
+            "rejected_count": synth.get("rejected_count"),
+            "missing_required": synth.get("missing_required"),
+            "resolution": synth.get("resolution"),
+        } if synth else None,
+        "candidates": {
+            "policy": cands.get("policy"),
+            "count": cands.get("count"),
+            "winner": cands.get("winner"),
+            "winner_model": cands.get("winner_model"),
+            "reason": cands.get("reason"),
+            "losers_cost_usd": cands.get("losers_cost_usd"),
+        } if cands else None,
+        "economics": {
+            "total_cost_usd": econ.get("total_cost_usd"),
+            "cost_complete": econ.get("cost_complete"),
+            "model_calls": econ.get("model_calls"),
+            "cost_per_verified_success": econ.get("cost_per_verified_success"),
+        } if econ else None,
+        "resumed": {
+            "attempts_restored": resumed.get("attempts_restored"),
+            "checkpoint_phase": resumed.get("checkpoint_phase"),
+            "checkpoint_status": resumed.get("checkpoint_status"),
+            "prior_model_calls": resumed.get("prior_model_calls"),
+            "prior_cost_usd": resumed.get("prior_cost_usd"),
+            "unsaved_progress_discarded": resumed.get("unsaved_progress_discarded"),
+        } if resumed else None,
+        "agents": {
+            "count": graph.get("agents"),
+            "models_distinct": graph.get("models_distinct") or None,
+            "edges": len(graph.get("edges") or []),
+        } if graph else None,
+        "evidence": {
+            "verification": (cands or {}).get("verification_evidence") or "openshard_observed",
+            "costs": "provider_usage_per_call",
+            "graph": graph.get("evidence") if graph else None,
+        },
+    }
+
+
 def execution_loop_block(entry: dict) -> dict[str, Any] | None:
     """OSN bounded-loop summary: counts and the loop's own provenance labels, never paths."""
     loop = _dict(entry.get("osn_loop"))
@@ -1127,6 +1221,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "sandbox_detail": sandbox_detail_block,
         "execution_loop": execution_loop_block,
         "agent_loop": agent_loop_block,  # local surfaces only; see its docstring
+        "multi_agent": multi_agent_block,  # hosted only when advanced_osn is on (sync strips it otherwise)
         "agent_budgets": agent_budgets_block,
         "adaptive_routing": adaptive_routing_block,
         "supervisor_routing": supervisor_routing_block,
@@ -1166,6 +1261,7 @@ __all__ = [
     "surface_value",
     "content_hash_value",
     "execution_loop_block",
+    "multi_agent_block",
     "learning_block",
     "organisation_policy_block",
     "permission_evidence_block",

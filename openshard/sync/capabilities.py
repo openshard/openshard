@@ -60,12 +60,19 @@ _MAX_BODY_BYTES = 256 * 1024
 CAPABILITY_AGENT_BUDGETS = "agent_budgets"
 CAPABILITY_ADAPTIVE_ROUTING = "adaptive_routing"
 CAPABILITY_SUPERVISOR_ROUTING = "supervisor_routing"
+# Whether the Platform accepts (and the organisation wants) the ``multi_agent``
+# Receipt block: topology, parallel workers / candidates, synthesis, economics,
+# resume. Off, that evidence stays in the local Receipt only.
+CAPABILITY_ADVANCED_OSN = "advanced_osn"
 # The capabilities an OSN run snapshots at its start.
 OSN_RUN_CAPABILITIES: tuple[str, ...] = (
     CAPABILITY_AGENT_BUDGETS,
     CAPABILITY_ADAPTIVE_ROUTING,
     CAPABILITY_SUPERVISOR_ROUTING,
 )
+# Not snapshotted on the run: the hosted ``capability_snapshot`` block is
+# validated strictly by the Platform and does not list this key. The sync
+# layer reads it when it builds an envelope (``openshard.sync.client``).
 
 SOURCE_FRESH = "fresh"
 SOURCE_CACHE = "cache"
