@@ -399,6 +399,7 @@ def agent_loop_block(entry: dict) -> dict[str, Any] | None:
         "candidates": candidates_block(loop.get("candidates")),
         "agents": agents_block(loop.get("agents")),
         "resumed": resumed_block(loop.get("resumed")),
+        "repository": repository_block(loop.get("repository")),
         "evidence": {
             "actions": _text(ev.get("actions"), 64),
             "action_results": _text(ev.get("action_results"), 64),
@@ -406,6 +407,21 @@ def agent_loop_block(entry: dict) -> dict[str, Any] | None:
         },
     }
     return block
+
+
+def repository_block(raw: Any) -> dict[str, Any] | None:
+    """Whether the run's verified files reached the repository when the Receipt was written: counts, never paths."""
+    d = _dict(raw)
+    if not d or "applied" not in d:
+        return None
+    applied = d.get("files_applied")
+    skipped = d.get("files_skipped")
+    return {
+        "applied": bool(d.get("applied")),
+        "files_applied": len(applied) if isinstance(applied, list) else 0,
+        "files_skipped": len(skipped) if isinstance(skipped, list) else 0,
+        "how": _text(d.get("how"), 32),
+    }
 
 
 _TOPOLOGIES = frozenset({"single", "planner_executor", "planner_executor_verifier", "parallel_subtasks",

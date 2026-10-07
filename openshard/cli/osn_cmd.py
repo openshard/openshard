@@ -880,6 +880,13 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "original_routing": prior_checkpoint.routing_record,
             "times_resumed": len(run_checkpoint.resumed_from),
         }
+    # Whether the verified bytes reached the repository when this Receipt was written.
+    # A later `osn apply` is later evidence (its sandbox-apply receipt and, with
+    # --commit, a verification bound to the commit); the Receipt itself is never rewritten.
+    entry["osn_loop"]["repository"] = {
+        "applied": bool(promoted), "files_applied": list(promoted), "files_skipped": list(skipped),
+        "how": "promote" if promote and receipt.status == "verified" else None,
+    }
     append_jsonl(runs_path, entry)
     run_checkpoint.status = ckpt.STATUS_COMPLETED
     run_checkpoint.phase = ckpt.PHASE_COMPLETED
