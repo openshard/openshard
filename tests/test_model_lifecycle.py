@@ -34,8 +34,10 @@ class TestLifecycleValues(unittest.TestCase):
 
     def test_registry_size_matches_curated_roster(self) -> None:
         # Two evaluated GPT-5.6 lanes plus four provider-backed OpenAI watchlist
-        # entries; six current provider models catalogued as watchlist 2026-10-03.
-        self.assertEqual(len(_REGISTRY), 55)
+        # entries; six current provider models catalogued as watchlist 2026-10-03;
+        # deepseek-v4.1-flash promoted to the cheap default 2026-10-07 (its
+        # predecessor stays, deprecated).
+        self.assertEqual(len(_REGISTRY), 56)
 
 
 class TestRoutingDefaultEligibility(unittest.TestCase):

@@ -67,3 +67,14 @@ def test_openrouter_ignores_a_non_numeric_cost():
     )), patch("openshard.providers.openrouter.compute_cost", return_value=None):
         resp = client.execute("acme/m", "hello")
     assert resp.usage.estimated_cost is None and resp.usage.cost_source is None
+
+
+def test_openrouter_normalizes_null_content_from_reasoning_only_response():
+    client = _client()
+    payload = _response({
+        "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.0001,
+    })
+    payload["choices"][0]["message"]["content"] = None
+    with patch.object(client, "_post", return_value=payload):
+        resp = client.execute("acme/m", "hello")
+    assert resp.content == ""

@@ -45,7 +45,7 @@ OPUS_47       = "anthropic/claude-opus-4.7"
 MYTHOS_5      = "anthropic/claude-mythos-5"
 GPT_54_MINI   = "openai/gpt-5.4-mini"
 GPT_54        = "openai/gpt-5.4"
-DEEPSEEK_FLASH = "deepseek/deepseek-v4-flash"
+DEEPSEEK_FLASH = "deepseek/deepseek-v4.1-flash"
 GEMINI_FLASH  = "google/gemini-3.5-flash"
 
 # Minimal config dict that model_policy_from_config handles without error

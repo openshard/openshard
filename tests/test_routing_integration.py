@@ -374,7 +374,7 @@ class TestDeepSeekBoilerplateModel(unittest.TestCase):
         decision = route("add a simple validation helper")
         self.assertEqual(decision.category, "boilerplate")
         self.assertEqual(decision.model, MODEL_CHEAP)
-        self.assertIn("v4-flash", MODEL_CHEAP)
+        self.assertIn("v4.1-flash", MODEL_CHEAP)  # the current Flash, never the retired v4-flash alias
 
     def test_model_cheap_is_not_v3_2(self):
         from openshard.routing.engine import MODEL_CHEAP

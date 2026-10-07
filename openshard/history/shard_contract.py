@@ -78,6 +78,7 @@ _STAGE_DISPLAY_LABELS: dict[str, str] = {
 # Keys are lowercase. Values use full model family names (not abbreviations).
 _MODEL_FRIENDLY_NAMES: dict[str, str] = {
     "deepseek/deepseek-v4-pro": "DeepSeek V4 Pro",
+    "deepseek/deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
     "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
     "anthropic/claude-sonnet-4.6": "Claude Sonnet 4.6",
     "anthropic/claude-sonnet-4-6": "Claude Sonnet 4.6",

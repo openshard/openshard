@@ -16,9 +16,9 @@ class TestModeModePolicy(unittest.TestCase):
     def test_ask_returns_policy(self) -> None:
         self.assertIsInstance(model_policy_for_mode("ask"), ModeModelPolicy)
 
-    def test_ask_default_is_deepseek_v4_flash(self) -> None:
+    def test_ask_default_is_deepseek_v41_flash(self) -> None:
         policy = model_policy_for_mode("ask")
-        self.assertEqual(policy.default_model_id, "deepseek/deepseek-v4-flash")
+        self.assertEqual(policy.default_model_id, "deepseek/deepseek-v4.1-flash")
 
     def test_ask_default_exists_in_registry(self) -> None:
         policy = model_policy_for_mode("ask")
@@ -101,9 +101,9 @@ class TestModelsModeCommand(unittest.TestCase):
         result = self.runner.invoke(cli, ["models", "mode", "ask"])
         self.assertEqual(result.exit_code, 0)
 
-    def test_mode_ask_includes_deepseek_v4_flash(self) -> None:
+    def test_mode_ask_includes_deepseek_v41_flash(self) -> None:
         result = self.runner.invoke(cli, ["models", "mode", "ask"])
-        self.assertIn("DeepSeek: V4 Flash", result.output)
+        self.assertIn("DeepSeek: V4.1 Flash", result.output)
 
     def test_mode_ask_includes_gpt5_nano(self) -> None:
         result = self.runner.invoke(cli, ["models", "mode", "ask"])
@@ -120,7 +120,7 @@ class TestModelsModeCommand(unittest.TestCase):
     def test_mode_ask_normalizes_uppercase(self) -> None:
         result = self.runner.invoke(cli, ["models", "mode", "ASK"])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("DeepSeek: V4 Flash", result.output)
+        self.assertIn("DeepSeek: V4.1 Flash", result.output)
 
     # --- plan ---
 

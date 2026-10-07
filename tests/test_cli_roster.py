@@ -20,7 +20,7 @@ _CONFIG_REL = Path(".openshard") / "config.yml"
 
 # Real model IDs from the registry (active_default lifecycle)
 _KNOWN_MODEL = "anthropic/claude-sonnet-4.6"
-_KNOWN_MODEL_2 = "deepseek/deepseek-v4-flash"
+_KNOWN_MODEL_2 = "deepseek/deepseek-v4.1-flash"
 _UNKNOWN_MODEL = "fake/model-does-not-exist-xyz"
 
 

@@ -4,6 +4,20 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Changed
+
+- Model roster: `deepseek/deepseek-v4.1-flash` is the curated cheap default
+  (routing class `cheap_coding`, Ask Mode, the `cheap` tier fallback and the
+  boilerplate scoring preference). `deepseek/deepseek-v4-flash`, the 0423
+  snapshot OpenRouter still serves under the old id, is deprecated: kept for
+  history and explicit selection, never chosen as a routing default.
+
+### Fixed
+
+- The OpenRouter client returns an empty string instead of `None` when a
+  reasoning model spends its whole output budget thinking and the API reports
+  `content: null`.
+
 ### Added
 
 - `openshard osn run` is now an iterative agent loop by default (`--loop agent`).

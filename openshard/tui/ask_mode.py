@@ -136,7 +136,7 @@ _ROSTER_VALUE = (
     "qwen/qwen3.7-max",
 )
 _ROSTER_CHEAP = (
-    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4.1-flash",
     "openai/gpt-5-nano",
     "google/gemini-3.1-flash-lite",
     "ibm-granite/granite-4.1-8b",
