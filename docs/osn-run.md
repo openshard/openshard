@@ -4,11 +4,23 @@ A bounded, policy-gated coding task with verification performed by OpenShard.
 
 ```
 openshard osn run "Implement slugify in slug.py" \
-  --verify-cmd "python -m pytest -q tests" \
+  [--verify-cmd "python -m pytest -q tests"] \
   --context-file slug.py --context-file tests/test_slug.py \
   [--model M] [--escalate-model M2 ...] [--max-attempts 2] \
   [--task-id task_...] [--promote] [--yes] [--no-learning] [--json]
 ```
+
+The verification command is, in order: `--verify-cmd` (the user's explicit choice), the
+repository's verification contract (`verification_commands` / `verification_command` in
+`.openshard/config.yml`, first command), or the test command OpenShard detects for the repository
+(`python -m pytest`, `npm test`, `cargo test`, ...). The run's header says which (`Verify ...
+(detected from the repository; pass --verify-cmd to override)`), the Receipt records it under
+`osn_loop.verification_command` (`label`, `source`: `user` / `config` / `detected`) and the
+checkpoint carries it so `osn resume` keeps the original command. A configured or detected
+command must pass the command-safety classifier (no shell metacharacters, no blocked
+executables); one it would not run silently is refused with the reason, and passing it with
+`--verify-cmd` is the way to run it anyway. With no command known the run refuses to start: OSN
+never reports work verified without a check it ran itself.
 
 ## Flow
 

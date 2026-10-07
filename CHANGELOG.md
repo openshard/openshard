@@ -24,6 +24,17 @@ All notable changes to OpenShard are documented here.
 
 ### Changed
 
+- `openshard osn run` no longer requires `--verify-cmd`. Without it the run
+  uses the repository's verification contract (`verification_commands` in
+  `.openshard/config.yml`), else the test command OpenShard detects for the
+  repository, and refuses to start when none is known (OSN never reports work
+  verified without a check it ran itself). A configured or detected command
+  that the command-safety classifier would not run silently is refused with
+  the reason; `--verify-cmd` remains the user's explicit authority. The
+  run's header, the Receipt (`osn_loop.verification_command`: label and
+  source `user` / `config` / `detected`) and the checkpoint name where the
+  command came from.
+
 - `openshard osn run` shows more of what is happening while it happens: the
   planner's plan as the executor received it (summary, steps, files, proposed
   subtasks); each verification's failing test ids and the last lines of the
