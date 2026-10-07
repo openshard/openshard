@@ -137,6 +137,26 @@ projection is unchanged until the Platform contract learns these blocks.
   `apply-last`. It refuses if the files changed after verification, and it does not re-verify in
   the repository.
 
+### Parallel candidates (`--topology candidates`)
+
+`--topology candidates` runs the **whole task** on up to `--max-workers` distinct models at once
+(the executor's model plus the models routing offers for the same requirement class, each worker
+excluding the models already chosen; fewer than two distinct models means no candidates, and the
+reason is recorded). Each candidate is a worker in its own isolated copy with the whole repository
+as its write scope, at most 10 turns, under the same file-mutation policy and organisation `models`
+policy. When all have finished, OpenShard runs the run's own verify command in **every candidate's
+copy** (observed evidence, never the model's word) and ranks them by a fixed order: verified in its
+own copy, then fewest writes refused by policy, then a usable outcome, then fewest files changed,
+then lowest provider-reported cost (an unknown cost ranks last), then fewest turns, then candidate
+order (`openshard.osn.candidates.EVALUATION_POLICY`). The winner's files are synthesised into the
+run's copy and verified **again** there like any attempt; losers stay in their copies. No verified
+candidate means no winner: the executor runs with an advisory naming what each candidate tried.
+
+The Receipt carries `osn_loop.candidates` (policy, count, models, every candidate's rank,
+own-copy verification, files, refused writes, cost, turns, whether selected; the winner and why;
+candidates' total and losers' cost, the latter also as the topology's `actual_extra_cost_usd`) and
+each candidate under `osn_loop.workers`; the full local Receipt shows a `CANDIDATES` section.
+
 ## Checkpoints and `osn resume`
 
 Every `osn run` keeps durable state under `.openshard/osn-runs/<osn-id>/` (local only, never synced):

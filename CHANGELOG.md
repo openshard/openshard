@@ -64,6 +64,16 @@ All notable changes to OpenShard are documented here.
   (planning / implementation / review) and a `tier_dispatch_receipt` so
   existing surfaces show which roles were dispatched.
 
+- Parallel candidates (`--topology candidates`): the whole task on up to
+  `--max-workers` distinct models at once, each in its own isolated copy;
+  OpenShard runs the verify command in every candidate's copy and ranks them
+  by a fixed order (verified, fewest refused writes, usable outcome, fewest
+  files, cheapest, fewest turns, order); the winner is synthesised into the
+  run's copy and verified again, losers only reach the Receipt
+  (`osn_loop.candidates`: policy, every candidate's rank and evidence, the
+  winner, losers' cost). No verified candidate hands the task to the
+  executor with an advisory.
+
 - Durable OSN run state and `openshard osn resume`: every run checkpoints
   under `.openshard/osn-runs/<osn-id>/` (plan, roles, finished attempts
   with verification results, changed files' bytes, model calls with cost

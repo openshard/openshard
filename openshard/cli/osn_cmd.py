@@ -96,6 +96,12 @@ class _OsnProgressRenderer:
         elif event == "stage_skipped":
             self._stop()
             echo(f"  No parallel workers ({data.get('reason') or 'not selected'})")
+        elif event == "stage_end" and data.get("stage") == "candidates":
+            self._stop()
+            winner = data.get("winner")
+            echo(f"  ✓ Candidates done · {data.get('workers')} candidate(s) · "
+                 + (f"winner {winner} ({_friendly_model(data.get('winner_model'))}) · {data.get('applied')} file(s) applied"
+                    if winner else "none verified in its own copy · executor takes over"))
         elif event == "stage_end":
             self._stop()
             echo(f"  ✓ Workers done · {data.get('workers')} worker(s) · synthesis applied {data.get('applied')} file(s)"
@@ -257,14 +263,17 @@ def _resolve_provider(name: str | None, model: str):
                    "executor: no planner, no review. full: both, always (the review may reuse the executor's model).")
 @click.option("--planner-model", default=None, help="Model for the planner role (default: routed).")
 @click.option("--verifier-model", default=None, help="Model for the independent review (default: routed, never the executor's).")
-@click.option("--topology", "topology_request", type=click.Choice(["auto", "single", "roles", "parallel"]),
+@click.option("--topology", "topology_request",
+              type=click.Choice(["auto", "single", "roles", "parallel", "candidates"]),
               default="auto", show_default=True,
               help="Execution topology. auto: one executor unless the planner proposes independent subtasks "
                    "with disjoint write scopes on a non-trivial task, then bounded parallel workers + synthesis. "
                    "single: one executor, no roles. roles: planner/verifier but never workers. parallel: workers "
-                   "whenever the planner's decomposition validates (falls back with the reason otherwise).")
+                   "whenever the planner's decomposition validates (falls back with the reason otherwise). "
+                   "candidates: the whole task on up to --max-workers distinct models at once, each verified by "
+                   "OpenShard in its own copy and ranked deterministically; the winner is verified again.")
 @click.option("--max-workers", default=3, type=click.IntRange(1, 3), show_default=True,
-              help="Most parallel writing workers (each in its own isolated copy).")
+              help="Most parallel writing workers or candidates (each in its own isolated copy).")
 @click.option("--explore/--no-explore", "explore", default=True, show_default=True,
               help="Let the planner answer up to 3 independent questions with parallel read-only workers "
                    "(at most 3 at once, never writing). Only when the planner runs and only when it asks.")
@@ -701,6 +710,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
                 for w in entry["osn_loop"].get("workers") or []
             ],
             "synthesis": entry["osn_loop"].get("synthesis"),
+            "candidates": entry["osn_loop"].get("candidates"),
             "economics": entry["osn_loop"].get("economics"),
             "resumed": entry["osn_loop"].get("resumed"),
             "checkpoint": {"run_id": checkpoint_id, "status": run_checkpoint.status},
@@ -1304,13 +1314,25 @@ def _resolve_workers(*, loop_mode, topology_request, max_workers, planner_enable
     routing can offer them), runs them in isolated copies, synthesises their
     files into the run's copy and reports every decision for the Receipt.
     """
-    if loop_mode != "agent" or topology_request in ("single", "roles") or not planner_enabled:
+    if loop_mode != "agent" or topology_request in ("single", "roles"):
         return None
+    if topology_request != "candidates" and not planner_enabled:
+        return None  # workers need the planner's decomposition; candidates do not
     from openshard.osn import roles as osn_roles
+    from openshard.osn.candidates import (
+        candidate_specs,
+        candidates_advisory,
+        select_candidate,
+        verify_candidates,
+    )
     from openshard.osn.decompose import decomposition_from_plan
     from openshard.osn.loop import _observe_verification
     from openshard.osn.synthesis import resolution_advisory, synthesize
-    from openshard.osn.topology import TOPOLOGY_PARALLEL_SUBTASKS, decide_topology
+    from openshard.osn.topology import (
+        TOPOLOGY_PARALLEL_CANDIDATES,
+        TOPOLOGY_PARALLEL_SUBTASKS,
+        decide_topology,
+    )
     from openshard.osn.workers import WorkerSpec, run_workers
     from openshard.routing.engine import route
     from openshard.sync.policies import enforce_models_allowed
@@ -1330,6 +1352,78 @@ def _resolve_workers(*, loop_mode, topology_request, max_workers, planner_enable
                 return False
     except Exception:
         catalog_knows = None
+
+    def verify_in_copy(copy, paths):
+        return _observe_verification(copy, paths, argv, 120.0, None)
+
+    def candidates_hook(sandbox, plan, repo_files):
+        """The whole task on distinct models at once; the best verified candidate wins."""
+        headroom = None if budget is None else budget.would_stop_next_attempt() is None
+        requirement_class = getattr(getattr(routing, "decision", None), "resolved_class", None) or "routine_coding"
+        chosen: list[tuple[str, str]] = [(executor_model, "executor")]
+        while len(chosen) < max_workers:
+            choice = osn_roles.select_role_model(
+                osn_roles.ROLE_WORKER, explicit=None, executor_model=executor_model, routing=routing,
+                provider_name=provider_name, catalog_knows=catalog_knows, requirement_class=requirement_class,
+                exclude=tuple(m for m, _ in chosen),
+            )
+            if not choice.model or choice.model in {m for m, _ in chosen} \
+                    or choice.source == osn_roles.SOURCE_EXECUTOR_REUSED:
+                break
+            chosen.append((choice.model, choice.source))
+        decision = decide_topology(
+            "candidates", planner_ran=plan is not None, verifier_wanted=verifier_enabled, decomposition=None,
+            task_complex=True, budget_headroom=headroom, distinct_models_available=len(chosen),
+            max_workers=max_workers,
+        )
+        record = decision.to_record()
+        if decision.selected != TOPOLOGY_PARALLEL_CANDIDATES:
+            return {"topology": record, "ran": False}
+        try:
+            enforce_models_allowed([m for m, _ in chosen if m != executor_model], model_policy)
+        except ValueError as exc:
+            record["topology_selected"] = "planner_executor_verifier" if verifier_enabled else (
+                "planner_executor" if plan is not None else "single")
+            record["topology_reason"] = f"candidate_model_not_allowed:{str(exc)[:80]}"
+            return {"topology": record, "ran": False}
+        specs = candidate_specs(chosen[: decision.worker_count], task, provider_name)
+        record["workers"] = [{"worker_id": s.worker_id, "subtask_id": s.subtask.id, "model": s.model,
+                              "model_source": s.model_source} for s in specs]
+        record["distinct_models"] = len({s.model for s in specs})
+        results, usage = run_workers(
+            specs, provider=provider_obj, task=task, plan=plan, repo_root=repo_root, base_sandbox=sandbox,
+            verify=verify_in_copy, budget=budget, max_workers=max_workers,
+            blocked_write_patterns=permissions.blocked_write_paths,
+            approval_write_patterns=permissions.approval_write_paths, progress=progress,
+        )
+        role_usage.extend(usage)
+        verify_candidates(results, verify_in_copy)
+        winner, evaluation = select_candidate(results)
+        record["actual_extra_cost_usd"] = evaluation.get("losers_cost_usd")
+        applied: list[str] = []
+        synth_record = None
+        if winner is not None:
+            synth = synthesize([winner], main_sandbox=sandbox, scopes={winner.worker_id: winner_scope(winner)})
+            applied = list(synth.applied)
+            synth_record = synth.to_record()
+        return {
+            "topology": record, "ran": True,
+            "workers": [r.to_record() for r in results],
+            "synthesis": synth_record,
+            "candidates": evaluation,
+            "applied": applied,
+            "blocked": [],
+            "decisions": [d for r in results for d in r.decisions],
+            "advisory": None if winner is not None else candidates_advisory(evaluation),
+        }
+
+    def winner_scope(winner):
+        from openshard.osn.candidates import CANDIDATE_SCOPE
+
+        return CANDIDATE_SCOPE
+
+    if topology_request == "candidates":
+        return candidates_hook
 
     def workers_hook(sandbox, plan, repo_files):
         decomposition = decomposition_from_plan(plan)
@@ -1378,9 +1472,6 @@ def _resolve_workers(*, loop_mode, topology_request, max_workers, planner_enable
                               "model_source": s.model_source} for s in specs]
         record["distinct_models"] = len({s.model for s in specs})
 
-        def verify_in_copy(copy, paths):
-            return _observe_verification(copy, paths, argv, 120.0, None)
-
         results, usage = run_workers(
             specs, provider=provider_obj, task=task, plan=plan, repo_root=repo_root, base_sandbox=sandbox,
             verify=verify_in_copy, budget=budget, max_workers=max_workers,
@@ -1416,7 +1507,7 @@ def _parallel_summary(loop: dict | None) -> list[str]:
         if topo.get("worker_count"):
             line += f" · {topo['worker_count']} worker(s)"
         if isinstance(topo.get("actual_extra_cost_usd"), (int, float)):
-            line += f" · workers cost ${topo['actual_extra_cost_usd']:.4f}"
+            line += f" · extra cost ${topo['actual_extra_cost_usd']:.4f}"
         out.append(line)
     for w in loop.get("workers") or []:
         cost = w.get("cost_usd")
@@ -1427,6 +1518,18 @@ def _parallel_summary(loop: dict | None) -> list[str]:
                    + f" · {_friendly_model(w.get('model'))} · {w.get('turns')} turn(s) · "
                    f"{len(w.get('changed_files') or [])} file(s) · {cost_text}"
                    + (f" · own-copy verification {v}" if v else ""))
+    cands = loop.get("candidates")
+    if isinstance(cands, dict):
+        out.append(f"  candidates: {cands.get('count')} on {len(set(cands.get('models') or []))} model(s) · "
+                   + (f"winner {cands.get('winner')} ({_friendly_model(cands.get('winner_model'))})"
+                      if cands.get("winner") else "no candidate verified")
+                   + f" · policy {cands.get('policy')}")
+        for e in cands.get("evaluated") or []:
+            cost = e.get("cost_usd")
+            out.append(f"    #{e.get('rank')} {e.get('worker_id')} · {_friendly_model(e.get('model'))} · "
+                       f"own-copy verification {e.get('verification') or 'not run'} · {e.get('files_changed')} file(s) · "
+                       + (f"${cost:.4f}" if isinstance(cost, (int, float)) else "cost unknown")
+                       + (" · selected" if e.get("selected") else ""))
     synth = loop.get("synthesis")
     if isinstance(synth, dict):
         out.append(f"  synthesis: applied {len(synth.get('applied') or [])} file(s), "

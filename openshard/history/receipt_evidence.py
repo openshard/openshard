@@ -302,6 +302,7 @@ def agent_loop_block(entry: dict) -> dict[str, Any] | None:
         "workers": workers_block(loop.get("workers")),
         "synthesis": synthesis_block(loop.get("synthesis")),
         "economics": economics_block(loop.get("economics")),
+        "candidates": candidates_block(loop.get("candidates")),
         "resumed": resumed_block(loop.get("resumed")),
         "evidence": {
             "actions": _text(ev.get("actions"), 64),
@@ -381,6 +382,41 @@ def synthesis_block(raw: Any) -> dict[str, Any] | None:
         "workers_rejected": len(d["workers_rejected"]) if isinstance(d.get("workers_rejected"), list) else None,
         "missing_required": len(d["missing_required"]) if isinstance(d.get("missing_required"), list) else None,
         "resolution": _text(d.get("resolution"), 32),
+    }
+
+
+def candidates_block(raw: Any) -> dict[str, Any] | None:
+    """Parallel candidates: the policy, every candidate's rank and verification, the winner; never paths."""
+    d = _dict(raw)
+    if not d:
+        return None
+    evaluated: list[dict[str, Any]] = []
+    for e in (d.get("evaluated") or [])[:MAX_WORKERS_PROJECTED]:
+        if not isinstance(e, dict):
+            continue
+        evaluated.append({
+            "worker_id": _text(e.get("worker_id"), 32),
+            "model": _text(e.get("model"), 256),
+            "rank": _count(e.get("rank")),
+            "selected": _bool(e.get("selected")),
+            "verified": _bool(e.get("verified")),
+            "verification": _text(e.get("verification"), 16),
+            "failed_tests": _count(e.get("failed_tests")),
+            "files_changed": _count(e.get("files_changed")),
+            "writes_refused": _count(e.get("writes_refused")),
+            "cost_usd": _number(e.get("cost_usd")),
+            "turns": _count(e.get("turns")),
+        })
+    return {
+        "policy": _text(d.get("policy"), 96),
+        "count": _count(d.get("count")),
+        "winner": _text(d.get("winner"), 32),
+        "winner_model": _text(d.get("winner_model"), 256),
+        "reason": _text(d.get("reason"), 48),
+        "candidates_cost_usd": _number(d.get("candidates_cost_usd")),
+        "losers_cost_usd": _number(d.get("losers_cost_usd")),
+        "evaluated": evaluated or None,
+        "verification_evidence": _text(_dict(d.get("evidence")).get("verification"), 48),
     }
 
 

@@ -527,6 +527,11 @@ def build_osn_run_entry(
         # model is the first worker's (the primary routed model); every worker's
         # model is listed in ``osn_loop.implementation_models`` and per worker.
         final_model = first_model
+        winner_model = (getattr(receipt, "candidates", None) or {}).get("winner_model")
+        if isinstance(winner_model, str) and winner_model:
+            # Parallel candidates: only the winner's implementation landed, so it
+            # is the execution model; the losers stay per-candidate evidence.
+            first_model = final_model = _sanitize_model(winner_model)
     verified_attempts = [
         a for a in _effective_attempts(receipt) if a.verification is not None and a.verification.ran
     ]
