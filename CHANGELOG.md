@@ -11,6 +11,12 @@ All notable changes to OpenShard are documented here.
   This change was made by OSN itself on its own repository (Receipt
   `rcpt_24cd298e…`, verified, reviewed and committed with the verification
   bound to the commit).
+- A plan file too large to show whole is shown to the OSN executor on its
+  first turn as a line-numbered outline (where each `def` / `class` /
+  `function` starts; Python, JavaScript and TypeScript; at most four files,
+  120 definitions each), so it reads the range it needs with `read_file`
+  instead of paging through the file. The Receipt records which files were
+  outlined under `osn_loop.plan_outline_files`.
 - The files the planner names as likely to change are shown to the OSN
   executor on its first turn, as `--context-file` does: existing, within the
   context-file size cap, not already supplied, at most four. The Receipt
