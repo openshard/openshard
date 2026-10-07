@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -83,6 +84,7 @@ STOP_MAX_TURNS = "max_turns"
 STOP_FINISHED = "finished"
 STOP_BUDGET = "budget"
 STOP_PROVIDER_ERROR = "provider_error"
+STOP_CANCELLED = "cancelled"  # the run was cancelled (Ctrl-C) before this turn started
 STOP_VERIFIER_TAINTED = "verifier_modified_files"
 STOP_VERIFIER_TIMEOUT = "verifier_timeout"
 STOP_VERIFIER_SETUP = "verifier_setup_failed"
@@ -323,6 +325,7 @@ def run_attempt_turns(
     repo_files: list[str] | None = None,
     read_only: bool = False,
     explore_hook: Callable[[list[dict[str, Any]], int], tuple[list[Observation], list[dict[str, Any]]]] | None = None,
+    cancel: threading.Event | None = None,
 ) -> AttemptOutcome:
     """Run one attempt of the iterative loop inside *sandbox*. Never touches *repo_root*.
 
@@ -370,6 +373,12 @@ def run_attempt_turns(
               summary=rec.result.get("summary"))
 
     for turn in range(1, max_turns + 1):
+        if cancel is not None and cancel.is_set():
+            # No new turn once the run is cancelled: the model call in flight (if any,
+            # in another worker) finishes, nothing else starts.
+            out.stop = STOP_CANCELLED
+            _emit(progress, "cancelled", attempt=attempt, turn=turn, role=role)
+            return out
         out.turns = turn
         state = TurnState(
             task=task, attempt=attempt, turn=turn, max_turns=max_turns, repo_files=files,
@@ -715,6 +724,7 @@ __all__ = [
     "MAX_VERIFICATIONS_HARD_CAP",
     "ROLE_EXECUTOR",
     "STOP_BUDGET",
+    "STOP_CANCELLED",
     "STOP_FINISHED",
     "STOP_MALFORMED_REPLY",
     "STOP_MAX_TURNS",

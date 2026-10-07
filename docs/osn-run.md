@@ -227,6 +227,11 @@ like every other signal; routing and verification are never changed by them.
 
 ## Checkpoints and `osn resume`
 
+Ctrl-C interrupts a run at once. Parallel workers, candidates and explorers stop at their next
+turn (a model call already in flight finishes; nothing else starts; queued workers never start)
+and are recorded as `failed` / `cancelled`; the run's checkpoint is marked `interrupted` and
+`openshard osn resume <osn-id>` continues from the last finished attempt.
+
 Every `osn run` keeps durable state under `.openshard/osn-runs/<osn-id>/` (local only, never synced):
 `checkpoint.json` (task, verify command, options, model ladder, the repository's fingerprint at
 start, the plan and role records, every finished attempt with its verification result, the model

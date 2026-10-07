@@ -16,13 +16,14 @@ round starts and every worker's spend is recorded on the ledger afterwards.
 """
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
 from openshard.osn.actions import MAX_EXPLORE_QUESTIONS
-from openshard.osn.agent_loop import Observation, run_attempt_turns
+from openshard.osn.agent_loop import STOP_CANCELLED, Observation, run_attempt_turns
 from openshard.osn.instructions import PROJECT_INSTRUCTIONS_SYSTEM_NOTE
 from openshard.osn.model_provider import AttemptUsage
 
@@ -114,6 +115,7 @@ def _run_one(
     sandbox: Any,
     repo_files: list[str],
     max_turns: int,
+    cancel: threading.Event | None = None,
 ) -> tuple[ExplorerResult, list[AttemptUsage]]:
     from openshard.osn.model_provider import IterativeModelProvider
     from openshard.policy.file_mutation import FileMutationGate
@@ -137,10 +139,12 @@ def _run_one(
         repo_root=repo_root, sandbox=sandbox, task=worker_task, attempt=0, provider=turn_provider,
         gate=FileMutationGate(), verify=_no_verification, budget=None, previous_failure=None, blocked_seen=[],
         changed_so_far=[], max_turns=max_turns, max_verifications=0, role=ROLE_EXPLORER,
-        model_label=lambda: model, repo_files=repo_files, read_only=True,
+        model_label=lambda: model, repo_files=repo_files, read_only=True, cancel=cancel,
     )
     summary = _usage_summary(turn_provider.usage)
-    if outcome.stop == "provider_error" or outcome.stop == "malformed_reply":
+    if outcome.stop == STOP_CANCELLED:
+        status, reason = "failed", "cancelled"
+    elif outcome.stop == "provider_error" or outcome.stop == "malformed_reply":
         status, reason = "failed", f"{outcome.stop}:{outcome.error_class}"
     elif outcome.findings:
         status, reason = "answered", None
@@ -170,6 +174,7 @@ def run_explorers(
     budget: Any | None = None,
     max_workers: int = MAX_WORKERS,
     max_turns: int = EXPLORER_MAX_TURNS,
+    cancel: threading.Event | None = None,
 ) -> tuple[list[ExplorerResult], list[AttemptUsage]]:
     """Answer *questions* with bounded read-only workers, at most *max_workers* at once.
 
@@ -186,11 +191,13 @@ def run_explorers(
     workers = max(1, min(int(max_workers), MAX_WORKERS, len(questions)))
     results: list[ExplorerResult] = []
     usage: list[AttemptUsage] = []
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="osn-explorer") as pool:
+    cancel = cancel if cancel is not None else threading.Event()
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="osn-explorer")
+    try:
         futures = [
             pool.submit(
                 _run_one, i, q, provider=provider, model=model, task=task, repo_root=repo_root,
-                sandbox=sandbox, repo_files=repo_files, max_turns=max_turns,
+                sandbox=sandbox, repo_files=repo_files, max_turns=max_turns, cancel=cancel,
             )
             for i, q in enumerate(questions)
         ]
@@ -204,6 +211,13 @@ def run_explorers(
                 ), []
             results.append(result)
             usage.extend(worker_usage)
+    except BaseException:
+        # Ctrl-C: no explorer starts another turn, queued ones never start, and the
+        # interrupt reaches the caller now.
+        cancel.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
     if budget is not None:
         for u in usage:
             budget.record_model_call(u.cost_usd)

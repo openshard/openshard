@@ -12,6 +12,13 @@ All notable changes to OpenShard are documented here.
   policy)`. The run entry records it under `osn_loop.repository` (applied,
   files applied and skipped, how) and the local projection keeps counts only.
   Older Receipts without the record say nothing rather than guess.
+- Ctrl-C during an OSN run with parallel workers, candidates or explorers
+  now stops them: no worker starts another turn once the run is cancelled
+  (its model call in flight finishes, nothing else starts), queued workers
+  never start, and the interrupt reaches the run at once so the checkpoint is
+  marked interrupted, instead of waiting for every worker to finish. A
+  cancelled worker is recorded as `failed` / `cancelled` and the progress
+  stream carries a `cancelled` event naming the worker and turn.
 - `openshard osn diff <osn-id>`: the unified diff a completed run's verified
   result would make against the repository as it is now, read-only, before
   `osn apply`; it names why a result is no longer applicable (HEAD moved, a

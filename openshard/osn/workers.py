@@ -23,13 +23,14 @@ import fnmatch
 import hashlib
 import shutil
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from openshard.osn.agent_loop import run_attempt_turns
+from openshard.osn.agent_loop import STOP_CANCELLED, run_attempt_turns
 from openshard.osn.decompose import Subtask
 from openshard.osn.model_provider import AGENT_SYSTEM_PROMPT, AttemptUsage, IterativeModelProvider
 from openshard.policy.decision import PolicyDecision, make_deny
@@ -236,6 +237,7 @@ def _run_one(
     blocked_write_patterns: tuple[str, ...],
     approval_write_patterns: tuple[str, ...],
     progress: Any,
+    cancel: threading.Event | None = None,
 ) -> tuple[WorkerResult, list[AttemptUsage]]:
     started = time.monotonic()
     sandbox = Path(tempfile.mkdtemp(prefix=f"osn-worker-{spec.worker_id}-")) / "work"
@@ -262,9 +264,12 @@ def _run_one(
         progress=_worker_progress(progress, spec),
         role=ROLE_WORKER, model_label=lambda: spec.model, repo_files=repo_files,
         blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
+        cancel=cancel,
     )
     summary = _usage_summary(turn_provider.usage)
-    if outcome.stop == "policy_block":
+    if outcome.stop == STOP_CANCELLED:
+        status, reason = STATUS_FAILED, "cancelled"
+    elif outcome.stop == "policy_block":
         status, reason = STATUS_BLOCKED, "write_outside_scope_or_policy"
     elif outcome.stop in ("provider_error", "malformed_reply", "budget"):
         status, reason = STATUS_FAILED, f"{outcome.stop}:{outcome.error_class or ''}".rstrip(":")
@@ -319,6 +324,7 @@ def run_workers(
     blocked_write_patterns: tuple[str, ...] = (),
     approval_write_patterns: tuple[str, ...] = (),
     progress: Any = None,
+    cancel: threading.Event | None = None,
 ) -> tuple[list[WorkerResult], list[AttemptUsage]]:
     """Run *specs* concurrently (at most *max_workers* at once), each in its own copy of *base_sandbox*.
 
@@ -335,12 +341,14 @@ def run_workers(
     workers = max(1, min(int(max_workers), HARD_MAX_WORKERS, len(specs)))
     results: list[WorkerResult] = []
     usage: list[AttemptUsage] = []
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="osn-worker") as pool:
+    cancel = cancel if cancel is not None else threading.Event()
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="osn-worker")
+    try:
         futures = [
             pool.submit(
                 _run_one, spec, provider=provider, task=task, plan=plan, repo_root=repo_root,
                 base_sandbox=base_sandbox, verify=verify, blocked_write_patterns=blocked_write_patterns,
-                approval_write_patterns=approval_write_patterns, progress=progress,
+                approval_write_patterns=approval_write_patterns, progress=progress, cancel=cancel,
             )
             for spec in specs
         ]
@@ -355,6 +363,14 @@ def run_workers(
                 ), []
             results.append(result)
             usage.extend(worker_usage)
+    except BaseException:
+        # Ctrl-C (or a worker re-raising it): no worker starts another turn, queued
+        # workers never start, and the interrupt reaches the caller now instead of
+        # after every in-flight model call has returned.
+        cancel.set()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
     if budget is not None:
         for u in usage:
             budget.record_model_call(u.cost_usd)
