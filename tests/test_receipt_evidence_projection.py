@@ -217,6 +217,8 @@ class TestBaseCommitAndContentHash:
         assert ev.base_commit_value({"git_head_commit_hash": "not-a-sha"}) is None
         assert ev.base_commit_value({"git_head_commit_hash": "abc"}) is None
         assert ev.base_commit_value({"git_head_commit_hash": 12345678}) is None
+        # An import's stored commit is the one its session produced, never its base.
+        assert ev.base_commit_value({"executor": "codex_history_import", "git_head_commit_hash": SHA}) is None
         assert ev.content_hash_value({"content_hash": "sha256:short"}) is None
         assert ev.content_hash_value({"content_hash": "a" * 64}) is None
 

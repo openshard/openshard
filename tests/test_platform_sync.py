@@ -230,6 +230,12 @@ class TestEnvelope:
         assert verification["status"] in ("passed", "failed", "partial", "not_run", "unknown")
         assert {"source", "checks_attempted", "checks_passed", "checks_failed", "complete",
                 "incomplete_reasons"} <= set(verification)
+        # External-agent observation is never presented as OpenShard control or execution.
+        assert receipt["origin"] == "external_observed"
+        assert verification["observation_mode"] != "openshard_executed"
+        for key in ("policy_decisions", "permissions", "approval_detail", "sandbox_detail", "execution_loop",
+                    "agent_budgets", "adaptive_routing", "supervisor_routing", "organisation_policy"):
+            assert receipt[key] is None, key
         blob = json.dumps(doc)
         assert "user:token" not in blob and str(repo) not in blob
         assert not (FORBIDDEN_KEYS & set(receipt))
