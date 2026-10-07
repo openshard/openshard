@@ -41,6 +41,90 @@ def _split_command(text: str) -> list[str]:
     return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p for p in parts]
 
 
+VERIFY_SOURCE_USER = "user"
+VERIFY_SOURCE_CONFIG = "config"
+VERIFY_SOURCE_DETECTED = "detected"
+VERIFY_SOURCE_TEXT = {
+    VERIFY_SOURCE_USER: "given with --verify-cmd",
+    VERIFY_SOURCE_CONFIG: "the repository's verification contract in .openshard/config.yml",
+    VERIFY_SOURCE_DETECTED: "detected from the repository; pass --verify-cmd to override",
+}
+
+
+def _resolve_verify_argv(verify_cmd: str | None, repo_root: Path) -> tuple[list[str], str]:
+    """The command OpenShard will run to verify the result, and where it came from.
+
+    Precedence: ``--verify-cmd`` (the user's explicit authority), then the
+    repository's verification contract (``verification_commands`` /
+    ``verification_command`` in ``.openshard/config.yml``; the first command,
+    as the post-session path plans it), then the test command OpenShard
+    detects for the repository. A detected or configured command must pass
+    the command-safety classifier; one that needs approval or is blocked is
+    not run silently on the user's behalf. With nothing known the run refuses
+    to start: OSN never calls work verified without a check it ran itself.
+    """
+    from openshard.verification.plan import (
+        CommandSafety,
+        VerificationSource,
+        classify_command_safety,
+    )
+
+    if verify_cmd is not None:
+        argv = _split_command(verify_cmd)
+        if not argv:
+            raise click.UsageError("--verify-cmd must not be empty")
+        source = VERIFY_SOURCE_USER
+    else:
+        argv, source = _contract_or_detected_verify(repo_root)
+        if not argv:
+            raise click.UsageError(
+                "No verification command is known for this repository. Pass --verify-cmd \"<command>\", or set "
+                "verification_commands in .openshard/config.yml. OSN never reports work verified without a "
+                "check it ran itself."
+            )
+        safety, reason = classify_command_safety(argv, VerificationSource(source))
+        if safety != CommandSafety.safe:
+            raise click.UsageError(
+                f"The {source} verification command {_verify_label(argv)!r} is not run on your behalf "
+                f"({safety.value}: {reason}). Pass it explicitly with --verify-cmd if you want it."
+            )
+    if argv[0] in ("python", "python3"):
+        # Run the verifier with the interpreter OpenShard itself runs under; a
+        # bare "python" can resolve to a different environment (e.g. one
+        # without the project's test dependencies) and fail for the wrong reason.
+        argv[0] = sys.executable
+    return argv, source
+
+
+def _contract_or_detected_verify(repo_root: Path) -> tuple[list[str], str]:
+    from openshard.config.settings import load_config_safe
+    from openshard.verification.post_session import _contract_argvs
+
+    repo_config, config_valid, _path = load_config_safe(cwd=repo_root)
+    if config_valid:
+        contract = _contract_argvs(repo_config or {})
+        if contract:
+            return list(contract[0]), VERIFY_SOURCE_CONFIG
+    try:
+        from openshard.analysis.repo import analyze_repo
+        from openshard.verification.plan import parse_command_to_argv
+
+        detected = analyze_repo(repo_root).test_command
+    except Exception:
+        detected = None
+    if detected:
+        return parse_command_to_argv(detected), VERIFY_SOURCE_DETECTED
+    return [], VERIFY_SOURCE_DETECTED
+
+
+def _verify_label(argv: list[str]) -> str:
+    """The command as shown to the user: the interpreter shortened to 'python', never a secret-like token."""
+    shown = list(argv)
+    if shown and shown[0] == sys.executable:
+        shown[0] = "python"
+    return " ".join(shown)
+
+
 def _friendly_model(model: str | None) -> str:
     if not model:
         return "unknown model"
@@ -324,8 +408,11 @@ def _resolve_provider(name: str | None, model: str):
 
 @osn_group.command("run")
 @click.argument("task")
-@click.option("--verify-cmd", required=True,
-              help="Command OpenShard runs itself to verify the result (exit 0 = pass), e.g. \"pytest -q tests/test_x.py\". A leading python/python3 runs under the interpreter OpenShard uses.")
+@click.option("--verify-cmd", default=None,
+              help="Command OpenShard runs itself to verify the result (exit 0 = pass), e.g. \"pytest -q tests/test_x.py\". "
+                   "A leading python/python3 runs under the interpreter OpenShard uses. Without it, the repository's "
+                   "verification contract (`verification_commands` in .openshard/config.yml) is used, else the test "
+                   "command OpenShard detects for the repository; the run refuses to start when none is known.")
 @click.option("--model", default=None, help="Model for the first attempt (default: existing keyword routing).")
 @click.option("--escalate-model", "escalate", multiple=True,
               help="Model for later attempts, in order. Used only after a verification failure.")
@@ -402,14 +489,9 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
                 click.echo(f"  Branch  {git.branch}")
         except Exception:
             click.echo(f"  Repo    {repo_root.name}")
-    argv = _split_command(verify_cmd)
-    if not argv:
-        raise click.UsageError("--verify-cmd must not be empty")
-    if argv[0] in ("python", "python3"):
-        # Run the verifier with the interpreter OpenShard itself runs under; a
-        # bare "python" can resolve to a different environment (e.g. one
-        # without the project's test dependencies) and fail for the wrong reason.
-        argv[0] = sys.executable
+    argv, verify_source = _resolve_verify_argv(verify_cmd, repo_root)
+    if not as_json:
+        click.echo(f"  Verify  {_verify_label(argv)} ({VERIFY_SOURCE_TEXT[verify_source]})")
     if promote and Path.cwd().resolve() != repo_root:
         raise click.ClickException("Run from the repository root to use --promote.")
     for rel in context_files:
@@ -420,6 +502,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     if resume_from:
         prior_checkpoint = _load_resumable_checkpoint(repo_root, resume_from)
         argv = list(prior_checkpoint.verify_argv)  # the run's own command, never a new one
+        verify_source = (prior_checkpoint.args or {}).get("verify_source") or verify_source
     # The checkpoint's own id: never a task id (those are minted only by `openshard task new`).
     checkpoint_id = prior_checkpoint.run_id if prior_checkpoint else f"osn-{uuid.uuid4().hex[:12]}"
 
@@ -509,7 +592,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "loop_mode": loop_mode, "max_turns": max_turns, "roles_mode": roles_mode,
             "planner_model": planner_model, "verifier_model": verifier_model,
             "topology_request": topology_request, "max_workers": max_workers, "explore": explore,
-            "no_learning": no_learning,
+            "no_learning": no_learning, "verify_source": verify_source,
         },
         repo=ckpt.repo_fingerprint(repo_root), models=list(models), routing_record=routing.record,
     )
@@ -723,6 +806,10 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             if commit_result and promoted:
                 commit_record = _commit_promoted(repo_root, promoted, task, entry)
                 _attach_commit(entry, commit_record)
+    # Where the verification command came from: the user's flag, the repository's
+    # contract, or OpenShard's detection. The Receipt names the source so a
+    # reader knows whether a human chose the check.
+    entry["osn_loop"]["verification_command"] = {"label": _verify_label(argv), "source": verify_source}
     if prior_checkpoint is not None:
         prior_costs = [u.cost_usd for u in prior_usage]
         entry["osn_loop"]["resumed"] = {
