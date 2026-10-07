@@ -6,6 +6,12 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- The OSN Receipt says where the changed files were when it was written:
+  `Files modified N` now carries `in an isolated copy · not applied when this
+  Receipt was written` or `applied to the repository (· N skipped by
+  policy)`. The run entry records it under `osn_loop.repository` (applied,
+  files applied and skipped, how) and the local projection keeps counts only.
+  Older Receipts without the record say nothing rather than guess.
 - `openshard osn diff <osn-id>`: the unified diff a completed run's verified
   result would make against the repository as it is now, read-only, before
   `osn apply`; it names why a result is no longer applicable (HEAD moved, a

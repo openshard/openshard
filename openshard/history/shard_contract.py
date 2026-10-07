@@ -2098,6 +2098,22 @@ def _osn_checks_display(receipt: ShardReceipt, loop: dict) -> str:
     return checks_label(receipt)
 
 
+def _osn_repository_state_line(raw: object, files_changed: int) -> str | None:
+    """Where the changed files were when the Receipt was written: the isolated copy, or the repository.
+
+    Only for runs that recorded it; older Receipts say nothing rather than guess.
+    """
+    if not isinstance(raw, dict) or "applied" not in raw or not files_changed:
+        return None
+    if raw.get("applied"):
+        skipped = raw.get("files_skipped") or 0
+        text = "applied to the repository"
+        if isinstance(skipped, int) and skipped > 0:
+            text += f" · {skipped} skipped by policy"
+        return text
+    return "in an isolated copy · not applied when this Receipt was written"
+
+
 def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
     """Routing-first OSN Receipt based on the canonical Receipt design."""
     evidence = receipt.recorded_evidence or {}
@@ -2163,6 +2179,9 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
         lines.append(f"{_INDENT}  ↳ " + " · ".join(receipt.files_touched[:5]))
     _agent_loop_raw = evidence.get("agent_loop")
     _agent_loop: dict = _agent_loop_raw if isinstance(_agent_loop_raw, dict) else {}
+    _repo_state = _osn_repository_state_line(_agent_loop.get("repository"), receipt.files_changed)
+    if _repo_state:
+        lines.append(f"{_INDENT}  ↳ {_repo_state}")
     _acts = _agent_loop.get("action_summary")
     if isinstance(_acts, dict) and _acts:
         _turns = _agent_loop.get("turns_total")
