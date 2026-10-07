@@ -79,9 +79,6 @@ _STAGE_DISPLAY_LABELS: dict[str, str] = {
 _MODEL_FRIENDLY_NAMES: dict[str, str] = {
     "deepseek/deepseek-v4-pro": "DeepSeek V4 Pro",
     "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
-    "deepseek/deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
-    "z-ai/glm-5.3": "GLM-5.3",
-    "z-ai/glm-5.3-flash": "GLM-5.3 Flash",
     "anthropic/claude-sonnet-4.6": "Claude Sonnet 4.6",
     "anthropic/claude-sonnet-4-6": "Claude Sonnet 4.6",
     "anthropic/claude-opus-4.7": "Claude Opus 4.7",
@@ -436,7 +433,7 @@ def _format_model_slug_shard(name: str) -> str:
         elif part[0].isdigit():
             tagged.append(("version", part))
         else:
-            tagged.append(("word", part.capitalize()))
+            tagged.append(("word", "DeepSeek" if lower == "deepseek" else part.capitalize()))
     def _digit(j: int) -> bool:
         return tagged[j][0] == "version" and len(tagged[j][1]) == 1 and tagged[j][1].isdigit()
 
