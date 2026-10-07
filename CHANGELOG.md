@@ -6,6 +6,13 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- `openshard osn run --json-events` (and `osn resume --json-events`): the
+  run's progress events as NDJSON on stdout, one `{"event", "seq",
+  "elapsed_s", "data"}` object per line as they happen, ending with
+  `{"event": "result", "data": <the --json object>}`; a Ctrl-C ends the stream
+  with an `interrupted` event naming the run to resume. It is the same engine
+  callback the terminal renderer consumes, never prompts, and writes nothing
+  else to stdout. `--json` and text output are unchanged.
 - `openshard osn apply <osn-id> [--commit] [--yes] [--json]`: put a completed
   run's verified result into the repository later, without re-running the
   model. A verified run that was not promoted keeps exactly the bytes

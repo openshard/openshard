@@ -57,6 +57,14 @@ the run id for `osn resume`. Lines from parallel workers or candidates are prefi
 worker id (`[worker-1]`) because they run concurrently. `--json` prints one final object and no
 progress lines.
 
+`--json-events` is the same stream for programs: one JSON object per progress event on stdout
+as the run goes (`{"event", "seq", "elapsed_s", "data"}`; worker events carry `worker_id` /
+`subtask_id` in `data`), ending with `{"event": "result", "data": <the --json object>}`. Nothing
+else is written to stdout, so a line-by-line reader is enough; a Ctrl-C ends the stream with an
+`interrupted` event naming the run to resume. Like `--json` it never prompts (policy `ask` paths
+are refused). `osn resume --json-events` streams the same way. The terminal renderer and the
+stream consume the same engine callback, so they cannot show different stories.
+
 ## Roles: planner, executor, verifier
 
 `--roles auto` (default) can put three roles on one run; each is recorded with its own model,
