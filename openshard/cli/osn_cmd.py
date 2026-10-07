@@ -1141,6 +1141,36 @@ def _budget_line(record: dict | None) -> str | None:
 _COMMIT_TITLE_CAP = 72
 
 
+def _commit_title(task: str, entry: dict) -> str:
+    """A commit title from what the run recorded: the executor's final note, else the plan summary,
+    else the task's first sentence, cut at a word boundary."""
+    loop = entry.get("osn_loop") if isinstance(entry.get("osn_loop"), dict) else {}
+    candidates: list[str] = []
+    for attempt in reversed(loop.get("attempts") or []):
+        note = attempt.get("final_note") if isinstance(attempt, dict) else None
+        if isinstance(note, str) and note.strip():
+            candidates.append(note)
+            break
+    plan = loop.get("plan") if isinstance(loop.get("plan"), dict) else {}
+    if isinstance(plan.get("summary"), str) and plan["summary"].strip():
+        candidates.append(plan["summary"])
+    candidates.append(task)
+    for text in candidates:
+        clean = " ".join(text.split())
+        first = clean.split(". ")[0].rstrip(".")
+        if len(first) <= _COMMIT_TITLE_CAP and first:
+            return first
+        words = first.split()
+        out: list[str] = []
+        for w in words:
+            if len(" ".join([*out, w])) > _COMMIT_TITLE_CAP - 1:
+                break
+            out.append(w)
+        if out:
+            return " ".join(out).rstrip(",;:(`'\"") + "…"
+    return "OSN change"
+
+
 def _commit_promoted(repo_root: Path, files: list[str], task: str, entry: dict) -> dict:
     """Commit exactly the promoted *files* on the current branch. Never raises.
 
@@ -1151,9 +1181,13 @@ def _commit_promoted(repo_root: Path, files: list[str], task: str, entry: dict) 
     """
     from openshard.util.git import run_git
 
-    title = " ".join(task.split())[:_COMMIT_TITLE_CAP].rstrip(" .") or "OSN change"
+    title = _commit_title(task, entry)
     receipt_id = entry.get("receipt_id") or ""
-    message = f"{title}\n\nMade by Openshard Native (OSN) from an isolated, verified copy.\nReceipt: {receipt_id}\n"
+    task_text = " ".join(task.split())
+    message = (
+        f"{title}\n\nTask: {task_text}\n\n"
+        f"Made by Openshard Native (OSN) from an isolated, verified copy.\nReceipt: {receipt_id}\n"
+    )
     branch = (run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip() or None
     record: dict = {"sha": None, "branch": branch, "files": list(files), "reason": None}
     if run_git(repo_root, ["add", "--", *files]) is None:

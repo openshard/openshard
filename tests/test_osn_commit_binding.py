@@ -120,6 +120,19 @@ def test_commit_is_not_bound_when_the_tree_is_dirty_and_says_so(tmp_path, monkey
     assert ev.commit_value(entry) == body["commit"]["sha"]  # the commit is real; only the binding is withheld
 
 
+def test_commit_title_prefers_what_the_run_recorded_and_stays_short():
+    from openshard.cli.osn_cmd import _commit_title
+
+    long_task = "In openshard/osn/run_entry.py, build_osn_run_entry mints shard_id with `_make_shard_id(entry['timestamp'], None)`, so every Receipt gets 0001. Fix it."
+    entry = {"osn_loop": {"attempts": [{"final_note": "Implemented OSN shard ids from the receipt count."}],
+                          "plan": {"summary": "Add run_index to the OSN entry builder"}}}
+    assert _commit_title(long_task, entry) == "Implemented OSN shard ids from the receipt count"
+    assert _commit_title(long_task, {"osn_loop": {"attempts": [], "plan": {"summary": "Add run_index to the OSN entry builder"}}}) == "Add run_index to the OSN entry builder"
+    title = _commit_title(long_task, {})
+    assert len(title) <= 72 and title.endswith("…") and not title.rstrip("…").endswith("`")
+    assert _commit_title("make out ok", {}) == "make out ok"
+
+
 def test_commit_requires_promote_and_a_failed_run_commits_nothing(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     r = _run(monkeypatch, repo, FakeProvider([json.dumps({"writes": [{"path": "out.txt", "content": "ok"}]})]),
