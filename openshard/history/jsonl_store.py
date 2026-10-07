@@ -407,6 +407,37 @@ def append_jsonl(path: Path, record: dict) -> None:
 
 
 @_learning_update
+def append_jsonl_with(path: Path, build: Callable[[list[str]], dict]) -> dict:
+    """Append the record ``build(existing_lines)`` returns, deciding it under the lock.
+
+    For writers whose record depends on what the file already holds (e.g. a
+    position-derived identity that must not collide with a record another
+    process appended a moment earlier): the read, ``build`` and the append are
+    one critical section under the same sidecar lock as :func:`append_jsonl`.
+    ``build`` receives the raw existing lines (possibly blank or malformed),
+    must return a JSON-serializable dict, runs under the lock (keep it cheap)
+    and must never re-enter this module on the same *path*. Returns the record
+    as written.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _file_lock(_lock_path_for(path)):
+        existing: list[str] = []
+        if path.exists():
+            with path.open("r", encoding="utf-8") as fh:
+                existing = fh.read().splitlines(keepends=True)
+        record = build(existing)
+        line = json.dumps(record) + "\n"
+        with path.open("a", encoding="utf-8") as fh:
+            if existing and not existing[-1].endswith("\n"):
+                fh.write("\n")
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return record
+
+
+@_learning_update
 def write_jsonl(path: Path, records: list[dict]) -> None:
     """Crash-safe locked whole-file rewrite of *path* with *records*.
 

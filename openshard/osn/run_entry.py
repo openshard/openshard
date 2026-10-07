@@ -11,6 +11,7 @@ beside the model actually executed, ``applied`` when (behind the
 """
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -479,6 +480,40 @@ def _shadow_provenance(
         return decision.to_provenance(record_mode="shadow", executed_model=executed_model)
     except Exception:
         return None
+
+
+def assign_history_shard_id(entry: dict, existing_lines: list[str]) -> dict:
+    """Final ``shard_id`` for an OSN entry about to be appended after *existing_lines*.
+
+    ``shard_id`` is the history-position identity (``shard-YYYYMMDD-NNNN``, see
+    ``history/receipt_identity.py``): the same ``_make_shard_id(timestamp,
+    run_index)`` minting every other writer uses, with the line count as the
+    index. Called under the runs.jsonl lock (``append_jsonl_with``) so two OSN
+    processes cannot both read the same count, and bumped past any id a
+    remaining record already holds (history deleted or rewritten). Returns a
+    new entry whose ``content_hash`` is stamped last, over the record as it
+    will be written.
+    """
+    from openshard.history.shard_contract import _make_shard_id
+    from openshard.history.shard_hash import SHARD_HASH_FIELD, compute_shard_hash
+
+    taken: set[str] = set()
+    for raw in existing_lines:
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("shard_id"), str):
+            taken.add(parsed["shard_id"])
+    index = len(existing_lines)
+    shard_id = _make_shard_id(entry["timestamp"], index)
+    while shard_id in taken:
+        index += 1
+        shard_id = _make_shard_id(entry["timestamp"], index)
+    final = {k: v for k, v in entry.items() if k != SHARD_HASH_FIELD}
+    final["shard_id"] = shard_id
+    final[SHARD_HASH_FIELD] = compute_shard_hash(final)
+    return final
 
 
 def build_osn_run_entry(

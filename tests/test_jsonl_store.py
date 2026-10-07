@@ -18,6 +18,7 @@ from openshard.history.jsonl_store import (
     _intra_process_lock,
     _lock_path_for,
     append_jsonl,
+    append_jsonl_with,
     history_file_lock,
     upsert_jsonl,
     write_jsonl,
@@ -315,3 +316,26 @@ def test_history_file_lock_and_upsert_jsonl_accept_timeout_kwarg(tmp_path: Path)
     # Contention gone: the same calls now succeed normally.
     upsert_jsonl(path, {"n": 1}, lambda e: True, timeout=5.0)
     assert [json.loads(ln) for ln in _read_lines(path)] == [{"n": 1}]
+
+
+def test_append_jsonl_with_decides_under_the_lock(tmp_path: Path) -> None:
+    """A record derived from the file's current length never collides across threads."""
+    path = tmp_path / "runs.jsonl"
+
+    def worker(_: int) -> None:
+        for _i in range(20):
+            append_jsonl_with(path, lambda lines: {"position": len(lines)})
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(worker, range(8)))
+
+    positions = [json.loads(ln)["position"] for ln in _read_lines(path)]
+    assert positions == list(range(160))
+
+
+def test_append_jsonl_with_returns_the_record_and_repairs_a_missing_newline(tmp_path: Path) -> None:
+    path = tmp_path / "runs.jsonl"
+    path.write_text('{"a": 1}', encoding="utf-8")  # no trailing newline
+    written = append_jsonl_with(path, lambda lines: {"seen": len(lines)})
+    assert written == {"seen": 1}
+    assert [json.loads(ln) for ln in _read_lines(path)] == [{"a": 1}, {"seen": 1}]
