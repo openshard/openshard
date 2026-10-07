@@ -146,7 +146,9 @@ def build_agent_graph(loop: dict[str, Any]) -> dict[str, Any] | None:
         "models_distinct": models,
         "nodes": nodes,
         "edges": edges,
-        "cost_usd": sum(c for c in costs if c is not None) if costs and all(c is not None for c in costs) else None,
+        # Rounded like every other recorded cost: a plain float sum differs by
+        # Python version (3.12 compensates, 3.11 does not) and the total is evidence.
+        "cost_usd": round(sum(c for c in costs if c is not None), 6) if costs and all(c is not None for c in costs) else None,
         "evidence": {"graph": "derived_from_recorded_roles", "costs": "provider_usage_per_call",
                      "verification": "openshard_observed"},
     }
