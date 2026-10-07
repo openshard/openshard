@@ -51,6 +51,7 @@ from openshard.osn.actions import (
     KIND_RUN_VERIFICATION,
     KIND_SEARCH_REPO,
     KIND_WRITE_FILE,
+    ActionParseError,
     ActionRecord,
     AgentAction,
     TurnResult,
@@ -85,6 +86,9 @@ STOP_VERIFIER_TAINTED = "verifier_modified_files"
 STOP_VERIFIER_TIMEOUT = "verifier_timeout"
 STOP_VERIFIER_SETUP = "verifier_setup_failed"
 STOP_POLICY_BLOCK = "policy_block"  # a write was refused by path safety or policy
+# The model's reply was not a usable action list even after the re-ask. The
+# attempt ends here; what was written is verified like any other attempt.
+STOP_MALFORMED_REPLY = "malformed_reply"
 
 ERROR_UNSAFE_PATH = "unsafe_path"
 ERROR_PROTECTED_PATH = "protected_path"
@@ -316,6 +320,15 @@ def run_attempt_turns(
             result = provider.turn(state)
         except BudgetExhausted as exc:
             out.stop, out.budget_stop = STOP_BUDGET, exc
+            return out
+        except ActionParseError as exc:
+            # A model that stops speaking the contract is a model problem, not a
+            # provider failure: the attempt ends and its writes face verification.
+            out.model_calls += 1
+            out.stop = STOP_MALFORMED_REPLY
+            out.error_class = type(exc).__name__
+            out.error_message = str(exc)[:180]
+            _emit(progress, "malformed_reply", attempt=attempt, turn=turn, role=role, message=out.error_message)
             return out
         except Exception as exc:  # provider failure: recorded, never raised into the loop
             from openshard.safety.sanitize import sanitize_text
@@ -600,6 +613,7 @@ __all__ = [
     "ROLE_EXECUTOR",
     "STOP_BUDGET",
     "STOP_FINISHED",
+    "STOP_MALFORMED_REPLY",
     "STOP_MAX_TURNS",
     "STOP_POLICY_BLOCK",
     "STOP_PROVIDER_ERROR",

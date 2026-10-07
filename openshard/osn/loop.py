@@ -38,6 +38,7 @@ from openshard.osn.agent_loop import (
     DEFAULT_MAX_TURNS,
     DEFAULT_MAX_VERIFICATIONS,
     STOP_BUDGET,
+    STOP_MALFORMED_REPLY,
     STOP_POLICY_BLOCK,
     STOP_PROVIDER_ERROR,
     STOP_VERIFIER_SETUP,
@@ -536,6 +537,11 @@ def run_bounded_loop(
             blocked_seen.extend(p for p in outcome.blocked if p not in blocked_seen)
             if outcome.model_calls:
                 _settle_supervision(None)  # the recommended model was called
+            # A verification the model requested on exactly the files the attempt
+            # ends with is evidence OpenShard observed; it is kept on the attempt
+            # even when the attempt ends early, never replaced by "not run".
+            if outcome.verification is not None and outcome.verification_state == state_fingerprint(sandbox, changed):
+                rec.verification = outcome.verification
             if outcome.stop == STOP_PROVIDER_ERROR:
                 _settle_supervision("run_ended_before_retry")
                 rec.error_class, rec.error_message = outcome.error_class, outcome.error_message
@@ -545,6 +551,16 @@ def run_bounded_loop(
                     error_class=outcome.error_class, message=outcome.error_message,
                 )
                 return _receipt("error", "provider_error")
+            if outcome.stop == STOP_MALFORMED_REPLY:
+                rec.error_class, rec.error_message = outcome.error_class, outcome.error_message
+                if not outcome.applied:
+                    # Nothing was written and the model stopped speaking the contract:
+                    # the same outcome as a bad one-shot reply.
+                    _settle_supervision("run_ended_before_retry")
+                    rec.policy = {**rec.policy, "provider_error": outcome.error_class}
+                    return _receipt("error", "provider_error")
+                # Writes exist: they face verification like any other attempt, and a
+                # failure can still be retried or escalated.
             if outcome.stop == STOP_BUDGET and outcome.budget_stop is not None:
                 _settle_supervision("run_ended_before_retry")
                 rec.policy = {**rec.policy, "budget_stop": outcome.budget_stop.stop_reason}

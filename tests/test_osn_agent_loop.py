@@ -310,6 +310,58 @@ class TestIterativeAttempt:
         rec = run_bounded_loop(repo, TASK, model, CHECK, max_attempts=3)
         assert rec.stop_reason == "no_progress_identical_actions" and len(rec.attempts) == 2
 
+    def test_malformed_reply_after_writes_ends_the_attempt_and_verification_still_runs(self, repo):
+        """A model that stops speaking the contract mid-attempt: its writes are verified, the ladder can act."""
+        from openshard.osn.actions import ActionParseError
+
+        class Flaky:
+            def __init__(self):
+                self.n = 0
+
+            def turn(self, state):
+                self.n += 1
+                if self.n == 1:
+                    return parse_turn(_turn(_a("write_file", path="src/app.txt", content="nope")))
+                if self.n == 2:
+                    raise ActionParseError("reply is not valid JSON")
+                return parse_turn(_turn(_a("write_file", path="src/app.txt", content="ok"), _a("finish")))
+
+        model = Flaky()
+        rec = run_bounded_loop(repo, TASK, model, CHECK, max_attempts=2)
+        assert rec.status == "verified" and [a.n for a in rec.attempts] == [1, 2]
+        first = rec.attempts[0]
+        assert first.turn_stop == "malformed_reply" and first.error_class == "ActionParseError"
+        assert first.verification is not None and first.verification.passed is False  # observed, not "not run"
+        assert first.applied == ["src/app.txt"]
+
+    def test_malformed_reply_without_writes_is_an_error_not_a_pass(self, repo):
+        from openshard.osn.actions import ActionParseError
+
+        class Mute:
+            def turn(self, state):
+                raise ActionParseError("reply is not valid JSON")
+
+        rec = run_bounded_loop(repo, TASK, Mute(), CHECK, max_attempts=2)
+        assert rec.status == "error" and rec.stop_reason == "provider_error"
+        assert rec.attempts[0].error_class == "ActionParseError" and rec.verification_state == "not_run"
+
+    def test_in_turn_verification_is_kept_when_the_provider_fails_afterwards(self, repo):
+        class Dies:
+            def __init__(self):
+                self.n = 0
+
+            def turn(self, state):
+                self.n += 1
+                if self.n == 1:
+                    return parse_turn(_turn(_a("write_file", path="src/app.txt", content="nope"), _a("run_verification")))
+                raise RuntimeError("provider gone")
+
+        rec = run_bounded_loop(repo, TASK, Dies(), CHECK, max_attempts=1)
+        assert rec.status == "error" and rec.stop_reason == "provider_error"
+        v = rec.attempts[0].verification
+        assert v is not None and v.passed is False and v.exit_code == 1  # OpenShard saw this; the Receipt says so
+        assert rec.verification_state == "failed"
+
     def test_provider_error_mid_attempt_is_error_not_pass(self, repo):
         class Boom:
             def turn(self, state):
