@@ -11,6 +11,7 @@ primitives; there is no second rule table.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -82,16 +83,35 @@ def _shape_problem(argv: object) -> str | None:
     return None
 
 
+_EXECUTABLE_SUFFIXES = (".exe", ".cmd", ".bat", ".com", ".ps1")
+_PYTHON_NAME_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?w?$")
+
+
+def _program_name(token: str) -> str:
+    """The program a command token names, as a prefix rule means it.
+
+    Directory, case, a Windows executable suffix (``npm.cmd``, ``git.exe``) and
+    a versioned Python interpreter name (``python3.12``, ``pythonw``) are not
+    part of the program's identity: ``python`` names all of them. Without this
+    a rule would miss the very interpreter OSN substitutes for a bare
+    ``python`` (``sys.executable``).
+    """
+    name = (min((PureWindowsPath(token).name, PurePosixPath(token).name), key=len) or token).lower()
+    for suffix in _EXECUTABLE_SUFFIXES:
+        if name.endswith(suffix) and len(name) > len(suffix):
+            name = name[: -len(suffix)]
+            break
+    return "python" if _PYTHON_NAME_RE.match(name) else name
+
+
 def _blocked_by_prefix(argv: list[str], prefixes: tuple[str, ...]) -> bool:
     if not prefixes or not argv:
         return False
-    executable = min(
-        (PureWindowsPath(argv[0]).name, PurePosixPath(argv[0]).name),
-        key=len,
-    ) or argv[0]
-    tokens = [executable.lower(), *(t.lower() for t in argv[1:])]
+    tokens = [_program_name(argv[0]), *(t.lower() for t in argv[1:])]
     for raw in prefixes:
         prefix = raw.lower().split()
+        if prefix:
+            prefix[0] = _program_name(prefix[0])
         if prefix and tokens[: len(prefix)] == prefix:
             return True
     return False
