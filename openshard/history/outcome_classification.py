@@ -418,8 +418,9 @@ def facts_from_entry(entry: object) -> ObservedFacts:
     if receipt:
         if receipt.get("granted"):
             approval = "granted"
-        elif receipt.get("outcome") == "unanswered":
-            # The writer's explicit signal: no approver existed, nobody refused.
+        elif receipt.get("outcome") in ("unanswered", "approver_error"):
+            # The writer's explicit signal: no approver existed, or the approver
+            # itself failed -- in neither case did anybody refuse.
             approval = "unavailable"
         else:
             approval = "denied"
