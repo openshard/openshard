@@ -133,6 +133,38 @@ def _friendly_model(model: str | None) -> str:
     return display_model_name(model)
 
 
+class _OsnEventStream:
+    """The same progress events as the terminal renderer, one JSON object per line on stdout.
+
+    Shape: ``{"event": <name>, "seq": <n>, "elapsed_s": <float>, "data": {...}}``;
+    the run ends with ``{"event": "result", ..., "data": <the --json object>}``.
+    Nothing else is written to stdout, so a program can read the stream line
+    by line. Events are the engine's own (``run_bounded_loop(progress=)``);
+    data from workers carries ``worker_id``. Never model reasoning.
+    """
+
+    def __init__(self) -> None:
+        self._seq = 0
+        self._t0 = time.monotonic()
+        self._lock = threading.RLock()
+
+    def _write(self, event: str, data: dict) -> None:
+        with self._lock:
+            self._seq += 1
+            line = json.dumps({"event": event, "seq": self._seq, "elapsed_s": round(time.monotonic() - self._t0, 3),
+                               "data": data}, default=str, ensure_ascii=True)
+            click.echo(line)
+
+    def __call__(self, event: str, data: dict) -> None:
+        self._write(event, dict(data))
+
+    def result(self, final: dict) -> None:
+        self._write("result", final)
+
+    def close(self) -> None:
+        return None
+
+
 class _OsnProgressRenderer:
     """Live, observable OSN progress. Shows actions and outcomes, never model reasoning."""
 
@@ -457,12 +489,18 @@ def _resolve_provider(name: str | None, model: str):
 @click.option("--no-learning", "no_learning", is_flag=True, default=False,
               help="Do not consult learning signals from this repository's prior OpenShard runs.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@click.option("--json-events", "json_events", is_flag=True, default=False,
+              help="Stream one JSON object per progress event to stdout as the run goes (NDJSON: event, seq, "
+                   "elapsed_s, data), ending with the same result object --json prints as an event named "
+                   "'result'. Like --json, never prompts.")
 @click.option("--resume-from", "resume_from", default=None, hidden=True,
               help="Internal: continue the checkpointed run with this id (use `openshard osn resume`).")
 def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_attempts, loop_mode, max_turns,
             roles_mode, planner_model, verifier_model, topology_request, max_workers, explore, task_id, promote,
-            commit_result, assume_yes, no_learning, as_json, resume_from=None):
+            commit_result, assume_yes, no_learning, as_json, resume_from=None, json_events=False):
     """Run TASK through the bounded OSN loop."""
+    machine = bool(as_json or json_events)  # no prompts, no prose on stdout
+    events = _OsnEventStream() if json_events else None
     if commit_result and not promote:
         raise click.UsageError("--commit requires --promote: only promoted files can be committed.")
     if topology_request == "single":
@@ -477,7 +515,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     from openshard.osn.run_entry import build_osn_run_entry
 
     repo_root = _repo_root(None, False)
-    if not as_json:
+    if not machine:
         click.echo("\nOpenshard Native (OSN)")
         click.echo(f"  Task    {task}")
         try:
@@ -490,7 +528,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         except Exception:
             click.echo(f"  Repo    {repo_root.name}")
     argv, verify_source = _resolve_verify_argv(verify_cmd, repo_root)
-    if not as_json:
+    if not machine:
         click.echo(f"  Verify  {_verify_label(argv)} ({VERIFY_SOURCE_TEXT[verify_source]})")
     if promote and Path.cwd().resolve() != repo_root:
         raise click.ClickException("Run from the repository root to use --promote.")
@@ -615,7 +653,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             raise click.ClickException(f"Cannot resume {prior_checkpoint.run_id}: {exc}") from None
         if ckpt.restore_budget(budget, prior_checkpoint.budget) and not as_json:
             click.echo("  Budget  counters carried over from the interrupted run")
-        if not as_json:
+        if not machine:
             click.echo(f"  Resume  {prior_checkpoint.run_id} from '{prior_checkpoint.phase}' · "
                        f"{prior_checkpoint.attempts_done} attempt(s) done · "
                        f"{len(prior_checkpoint.files)} file(s) restored · "
@@ -625,7 +663,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     if learning_for is not None:
         learning = learning_for(model)  # the first model's view: never another model's statistics
     learning_files = _learning_context_files(learning, repo_root, list(context_files))
-    if not as_json:
+    if not machine:
         click.echo(f"  Route   {' → '.join(_friendly_model(m) for m in models)}")
         if routing.applied and routing.decision is not None:
             click.echo(f"  Policy  Adaptive Routing V2 · {routing.decision.resolved_class}")
@@ -641,7 +679,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     def run_approver(rel, _decision):
         if assume_yes:
             return True, "flag_yes"
-        if as_json:
+        if machine:
             return False, "json_no_prompt"
         try:
             granted = click.confirm(f"Policy requires approval to write {rel}. Continue in the isolated workspace?", default=False)
@@ -657,11 +695,11 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         learning_context=learning.prompt_text if learning is not None else None,
         learning_context_for=(lambda m: learning_for(m).prompt_text) if learning_for is not None else None,
     )
-    if not as_json:
+    if not machine:
         click.echo(f"  Loop    {'agent (bounded turns: inspect → write → verify)' if loop_mode == 'agent' else 'one-shot writes'}")
     supervisor = _resolve_supervisor(routing, budget, action_provider, capabilities, user_ladder=list(escalate),
                                      explicit_model=explicit_model)
-    progress_renderer = _OsnProgressRenderer() if not as_json else None
+    progress_renderer = events if events is not None else (_OsnProgressRenderer() if not machine else None)
     planner_hook, verifier_hook, role_skips, role_usage = _resolve_roles(
         loop_mode=loop_mode, roles_mode=roles_mode, planner_model=planner_model, verifier_model=verifier_model,
         explore=explore, decompose=topology_request in ("auto", "parallel"),
@@ -677,7 +715,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         provider_obj=provider_obj, model_policy=model_policy, budget=budget, argv=argv, role_usage=role_usage,
         permissions=permissions, progress=progress_renderer,
     )
-    if not as_json and loop_mode == "agent":
+    if not machine and loop_mode == "agent":
         for line in _roles_preamble(role_skips, planner_hook is not None, verifier_hook is not None):
             click.echo(line)
         click.echo(f"  Topology {topology_request}" + (" (workers possible)" if workers_hook else ""))
@@ -725,6 +763,10 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         )
     except KeyboardInterrupt:
         _mark_interrupted("keyboard_interrupt")
+        if events is not None:
+            events("interrupted", {"run_id": checkpoint_id, "phase": run_checkpoint.phase,
+                                   "attempts_done": run_checkpoint.attempts_done,
+                                   "resume_with": f"openshard osn resume {checkpoint_id}"})
         if progress_renderer is not None:
             progress_renderer.close()
         click.echo(f"\nInterrupted after '{run_checkpoint.phase}' ({run_checkpoint.attempts_done} attempt(s) done). "
@@ -799,7 +841,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     commit_record: dict | None = None
     if promote:
         if receipt.status != "verified":
-            if not as_json:
+            if not machine:
                 click.echo(f"Not promoting: loop status is '{receipt.status}'.")
         else:
             promoted, skipped = _promote(repo_root, receipt, entry, assume_yes, permissions)
@@ -854,10 +896,10 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         # Re-run the run's own verification command on the committed tree and record
         # it as later evidence bound to that commit (verifications.jsonl), the same
         # path `openshard verify` uses. The Receipt itself is not modified.
-        bound_verification = _bind_verification(repo_root, entry, argv, as_json=as_json)
+        bound_verification = _bind_verification(repo_root, entry, argv, as_json=machine)
 
-    if as_json:
-        click.echo(json.dumps({
+    if machine:
+        final = {
             "status": receipt.status, "stop_reason": receipt.stop_reason,
             "verification_state": receipt.verification_state,
             "receipt_id": entry.get("receipt_id"), "task_id": entry.get("task_id"),
@@ -892,7 +934,11 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "checkpoint": {"run_id": checkpoint_id, "status": run_checkpoint.status},
             **budget_output,
             "learning": _learning_json(entry.get("learning")),
-        }, indent=2))
+        }
+        if events is not None:
+            events.result(final)
+        else:
+            click.echo(json.dumps(final, indent=2))
         return
     click.echo(f"OSN loop: {receipt.status} ({receipt.stop_reason}); verification {receipt.verification_state}")
     used = entry["osn_loop"].get("implementation_models") or []
@@ -961,7 +1007,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     receipt_id = entry.get("receipt_id")
     if receipt_id:
         click.echo(f"\nReceipt  {receipt_id} · `openshard last` shows it · run {checkpoint_id}")
-    if retained:
+    if retained and not machine:
         _offer_apply(repo_root, run_checkpoint, receipt, entry, permissions, assume_yes)
 
 
@@ -1468,8 +1514,10 @@ def _load_resumable_checkpoint(repo_root: Path, run_id: str):
 @click.option("--commit", "commit_result", is_flag=True, default=False, help="As for `osn run --commit`.")
 @click.option("--yes", "assume_yes", is_flag=True, default=False, help="Approve policy 'ask' paths without prompting.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@click.option("--json-events", "json_events", is_flag=True, default=False,
+              help="As for `osn run --json-events`: NDJSON progress events, then the result.")
 @click.pass_context
-def osn_resume(ctx, run_id, promote, commit_result, assume_yes, as_json):
+def osn_resume(ctx, run_id, promote, commit_result, assume_yes, as_json, json_events):
     """Continue an interrupted OSN run from its last checkpoint.
 
     The run continues in a fresh isolated copy with the checkpointed files, the
@@ -1494,6 +1542,7 @@ def osn_resume(ctx, run_id, promote, commit_result, assume_yes, as_json):
         max_workers=int(args.get("max_workers") or 3), explore=bool(args.get("explore", True)),
         task_id=args.get("task_id"), promote=promote, commit_result=commit_result, assume_yes=assume_yes,
         no_learning=bool(args.get("no_learning", False)), as_json=as_json, resume_from=run_id,
+        json_events=json_events,
     )
 
 
