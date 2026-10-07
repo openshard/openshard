@@ -14,6 +14,7 @@ from openshard.learning.retrieval import PROMPT_OPEN, consult
 from openshard.learning.signals import derive_signals
 from openshard.osn.loop import LoopContext, run_bounded_loop
 from openshard.osn.model_provider import (
+    AGENT_SYSTEM_PROMPT,
     LEARNING_SYSTEM_NOTE,
     SYSTEM_PROMPT,
     ModelActionProvider,
@@ -122,7 +123,8 @@ def test_second_related_run_uses_the_first_runs_evidence_end_to_end(tmp_path, mo
     assert body["learning"]["verification_influenced"] is False
 
     call = fp3.calls[0]
-    assert PROMPT_OPEN in call["prompt"] and call["system"] == SYSTEM_PROMPT + LEARNING_SYSTEM_NOTE
+    # `osn run` drives the agent loop by default; learning reaches its system prompt the same way.
+    assert PROMPT_OPEN in call["prompt"] and call["system"] == AGENT_SYSTEM_PROMPT + LEARNING_SYSTEM_NOTE
     assert call["prompt"].index("Task:\nUpdate the dashboard analytics layout") < call["prompt"].index(PROMPT_OPEN)
     assert "failed verification" in call["prompt"]
 
@@ -158,7 +160,7 @@ def test_no_learning_flag_consults_nothing_and_says_so(tmp_path, monkeypatch):
     r = _invoke(monkeypatch, repo, fp, "Update the dashboard analytics layout", "--model", "fake/b",
                 "--no-learning", "--json")
     assert r.exit_code == 0, r.output
-    assert PROMPT_OPEN not in fp.calls[0]["prompt"] and fp.calls[0]["system"] == SYSTEM_PROMPT
+    assert PROMPT_OPEN not in fp.calls[0]["prompt"] and fp.calls[0]["system"] == AGENT_SYSTEM_PROMPT
     rec = _runs(repo)[-1]["learning"]
     assert rec["consulted"] is False and rec["status"] == "disabled" and rec["used"] is False
     assert "check" in rec  # this run still leaves evidence for later learning

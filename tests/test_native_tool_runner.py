@@ -403,5 +403,65 @@ class TestNativeToolSearchEvent(unittest.TestCase):
         self.assertEqual(d["warnings"], ["truncated"])
 
 
+class TestNativeToolRunnerWriteFile(unittest.TestCase):
+    """write_file is a real, controlled tool: path-safe, policy-checked, evidence without content."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "a.py").write_bytes(b"x=1\ny=2\n")  # bytes: no newline translation on Windows
+        self.runner = NativeToolRunner(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, path, content, approved=True, runner=None):
+        return (runner or self.runner).run(
+            NativeToolCall("write_file", {"path": path, "content": content}, approved=approved)
+        )
+
+    def test_update_reports_hashes_sizes_and_line_delta_but_never_content(self):
+        import json
+
+        res = self._write("a.py", "x=1\ny=3\nz=4\n")
+        self.assertTrue(res.ok)
+        self.assertEqual(res.metadata["change_type"], "update")
+        self.assertEqual((res.metadata["lines_added"], res.metadata["lines_removed"]), (2, 1))
+        self.assertEqual((res.metadata["bytes_before"], res.metadata["bytes_after"]), (8, 12))
+        self.assertNotEqual(res.metadata["sha256_before"], res.metadata["sha256_after"])
+        self.assertNotIn("y=3", json.dumps(res.metadata) + res.output)
+        self.assertFalse(res.metadata["raw_content_stored"])
+        self.assertEqual((self.root / "a.py").read_bytes(), b"x=1\ny=3\nz=4\n")
+
+    def test_unchanged_create_and_nested_directories(self):
+        same = self._write("a.py", "x=1\ny=2\n")
+        self.assertTrue(same.ok)
+        self.assertEqual(same.metadata["change_type"], "unchanged")
+        created = self._write("new/dir/f.txt", "hi")
+        self.assertTrue(created.ok)
+        self.assertEqual(created.metadata["change_type"], "create")
+        self.assertEqual((created.metadata["lines_added"], created.metadata["lines_removed"]), (1, 0))
+        self.assertTrue((self.root / "new" / "dir" / "f.txt").exists())
+
+    def test_unapproved_unsafe_and_protected_writes_are_refused(self):
+        self.assertFalse(self._write("a.py", "x", approved=False).ok)
+        self.assertEqual((self.root / "a.py").read_bytes(), b"x=1\ny=2\n")
+        self.assertFalse(self._write("../escape.txt", "x").ok)
+        self.assertFalse((self.root.parent / "escape.txt").exists())
+        denied = self._write(".env", "S=1")  # approved, yet a built-in deny is never approved away
+        self.assertFalse(denied.ok)
+        self.assertEqual(denied.metadata["policy_decision"], "deny")
+        self.assertFalse((self.root / ".env").exists())
+        self.assertFalse(self._write("a.py", None).ok)  # type: ignore[arg-type]
+
+    def test_organisation_blocked_patterns_apply(self):
+        org = NativeToolRunner(self.root, blocked_write_patterns=("src/**",))
+        res = self._write("src/g.py", "x", runner=org)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.metadata["policy_source"], "organisation_policy")
+        self.assertFalse((self.root / "src" / "g.py").exists())
+        self.assertTrue(self._write("other.py", "x", runner=org).ok)
+
+
 if __name__ == "__main__":
     unittest.main()
