@@ -4,6 +4,15 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- OSN reads the verification command's output as UTF-8 (replacing
+  undecodable bytes) on every platform. On Windows the locale codec (cp1252)
+  raised inside subprocess's reader thread on a single undecodable byte in a
+  test's output, the output was lost and the run reported the check as
+  failed: an environment failure recorded as the change's. Found by running
+  OSN on OpenShard's own test suite.
+
 ### Added
 
 - The OSN Receipt says where the changed files were when it was written:
