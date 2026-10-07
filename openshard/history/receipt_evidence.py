@@ -653,8 +653,32 @@ def roles_block(raw: Any) -> dict[str, Any] | None:
         explorers = explorers_block(rec.get("explorers"))
         if explorers is not None:
             block["explorers"] = explorers
+        by_model = role_models_block(rec.get("by_model"))
+        if by_model is not None:
+            block["by_model"] = by_model
         out[role] = block
     return out or None
+
+
+def role_models_block(raw: Any) -> list[dict[str, Any]] | None:
+    """A role's calls split by model when more than one made them (escalation, re-route): counts and costs only."""
+    if not isinstance(raw, list) or len(raw) < 2:
+        return None
+    out: list[dict[str, Any]] = []
+    for item in raw[:6]:
+        d = _dict(item)
+        if not d or not isinstance(d.get("model"), str):
+            continue
+        attempts = d.get("attempts")
+        out.append({
+            "model": _text(d.get("model"), 256),
+            "attempts": [a for a in attempts if isinstance(a, int)][:8] if isinstance(attempts, list) else [],
+            "calls": _count(d.get("calls")),
+            "prompt_tokens": _count(d.get("prompt_tokens")),
+            "completion_tokens": _count(d.get("completion_tokens")),
+            "cost_usd": _number(d.get("cost_usd")),
+        })
+    return out if len(out) > 1 else None
 
 
 _EXPLORER_STATUSES = frozenset({"answered", "no_answer", "failed"})
