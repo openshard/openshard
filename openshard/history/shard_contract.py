@@ -1959,6 +1959,7 @@ def _render_osn_parallel(receipt: ShardReceipt) -> list[str]:
     topo = agent_loop.get("topology") if isinstance(agent_loop.get("topology"), dict) else None
     workers = agent_loop.get("workers") if isinstance(agent_loop.get("workers"), list) else []
     synth = agent_loop.get("synthesis") if isinstance(agent_loop.get("synthesis"), dict) else None
+    cands = agent_loop.get("candidates") if isinstance(agent_loop.get("candidates"), dict) else None
     econ = agent_loop.get("economics") if isinstance(agent_loop.get("economics"), dict) else None
     resumed = agent_loop.get("resumed") if isinstance(agent_loop.get("resumed"), dict) else None
     lines: list[str] = []
@@ -1981,7 +1982,7 @@ def _render_osn_parallel(receipt: ShardReceipt) -> list[str]:
         lines.append(_row("Reason", str(topo.get("reason") or "not recorded"), width=12))
         if topo.get("worker_count"):
             cost = topo.get("actual_extra_cost_usd")
-            extra = f" · workers cost ${cost:.4f}" if isinstance(cost, (int, float)) else ""
+            extra = f" · extra cost ${cost:.4f}" if isinstance(cost, (int, float)) else ""
             lines.append(_row("Workers", f"{topo['worker_count']} · {topo.get('distinct_models') or '?'} distinct model(s){extra}", width=12))
         lines.append("")
     if workers:
@@ -1999,6 +2000,24 @@ def _render_osn_parallel(receipt: ShardReceipt) -> list[str]:
                               f"{_display_model_name(model) if isinstance(model, str) else 'model unknown'} · "
                               f"{w.get('turns') or 0} turn(s) · {w.get('files_changed') or 0} file(s) · {cost_text}{own}",
                               width=12))
+        lines.append("")
+    if cands:
+        lines.append(f"{_INDENT}CANDIDATES")
+        lines.append(_row("Policy", str(cands.get("policy") or "not recorded"), width=12))
+        winner = cands.get("winner")
+        wm = cands.get("winner_model")
+        lines.append(_row("Winner", f"{winner} · {_display_model_name(wm) if isinstance(wm, str) else 'model unknown'}"
+                          if winner else f"none ({cands.get('reason') or 'no candidate verified'})", width=12))
+        for e in cands.get("evaluated") or []:
+            cost = e.get("cost_usd")
+            model = e.get("model")
+            lines.append(_row(f"#{e.get('rank')} {e.get('worker_id')}",
+                              f"{_display_model_name(model) if isinstance(model, str) else 'model unknown'} · "
+                              f"own-copy verification {e.get('verification') or 'not run'} · "
+                              f"{e.get('files_changed') or 0} file(s) · "
+                              + (f"${cost:.4f}" if isinstance(cost, (int, float)) else "cost unknown")
+                              + (" · selected" if e.get("selected") else ""), width=12))
+        lines.append(_row("Evidence", str(cands.get("verification_evidence") or "not recorded"), width=12))
         lines.append("")
     if synth:
         lines.append(f"{_INDENT}SYNTHESIS")

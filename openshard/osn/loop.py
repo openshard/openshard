@@ -215,6 +215,8 @@ class LoopReceipt:
     topology: dict | None = None
     workers: list[dict] = field(default_factory=list)
     synthesis: dict | None = None
+    # Parallel candidates (``openshard.osn.candidates``): every candidate's evaluation and the winner.
+    candidates: dict | None = None
     # Set when this run continued an earlier process's checkpoint: what was carried over.
     resumed: dict | None = None
 
@@ -288,6 +290,7 @@ class LoopReceipt:
             "topology": dict(self.topology) if self.topology else None,
             "workers": [dict(w) for w in self.workers],
             "synthesis": dict(self.synthesis) if self.synthesis else None,
+            "candidates": dict(self.candidates) if self.candidates else None,
             "resumed": dict(self.resumed) if self.resumed else None,
             "command_policy": self.command_decision,
             "evidence": {
@@ -456,7 +459,7 @@ def _is_turn_provider(provider: Any) -> bool:
 def resume_state(*, sandbox: Path, attempts: list[AttemptRecord], changed: list[str], prev_fingerprint: str | None,
                  prev_failure: str | None, blocked_seen: list[str], prev_actions: str | None, roles: dict,
                  plan: dict | None, reviews: list[dict], topology: dict | None, workers: list[dict],
-                 synthesis: dict | None) -> dict:
+                 synthesis: dict | None, candidates: dict | None = None) -> dict:
     """The loop's resumable state as plain data (attempts in full, verification results included)."""
     return {
         "sandbox": str(sandbox),
@@ -472,6 +475,7 @@ def resume_state(*, sandbox: Path, attempts: list[AttemptRecord], changed: list[
         "topology": dict(topology) if topology else None,
         "workers": [dict(w) for w in workers],
         "synthesis": dict(synthesis) if synthesis else None,
+        "candidates": dict(candidates) if candidates else None,
     }
 
 
@@ -504,6 +508,7 @@ def _restore_state(state: dict) -> dict:
         "topology": dict(state["topology"]) if isinstance(state.get("topology"), dict) else None,
         "workers": [dict(w) for w in state.get("workers") or [] if isinstance(w, dict)],
         "synthesis": dict(state["synthesis"]) if isinstance(state.get("synthesis"), dict) else None,
+        "candidates": dict(state["candidates"]) if isinstance(state.get("candidates"), dict) else None,
     }
 
 
@@ -620,6 +625,7 @@ def run_bounded_loop(
     topology: dict | None = None
     worker_records: list[dict] = []
     synthesis_record: dict | None = None
+    candidates_record: dict | None = None
     max_reviews = max(0, min(int(max_reviews), MAX_REVIEWS))
     resumed_record: dict | None = None
     if resume:
@@ -636,6 +642,7 @@ def run_bounded_loop(
         topology = restored["topology"]
         worker_records = restored["workers"]
         synthesis_record = restored["synthesis"]
+        candidates_record = restored["candidates"]
         resumed_record = {
             "attempts_restored": len(attempts), "plan_restored": plan is not None,
             "topology_restored": topology is not None, "files_restored": len(changed),
@@ -658,6 +665,7 @@ def run_bounded_loop(
                 sandbox=sandbox, attempts=attempts, changed=changed, prev_fingerprint=prev_fingerprint,
                 prev_failure=prev_failure, blocked_seen=blocked_seen, prev_actions=prev_actions, roles=roles,
                 plan=plan, reviews=reviews, topology=topology, workers=worker_records, synthesis=synthesis_record,
+                candidates=candidates_record,
             ))
         except Exception:
             # Durability must never change what the run does.
@@ -682,6 +690,7 @@ def run_bounded_loop(
             topology=topology,
             workers=worker_records,
             synthesis=synthesis_record,
+            candidates=candidates_record,
             resumed=resumed_record,
         )
 
@@ -926,15 +935,18 @@ def run_bounded_loop(
                 if stage.get("ran"):
                     worker_records.extend(dict(w) for w in stage.get("workers") or [])
                     synthesis_record = dict(stage.get("synthesis") or {}) or None
+                    candidates_record = dict(stage.get("candidates") or {}) or None
                     for p in stage.get("applied") or []:
                         if p not in changed:
                             changed.append(p)
                     stage_advisory = stage.get("advisory") or None
                     skip_turns = stage_advisory is None and bool(stage.get("applied"))
                     _emit_progress(
-                        progress, "stage_end", stage="workers", workers=len(stage.get("workers") or []),
+                        progress, "stage_end", stage="candidates" if candidates_record else "workers",
+                        workers=len(stage.get("workers") or []),
                         applied=len(stage.get("applied") or []), conflicts=len((synthesis_record or {}).get("conflicts") or []),
                         resolution="executor_turns" if stage_advisory else "none_needed",
+                        winner=(candidates_record or {}).get("winner"), winner_model=(candidates_record or {}).get("winner_model"),
                     )
                 else:
                     stage = None
