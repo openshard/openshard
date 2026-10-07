@@ -141,6 +141,15 @@ class _OsnProgressRenderer:
             role = data.get("role")
             prefix = f"{role.capitalize()} turn" if isinstance(role, str) and role != "executor" else "Turn"
             self._start(f"{prefix} {data.get('turn')}/{data.get('max_turns')} · {_friendly_model(data.get('model'))}")
+        elif event == "explore_start":
+            self._stop()
+            n = data.get("questions") or 0
+            echo(f"  Exploring {n} question{'s' if n != 1 else ''} in parallel (read-only) · "
+                 f"{_friendly_model(data.get('model'))}")
+            self._start("Explorers working")
+        elif event == "explore_end":
+            self._stop()
+            echo(f"  ✓ Exploration done · {data.get('answered')}/{data.get('total')} answered")
         elif event == "role_start":
             self._stop()
             role = data.get("role")
@@ -229,6 +238,9 @@ def _resolve_provider(name: str | None, model: str):
                    "executor: no planner, no review. full: both, always (the review may reuse the executor's model).")
 @click.option("--planner-model", default=None, help="Model for the planner role (default: routed).")
 @click.option("--verifier-model", default=None, help="Model for the independent review (default: routed, never the executor's).")
+@click.option("--explore/--no-explore", "explore", default=True, show_default=True,
+              help="Let the planner answer up to 3 independent questions with parallel read-only workers "
+                   "(at most 3 at once, never writing). Only when the planner runs and only when it asks.")
 @click.option("--task-id", default=None, help="Explicit task id (from `openshard task new`).")
 @click.option("--promote", is_flag=True, default=False,
               help="After verified success, copy changed files into the repo through the policy gate.")
@@ -238,7 +250,8 @@ def _resolve_provider(name: str | None, model: str):
               help="Do not consult learning signals from this repository's prior OpenShard runs.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_attempts, loop_mode, max_turns,
-            roles_mode, planner_model, verifier_model, task_id, promote, assume_yes, no_learning, as_json):
+            roles_mode, planner_model, verifier_model, explore, task_id, promote, assume_yes, no_learning,
+            as_json):
     """Run TASK through the bounded OSN loop."""
     from openshard.cli.ingest import _repo_root
     from openshard.history.jsonl_store import append_jsonl
@@ -395,6 +408,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     progress_renderer = _OsnProgressRenderer() if not as_json else None
     planner_hook, verifier_hook, role_skips, role_usage = _resolve_roles(
         loop_mode=loop_mode, roles_mode=roles_mode, planner_model=planner_model, verifier_model=verifier_model,
+        explore=explore,
         task=task, repo_root=repo_root, executor_model=model, routing=routing, provider_name=provider_name,
         provider_obj=provider_obj, model_policy=model_policy, budget=budget, learning=learning,
         context_files=[*context_files, *learning_files], action_provider=action_provider, argv=argv,
@@ -876,7 +890,7 @@ def _count_repo_files(repo_root: Path, cap: int = 200) -> int:
 
 def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task, repo_root, executor_model,
                    routing, provider_name, provider_obj, model_policy, budget, learning, context_files,
-                   action_provider, argv, progress):
+                   action_provider, argv, progress, explore=True):
     """Planner and verifier hooks for this run, the roles that will not run and why, and their usage list.
 
     Role models come from ``openshard.osn.roles.select_role_model`` and must pass
@@ -926,12 +940,29 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
     )
     planner_hook = None
     if want_planner and planner_choice.model:
+        explorer_model = None
+        if explore:
+            # Exploration workers: a fast control-plane model when routing offers one,
+            # else the planner's own model. Reads only, so independence is not required.
+            explorer_choice = osn_roles.select_role_model(
+                osn_roles.ROLE_EXPLORER, explicit=None, executor_model=executor_model, routing=routing,
+                provider_name=provider_name, catalog_knows=catalog_knows,
+            )
+            explorer_model = (
+                explorer_choice.model if explorer_choice.source != osn_roles.SOURCE_EXECUTOR_REUSED
+                else planner_choice.model
+            )
+            try:
+                enforce_models_allowed([m for m in (explorer_model,) if m and m != executor_model], model_policy)
+            except ValueError as exc:
+                raise click.ClickException(str(exc)) from None
+
         def planner_hook(sandbox, repo_files):  # noqa: E306
             plan, role, usage = osn_roles.run_planner_turns(
                 provider_obj, planner_choice.model, task=task, repo_root=repo_root, sandbox=sandbox,
                 repo_files=repo_files, choice=planner_choice, provider_name=provider_name, budget=budget,
                 learning_context=learning.prompt_text if learning is not None else None,
-                context_files=list(context_files), progress=progress,
+                context_files=list(context_files), progress=progress, explorer_model=explorer_model,
             )
             role_usage.extend(usage)
             return plan, role.to_record()
@@ -1004,6 +1035,11 @@ def _roles_summary(loop: dict | None) -> list[str]:
         elif rec.get("independent") is False and role == "verifier":
             bits.append("same model as executor")
         out.append(f"  {role}: " + " · ".join(bits))
+        for ex in rec.get("explorers") or []:
+            ex_cost = ex.get("cost_usd")
+            ex_cost_text = f"${ex_cost:.4f}" if isinstance(ex_cost, (int, float)) else "cost unknown"
+            out.append(f"    explorer {int(ex.get('index', 0)) + 1}: {ex.get('status')} · "
+                       f"{_friendly_model(ex.get('model'))} · {ex.get('findings_count', 0)} finding(s) · {ex_cost_text}")
     for r in loop.get("reviews") or []:
         line = f"  review (attempt {r.get('attempt')}): {str(r.get('verdict', '?')).upper()} (model-reported)"
         if r.get("summary"):

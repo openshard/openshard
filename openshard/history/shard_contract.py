@@ -1889,6 +1889,25 @@ def _role_line(role: str, rec: dict) -> str:
     return _row(role.capitalize(), " · ".join(parts), width=12)
 
 
+def _explorer_line(ex: dict) -> str:
+    """One parallel exploration worker: outcome, model, usage, cost with provenance."""
+    model = ex.get("model")
+    parts = [_display_model_name(model) if isinstance(model, str) else "model unknown", str(ex.get("status") or "?")]
+    if isinstance(ex.get("findings_count"), int):
+        parts.append(f"{ex['findings_count']} finding{'s' if ex['findings_count'] != 1 else ''}")
+    cost = ex.get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        label = {"provider_reported": "provider-reported", "list_rate_estimate": "list-rate estimate"}.get(
+            str(ex.get("cost_source") or ""), "origin not recorded",
+        )
+        parts.append(f"${cost:.4f} ({label})")
+    else:
+        parts.append("cost unknown")
+    idx = ex.get("index")
+    label = f"  explorer {idx + 1}" if isinstance(idx, int) else "  explorer"
+    return _row(label, " · ".join(parts), width=12)
+
+
 def _render_osn_roles(receipt: ShardReceipt, *, detail: str = "compact") -> list[str]:
     """ROLES / PLAN / REVIEW sections for an OSN run with role evidence."""
     evidence = receipt.recorded_evidence or {}
@@ -1902,6 +1921,9 @@ def _render_osn_roles(receipt: ShardReceipt, *, detail: str = "compact") -> list
         rec = roles.get(role)
         if isinstance(rec, dict):
             lines.append(_role_line(role, rec))
+            for ex in (rec.get("explorers") or []) if role == "planner" else []:
+                if isinstance(ex, dict):
+                    lines.append(_explorer_line(ex))
     lines.append("")
     if detail == "full":
         plan = agent_loop.get("plan") if isinstance(agent_loop.get("plan"), dict) else None

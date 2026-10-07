@@ -43,6 +43,22 @@ provider, calls, tokens, cost (with provenance) and duration, and a role that di
 | executor | the turn loop above, with the plan as advisory context | always | as before (`--model`, Routing V2, or keyword routing, with the escalation ladder) |
 | verifier | one call after an attempt OpenShard itself verified: task, plan, a bounded diff, the verification evidence; replies `pass`, `warn` or `fail` with concerns | the same non-trivial rule as the planner, and a model other than the executor's is available (`--verifier-model`, Routing V2's `verifier` class with the executor's model excluded, or the native validator tier when the catalog knows it); a self-review is not paid for in `auto` | as listed; `--roles full` runs it even on the executor's own model and records `independent: false` |
 
+### Parallel read-only exploration
+
+While planning, the planner may hand up to three *independent* questions (where something is
+implemented, how the tests are laid out, which policy code applies) to exploration workers
+(`--explore`, on by default; `--no-explore` disables it). Each worker is a read-only agent turn
+loop on the same isolated copy (at most 2 turns; writes and verification requests are refused by the
+harness), on a fast control-plane model when routing offers one, else the planner's model. At most
+three run at once, only when the planner asks, and never on a task too trivial for a planner. Their
+compact answers (short findings plus the repo-relative paths they rest on) come back to the planner
+as observations; the planner remains the single reasoning owner and the executor never sees a worker
+directly. The budget is checked once before a round and every worker's spend is recorded afterwards.
+The Receipt keeps each worker on the planner's role record (`osn_loop.roles.planner.explorers`:
+question, outcome, model, calls, turns, findings and sources counts, tokens, cost with provenance,
+duration, its read-only actions) and in `model_calls` with role `explorer`; the full local Receipt
+lists them under `ROLES`.
+
 The verdict is **model-reported evidence** beside the deterministic result and never changes the
 verification status. A `fail` buys at most one bounded executor recovery attempt on the same
 model (no escalation: nothing failed deterministically) whose result is verified like any other;

@@ -162,6 +162,9 @@ class AttemptOutcome:
     verifications_run: int = 0
     final_note: str = ""
     plan: dict[str, Any] | None = None  # the last structured plan a turn carried (planner role)
+    findings: list[str] = field(default_factory=list)  # an explorer's compact answer (explorer role)
+    sources: list[str] = field(default_factory=list)
+    explorations: list[dict[str, Any]] = field(default_factory=list)  # what each exploration round produced
 
     @property
     def finished(self) -> bool:
@@ -269,6 +272,7 @@ def run_attempt_turns(
     initial_observations: list[Observation] | None = None,
     repo_files: list[str] | None = None,
     read_only: bool = False,
+    explore_hook: Callable[[list[dict[str, Any]], int], tuple[list[Observation], list[dict[str, Any]]]] | None = None,
 ) -> AttemptOutcome:
     """Run one attempt of the iterative loop inside *sandbox*. Never touches *repo_root*.
 
@@ -349,8 +353,23 @@ def run_attempt_turns(
         out.model_calls += 1
         if result.plan is not None:
             out.plan = result.plan
+        if result.findings or result.sources:
+            out.findings, out.sources = list(result.findings), list(result.sources)
         _emit(progress, "turn_response", attempt=attempt, turn=turn, actions=len(result.actions),
               note=result.note, duration_ms=int((time.monotonic() - started) * 1000), role=role)
+        if result.explore and explore_hook is not None and turn < max_turns:
+            # Bounded parallel exploration (``openshard.osn.explore``): the hook runs
+            # read-only workers and hands back their compact answers as observations
+            # for this role's next turn. The role stays the single reasoning owner.
+            try:
+                new_obs, records = explore_hook(result.explore, turn)
+            except BudgetExhausted as exc:
+                out.stop, out.budget_stop = STOP_BUDGET, exc
+                return out
+            for obs in new_obs:
+                observations.append(obs)
+            _compact_window(observations)
+            out.explorations.extend(records)
 
         finished = False
         for action in result.actions:

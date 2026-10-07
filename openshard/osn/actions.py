@@ -86,6 +86,11 @@ class TurnResult:
     legacy_writes: bool = False
     # The planner role's structured plan, when the reply carried one (raw; bounded by the caller).
     plan: dict[str, Any] | None = None
+    # Exploration questions the planner asks to have answered in parallel (bounded here).
+    explore: list[dict[str, Any]] = field(default_factory=list)
+    # An explorer's compact answer: findings and the repo-relative paths they rest on (bounded here).
+    findings: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
 
 
 def _clean_text(value: Any, cap: int) -> str:
@@ -174,6 +179,12 @@ def parse_turn(content: str) -> TurnResult:
     raw_actions = data.get("actions")
     legacy = False
     plan = data.get("plan") if isinstance(data.get("plan"), dict) else None
+    explore = _parse_explore(data.get("explore"))
+    findings = _parse_text_list(data.get("findings"), cap=MAX_FINDINGS, item_cap=MAX_FINDING_CHARS)
+    sources = [s for s in _parse_text_list(data.get("sources"), cap=MAX_SOURCES, item_cap=MAX_TARGET_CHARS)
+               if _safe_display_path(s)]
+    if raw_actions is None and (findings or sources):
+        raw_actions = [{"kind": KIND_FINISH}]  # an explorer's answer alone ends its turns
     if raw_actions is None and isinstance(data.get("writes"), list):
         legacy = True
         raw_actions = [
@@ -197,7 +208,51 @@ def parse_turn(content: str) -> TurnResult:
         out.append(a)
         if a.kind == KIND_FINISH:
             break
-    return TurnResult(out, note, legacy, plan)
+    return TurnResult(out, note, legacy, plan, explore, findings, sources)
+
+
+MAX_EXPLORE_QUESTIONS = 3
+MAX_QUESTION_CHARS = 200
+MAX_PATH_HINTS = 5
+MAX_FINDINGS = 8
+MAX_FINDING_CHARS = 240
+MAX_SOURCES = 8
+
+
+def _safe_display_path(path: str) -> bool:
+    norm = path.replace("\\", "/")
+    if norm.startswith(("/", "~")) or ":" in norm or ".." in norm.split("/"):
+        return False
+    return not any(unicodedata.category(ch) == "Cc" for ch in path)
+
+
+def _parse_text_list(values: Any, *, cap: int, item_cap: int) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out = [_clean_text(v, item_cap) for v in values if isinstance(v, str) and v.strip()]
+    return [v for v in out if v][:cap]
+
+
+def _parse_explore(raw: Any) -> list[dict[str, Any]]:
+    """Bounded exploration questions: ``[{"question": str, "paths_hint": [repo-relative paths]}]``."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, str):
+            item = {"question": item}
+        if not isinstance(item, dict):
+            continue
+        question = _clean_text(item.get("question", ""), MAX_QUESTION_CHARS)
+        if not question:
+            continue
+        hints = [h.replace("\\", "/")[:MAX_TARGET_CHARS]
+                 for h in _parse_text_list(item.get("paths_hint"), cap=MAX_PATH_HINTS, item_cap=MAX_TARGET_CHARS)
+                 if _safe_display_path(h)]
+        out.append({"question": question, "paths_hint": hints})
+        if len(out) >= MAX_EXPLORE_QUESTIONS:
+            break
+    return out
 
 
 @dataclass
