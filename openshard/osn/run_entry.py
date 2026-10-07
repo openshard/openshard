@@ -108,6 +108,24 @@ def _ordered_usage(usage: list[AttemptUsage]) -> list[AttemptUsage]:
     return [u for _, u in indexed]
 
 
+def _worker_usage_in_order(receipt: LoopReceipt, usage: list[AttemptUsage]) -> list[AttemptUsage]:
+    """Worker calls ordered by worker id (threads finish in any order; the Receipt must not)."""
+    order = {str(w.get("worker_id")): i for i, w in enumerate(getattr(receipt, "workers", None) or [])
+             if isinstance(w, dict)}
+    mine = [u for u in usage if getattr(u, "role", "executor") == "worker"]
+    return sorted(mine, key=lambda u: (order.get(str(getattr(u, "worker_id", "")), len(order)), u.turn))
+
+
+def _implementation_models(receipt: LoopReceipt, usage: list[AttemptUsage]) -> list[str]:
+    """Every model that made implementation calls (executor and workers), first use first."""
+    out: list[str] = []
+    for u in [*[u for u in usage if getattr(u, "role", "executor") == "executor"],
+              *_worker_usage_in_order(receipt, usage)]:
+        if u.model not in out:
+            out.append(u.model)
+    return out
+
+
 def _record_roles(entry: dict, receipt: LoopReceipt, usage: list[AttemptUsage], final_model: str) -> None:
     """Role evidence: ``osn_loop.roles`` (executor filled from its calls), ``stage_runs`` and a tier dispatch receipt.
 
@@ -117,15 +135,37 @@ def _record_roles(entry: dict, receipt: LoopReceipt, usage: list[AttemptUsage], 
     role that really made a call. A role that did not run says ``skipped`` and
     why; usage a provider did not report stays ``None``.
     """
-    from openshard.osn.roles import ROLE_EXECUTOR, RoleRun
+    from openshard.osn.roles import ROLE_EXECUTOR, ROLE_WORKER, RoleRun
 
     roles: dict[str, Any] = dict(entry["osn_loop"].get("roles") or {})
-    executor = RoleRun.from_usage(ROLE_EXECUTOR, usage, choice=None, provider=None)
+    worker_records = [w for w in (getattr(receipt, "workers", None) or []) if isinstance(w, dict)]
+    executor_calls = [u for u in usage if u.role == ROLE_EXECUTOR]
+    if worker_records and not executor_calls and receipt.attempts and receipt.attempts[0].parallel_stage:
+        # The workers' synthesised files verified without an executor turn: the
+        # executor was not needed, which is not a failure.
+        executor = RoleRun.from_usage(ROLE_EXECUTOR, usage, choice=None, provider=None,
+                                      status="skipped", reason="workers_synthesised_cleanly")
+    else:
+        executor = RoleRun.from_usage(ROLE_EXECUTOR, usage, choice=None, provider=None)
     executor_record = executor.to_record()
     executor_record.pop("actions", None)
     executor_record["turns"] = entry["osn_loop"].get("turns_total")
     executor_record["source"] = "routing"
     roles[ROLE_EXECUTOR] = executor_record
+    worker_usage = [u for u in usage if u.role == ROLE_WORKER]
+    if worker_usage:
+        # Workers are one role with several agents: the aggregate here, each
+        # worker's own model/usage/outcome under ``osn_loop.workers``.
+        worker_run = RoleRun.from_usage(
+            ROLE_WORKER, usage, choice=None, provider=None,
+            turns=sum(int(w.get("turns") or 0) for w in worker_records) or None,
+        )
+        worker_record = worker_run.to_record()
+        worker_record.pop("actions", None)
+        worker_record["source"] = "routing"
+        worker_record["workers"] = len(worker_records)
+        worker_record["models"] = sorted({u.model for u in worker_usage})
+        roles[ROLE_WORKER] = worker_record
     entry["osn_loop"]["roles"] = roles
     if len(roles) == 1 and receipt.mode != "turns" and not usage:
         return
@@ -145,6 +185,19 @@ def _record_roles(entry: dict, receipt: LoopReceipt, usage: list[AttemptUsage], 
             "tokens_input": rec.get("prompt_tokens"),
             "tokens_output": rec.get("completion_tokens"),
         })
+    for w in (getattr(receipt, "workers", None) or []):
+        if not isinstance(w, dict) or not w.get("model"):
+            continue
+        duration = w.get("duration_ms")
+        stage_runs.append({
+            "stage_type": _STAGE_FOR_ROLE["executor"],
+            "model": w["model"],
+            "duration": round(duration / 1000.0, 3) if isinstance(duration, int) else None,
+            "cost": w.get("cost_usd"),
+            "summary": f"OSN {w.get('worker_id') or 'worker'} ({w.get('subtask_id') or 'subtask'})",
+            "tokens_input": w.get("prompt_tokens"),
+            "tokens_output": w.get("completion_tokens"),
+        })
     if len(stage_runs) > 1:
         # One stage alone is the plain execution model; several stages are worth listing.
         entry["stage_runs"] = stage_runs
@@ -160,6 +213,11 @@ def _record_roles(entry: dict, receipt: LoopReceipt, usage: list[AttemptUsage], 
         validator_status = (
             "applied" if isinstance(verifier, dict) and verifier.get("status") == "ran" else "skipped"
         )
+        implementation = entry["osn_loop"].get("implementation_models") or []
+        worker_models = sorted({str(w.get("model")) for w in worker_records if w.get("model")})
+        warnings: list[str] = []
+        if worker_models:
+            warnings.append(f"implementation by {len(worker_records)} parallel worker(s): " + ", ".join(worker_models))
         entry["tier_dispatch_receipt"] = {
             "enabled": True,
             "applied": True,
@@ -171,13 +229,53 @@ def _record_roles(entry: dict, receipt: LoopReceipt, usage: list[AttemptUsage], 
             "validator_tier": (verifier or {}).get("source") or "",
             "validator_model": _model(verifier),
             "planner_model_actual": _actual(planner),
-            "executor_model_actual": final_model if usage else None,
+            "executor_model_actual": final_model if implementation else None,
             "validator_model_actual": _actual(verifier),
             "validator_dispatch_status": validator_status,
             "fallback_used": False,
             "fallback_reason": "",
-            "warnings": [],
+            "warnings": warnings,
         }
+
+
+def _record_economics(entry: dict, receipt: LoopReceipt, usage: list[AttemptUsage]) -> None:
+    """``osn_loop.economics``: what the run cost per role, worker, model and attempt, and per verified success.
+
+    Every figure is a sum of provider-reported or list-rate figures recorded per
+    call; a role or worker with an unknown call cost makes that figure None and
+    the total incomplete. ``cost_per_verified_success`` is the complete total
+    when the run verified, else None: unknown is never zero.
+    """
+    def _sum(items: list[float | None]) -> float | None:
+        return sum(c for c in items if c is not None) if items and all(c is not None for c in items) else None
+
+    by_role: dict[str, float | None] = {}
+    by_model: dict[str, float | None] = {}
+    by_attempt: dict[str, float | None] = {}
+    for role in sorted({getattr(u, "role", "executor") for u in usage}):
+        by_role[role] = _sum([u.cost_usd for u in usage if getattr(u, "role", "executor") == role])
+    for model in sorted({u.model for u in usage}):
+        by_model[model] = _sum([u.cost_usd for u in usage if u.model == model])
+    for n in sorted({u.attempt for u in usage}):
+        by_attempt[str(n)] = _sum([u.cost_usd for u in usage if u.attempt == n])
+    by_worker = {
+        str(w.get("worker_id")): (w.get("cost_usd") if isinstance(w.get("cost_usd"), (int, float)) else None)
+        for w in getattr(receipt, "workers", []) or [] if isinstance(w, dict)
+    }
+    total = _sum([u.cost_usd for u in usage])
+    verified = receipt.status == "verified"
+    entry["osn_loop"]["economics"] = {
+        "total_cost_usd": total,
+        "cost_complete": total is not None and bool(usage),
+        "model_calls": len(usage),
+        "verified": verified,
+        "cost_per_verified_success": total if (verified and total is not None) else None,
+        "by_role": by_role,
+        "by_worker": by_worker,
+        "by_model": by_model,
+        "by_attempt": by_attempt,
+        "evidence": "provider_usage_per_call",
+    }
 
 
 def _cost_provenance(usage: list[AttemptUsage]) -> str | None:
@@ -413,9 +511,21 @@ def build_osn_run_entry(
     # The run's model is the executor's: planner and verifier calls are recorded
     # per role and per call, never flattened into the execution model.
     usage = _ordered_usage(usage)
-    executor_usage = [u for u in usage if getattr(u, "role", "executor") == "executor"] or list(usage)
+    executor_usage = [u for u in usage if getattr(u, "role", "executor") == "executor"]
+    implementation_models = _implementation_models(receipt, usage)
+    workers_only = not executor_usage
+    if workers_only:
+        # No executor call: the implementation, if any, was parallel workers'.
+        # Their calls, in worker order, stand in for the executor's; a planner's
+        # or verifier's model never becomes the execution model.
+        executor_usage = _worker_usage_in_order(receipt, usage)
     first_model = _sanitize_model(executor_usage[0].model) if executor_usage else "unknown"
     final_model = _sanitize_model(executor_usage[-1].model) if executor_usage else "unknown"
+    if workers_only:
+        # Workers run side by side: there is no "final" rung, so the execution
+        # model is the first worker's (the primary routed model); every worker's
+        # model is listed in ``osn_loop.implementation_models`` and per worker.
+        final_model = first_model
     verified_attempts = [
         a for a in _effective_attempts(receipt) if a.verification is not None and a.verification.ran
     ]
@@ -485,7 +595,9 @@ def build_osn_run_entry(
             entry["retry_attempts"] = attempts
     else:
         entry["estimated_cost"] = _sum_costs(usage)
+    entry["osn_loop"]["implementation_models"] = implementation_models
     _record_roles(entry, receipt, usage, final_model)
+    _record_economics(entry, receipt, usage)
     entry["prompt_tokens"] = sum(u.prompt_tokens for u in usage)
     entry["completion_tokens"] = sum(u.completion_tokens for u in usage)
     entry["total_tokens"] = entry["prompt_tokens"] + entry["completion_tokens"]
