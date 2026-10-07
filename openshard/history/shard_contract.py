@@ -79,6 +79,9 @@ _STAGE_DISPLAY_LABELS: dict[str, str] = {
 _MODEL_FRIENDLY_NAMES: dict[str, str] = {
     "deepseek/deepseek-v4-pro": "DeepSeek V4 Pro",
     "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+    "deepseek/deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
+    "z-ai/glm-5.3": "GLM-5.3",
+    "z-ai/glm-5.3-flash": "GLM-5.3 Flash",
     "anthropic/claude-sonnet-4.6": "Claude Sonnet 4.6",
     "anthropic/claude-sonnet-4-6": "Claude Sonnet 4.6",
     "anthropic/claude-opus-4.7": "Claude Opus 4.7",

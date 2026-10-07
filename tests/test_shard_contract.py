@@ -525,6 +525,11 @@ class TestDisplayModelName(unittest.TestCase):
     def test_deepseek_v4_flash(self):
         self.assertEqual(_display_model_name("deepseek/deepseek-v4-flash"), "DeepSeek V4 Flash")
 
+    def test_current_dogfood_model_names(self):
+        self.assertEqual(_display_model_name("deepseek/deepseek-v4.1-flash"), "DeepSeek V4.1 Flash")
+        self.assertEqual(_display_model_name("z-ai/glm-5.3"), "GLM-5.3")
+        self.assertEqual(_display_model_name("z-ai/glm-5.3-flash"), "GLM-5.3 Flash")
+
     def test_claude_sonnet_dot(self):
         self.assertEqual(_display_model_name("anthropic/claude-sonnet-4.6"), "Claude Sonnet 4.6")
 

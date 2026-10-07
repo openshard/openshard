@@ -130,16 +130,16 @@ _ROSTER_FRONTIER = (
     "anthropic/claude-sonnet-4.6",
 )
 _ROSTER_VALUE = (
+    "z-ai/glm-5.3",
     "moonshotai/kimi-k2.6",
     "deepseek/deepseek-v4-pro",
-    "z-ai/glm-5.1",
     "qwen/qwen3.7-max",
 )
 _ROSTER_CHEAP = (
-    "deepseek/deepseek-v4-flash",
+    "z-ai/glm-5.3-flash",
+    "deepseek/deepseek-v4.1-flash",
     "openai/gpt-5-nano",
     "google/gemini-3.1-flash-lite",
-    "ibm-granite/granite-4.1-8b",
 )
 
 
