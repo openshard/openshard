@@ -55,8 +55,12 @@ from openshard.routing.routing_classes import (
 
 SYNCED_AT = "2026-09-24T00:00:00Z"
 SYNCED_TS = 1790208000.0  # 2026-09-24T00:00:00Z
-NEW_FLASH = "deepseek/deepseek-v4.1-flash"
-OLD_FLASH = "deepseek/deepseek-v4-flash"
+# The curated cheap default and a hypothetical newer sibling that discovery
+# would list but curation has not promoted (deepseek-v4.1-flash became the
+# curated default in 2026-10, so the "discovered, not promoted" exemplar is a
+# later id that no registry entry names).
+NEW_FLASH = "deepseek/deepseek-v4.2-flash"
+OLD_FLASH = "deepseek/deepseek-v4.1-flash"
 
 
 def _raw(
@@ -89,14 +93,14 @@ def _raw(
 def _snapshot() -> list[dict]:
     """A small OpenRouter-shaped snapshot around the DeepSeek Flash family."""
     return [
-        # Curated model, as listed upstream (2026-04-24).
-        _raw(OLD_FLASH, "DeepSeek: DeepSeek V4 Flash 0423", created=1777000000,
+        # Curated model, as listed upstream.
+        _raw(OLD_FLASH, "DeepSeek: DeepSeek V4.1 Flash", created=1777000000,
              prompt="0.000000088606", completion="0.000000177212",
-             slug="deepseek/deepseek-v4-flash-20260423"),
-        # Newly released successor (2026-09-10): cheaper-class, tools, vision.
-        _raw(NEW_FLASH, "DeepSeek: DeepSeek V4.1 Flash", created=1789021285,
-             prompt="0.00000014", completion="0.00000042", inputs=("text", "image"),
              slug="deepseek/deepseek-v4.1-flash-20260910"),
+        # A newer successor discovery lists but curation has not promoted: cheaper-class, tools, vision.
+        _raw(NEW_FLASH, "DeepSeek: DeepSeek V4.2 Flash", created=1789021285,
+             prompt="0.00000014", completion="0.00000042", inputs=("text", "image"),
+             slug="deepseek/deepseek-v4.2-flash-20260910"),
         # Pricing variant sharing the canonical slug.
         _raw(NEW_FLASH + ":batch", "DeepSeek: DeepSeek V4.1 Flash (batch)", created=1789021285,
              prompt="0.000000112", completion="0.000000336",
@@ -313,7 +317,7 @@ class TestDiscoveredNotPromoted:
 
 class TestAliases:
     def test_canonical_slug_resolves_to_base_not_variant(self):
-        assert _catalog().resolve("deepseek/deepseek-v4.1-flash-20260910") == NEW_FLASH
+        assert _catalog().resolve("deepseek/deepseek-v4.2-flash-20260910") == NEW_FLASH
 
     def test_dash_form_resolves(self):
         assert _catalog().resolve("anthropic/claude-opus-4-7") == "anthropic/claude-opus-4.7"
@@ -419,7 +423,7 @@ class TestExplicitSelection:
 
     def test_class_pin_accepts_discovered_model_via_alias(self):
         policy = model_policy_from_config(
-            {"models": {"routing_classes": {"cheap_coding": "deepseek/deepseek-v4.1-flash-20260910"}}}
+            {"models": {"routing_classes": {"cheap_coding": "deepseek/deepseek-v4.2-flash-20260910"}}}
         )
         assert policy.class_pin_map == {"cheap_coding": NEW_FLASH}
         assert NEW_FLASH in explicit_selection_ids(policy)

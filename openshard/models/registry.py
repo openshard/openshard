@@ -170,8 +170,27 @@ _REGISTRY: list[ModelEntry] = [
     # Routing defaults in engine.py are unchanged.
     # ------------------------------------------------------------------
     ModelEntry(
-        id="deepseek/deepseek-v4-flash",
+        id="deepseek/deepseek-v4.1-flash",
         lifecycle="active_default",
+        display_name="DeepSeek: V4.1 Flash",
+        provider="DeepSeek",
+        tier="cheap",
+        roles=("cheap_control", "boilerplate"),
+        experimental=False,
+        context_length=1_048_576,
+        input_modalities=("text", "image"),
+        supports_tools=True,
+        supports_structured_outputs=True,
+        supports_reasoning=True,
+        supports_multimodal=True,
+        latency_class="fast",
+        cost_class="cheap",
+        notes="Current DeepSeek Flash. Replaces deepseek-v4-flash (the 0423 snapshot) as the cheap default; "
+              "verified live on OpenRouter 2026-10-07 (reported id matches the requested id).",
+    ),
+    ModelEntry(
+        id="deepseek/deepseek-v4-flash",
+        lifecycle="deprecated",
         display_name="DeepSeek: V4 Flash",
         provider="DeepSeek",
         tier="cheap",
@@ -182,6 +201,8 @@ _REGISTRY: list[ModelEntry] = [
         supports_structured_outputs=True,
         latency_class="fast",
         cost_class="cheap",
+        notes="Superseded by deepseek-v4.1-flash. OpenRouter still serves the 0423 snapshot under this id; kept "
+              "for history, display and explicit --model use only, never as a routing default.",
     ),
     ModelEntry(
         id="z-ai/glm-5.1",

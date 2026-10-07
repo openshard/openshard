@@ -269,7 +269,8 @@ class TestSuccessors:
         everything = shadow_candidates(
             REQUIREMENT_CLASSES["routine_coding"], live_catalog.entries, states=states_for(live_catalog), limit=100,
         )
-        assert NEW_GLM in everything and NEW_FLASH in everything
+        assert NEW_GLM in everything
+        assert NEW_FLASH not in everything  # curated since 2026-10: a default, not a shadow candidate
         for name, s in select_all_requirements(live_catalog).items():
             assert s.model is None or live_catalog.get(s.model).curated, name
             assert not any(live_catalog.get(m) and not live_catalog.get(m).curated

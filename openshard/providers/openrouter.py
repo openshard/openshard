@@ -4,6 +4,8 @@ import httpx
 
 # Re-export shared data types so existing imports from this module keep working.
 from openshard.providers.base import (
+    COST_SOURCE_LIST_RATE,
+    COST_SOURCE_PROVIDER,
     BaseProvider,
     ChatResponse,
     ModelInfo,
@@ -83,7 +85,8 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     # Main worker
     "z-ai/glm-5.1":                         (0.10,   0.10),   # ~est
     # Cheap coding
-    "deepseek/deepseek-v4-flash":          (0.10,   0.28),   # ~est
+    "deepseek/deepseek-v4.1-flash":        (0.13,   0.52),   # OpenRouter headline rate 2026-10-07
+    "deepseek/deepseek-v4-flash":          (0.10,   0.28),   # ~est (deprecated 0423 snapshot)
     "deepseek/deepseek-v4-pro":            (0.27,   1.10),   # ~est
     # Visual / multimodal
     "moonshotai/kimi-k2.5":                 (0.45,   2.20),
@@ -219,6 +222,10 @@ class OpenRouterClient(BaseProvider):
         payload: dict = {
             "model": model,
             "messages": messages,
+            # Usage accounting: ask OpenRouter to return its own cost for this
+            # call so the Receipt can record a provider-reported figure rather
+            # than OpenShard's list-rate estimate whenever the provider says.
+            "usage": {"include": True},
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
@@ -228,22 +235,32 @@ class OpenRouterClient(BaseProvider):
         if not choices:
             raise OpenRouterError("API returned no choices in response")
 
-        content = choices[0].get("message", {}).get("content", "")
-        usage_raw = data.get("usage", {})
+        # Reasoning-only exhaustion may return content: null.
+        content = (choices[0].get("message") or {}).get("content") or ""
+        usage_raw = data.get("usage") or {}
         raw_cost = usage_raw.get("cost")
         resolved_model = data.get("model", model)
-        estimated_cost = float(raw_cost) if raw_cost is not None else None
+        estimated_cost = (
+            float(raw_cost) if isinstance(raw_cost, (int, float)) and not isinstance(raw_cost, bool) else None
+        )
+        details = usage_raw.get("prompt_tokens_details") or {}
+        cached = details.get("cached_tokens") if isinstance(details, dict) else None
         usage = UsageStats(
             prompt_tokens=usage_raw.get("prompt_tokens", 0),
             completion_tokens=usage_raw.get("completion_tokens", 0),
             total_tokens=usage_raw.get("total_tokens", 0),
             estimated_cost=estimated_cost,
+            cost_source=COST_SOURCE_PROVIDER if estimated_cost is not None else None,
+            cache_read_tokens=cached if isinstance(cached, int) and not isinstance(cached, bool) else None,
         )
-        # Fallback: compute cost from token counts when provider omits it
+        # Fallback: compute cost from token counts when provider omits it. This
+        # is OpenShard's own list-rate arithmetic and is labelled as such.
         if usage.estimated_cost is None and usage.total_tokens > 0:
             usage.estimated_cost = compute_cost(
                 resolved_model, usage.prompt_tokens, usage.completion_tokens
             )
+            if usage.estimated_cost is not None:
+                usage.cost_source = COST_SOURCE_LIST_RATE
         return ChatResponse(
             content=content, model=resolved_model, usage=usage,
             presend_secret_scan=_presend_scan,

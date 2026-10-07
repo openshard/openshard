@@ -231,7 +231,7 @@ def execution_loop_block(entry: dict) -> dict[str, Any] | None:
     loop = _dict(entry.get("osn_loop"))
     if not loop:
         return None
-    attempts: list[dict[str, int]] = []
+    attempts: list[dict[str, Any]] = []
     raw_attempts = loop.get("attempts")
     if isinstance(raw_attempts, list):
         for a in raw_attempts[:MAX_LOOP_ATTEMPTS]:
@@ -252,7 +252,7 @@ def execution_loop_block(entry: dict) -> dict[str, Any] | None:
         "policy_and_file_effects": _text(ev.get("policy_and_file_effects"), 64),
         "verification": _text(ev.get("verification"), 64),
     }
-    block = {
+    block: dict[str, Any] = {
         "status": _text(loop.get("status"), 32),
         "stop_reason": _text(loop.get("stop_reason"), 120),
         "verification_state": _text(loop.get("verification_state"), 32),
@@ -260,6 +260,202 @@ def execution_loop_block(entry: dict) -> dict[str, Any] | None:
         "evidence": None if _all_none(evidence) else evidence,
     }
     return None if _all_none(block) else block
+
+
+def agent_loop_block(entry: dict) -> dict[str, Any] | None:
+    """The iterative agent loop of an OSN run: turns, action counts and every model call.
+
+    Local Receipt surfaces only for now. The hosted sync contract
+    (``packages/contracts/src/receipt-sync.ts``) validates ``execution_loop``
+    strictly and does not yet know these keys, so they are kept out of that
+    block and out of the hosted projection; nothing here names a path, a
+    prompt or tool output.
+    """
+    loop = _dict(entry.get("osn_loop"))
+    if not loop or loop.get("mode") != "turns":
+        return None
+    attempts: list[dict[str, Any]] = []
+    raw_attempts = loop.get("attempts")
+    if isinstance(raw_attempts, list):
+        for a in raw_attempts[:MAX_LOOP_ATTEMPTS]:
+            if not isinstance(a, dict) or _count(a.get("n")) is None:
+                continue
+            attempts.append({
+                "n": _count(a.get("n")),
+                "turns": _count(a.get("turns")),
+                "turn_stop": _text(a.get("turn_stop"), 32),
+                "verifications_in_turn": _count(a.get("verifications_in_turn")),
+                "action_summary": _action_counts(a.get("action_summary")),
+            })
+    ev = _dict(loop.get("evidence"))
+    block: dict[str, Any] = {
+        "mode": "turns",
+        "turns_total": _count(loop.get("turns_total")),
+        "action_summary": _action_counts(loop.get("action_summary")),
+        "attempts": attempts or None,
+        "model_calls": model_calls_block(loop.get("model_calls")),
+        "model_calls_truncated": _bool(loop.get("model_calls_truncated")),
+        "roles": roles_block(loop.get("roles")),
+        "plan": plan_block(loop.get("plan")),
+        "reviews": reviews_block(loop.get("reviews")),
+        "evidence": {
+            "actions": _text(ev.get("actions"), 64),
+            "action_results": _text(ev.get("action_results"), 64),
+            "reviews": "model_reported" if loop.get("reviews") else None,
+        },
+    }
+    return block
+
+
+_ROLE_STATUSES = frozenset({"ran", "skipped", "failed"})
+
+
+def roles_block(raw: Any) -> dict[str, Any] | None:
+    """Per-role evidence: status (ran / skipped / failed and why), model, provider, usage, cost provenance."""
+    d = _dict(raw)
+    if not d:
+        return None
+    out: dict[str, Any] = {}
+    for role in ("planner", "executor", "verifier"):
+        rec = _dict(d.get(role))
+        if not rec:
+            continue
+        status = rec.get("status")
+        block: dict[str, Any] = {
+            "status": status if status in _ROLE_STATUSES else None,
+            "reason": _text(rec.get("reason"), 64),
+            "model": _text(rec.get("model"), 256),
+            "requested_model": _text(rec.get("requested_model"), 256),
+            "provider": _text(rec.get("provider"), 64),
+            "source": _text(rec.get("source"), 32),
+            "independent": _bool(rec.get("independent")),
+            "calls": _count(rec.get("calls")),
+            "turns": _count(rec.get("turns")),
+            "prompt_tokens": _count(rec.get("prompt_tokens")),
+            "completion_tokens": _count(rec.get("completion_tokens")),
+            "cost_usd": _number(rec.get("cost_usd")),
+            "cost_source": _text(rec.get("cost_source"), 32),
+            "duration_ms": _count(rec.get("duration_ms")),
+            "usage_complete": _bool(rec.get("usage_complete")),
+        }
+        explorers = explorers_block(rec.get("explorers"))
+        if explorers is not None:
+            block["explorers"] = explorers
+        out[role] = block
+    return out or None
+
+
+_EXPLORER_STATUSES = frozenset({"answered", "no_answer", "failed"})
+
+
+def explorers_block(raw: Any) -> list[dict[str, Any]] | None:
+    """Parallel read-only exploration workers: outcome, model, usage and cost per worker; never the question text's paths or findings."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[dict[str, Any]] = []
+    for r in raw[:MAX_EXPLORERS]:
+        if not isinstance(r, dict):
+            continue
+        status = r.get("status")
+        out.append({
+            "index": _count(r.get("index")),
+            "status": status if status in _EXPLORER_STATUSES else None,
+            "reason": _text(r.get("reason"), 64),
+            "model": _text(r.get("model"), 256),
+            "turns": _count(r.get("turns")),
+            "calls": _count(r.get("calls")),
+            "findings_count": _count(r.get("findings_count")),
+            "sources_count": len(r["sources"]) if isinstance(r.get("sources"), list) else None,
+            "prompt_tokens": _count(r.get("prompt_tokens")),
+            "completion_tokens": _count(r.get("completion_tokens")),
+            "cost_usd": _number(r.get("cost_usd")),
+            "cost_source": _text(r.get("cost_source"), 32),
+            "duration_ms": _count(r.get("duration_ms")),
+        })
+    return out or None
+
+
+MAX_EXPLORERS = 3
+
+
+def plan_block(raw: Any) -> dict[str, Any] | None:
+    d = _dict(raw)
+    if not d:
+        return None
+    raw_steps, raw_files = d.get("steps"), d.get("files")
+    return {
+        "summary": _text(d.get("summary"), MAX_TEXT),
+        "file_count": len(raw_files) if isinstance(raw_files, list) else None,
+        "step_count": len(raw_steps) if isinstance(raw_steps, list) else 0,
+        "simple": _bool(d.get("simple")),
+    }
+
+
+_VERDICTS = frozenset({"pass", "warn", "fail"})
+
+
+def reviews_block(raw: Any) -> list[dict[str, Any]] | None:
+    """Independent model reviews: verdict, summary, whether a recovery attempt followed and how it ended."""
+    if not isinstance(raw, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for r in raw[:4]:
+        if not isinstance(r, dict) or r.get("verdict") not in _VERDICTS:
+            continue
+        out.append({
+            "attempt": _count(r.get("attempt")),
+            "verdict": r["verdict"],
+            "summary": _text(r.get("summary"), MAX_TEXT),
+            "concern_count": len(r["concerns"]) if isinstance(r.get("concerns"), list) else None,
+            "model": _text(r.get("model"), 256),
+            "independent": _bool(r.get("independent")),
+            "evidence": "model_reported",
+            "recovery_requested": _bool(r.get("recovery_requested")),
+            "recovery_outcome": _text(r.get("recovery_outcome"), 40),
+        })
+    return out or None
+
+
+_ACTION_COUNT_KEYS = (
+    "actions", "reads", "searches", "listings", "diffs", "writes_proposed", "writes_applied",
+    "writes_blocked", "verifications", "invalid",
+)
+MAX_MODEL_CALLS = 20
+_ROLE_NAMES = frozenset({"planner", "executor", "verifier", "validator", "explorer"})
+
+
+def _action_counts(raw: Any) -> dict[str, int] | None:
+    d = _dict(raw)
+    out = {k: _count(d.get(k)) for k in _ACTION_COUNT_KEYS}
+    return None if _all_none(out) else {k: v for k, v in out.items() if v is not None}
+
+
+def model_calls_block(raw: Any) -> list[dict[str, Any]] | None:
+    """Per-call model usage of an OSN run: role, model, tokens, cost and its provenance. Never prompts."""
+    if not isinstance(raw, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for c in raw[:MAX_MODEL_CALLS]:
+        if not isinstance(c, dict):
+            continue
+        model = _text(c.get("model"), 256)
+        if model is None:
+            continue
+        role = c.get("role")
+        out.append({
+            "attempt": _count(c.get("attempt")),
+            "turn": _count(c.get("turn")),
+            "role": role if isinstance(role, str) and role in _ROLE_NAMES else None,
+            "model": model,
+            "requested_model": _text(c.get("requested_model"), 256),
+            "prompt_tokens": _count(c.get("prompt_tokens")),
+            "completion_tokens": _count(c.get("completion_tokens")),
+            "cache_read_tokens": _count(c.get("cache_read_tokens")),
+            "cost_usd": _number(c.get("cost_usd")),
+            "cost_source": _text(c.get("cost_source"), 32),
+            "duration_ms": _count(c.get("duration_ms")),
+        })
+    return out or None
 
 
 _BUDGET_LIMIT_KEYS = ("max_spend_usd", "max_attempts", "max_commands", "max_writes")
@@ -728,6 +924,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "approval_detail": approval_detail_block,
         "sandbox_detail": sandbox_detail_block,
         "execution_loop": execution_loop_block,
+        "agent_loop": agent_loop_block,  # local surfaces only; see its docstring
         "agent_budgets": agent_budgets_block,
         "adaptive_routing": adaptive_routing_block,
         "supervisor_routing": supervisor_routing_block,

@@ -525,6 +525,9 @@ class TestDisplayModelName(unittest.TestCase):
     def test_deepseek_v4_flash(self):
         self.assertEqual(_display_model_name("deepseek/deepseek-v4-flash"), "DeepSeek V4 Flash")
 
+    def test_discovered_deepseek_model_uses_canonical_brand_casing(self):
+        self.assertEqual(_display_model_name("deepseek/deepseek-v4.1-flash"), "DeepSeek V4.1 Flash")
+
     def test_claude_sonnet_dot(self):
         self.assertEqual(_display_model_name("anthropic/claude-sonnet-4.6"), "Claude Sonnet 4.6")
 

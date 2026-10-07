@@ -278,6 +278,7 @@ def _render_repo_plan(
 
 
 _MODEL_SHORT: dict[str, str] = {
+    "deepseek/deepseek-v4.1-flash":    "DeepSeek V4.1 Flash",
     "deepseek/deepseek-v4-flash":      "DeepSeek V4 Flash",
     "deepseek/deepseek-v4-pro":        "DeepSeek V4 Pro",
     "z-ai/glm-5.1":                    "GLM-5.1",

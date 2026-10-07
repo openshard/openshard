@@ -84,7 +84,8 @@ class _OsnProgressRenderer:
         elif event == "attempt_start":
             self._stop()
             model = _friendly_model(data.get("model"))
-            echo(f"\nAttempt {data.get('attempt')} · {model}")
+            tag = " · recovery after independent review" if data.get("review_recovery") else ""
+            echo(f"\nAttempt {data.get('attempt')} · {model}{tag}")
             self._start(f"Calling {model}")
         elif event == "model_response":
             self._stop()
@@ -106,8 +107,10 @@ class _OsnProgressRenderer:
             else:
                 echo(f"  ✓ Policy allowed · {applied} write{'s' if applied != 1 else ''}")
         elif event == "verification_start":
-            echo("\nVerification")
-            self._start("Running verification")
+            self._stop()
+            if not data.get("in_turn"):
+                echo("\nVerification")
+            self._start("Running verification" + (" (requested by the model)" if data.get("in_turn") else ""))
         elif event == "verification_result":
             self._stop()
             status = data.get("status")
@@ -123,7 +126,9 @@ class _OsnProgressRenderer:
             echo("\nRecovery")
             action = data.get("action")
             recovery_model = data.get("model")
-            if action == "escalate" and isinstance(recovery_model, str) and recovery_model:
+            if action == "review_recovery":
+                echo("  Independent review raised concerns (model-reported); one bounded recovery attempt")
+            elif action == "escalate" and isinstance(recovery_model, str) and recovery_model:
                 echo("  Verification failure observed")
                 echo(f"  → {_friendly_model(recovery_model)}")
             else:
@@ -131,6 +136,69 @@ class _OsnProgressRenderer:
         elif event == "budget_stop":
             self._stop()
             echo(f"  ✗ Budget stopped the run · {data.get('reason') or 'limit reached'}")
+        elif event == "turn_start":
+            self._stop()
+            role = data.get("role")
+            prefix = f"{role.capitalize()} turn" if isinstance(role, str) and role != "executor" else "Turn"
+            self._start(f"{prefix} {data.get('turn')}/{data.get('max_turns')} · {_friendly_model(data.get('model'))}")
+        elif event == "explore_start":
+            self._stop()
+            n = data.get("questions") or 0
+            echo(f"  Exploring {n} question{'s' if n != 1 else ''} in parallel (read-only) · "
+                 f"{_friendly_model(data.get('model'))}")
+            self._start("Explorers working")
+        elif event == "explore_end":
+            self._stop()
+            echo(f"  ✓ Exploration done · {data.get('answered')}/{data.get('total')} answered")
+        elif event == "role_start":
+            self._stop()
+            role = data.get("role")
+            if role == "planner":
+                echo("\nPlanning (read-only)")
+            elif role == "verifier":
+                echo("\nIndependent review")
+                self._start("Reviewing the verified change")
+        elif event == "role_end":
+            self._stop()
+            role = data.get("role")
+            status = data.get("status")
+            role_model = _friendly_model(data.get("model")) if data.get("model") else ""
+            if role == "planner":
+                if status == "ran" and data.get("has_plan"):
+                    echo("  ✓ Plan ready" + (f" · {role_model}" if role_model else ""))
+                else:
+                    echo(f"  ? Planner {status or 'did not run'}" + (f" · {data.get('reason')}" if data.get("reason") else "")
+                         + " · continuing without a plan")
+            elif role == "verifier":
+                verdict = data.get("verdict")
+                if status == "ran" and verdict:
+                    mark = "✓" if verdict == "pass" else "!" if verdict == "warn" else "✗"
+                    echo(f"  {mark} Review {verdict.upper()} (model-reported" + (f", {role_model}" if role_model else "") + ")")
+                else:
+                    echo(f"  ? Review {status or 'unavailable'}" + (f" · {data.get('reason')}" if data.get("reason") else ""))
+        elif event == "turn_response":
+            self._stop()
+            n = data.get("actions") or 0
+            note = data.get("note")
+            echo(f"  Turn {data.get('turn')} · {n} action{'s' if n != 1 else ''}" + (f" · {note}" if note else ""))
+        elif event == "action":
+            self._stop()
+            kind = data.get("kind") or "action"
+            target = data.get("target") or ""
+            status = data.get("status")
+            decision = data.get("decision")
+            summary = data.get("summary")
+            if kind == "finish":
+                echo("    ■ finish" + (f" · {summary}" if summary else ""))
+            elif status == "refused":
+                echo(f"    ✗ {kind} {target} · refused ({decision})")
+            elif status == "failed":
+                echo(f"    ✗ {kind} {target}" + (f" · {summary}" if summary else " · failed"))
+            else:
+                echo(f"    → {kind} {target}" + (f" · {summary}" if summary else ""))
+        elif event == "verification_reused":
+            echo("\nVerification")
+            echo("  ✓ Already observed on the final files (not run again)")
 
 
 def _resolve_provider(name: str | None, model: str):
@@ -158,6 +226,21 @@ def _resolve_provider(name: str | None, model: str):
 @click.option("--provider", default=None, help="Provider name when several are configured.")
 @click.option("--context-file", "context_files", multiple=True, help="Repo-relative file to show the model. Repeatable.")
 @click.option("--max-attempts", default=2, type=click.IntRange(1, 5), show_default=True)
+@click.option("--loop", "loop_mode", type=click.Choice(["agent", "writes"]), default="agent", show_default=True,
+              help="agent: the model inspects, writes and verifies over several bounded turns. "
+                   "writes: one whole-file proposal per attempt (the original one-shot loop).")
+@click.option("--max-turns", default=12, type=click.IntRange(1, 30), show_default=True,
+              help="Model turns per attempt in --loop agent mode.")
+@click.option("--roles", "roles_mode", type=click.Choice(["auto", "executor", "full"]), default="auto",
+              show_default=True,
+              help="auto: a read-only planner before the executor when the task is not trivial, and an "
+                   "independent model review after a verified result when a distinct model is available. "
+                   "executor: no planner, no review. full: both, always (the review may reuse the executor's model).")
+@click.option("--planner-model", default=None, help="Model for the planner role (default: routed).")
+@click.option("--verifier-model", default=None, help="Model for the independent review (default: routed, never the executor's).")
+@click.option("--explore/--no-explore", "explore", default=True, show_default=True,
+              help="Let the planner answer up to 3 independent questions with parallel read-only workers "
+                   "(at most 3 at once, never writing). Only when the planner runs and only when it asks.")
 @click.option("--task-id", default=None, help="Explicit task id (from `openshard task new`).")
 @click.option("--promote", is_flag=True, default=False,
               help="After verified success, copy changed files into the repo through the policy gate.")
@@ -166,13 +249,14 @@ def _resolve_provider(name: str | None, model: str):
 @click.option("--no-learning", "no_learning", is_flag=True, default=False,
               help="Do not consult learning signals from this repository's prior OpenShard runs.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
-def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_attempts, task_id,
-            promote, assume_yes, no_learning, as_json):
+def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_attempts, loop_mode, max_turns,
+            roles_mode, planner_model, verifier_model, explore, task_id, promote, assume_yes, no_learning,
+            as_json):
     """Run TASK through the bounded OSN loop."""
     from openshard.cli.ingest import _repo_root
     from openshard.history.jsonl_store import append_jsonl
     from openshard.osn.loop import run_bounded_loop
-    from openshard.osn.model_provider import ModelActionProvider
+    from openshard.osn.model_provider import IterativeModelProvider, ModelActionProvider
     from openshard.osn.run_entry import build_osn_run_entry
 
     repo_root = _repo_root(None, False)
@@ -309,24 +393,41 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             granted = False
         return granted, "interactive_prompt"
 
-    action_provider = ModelActionProvider(
+    provider_cls = IterativeModelProvider if loop_mode == "agent" else ModelActionProvider
+    action_provider = provider_cls(
         provider=provider_obj, models=models, repo_root=repo_root,
         context_files=[*context_files, *learning_files],
         budget=budget,
         learning_context=learning.prompt_text if learning is not None else None,
         learning_context_for=(lambda m: learning_for(m).prompt_text) if learning_for is not None else None,
     )
+    if not as_json:
+        click.echo(f"  Loop    {'agent (bounded turns: inspect → write → verify)' if loop_mode == 'agent' else 'one-shot writes'}")
     supervisor = _resolve_supervisor(routing, budget, action_provider, capabilities, user_ladder=list(escalate),
                                      explicit_model=explicit_model)
+    progress_renderer = _OsnProgressRenderer() if not as_json else None
+    planner_hook, verifier_hook, role_skips, role_usage = _resolve_roles(
+        loop_mode=loop_mode, roles_mode=roles_mode, planner_model=planner_model, verifier_model=verifier_model,
+        explore=explore,
+        task=task, repo_root=repo_root, executor_model=model, routing=routing, provider_name=provider_name,
+        provider_obj=provider_obj, model_policy=model_policy, budget=budget, learning=learning,
+        context_files=[*context_files, *learning_files], action_provider=action_provider, argv=argv,
+        progress=progress_renderer,
+    )
+    if not as_json and loop_mode == "agent":
+        for line in _roles_preamble(role_skips, planner_hook is not None, verifier_hook is not None):
+            click.echo(line)
 
     started = time.monotonic()
-    progress_renderer = _OsnProgressRenderer() if not as_json else None
     try:
         receipt = run_bounded_loop(
             repo_root, task, action_provider, argv, task_id=task_id, max_attempts=max_attempts,
             budget=budget,
             supervisor=supervisor,
             progress=progress_renderer,
+            max_turns=max_turns,
+            planner=planner_hook,
+            verifier=verifier_hook,
             organisation_approver=run_approver,
             blocked_write_patterns=permissions.blocked_write_paths,
             approval_write_patterns=permissions.approval_write_paths,
@@ -336,6 +437,18 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         if progress_renderer is not None:
             progress_renderer.close()
     duration = time.monotonic() - started
+    for skipped_role, (skip_reason, skip_choice) in role_skips.items():
+        if skipped_role not in receipt.roles:
+            from openshard.osn.roles import RoleRun
+
+            receipt.roles[skipped_role] = RoleRun.skipped(skipped_role, skip_reason, skip_choice).to_record()
+    # Every model call of the run, in order: the planner's (attempt 0), then each
+    # attempt's executor calls followed by any review of that attempt.
+    all_usage = sorted(
+        enumerate([*role_usage, *action_provider.usage]),
+        key=lambda iu: (iu[1].attempt, {"planner": 0, "executor": 1}.get(iu[1].role, 2), iu[0]),
+    )
+    all_usage = [u for _, u in all_usage]
 
     from openshard.learning.record import build_learning_record
 
@@ -351,7 +464,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     runs_path = repo_root / ".openshard" / "runs.jsonl"
     run_index = sum(1 for _ in runs_path.open(encoding="utf-8")) if runs_path.exists() else 0
     entry = build_osn_run_entry(
-        receipt, task=task, usage=action_provider.usage, duration_seconds=duration,
+        receipt, task=task, usage=all_usage, duration_seconds=duration,
         repo_path=repo_root, task_id=task_id, run_index=run_index,
         budget_record=budget.to_record() if budget is not None else budget_record,
         routing_decision=routing.decision, routing_record_mode=routing.record_mode,
@@ -397,12 +510,29 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "provider": provider_name, "models": models, "attempts": len(receipt.attempts),
             "changed_files": receipt.changed_files, "promoted": promoted, "skipped": skipped,
             "sandbox_path": receipt.sandbox_path,
+            "mode": receipt.mode,
+            "turns": entry["osn_loop"].get("turns_total"),
+            "action_summary": entry["osn_loop"].get("action_summary"),
+            "actions": [
+                {k: a.get(k) for k in ("turn", "kind", "target", "decision", "executed", "ok", "role", "model")}
+                for att in entry["osn_loop"].get("attempts") or [] for a in att.get("actions") or []
+            ],
+            "model_calls": entry["osn_loop"].get("model_calls"),
+            "cost_provenance": entry.get("cost_provenance"),
+            "roles": entry["osn_loop"].get("roles"),
+            "plan": entry["osn_loop"].get("plan"),
+            "reviews": entry["osn_loop"].get("reviews"),
             **budget_output,
             "learning": _learning_json(entry.get("learning")),
         }, indent=2))
         return
     click.echo(f"OSN loop: {receipt.status} ({receipt.stop_reason}); verification {receipt.verification_state}")
     click.echo(f"  attempts: {len(receipt.attempts)}   model(s): {', '.join(models)}   provider: {provider_name}")
+    agent_line = _agent_loop_line(entry.get("osn_loop"), entry)
+    if agent_line:
+        click.echo(f"  agent loop: {agent_line}")
+    for line in _roles_summary(entry.get("osn_loop")):
+        click.echo(line)
     budget_line = _budget_line(entry.get("agent_budgets"))
     if budget_line:
         click.echo(f"  budget: {budget_line}")
@@ -742,6 +872,208 @@ def _resolve_budget(
         err=True,
     )
     return None, not_enforced_record(local_limits, reason)
+
+def _count_repo_files(repo_root: Path, cap: int = 200) -> int:
+    """How many files the repository has, up to *cap* (enough to tell a tiny fixture from a project)."""
+    ignored = {".git", ".openshard", "__pycache__", ".venv", "venv", "node_modules", ".pytest_cache"}
+    count = 0
+    try:
+        for p in repo_root.rglob("*"):
+            if any(part in ignored for part in p.relative_to(repo_root).parts):
+                continue
+            if p.is_file():
+                count += 1
+                if count >= cap:
+                    break
+    except OSError:
+        return count
+    return count
+
+
+def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task, repo_root, executor_model,
+                   routing, provider_name, provider_obj, model_policy, budget, learning, context_files,
+                   action_provider, argv, progress, explore=True):
+    """Planner and verifier hooks for this run, the roles that will not run and why, and their usage list.
+
+    Role models come from ``openshard.osn.roles.select_role_model`` and must pass
+    the same ``models`` policy as the executor's. Nothing here calls a model;
+    the hooks do, inside the loop, at the boundaries the loop owns.
+    """
+    role_usage: list = []
+    role_skips: dict = {}
+    if loop_mode != "agent":
+        return None, None, role_skips, role_usage
+    from openshard.osn import roles as osn_roles
+    from openshard.routing.engine import route
+    from openshard.sync.policies import enforce_models_allowed
+
+    catalog_knows = None
+    try:
+        from openshard.models.catalog import load_catalog
+
+        _catalog = load_catalog(refresh="never")
+
+        def catalog_knows(model_id: str) -> bool:  # noqa: E306
+            try:
+                return _catalog.resolve(model_id) is not None
+            except Exception:
+                return False
+    except Exception:
+        catalog_knows = None
+    planner_choice = osn_roles.select_role_model(
+        osn_roles.ROLE_PLANNER, explicit=planner_model, executor_model=executor_model, routing=routing,
+        provider_name=provider_name, catalog_knows=catalog_knows,
+    )
+    verifier_choice = osn_roles.select_role_model(
+        osn_roles.ROLE_VERIFIER, explicit=verifier_model, executor_model=executor_model, routing=routing,
+        provider_name=provider_name, catalog_knows=catalog_knows,
+    )
+    try:
+        enforce_models_allowed(
+            [m for m in (planner_choice.model, verifier_choice.model) if m and m != executor_model], model_policy,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+
+    task_category = route(task).category
+    repo_file_count = _count_repo_files(repo_root)
+    want_planner, planner_skip = osn_roles.planner_wanted(
+        roles_mode, task_category=task_category, repo_file_count=repo_file_count,
+    )
+    planner_hook = None
+    if want_planner and planner_choice.model:
+        explorer_model = None
+        if explore:
+            # Exploration workers: a fast control-plane model when routing offers one,
+            # else the planner's own model. Reads only, so independence is not required.
+            explorer_choice = osn_roles.select_role_model(
+                osn_roles.ROLE_EXPLORER, explicit=None, executor_model=executor_model, routing=routing,
+                provider_name=provider_name, catalog_knows=catalog_knows,
+            )
+            explorer_model = (
+                explorer_choice.model if explorer_choice.source != osn_roles.SOURCE_EXECUTOR_REUSED
+                else planner_choice.model
+            )
+            try:
+                enforce_models_allowed([m for m in (explorer_model,) if m and m != executor_model], model_policy)
+            except ValueError as exc:
+                raise click.ClickException(str(exc)) from None
+
+        def planner_hook(sandbox, repo_files):  # noqa: E306
+            plan, role, usage = osn_roles.run_planner_turns(
+                provider_obj, planner_choice.model, task=task, repo_root=repo_root, sandbox=sandbox,
+                repo_files=repo_files, choice=planner_choice, provider_name=provider_name, budget=budget,
+                learning_context=learning.prompt_text if learning is not None else None,
+                context_files=list(context_files), progress=progress, explorer_model=explorer_model,
+            )
+            role_usage.extend(usage)
+            return plan, role.to_record()
+    else:
+        role_skips[osn_roles.ROLE_PLANNER] = (planner_skip or "no_planner_model", planner_choice)
+
+    want_verifier, verifier_skip = osn_roles.verifier_wanted(
+        roles_mode, verifier_choice, task_category=task_category, repo_file_count=repo_file_count,
+    )
+    verifier_hook = None
+    if want_verifier and verifier_choice.model:
+        check_name = argv[0].replace("\\", "/").rsplit("/", 1)[-1] if argv else ""
+
+        def verifier_hook(sandbox, changed, result, attempt):  # noqa: E306
+            from openshard.osn.agent_loop import sandbox_diff_text
+
+            diff_text = sandbox_diff_text(repo_root, sandbox, changed, limit=osn_roles.MAX_REVIEW_DIFF_CHARS)
+            verification = {
+                "status": "passed" if result.passed else "failed", "exit_code": result.exit_code,
+                "failed_tests": list(result.failed_tests), "command": check_name,
+            }
+            review, usage, err = osn_roles.run_verifier_call(
+                provider_obj, verifier_choice.model, task=task, plan=getattr(action_provider, "plan", None),
+                diff_text=diff_text, verification=verification, changed_files=list(changed), attempt=attempt,
+                budget=budget,
+            )
+            role_usage.extend(usage)
+            role = osn_roles.RoleRun.from_usage(
+                osn_roles.ROLE_VERIFIER, usage, choice=verifier_choice, provider=provider_name,
+                status=osn_roles.STATUS_RAN if review else osn_roles.STATUS_FAILED, reason=err,
+            )
+            return review, role.to_record()
+    else:
+        role_skips[osn_roles.ROLE_VERIFIER] = (verifier_skip or "no_verifier_model", verifier_choice)
+    return planner_hook, verifier_hook, role_skips, role_usage
+
+
+def _roles_preamble(role_skips: dict, planner: bool, verifier: bool) -> list[str]:
+    parts = []
+    parts.append("planner" if planner else f"no planner ({role_skips.get('planner', ('?',))[0]})")
+    parts.append("executor")
+    parts.append("independent review" if verifier else f"no review ({role_skips.get('verifier', ('?',))[0]})")
+    return [f"  Roles   {' → '.join(parts)}"]
+
+
+def _roles_summary(loop: dict | None) -> list[str]:
+    """One line per role after the run: what ran on which model, what it cost, what it concluded."""
+    if not isinstance(loop, dict) or not isinstance(loop.get("roles"), dict):
+        return []
+    out: list[str] = []
+    for role in ("planner", "executor", "verifier"):
+        rec = loop["roles"].get(role)
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("status") != "ran":
+            out.append(f"  {role}: {rec.get('status')} ({rec.get('reason') or 'no reason recorded'})")
+            continue
+        cost = rec.get("cost_usd")
+        label = {"provider_reported": "provider-reported", "list_rate_estimate": "list-rate estimate"}.get(
+            str(rec.get("cost_source") or ""), "origin not recorded",
+        )
+        cost_text = f"${cost:.4f} ({label})" if isinstance(cost, (int, float)) else "cost unknown"
+        tokens = rec.get("total_tokens")
+        bits = [f"{_friendly_model(rec.get('model'))}", f"{rec.get('calls')} call(s)"]
+        if isinstance(tokens, int):
+            bits.append(f"{tokens:,} tokens")
+        bits.append(cost_text)
+        if rec.get("independent") is True:
+            bits.append("independent model")
+        elif rec.get("independent") is False and role == "verifier":
+            bits.append("same model as executor")
+        out.append(f"  {role}: " + " · ".join(bits))
+        for ex in rec.get("explorers") or []:
+            ex_cost = ex.get("cost_usd")
+            ex_cost_text = f"${ex_cost:.4f}" if isinstance(ex_cost, (int, float)) else "cost unknown"
+            out.append(f"    explorer {int(ex.get('index', 0)) + 1}: {ex.get('status')} · "
+                       f"{_friendly_model(ex.get('model'))} · {ex.get('findings_count', 0)} finding(s) · {ex_cost_text}")
+    for r in loop.get("reviews") or []:
+        line = f"  review (attempt {r.get('attempt')}): {str(r.get('verdict', '?')).upper()} (model-reported)"
+        if r.get("summary"):
+            line += f" · {r['summary']}"
+        if r.get("recovery_requested"):
+            line += f" · recovery: {r.get('recovery_outcome') or 'requested'}"
+        out.append(line)
+    return out
+
+
+def _agent_loop_line(loop: dict | None, entry: dict) -> str | None:
+    """One line on how the agent spent its turns and what the model calls cost, with provenance."""
+    if not isinstance(loop, dict) or not isinstance(loop.get("action_summary"), dict):
+        return None
+    acts = loop["action_summary"]
+    inspect = (acts.get("reads") or 0) + (acts.get("searches") or 0) + (acts.get("listings") or 0)
+    parts = [f"{loop.get('turns_total')} turn(s)", f"{acts.get('actions', 0)} action(s)", f"{inspect} inspect"]
+    parts.append(f"{acts.get('writes_applied', 0)} write(s)")
+    if acts.get("writes_blocked"):
+        parts.append(f"{acts['writes_blocked']} refused")
+    parts.append(f"{acts.get('verifications', 0)} model-requested verification(s)")
+    calls = loop.get("model_calls") or []
+    if calls:
+        cost = entry.get("estimated_cost")
+        prov = entry.get("cost_provenance")
+        label = {"provider_reported": "provider-reported", "official_rate_estimate": "list-rate estimate"}.get(
+            prov or "", "origin not recorded",
+        )
+        cost_text = f"${cost:.4f} ({label})" if isinstance(cost, (int, float)) else "cost unknown"
+        parts.append(f"{len(calls)} model call(s) · {entry.get('total_tokens', 0):,} tokens · {cost_text}")
+    return " · ".join(parts)
+
 
 def _budget_line(record: dict | None) -> str | None:
     if not isinstance(record, dict):

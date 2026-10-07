@@ -207,12 +207,12 @@ class TestSelectWithInfoHistoryAdjustments(unittest.TestCase):
     def test_history_bonus_cannot_beat_exact_policy_preference(self):
         # m/preferred holds the +3.0 exact-match policy bonus for "boilerplate".
         # m/other gets a +1.0 history bonus. The policy winner must still win.
-        preferred = self._make("deepseek/deepseek-v4-flash", prompt_per_token="0.00000014")
+        preferred = self._make("deepseek/deepseek-v4.1-flash", prompt_per_token="0.00000014")
         other = self._make("z-ai/glm-5.1", prompt_per_token="0.000001")
         req = requirements_from_category("boilerplate")
-        adjustments = {"deepseek/deepseek-v4-flash": 0.0, "z-ai/glm-5.1": 1.0}
+        adjustments = {"deepseek/deepseek-v4.1-flash": 0.0, "z-ai/glm-5.1": 1.0}
         result = select_with_info([preferred, other], req, "boilerplate", history_adjustments=adjustments)
-        self.assertEqual(result.selected_model, "deepseek/deepseek-v4-flash")
+        self.assertEqual(result.selected_model, "deepseek/deepseek-v4.1-flash")
 
     def test_scores_raw_empty_when_no_adjustments(self):
         e1 = self._make("m/a")

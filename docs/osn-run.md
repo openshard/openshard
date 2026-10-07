@@ -12,8 +12,68 @@ openshard osn run "Implement slugify in slug.py" \
 
 ## Flow
 
-task -> context -> model proposes whole-file writes -> policy gate -> isolated copy ->
-OpenShard runs `--verify-cmd` -> bounded retry / escalation -> receipt.
+task -> isolated copy -> model turn: choose bounded actions -> OpenShard validates and performs
+each action -> result shown to the model -> next turn ... -> verification run by OpenShard ->
+bounded retry / escalation -> receipt.
+
+By default (`--loop agent`) the model works in bounded turns (`--max-turns`, default 12, hard cap
+30). Each turn it replies with a JSON list of typed actions and a short note; OpenShard performs
+them in order inside the isolated copy and shows the model only their results on the next turn:
+
+| Action | What OpenShard does | Authority |
+|---|---|---|
+| `list_files`, `read_file`, `search_repo`, `get_diff` | reads the isolated copy (bounded output); `get_diff` shows the model's own changes against the repository | path safety; protected paths (secrets, `.git/`, `.openshard/`) are refused |
+| `write_file` (complete new content) | path safety, the file-mutation policy (deny / ask / allow, plus organisation write-path patterns), the agent budget, then the native `write_file` tool, which re-checks path and policy itself and records before/after hashes, sizes and line counts | a refused write ends the attempt and the run is `blocked`, exactly as a refused one-shot proposal is; nothing is retried |
+| `run_verification` | runs `--verify-cmd` in the isolated copy (at most 2 per attempt) and shows the outcome and a short output tail | the model never chooses the command; each launch counts toward the command budget |
+| `finish` | ends the attempt | if files changed after the last verification, OpenShard runs it once more |
+
+A reply that is not a valid action list is re-asked once (its spend is recorded), then the run
+ends in `error`. A turn may carry at most 8 actions; anything after `finish` is ignored.
+`--loop writes` keeps the original behaviour: one whole-file proposal per attempt.
+
+## Roles: planner, executor, verifier
+
+`--roles auto` (default) can put three roles on one run; each is recorded with its own model,
+provider, calls, tokens, cost (with provenance) and duration, and a role that did not run says
+`skipped` and why.
+
+| Role | What it does | When it runs (`auto`) | Model |
+|---|---|---|---|
+| planner | up to 3 read-only turns in the isolated copy (writes and verification requests are refused), ending in a short plan: summary, likely files, steps, what verification must show | the task's routing category is `complex` or `security`, or the repository has more than 12 files; a trivial task pays for no planner | `--planner-model`, else Routing V2 over the run's candidate pool (`deep_reasoning`) when the capability applied, else the native planner tier if the catalog knows it, else the executor's model |
+| executor | the turn loop above, with the plan as advisory context | always | as before (`--model`, Routing V2, or keyword routing, with the escalation ladder) |
+| verifier | one call after an attempt OpenShard itself verified: task, plan, a bounded diff, the verification evidence; replies `pass`, `warn` or `fail` with concerns | the same non-trivial rule as the planner, and a model other than the executor's is available (`--verifier-model`, Routing V2's `verifier` class with the executor's model excluded, or the native validator tier when the catalog knows it); a self-review is not paid for in `auto` | as listed; `--roles full` runs it even on the executor's own model and records `independent: false` |
+
+### Parallel read-only exploration
+
+While planning, the planner may hand up to three *independent* questions (where something is
+implemented, how the tests are laid out, which policy code applies) to exploration workers
+(`--explore`, on by default; `--no-explore` disables it). Each worker is a read-only agent turn
+loop on the same isolated copy (at most 2 turns; writes and verification requests are refused by the
+harness), on a fast control-plane model when routing offers one, else the planner's model. At most
+three run at once, only when the planner asks, and never on a task too trivial for a planner. Their
+compact answers (short findings plus the repo-relative paths they rest on) come back to the planner
+as observations; the planner remains the single reasoning owner and the executor never sees a worker
+directly. The budget is checked once before a round and every worker's spend is recorded afterwards.
+The Receipt keeps each worker on the planner's role record (`osn_loop.roles.planner.explorers`:
+question, outcome, model, calls, turns, findings and sources counts, tokens, cost with provenance,
+duration, its read-only actions) and in `model_calls` with role `explorer`; the full local Receipt
+lists them under `ROLES`.
+
+The verdict is **model-reported evidence** beside the deterministic result and never changes the
+verification status. A `fail` buys at most one bounded executor recovery attempt on the same
+model (no escalation: nothing failed deterministically) whose result is verified like any other;
+if it does not verify, its changes are undone and the verified state stands
+(`recovery_outcome: reverted_to_verified_state`). At most two reviews per run. `--roles executor`
+disables both roles.
+
+The Receipt carries `osn_loop.roles` (per-role status, reason, requested and reported model,
+provider, calls, turns, tokens, cost, `cost_source`, duration), `osn_loop.plan`, `osn_loop.reviews`
+(verdict, summary, concerns, whether a recovery was requested and how it ended), `stage_runs`
+(planning / implementation / review, the per-stage usage every Receipt surface already shows) and a
+`tier_dispatch_receipt` whose `*_model_actual` fields are set only for a role that really called a
+model, so `openshard history` shows which roles were dispatched. The run's `execution_model` stays
+the executor's. The full local Receipt gets `ROLES`, `PLAN` and `REVIEW` sections; the hosted
+projection is unchanged until the Platform contract learns these blocks.
 
 - The model is called through the existing provider layer (`BaseProvider.execute`), so any
   configured provider works. Without `--model`, the existing keyword routing picks the first model.
@@ -37,7 +97,9 @@ OpenShard runs `--verify-cmd` -> bounded retry / escalation -> receipt.
 
 | Field | Level |
 |---|---|
-| Proposed writes | agent-declared |
+| Proposed writes and every other declared action (`osn_loop.attempts[*].actions`: kind, repo-relative target, short intent, role, model, turn) | agent-declared |
+| What OpenShard decided and saw for each action (policy decision, approval, whether it executed, before/after hashes and line counts of a write, counts of a read, the outcome of a verification) | OpenShard-observed; tool output, file contents and prompts are never stored |
+| Model calls (`osn_loop.model_calls`: attempt, turn, role, requested and reported model, tokens, cost, `cost_source`, duration) | provider-reported usage; a cost is `provider_reported` only when the provider itself stated it, otherwise OpenShard's list-rate arithmetic labelled `list_rate_estimate`, and the run's `cost_provenance` says which |
 | Policy decisions, file effects | OpenShard-observed; every proposed write is stored as an allow / ask / deny `policy_decisions` entry (with whether an approver granted an ask), and an `approval_receipt` says what approval was needed and whether it was given, so `history`, failure classification and trust scoring treat an OSN policy block as a policy block |
 | Verification (exit code) | OpenShard-observed (`directly_observed` / `openshard_executed`) |
 | Model cost | recorded only when the provider reported it; otherwise unknown |

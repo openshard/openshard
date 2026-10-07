@@ -1,14 +1,24 @@
-"""Bounded OSN execution-loop slice (v0).
+"""Bounded OSN execution loop.
 
 inspect -> plan -> policy -> isolated action -> direct verification
 -> bounded retry (only if justified) -> receipt.
+
+Two provider shapes drive an attempt:
+
+* a *turn provider* (``.turn(state)``, see ``openshard.osn.agent_loop``): the
+  model takes several bounded turns, choosing typed actions (list, read,
+  search, diff, write, run_verification, finish) from what the previous
+  actions returned, while the harness validates and performs each one;
+* an *action provider* (``provider(ctx) -> [FileWriteAction]``): one call
+  proposing whole-file writes, kept for callers of the original contract.
 
 Evidence semantics: actions come from an agent/provider and are *declared*;
 policy decisions, file effects and verification are *observed* by OpenShard.
 Applying a change is never treated as verifying it. Changes are made only in
 an isolated copy (a filesystem copy, not a process sandbox: the verify command
-runs with host permissions and may execute agent-written code); promoting them to the real repo is a separate, policy-gated
-step (see openshard.native.sandbox_apply.apply_sandbox_changes).
+runs with host permissions and may execute agent-written code); promoting them
+to the real repo is a separate, policy-gated step (see
+openshard.native.sandbox_apply.apply_sandbox_changes).
 """
 from __future__ import annotations
 
@@ -23,6 +33,20 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from openshard.osn.actions import summarize_actions
+from openshard.osn.agent_loop import (
+    DEFAULT_MAX_TURNS,
+    DEFAULT_MAX_VERIFICATIONS,
+    STOP_BUDGET,
+    STOP_MALFORMED_REPLY,
+    STOP_POLICY_BLOCK,
+    STOP_PROVIDER_ERROR,
+    STOP_VERIFIER_SETUP,
+    STOP_VERIFIER_TAINTED,
+    STOP_VERIFIER_TIMEOUT,
+    run_attempt_turns,
+    state_fingerprint,
+)
 from openshard.osn.budget import STATUS_BUDGET_EXHAUSTED, BudgetExhausted, BudgetLedger
 from openshard.policy.command_execution import organisation_command_blocked
 from openshard.policy.decision import PolicyDecision, make_deny
@@ -39,6 +63,9 @@ _COPY_IGNORE = shutil.ignore_patterns(
     ".env", ".env.*", ".claude", ".codex", ".opencode", ".codegraph", "*.pem", "*.key",
     ".mypy_cache", ".ruff_cache", "dist", ".tmp",
 )
+
+MODE_TURNS = "turns"  # iterative: the model chooses bounded actions turn by turn
+MODE_WRITES = "writes"  # one-shot: the model proposes whole-file writes once per attempt
 
 
 @dataclass(frozen=True)
@@ -63,6 +90,18 @@ class LoopContext:
 # provider(context) -> proposed actions. In production this wraps a model call.
 ActionProvider = Callable[[LoopContext], list[FileWriteAction]]
 ProgressCallback = Callable[[str, dict[str, Any]], None]
+# Role hooks (``openshard.osn.roles``). The planner sees the isolated copy and
+# its file list and returns ``(plan or None, role record)``; the verifier sees
+# the copy, the changed files, the observed verification and the attempt
+# number and returns ``(review or None, role record)``. Both may raise
+# ``BudgetExhausted`` before spending; the loop records the skip.
+PlannerHook = Callable[[Path, list[str]], tuple[dict | None, dict]]
+VerifierHook = Callable[[Path, list[str], "VerificationResult", int], tuple[dict | None, dict]]
+MAX_REVIEWS = 2
+REVIEW_EVIDENCE = "model_reported"
+RECOVERY_VERIFIED = "verified"  # the recovery attempt changed files and verification passed again
+RECOVERY_NO_CHANGE = "no_change"  # the executor made no change; the verified state stands
+RECOVERY_REVERTED = "reverted_to_verified_state"  # the recovery did not verify; its changes were undone
 
 
 def _emit_progress(progress: ProgressCallback | None, event: str, **data: Any) -> None:
@@ -116,6 +155,19 @@ class AttemptRecord:
     # Safe provider failure detail. Never raw output, stack traces, paths or secrets.
     error_class: str | None = None
     error_message: str | None = None
+    # Iterative mode only: the model's turns and every declared action with
+    # the harness's decision and observed effect (``ActionRecord.to_dict``).
+    turns: int | None = None
+    actions: list[dict] = field(default_factory=list)
+    verifications_in_turn: int = 0
+    turn_stop: str | None = None  # finished | max_turns | budget | provider_error | verifier_*
+    final_note: str = ""
+    # True for the bounded executor attempt an independent review asked for.
+    review_recovery: bool = False
+    # True when that recovery attempt did not verify and its changes were undone:
+    # its verification describes bytes that no longer exist, so it never
+    # defines the run's verification state.
+    reverted: bool = False
 
 
 @dataclass
@@ -134,10 +186,25 @@ class LoopReceipt:
     # Privacy-safe command decision for the user-supplied verifier. Raw argv is
     # never stored; this is the same PolicyDecision shape as file mutations.
     command_decision: dict | None = None
+    mode: str = MODE_WRITES
+    # Roles that took part (``openshard.osn.roles.RoleRun`` records keyed by role),
+    # the planner's plan, and every independent review with its outcome.
+    roles: dict[str, dict] = field(default_factory=dict)
+    plan: dict | None = None
+    reviews: list[dict] = field(default_factory=list)
+
+    @property
+    def review_verdict(self) -> str | None:
+        """The last independent review's verdict (model-reported), or None."""
+        return self.reviews[-1].get("verdict") if self.reviews else None
+
+    def effective_attempts(self) -> list[AttemptRecord]:
+        """The attempts whose effects are still in the isolated copy (reverted recoveries excluded)."""
+        return [a for a in self.attempts if not a.reverted]
 
     @property
     def verification_state(self) -> str:
-        for a in reversed(self.attempts):
+        for a in reversed(self.effective_attempts()):
             if a.verification is None:
                 continue
             if not a.verification.ran:
@@ -148,38 +215,68 @@ class LoopReceipt:
         return "not_run"
 
     def to_dict(self) -> dict:
+        attempts = []
+        for a in self.attempts:
+            item: dict[str, Any] = {
+                "n": a.n,
+                "proposed": [_display_path(p) for p in a.proposed],
+                "applied": a.applied,
+                "blocked": [_display_path(p) for p in a.blocked],
+                "policy": _stored_policy(a.policy),
+                "verification": _stored_verification(a.verification),
+                "error": (
+                    {"class": a.error_class, "message": a.error_message}
+                    if a.error_class else None
+                ),
+            }
+            if a.turns is not None:
+                item["turns"] = a.turns
+                item["turn_stop"] = a.turn_stop
+                item["actions"] = [dict(x) for x in a.actions]
+                item["action_summary"] = _action_summary_from_dicts(a.actions)
+                item["verifications_in_turn"] = a.verifications_in_turn
+                if a.final_note:
+                    item["final_note"] = a.final_note
+            if a.review_recovery:
+                item["review_recovery"] = True
+            if a.reverted:
+                item["reverted"] = True
+            attempts.append(item)
         return {
             "schema_version": self.schema_version,
             "receipt_id": self.receipt_id,
             "task_id": self.task_id,
             "status": self.status,
             "stop_reason": self.stop_reason,
+            "mode": self.mode,
             "verification_state": self.verification_state,
             "changed_files": list(self.changed_files),
             "sandbox_path": self.sandbox_path,
-            "attempts": [
-                {
-                    "n": a.n,
-                    "proposed": [_display_path(p) for p in a.proposed],
-                    "applied": a.applied,
-                    "blocked": [_display_path(p) for p in a.blocked],
-                    "policy": _stored_policy(a.policy),
-                    "verification": _stored_verification(a.verification),
-                    "error": (
-                        {"class": a.error_class, "message": a.error_message}
-                        if a.error_class else None
-                    ),
-                }
-                for a in self.attempts
-            ],
+            "attempts": attempts,
+            "roles": {k: dict(v) for k, v in self.roles.items()},
+            "plan": dict(self.plan) if self.plan else None,
+            "reviews": [dict(r) for r in self.reviews],
             "command_policy": self.command_decision,
             "evidence": {
                 "actions": "agent_declared",
                 "policy_and_file_effects": "openshard_observed",
+                "action_results": "openshard_observed",
                 "verification": "openshard_observed",
                 "task_text_stored": False,
             },
         }
+
+
+def _action_summary_from_dicts(actions: list[dict]) -> dict[str, int]:
+    from openshard.osn.actions import ActionRecord
+
+    records = []
+    for d in actions:
+        try:
+            records.append(ActionRecord(**{k: v for k, v in d.items() if k in ActionRecord.__dataclass_fields__}))
+        except TypeError:
+            continue
+    return summarize_actions(records)
 
 
 def _display_path(p: str) -> str:
@@ -280,10 +377,85 @@ def _run_verification(command: list[str], cwd: Path, timeout: float) -> tuple[Ve
     return result, out
 
 
+def _observe_verification(
+    sandbox: Path,
+    changed: list[str],
+    verify_command: list[str],
+    timeout: float,
+    budget: BudgetLedger | None,
+) -> tuple[VerificationResult, str]:
+    """Run the verifier once in *sandbox* and classify what OpenShard observed.
+
+    Raises ``BudgetExhausted`` before launching when the command budget is spent.
+    Sets ``tainted`` when the verifier rewrote the files it was checking (a pass
+    then proves nothing), ``setup_failure`` when the output shows the verifier
+    itself could not run (no verdict on the change), and ``failed_tests`` on an
+    ordinary observed failure.
+    """
+    if budget is not None:
+        budget.authorize_command()
+    before = _hash_files(sandbox, changed)
+    result, output = _run_verification(verify_command, sandbox, timeout)
+    after = _hash_files(sandbox, changed)
+    if after != before:
+        result.passed = False
+        result.tainted = True
+        return result, output
+    if result.passed or result.timed_out:
+        return result, output
+    kind = detect_setup_failure(result.exit_code, output)
+    if kind is not None:
+        # A missing tool is not something another model call can fix. No outcome was
+        # observed for the proposed change, so this is not a failed verification.
+        result.setup_failure = kind
+        result.ran = False
+        result.observed = False
+        result.passed = False
+        return result, output
+    result.failed_tests = failing_test_ids(output)
+    return result, output
+
+
+def _is_turn_provider(provider: Any) -> bool:
+    return callable(getattr(provider, "turn", None))
+
+
+def _snapshot(root: Path, rels: list[str]) -> dict[str, bytes | None]:
+    """The bytes of *rels* under *root* (None for an absent file), to restore a verified state."""
+    out: dict[str, bytes | None] = {}
+    for rel in rels:
+        p = root / rel
+        try:
+            out[rel] = p.read_bytes() if p.is_file() else None
+        except OSError:
+            out[rel] = None
+    return out
+
+
+def _restore(root: Path, snapshot: dict[str, bytes | None], changed_after: list[str]) -> None:
+    """Put the isolated copy back to *snapshot*; files created since are removed."""
+    for rel in changed_after:
+        if rel not in snapshot:
+            try:
+                (root / rel).unlink(missing_ok=True)
+            except OSError:
+                pass
+    for rel, data in snapshot.items():
+        p = root / rel
+        try:
+            if data is None:
+                p.unlink(missing_ok=True)
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(data)
+        except OSError:
+            pass
+
+
 def run_bounded_loop(
     repo_root: Path,
     task: str,
-    provider: ActionProvider,
+    provider: Any,
     verify_command: list[str],
     *,
     task_id: str | None = None,
@@ -298,8 +470,26 @@ def run_bounded_loop(
     blocked_write_patterns: tuple[str, ...] = (),
     approval_write_patterns: tuple[str, ...] = (),
     blocked_command_prefixes: tuple[str, ...] = (),
+    max_turns: int = DEFAULT_MAX_TURNS,
+    max_verifications_per_attempt: int = DEFAULT_MAX_VERIFICATIONS,
+    planner: PlannerHook | None = None,
+    verifier: VerifierHook | None = None,
+    max_reviews: int = MAX_REVIEWS,
 ) -> LoopReceipt:
     """Run the bounded loop. Never writes to *repo_root*.
+
+    *provider* is either a turn provider (``.turn(state)``; the iterative
+    agent loop, ``max_turns`` turns per attempt, ``max_verifications_per_attempt``
+    model-requested verifications per attempt) or an action provider
+    (``provider(ctx) -> [FileWriteAction]``; one proposal per attempt).
+
+    A *planner* hook runs once before the first attempt (read-only) and its
+    plan reaches a turn provider through ``set_plan``. A *verifier* hook runs
+    after an attempt OpenShard itself verified; its verdict is recorded as
+    model-reported evidence and never changes the verification status. A
+    ``fail`` verdict may trigger one bounded executor recovery attempt (turn
+    providers only); if that attempt does not verify, its changes are undone
+    and the verified state stands. At most ``max_reviews`` reviews per run.
 
     With a *budget* (Agent Budgets, capability-gated by the caller) each
     attempt, verify-command launch and file write is authorized first; the
@@ -318,17 +508,26 @@ def run_bounded_loop(
     rr, sb = repo_root.resolve(), sandbox.resolve()
     if sb == rr or rr in sb.parents or sb in rr.parents:
         raise ValueError("sandbox_path must be separate from repo_root")
+    iterative = _is_turn_provider(provider)
+    mode = MODE_TURNS if iterative else MODE_WRITES
     attempts: list[AttemptRecord] = []
     changed: list[str] = []
     prev_fingerprint: str | None = None
     prev_failure: str | None = None
     blocked_seen: list[str] = []
     prev_actions: str | None = None
+    roles: dict[str, dict] = {}
+    plan: dict | None = None
+    reviews: list[dict] = []
+    max_reviews = max(0, min(int(max_reviews), MAX_REVIEWS))
 
-    _emit_progress(progress, "workspace_ready")
+    _emit_progress(progress, "workspace_ready", mode=mode)
     command_record: dict | None = None
 
     def _receipt(status: str, reason: str) -> LoopReceipt:
+        if verifier is not None and status != "verified" and "verifier" not in roles:
+            # A review was configured but there was never a verified result to review.
+            roles["verifier"] = {"role": "verifier", "status": "skipped", "reason": "no_verified_result_to_review"}
         return LoopReceipt(
             task_id,
             status,
@@ -337,6 +536,10 @@ def run_bounded_loop(
             changed,
             str(sandbox),
             command_decision=command_record,
+            mode=mode,
+            roles=roles,
+            plan=plan,
+            reviews=reviews,
         )
 
     # --verify-cmd is an explicit user choice and historically runs as supplied.
@@ -370,6 +573,166 @@ def run_bounded_loop(
         pending_supervision.supervision = supervisor.decisions[-1].to_record()
         pending_supervision = None
 
+    def _verify(paths: list[str]) -> tuple[VerificationResult, str]:
+        return _observe_verification(sandbox, paths, verify_command, verify_timeout, budget)
+
+    if planner is not None:
+        # Read-only planning before any write. A plan is advisory context for the
+        # executor; a planner that fails or is stopped by the budget is recorded,
+        # and the run goes on without a plan.
+        _emit_progress(progress, "role_start", role="planner")
+        try:
+            plan, planner_record = planner(sandbox, _list_files(sandbox))
+        except BudgetExhausted as exc:
+            planner_record = {"role": "planner", "status": "skipped", "reason": exc.stop_reason}
+            plan = None
+        roles["planner"] = dict(planner_record)
+        _emit_progress(progress, "role_end", role="planner", status=planner_record.get("status"),
+                       model=planner_record.get("model"), has_plan=plan is not None)
+        if plan is not None:
+            set_plan = getattr(provider, "set_plan", None)
+            if callable(set_plan):
+                set_plan(plan)
+
+    def _review_recovery(n: int, concerns: list[str], same_model: str | None) -> tuple[bool, str]:
+        """One bounded executor attempt in answer to a failed independent review.
+
+        Returns ``(verified again, outcome token)``. On anything but a new
+        verified state the isolated copy is restored to the verified bytes.
+        """
+        snapshot = _snapshot(sandbox, changed)
+        changed_before = list(changed)
+        if budget is not None:
+            try:
+                budget.start_attempt()
+            except BudgetExhausted as exc:
+                roles["verifier"] = {**roles.get("verifier", {}), "recovery_skipped": exc.stop_reason}
+                return False, RECOVERY_NO_CHANGE
+        setter = getattr(provider, "set_next_model", None)
+        if same_model and callable(setter):
+            setter(same_model)  # no escalation: the deterministic verification passed
+        begin = getattr(provider, "begin_attempt", None)
+        if callable(begin):
+            begin(n)
+        model_getter = getattr(provider, "pending_model_for", None)
+        pending = model_getter(n) if callable(model_getter) else same_model
+        _emit_progress(progress, "attempt_start", attempt=n, model=pending, review_recovery=True)
+        gate = FileMutationGate(
+            approver=approver, organisation_approver=organisation_approver,
+            blocked_patterns=blocked_write_patterns, approval_patterns=approval_write_patterns,
+        )
+        advisory = (
+            "An independent review of your verified change raised concerns (model-reported; the deterministic "
+            "verification PASSED). Address them only where they are valid, and keep verification passing:\n- "
+            + "\n- ".join(concerns or ["(no specific concern recorded)"])
+        )
+        outcome = run_attempt_turns(
+            repo_root=repo_root, sandbox=sandbox, task=task, attempt=n, provider=provider, gate=gate,
+            verify=_verify, budget=budget, previous_failure=advisory, blocked_seen=list(blocked_seen),
+            changed_so_far=list(changed), max_turns=max_turns, max_verifications=max_verifications_per_attempt,
+            progress=progress, model_label=lambda: pending,
+            blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
+            repo_files=_list_files(sandbox),
+        )
+        rec = AttemptRecord(
+            n, list(outcome.proposed), list(outcome.applied), list(outcome.blocked), gate.summary(),
+            decisions=list(outcome.decisions), turns=outcome.turns,
+            actions=[r.to_dict() for r in outcome.records], verifications_in_turn=outcome.verifications_run,
+            turn_stop=outcome.stop, final_note=outcome.final_note, review_recovery=True,
+        )
+        if outcome.stop == STOP_PROVIDER_ERROR:
+            rec.error_class, rec.error_message = outcome.error_class, outcome.error_message
+        attempts.append(rec)
+        for p in outcome.applied:
+            if p not in changed:
+                changed.append(p)
+        _emit_progress(progress, "policy_result", attempt=n, applied=len(outcome.applied),
+                       blocked=len(outcome.blocked), turns=outcome.turns)
+        if outcome.stop not in ("finished", "max_turns") or not outcome.applied:
+            _restore(sandbox, snapshot, changed)
+            del changed[len(changed_before):]
+            if outcome.applied:
+                rec.reverted = True
+            return False, RECOVERY_NO_CHANGE if outcome.stop in ("finished", "max_turns") else RECOVERY_REVERTED
+        fp = state_fingerprint(sandbox, changed)
+        if outcome.verification is not None and outcome.verification_state == fp:
+            result, _output = outcome.verification, outcome.verification_output
+            _emit_progress(progress, "verification_reused", attempt=n)
+        else:
+            try:
+                _emit_progress(progress, "verification_start", attempt=n)
+                result, _output = _verify(changed)
+            except BudgetExhausted:
+                _restore(sandbox, snapshot, changed)
+                del changed[len(changed_before):]
+                rec.reverted = True
+                return False, RECOVERY_REVERTED
+        rec.verification = result
+        _emit_progress(
+            progress, "verification_result", attempt=n,
+            status=("unknown" if result.timed_out else "passed" if result.passed else "failed"),
+            exit_code=result.exit_code, ran=result.ran,
+        )
+        if result.passed and not result.tainted:
+            return True, RECOVERY_VERIFIED
+        _restore(sandbox, snapshot, changed)
+        del changed[len(changed_before):]
+        rec.reverted = True
+        return False, RECOVERY_REVERTED
+
+    def _verified(n: int, result: VerificationResult) -> LoopReceipt:
+        """The attempt verified: run the independent review (bounded) and finish."""
+        nonlocal reviews
+        reviews_run = 0
+        current_attempt = n
+        while verifier is not None and reviews_run < max_reviews:
+            _emit_progress(progress, "role_start", role="verifier", attempt=current_attempt)
+            try:
+                review, verifier_record = verifier(sandbox, list(changed), result, current_attempt)
+            except BudgetExhausted as exc:
+                roles["verifier"] = {"role": "verifier", "status": "skipped", "reason": exc.stop_reason}
+                _emit_progress(progress, "role_end", role="verifier", status="skipped", reason=exc.stop_reason)
+                break
+            reviews_run += 1
+            roles["verifier"] = dict(verifier_record)
+            _emit_progress(progress, "role_end", role="verifier", status=verifier_record.get("status"),
+                           model=verifier_record.get("model"), verdict=(review or {}).get("verdict"))
+            if review is None:
+                break
+            concerns: list[str] = [c for c in (review.get("concerns") or []) if isinstance(c, str)]
+            entry: dict[str, Any] = {
+                "attempt": current_attempt, "verdict": review.get("verdict"), "summary": review.get("summary"),
+                "concerns": concerns, "evidence": REVIEW_EVIDENCE,
+                "model": verifier_record.get("model"), "independent": verifier_record.get("independent"),
+                "recovery_requested": False, "recovery_outcome": None,
+            }
+            reviews.append(entry)
+            if review.get("verdict") != "fail" or not iterative:
+                break
+            if reviews_run >= max_reviews or len(attempts) >= max_attempts:
+                break
+            # The review found a problem the tests did not. One bounded executor
+            # attempt on the same model; its result is verified like any other.
+            entry["recovery_requested"] = True
+            usage_for = getattr(provider, "usage_for", None)
+            same_model = None
+            if callable(usage_for):
+                try:
+                    same_model = usage_for(current_attempt)[0]
+                except Exception:
+                    same_model = None
+            current_attempt = len(attempts) + 1
+            _emit_progress(progress, "recovery_decision", attempt=current_attempt - 1, action="review_recovery",
+                           reason="independent_review_fail", model=same_model, acted_on=True)
+            ok, outcome_token = _review_recovery(current_attempt, concerns, same_model)
+            entry["recovery_outcome"] = outcome_token
+            if not ok:
+                break
+            result = attempts[-1].verification  # type: ignore[assignment]
+        receipt = _receipt("verified", "verification_passed")
+        receipt.verified_file_hashes = _hash_files(sandbox, changed)
+        return receipt
+
     for n in range(1, max_attempts + 1):
         if budget is not None:
             try:
@@ -377,48 +740,9 @@ def run_bounded_loop(
             except BudgetExhausted as exc:
                 _settle_supervision("run_ended_before_retry")
                 return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
-        ctx = LoopContext(task, _list_files(sandbox), n, prev_failure, list(blocked_seen))
         model_getter = getattr(provider, "pending_model_for", None)
         pending_model = model_getter(n) if callable(model_getter) else None
         _emit_progress(progress, "attempt_start", attempt=n, model=pending_model)
-        try:
-            actions = provider(ctx)
-        except BudgetExhausted as exc:
-            _emit_progress(progress, "budget_stop", attempt=n, reason=exc.stop_reason)
-            # The provider consulted the same ledger before a call and refused
-            # it. The attempt had started (an earlier call in it may have been
-            # paid for, e.g. before a re-ask), so it is recorded like a
-            # provider error: proposed nothing, applied nothing.
-            _settle_supervision("run_ended_before_retry")
-            attempts.append(AttemptRecord(n, [], [], [], {"budget_stop": exc.stop_reason}))
-            return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
-        except Exception as exc:
-            _settle_supervision("run_ended_before_retry")
-            error_class = type(exc).__name__
-            error_message = _safe_error_message(exc)
-            attempts.append(AttemptRecord(
-                n, [], [], [], {"provider_error": error_class},
-                error_class=error_class, error_message=error_message,
-            ))
-            _emit_progress(
-                progress, "provider_error", attempt=n, model=pending_model,
-                error_class=error_class, message=error_message,
-            )
-            return _receipt("error", "provider_error")
-        _settle_supervision(None)  # the recommended model was called
-        _emit_progress(progress, "model_response", attempt=n, model=pending_model, proposed=len(actions))
-        if not actions:
-            _emit_progress(progress, "no_actions", attempt=n)
-            return _receipt("no_actions", "provider proposed no actions")
-
-        actions_fp = hashlib.sha256(
-            "\x1f".join(f"{a.path}\x1f{a.content}" for a in actions).encode("utf-8", "replace")
-        ).hexdigest()
-        if actions_fp == prev_actions:
-            # Same writes as the last (failed) attempt: a retry is not justified.
-            return _receipt("failed", "no_progress_identical_actions")
-        prev_actions = actions_fp
-
         gate = FileMutationGate(
             approver=approver,
             organisation_approver=organisation_approver,
@@ -429,75 +753,200 @@ def run_bounded_loop(
         blocked: list[str] = []
         attempt_decisions: list[dict] = []  # in the order the model proposed the writes
         budget_stop: BudgetExhausted | None = None
-        for act in actions:
+        rec: AttemptRecord
+        # Set when the iterative attempt already ran the verifier on the
+        # artifact state it finished with; the loop then does not run it again.
+        in_turn_result: VerificationResult | None = None
+        in_turn_output = ""
+
+        if iterative:
+            begin = getattr(provider, "begin_attempt", None)
+            if callable(begin):
+                begin(n)
+            outcome = run_attempt_turns(
+                repo_root=repo_root, sandbox=sandbox, task=task, attempt=n, provider=provider,
+                gate=gate, verify=_verify, budget=budget, previous_failure=prev_failure,
+                blocked_seen=list(blocked_seen), changed_so_far=list(changed),
+                max_turns=max_turns, max_verifications=max_verifications_per_attempt, progress=progress,
+                model_label=lambda: pending_model,
+                blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
+                repo_files=_list_files(sandbox),
+            )
+            rec = AttemptRecord(
+                n, list(outcome.proposed), list(outcome.applied), list(outcome.blocked), gate.summary(),
+                decisions=list(outcome.decisions), turns=outcome.turns,
+                actions=[r.to_dict() for r in outcome.records],
+                verifications_in_turn=outcome.verifications_run, turn_stop=outcome.stop,
+                final_note=outcome.final_note,
+            )
+            attempts.append(rec)
+            for p in outcome.applied:
+                if p not in changed:
+                    changed.append(p)
+            blocked_seen.extend(p for p in outcome.blocked if p not in blocked_seen)
+            if outcome.model_calls:
+                _settle_supervision(None)  # the recommended model was called
+            # A verification the model requested on exactly the files the attempt
+            # ends with is evidence OpenShard observed; it is kept on the attempt
+            # even when the attempt ends early, never replaced by "not run".
+            if outcome.verification is not None and outcome.verification_state == state_fingerprint(sandbox, changed):
+                rec.verification = outcome.verification
+            if outcome.stop == STOP_PROVIDER_ERROR:
+                _settle_supervision("run_ended_before_retry")
+                rec.error_class, rec.error_message = outcome.error_class, outcome.error_message
+                rec.policy = {**rec.policy, "provider_error": outcome.error_class}
+                _emit_progress(
+                    progress, "provider_error", attempt=n, model=pending_model,
+                    error_class=outcome.error_class, message=outcome.error_message,
+                )
+                return _receipt("error", "provider_error")
+            if outcome.stop == STOP_MALFORMED_REPLY:
+                rec.error_class, rec.error_message = outcome.error_class, outcome.error_message
+                if not outcome.applied:
+                    # Nothing was written and the model stopped speaking the contract:
+                    # the same outcome as a bad one-shot reply.
+                    _settle_supervision("run_ended_before_retry")
+                    rec.policy = {**rec.policy, "provider_error": outcome.error_class}
+                    return _receipt("error", "provider_error")
+                # Writes exist: they face verification like any other attempt, and a
+                # failure can still be retried or escalated.
+            if outcome.stop == STOP_BUDGET and outcome.budget_stop is not None:
+                _settle_supervision("run_ended_before_retry")
+                rec.policy = {**rec.policy, "budget_stop": outcome.budget_stop.stop_reason}
+                return _receipt(STATUS_BUDGET_EXHAUSTED, outcome.budget_stop.stop_reason)
+            _emit_progress(
+                progress, "policy_result", attempt=n, applied=len(outcome.applied), blocked=len(outcome.blocked),
+                turns=outcome.turns,
+            )
+            if outcome.stop in (STOP_VERIFIER_TAINTED, STOP_VERIFIER_TIMEOUT, STOP_VERIFIER_SETUP):
+                rec.verification = outcome.verification
+                if outcome.stop == STOP_VERIFIER_TAINTED:
+                    return _receipt("failed", "verifier_modified_files")
+                if outcome.stop == STOP_VERIFIER_TIMEOUT:
+                    return _receipt("error", "verifier_timeout")
+                return _receipt("error", "verifier_setup_failed")
+            if outcome.stop == STOP_POLICY_BLOCK or outcome.blocked:
+                # Policy/safety blocks are not retried automatically: the same
+                # proposal would be blocked again and a human decision is needed.
+                # Writes applied before the refusal stay in the isolated copy, unverified.
+                return _receipt("blocked", "policy_or_path_block")
+            if not outcome.applied:
+                _emit_progress(progress, "no_actions", attempt=n)
+                return _receipt("no_actions", "provider proposed no actions")
+            applied, blocked = list(outcome.applied), list(outcome.blocked)
+            actions_fp = state_fingerprint(sandbox, changed)
+            if actions_fp == prev_actions:
+                # The attempt ended with the same bytes as the last (failed) one: no progress.
+                return _receipt("failed", "no_progress_identical_actions")
+            prev_actions = actions_fp
+            if outcome.verification is not None and outcome.verification_state == actions_fp:
+                in_turn_result, in_turn_output = outcome.verification, outcome.verification_output
+        else:
+            ctx = LoopContext(task, _list_files(sandbox), n, prev_failure, list(blocked_seen))
             try:
-                dest = resolve_safe_repo_path(sandbox, act.path)
-            except UnsafePathError:
-                blocked.append(act.path)
-                attempt_decisions.append(_stored_decision(make_deny(
-                    "file_write", act.path, "path escapes the repository or is unsafe",
-                    source="path_safety", severity="high",
-                )))
-                continue
-            permitted = gate.authorize(act.path)
-            attempt_decisions.append(_stored_decision(gate.outcomes[-1].policy, gate.outcomes[-1].approval_source))
-            if not permitted:
-                blocked.append(act.path)
-                continue
-            if budget is not None:
+                actions = provider(ctx)
+            except BudgetExhausted as exc:
+                _emit_progress(progress, "budget_stop", attempt=n, reason=exc.stop_reason)
+                # The provider consulted the same ledger before a call and refused
+                # it. The attempt had started (an earlier call in it may have been
+                # paid for, e.g. before a re-ask), so it is recorded like a
+                # provider error: proposed nothing, applied nothing.
+                _settle_supervision("run_ended_before_retry")
+                attempts.append(AttemptRecord(n, [], [], [], {"budget_stop": exc.stop_reason}))
+                return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
+            except Exception as exc:
+                _settle_supervision("run_ended_before_retry")
+                error_class = type(exc).__name__
+                error_message = _safe_error_message(exc)
+                attempts.append(AttemptRecord(
+                    n, [], [], [], {"provider_error": error_class},
+                    error_class=error_class, error_message=error_message,
+                ))
+                _emit_progress(
+                    progress, "provider_error", attempt=n, model=pending_model,
+                    error_class=error_class, message=error_message,
+                )
+                return _receipt("error", "provider_error")
+            _settle_supervision(None)  # the recommended model was called
+            _emit_progress(progress, "model_response", attempt=n, model=pending_model, proposed=len(actions))
+            if not actions:
+                _emit_progress(progress, "no_actions", attempt=n)
+                return _receipt("no_actions", "provider proposed no actions")
+
+            actions_fp = hashlib.sha256(
+                "\x1f".join(f"{a.path}\x1f{a.content}" for a in actions).encode("utf-8", "replace")
+            ).hexdigest()
+            if actions_fp == prev_actions:
+                # Same writes as the last (failed) attempt: a retry is not justified.
+                return _receipt("failed", "no_progress_identical_actions")
+            prev_actions = actions_fp
+
+            for act in actions:
                 try:
-                    budget.authorize_write()
-                except BudgetExhausted as exc:
-                    # Nothing past this point is written; what was already
-                    # applied stays in the isolated copy only.
-                    budget_stop = exc
-                    break
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(act.content, encoding="utf-8")
-            gate.mark_executed(act.path)
-            applied.append(act.path)
-            if act.path not in changed:
-                changed.append(act.path)
-        rec = AttemptRecord(n, [a.path for a in actions], applied, blocked, gate.summary())
-        rec.decisions = attempt_decisions
-        attempts.append(rec)
-        blocked_seen.extend(p for p in blocked if p not in blocked_seen)
-        _emit_progress(
-            progress, "policy_result", attempt=n, applied=len(applied), blocked=len(blocked),
-        )
+                    dest = resolve_safe_repo_path(sandbox, act.path)
+                except UnsafePathError:
+                    blocked.append(act.path)
+                    attempt_decisions.append(_stored_decision(make_deny(
+                        "file_write", act.path, "path escapes the repository or is unsafe",
+                        source="path_safety", severity="high",
+                    )))
+                    continue
+                permitted = gate.authorize(act.path)
+                attempt_decisions.append(_stored_decision(gate.outcomes[-1].policy, gate.outcomes[-1].approval_source))
+                if not permitted:
+                    blocked.append(act.path)
+                    continue
+                if budget is not None:
+                    try:
+                        budget.authorize_write()
+                    except BudgetExhausted as exc:
+                        # Nothing past this point is written; what was already
+                        # applied stays in the isolated copy only.
+                        budget_stop = exc
+                        break
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(act.content, encoding="utf-8")
+                gate.mark_executed(act.path)
+                applied.append(act.path)
+                if act.path not in changed:
+                    changed.append(act.path)
+            rec = AttemptRecord(n, [a.path for a in actions], applied, blocked, gate.summary())
+            rec.decisions = attempt_decisions
+            attempts.append(rec)
+            blocked_seen.extend(p for p in blocked if p not in blocked_seen)
+            _emit_progress(
+                progress, "policy_result", attempt=n, applied=len(applied), blocked=len(blocked),
+            )
 
-        if budget_stop is not None:
-            return _receipt(STATUS_BUDGET_EXHAUSTED, budget_stop.stop_reason)
-        if blocked:
-            # Policy/safety blocks are not retried automatically: the same
-            # proposal would be blocked again and a human decision is needed.
-            return _receipt("blocked", "policy_or_path_block")
+            if budget_stop is not None:
+                return _receipt(STATUS_BUDGET_EXHAUSTED, budget_stop.stop_reason)
+            if blocked:
+                # Policy/safety blocks are not retried automatically: the same
+                # proposal would be blocked again and a human decision is needed.
+                return _receipt("blocked", "policy_or_path_block")
 
-        if budget is not None:
+        # ---- verification (shared) ------------------------------------------
+        if in_turn_result is not None:
+            result, output = in_turn_result, in_turn_output
+            _emit_progress(progress, "verification_reused", attempt=n)
+        else:
             try:
-                budget.authorize_command()
+                _emit_progress(progress, "verification_start", attempt=n)
+                result, output = _verify(changed)
             except BudgetExhausted as exc:
                 return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
-        before = _hash_files(sandbox, changed)
-        _emit_progress(progress, "verification_start", attempt=n)
-        result, output = _run_verification(verify_command, sandbox, verify_timeout)
         rec.verification = result
         _emit_progress(
             progress, "verification_result", attempt=n,
             status=("unknown" if result.timed_out else "passed" if result.passed else "failed"),
             exit_code=result.exit_code, ran=result.ran,
         )
-        after = _hash_files(sandbox, changed)
-        if after != before:
+        if result.tainted:
             # A pass on files the verifier itself rewrote proves nothing about
             # the proposed change, and those bytes must never be promoted.
-            result.passed = False
-            result.tainted = True
             return _receipt("failed", "verifier_modified_files")
         if result.passed:
-            receipt = _receipt("verified", "verification_passed")
-            receipt.verified_file_hashes = after
-            return receipt
+            return _verified(n, result)
 
         if result.timed_out:
             # The command started, but OpenShard did not observe a pass or fail
@@ -505,17 +954,9 @@ def run_bounded_loop(
             # into model-quality evidence, so stop without consulting recovery.
             return _receipt("error", "verifier_timeout")
 
-        kind = detect_setup_failure(result.exit_code, output)
-        if kind is not None:
-            # A missing tool is not something another model call can fix. No outcome was
-            # observed for the proposed change, so this is not a failed verification.
-            result.setup_failure = kind
-            result.ran = False
-            result.observed = False
-            result.passed = False
+        if result.setup_failure is not None:
             return _receipt("error", "verifier_setup_failed")
 
-        result.failed_tests = failing_test_ids(output)
         fingerprint = result.output_sha256
         if fingerprint == prev_fingerprint:
             return _receipt("failed", "no_progress_identical_failure")

@@ -46,7 +46,7 @@ from openshard.routing.routing_classes import ROLE_TO_CLASS, ROUTING_CLASSES
 # ``complex`` previously fell back to minimax/m2.7, an id OpenRouter never
 # listed; it now falls back to the curated long-context model.
 _FALLBACKS: dict[str, str] = {
-    "cheap":    "deepseek/deepseek-v4-flash",
+    "cheap":    "deepseek/deepseek-v4.1-flash",
     "main":     "z-ai/glm-5.1",
     "strong":   "anthropic/claude-sonnet-4.6",
     "escalate": "anthropic/claude-opus-4.7",
