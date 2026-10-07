@@ -137,6 +137,36 @@ projection is unchanged until the Platform contract learns these blocks.
   `apply-last`. It refuses if the files changed after verification, and it does not re-verify in
   the repository.
 
+## Checkpoints and `osn resume`
+
+Every `osn run` keeps durable state under `.openshard/osn-runs/<osn-id>/` (local only, never synced):
+`checkpoint.json` (task, verify command, options, model ladder, the repository's fingerprint at
+start, the plan and role records, every finished attempt with its verification result, the model
+calls so far with their cost provenance, the budget ledger's counters) and `files/`, the changed
+files' bytes as the last finished attempt left them. It is written when the run starts, after
+planning, after the parallel-workers stage and after every attempt the run will continue from;
+Ctrl-C or an exception marks it `interrupted`, a run that wrote its Receipt marks it `completed`
+(and drops `files/`). A process that dies without warning leaves `running` with a dead pid.
+
+`openshard osn runs` lists them with whether each can be resumed. `openshard osn resume <osn-id>
+[--promote] [--commit] [--yes] [--json]` continues the run: a **fresh** isolated copy with the
+checkpointed files restored (whatever the interrupted process did after its last checkpoint is
+discarded and the Receipt says so), the same task, verify command, options and model ladder (the
+original routing decision is kept on the Receipt), the plan restored and the planner skipped, the
+topology decision kept, every finished attempt restored and flagged `resumed_from_checkpoint`,
+the earlier model calls and budget counters carried so cost and limits cover the whole run. The next
+attempt is the ladder's next rung; a supervisor escalation decided just before the interruption is
+not carried. Resume is **refused**, with the rule named, when the checkpoint is missing or
+unreadable or of another version, the run already completed (its Receipt id is shown), its process
+is still alive, the repository's HEAD or working tree changed since the run started (OpenShard's own
+`.openshard/` state excepted), the verify command differs, or nothing had happened yet.
+
+The Receipt of a resumed run carries `osn_loop.resumed` (checkpoint phase and status, attempts /
+plan / topology / files restored, prior model calls and cost, `unsaved_progress_discarded`,
+`times_resumed`, evidence `checkpoint_recorded_by_openshard`); the full local Receipt shows a
+`RESUMED` section. Restored attempts are evidence OpenShard recorded in the earlier process, not
+something this process observed, and are labelled as such.
+
 ## Evidence
 
 | Field | Level |

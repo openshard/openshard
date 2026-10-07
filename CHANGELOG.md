@@ -64,6 +64,19 @@ All notable changes to OpenShard are documented here.
   (planning / implementation / review) and a `tier_dispatch_receipt` so
   existing surfaces show which roles were dispatched.
 
+- Durable OSN run state and `openshard osn resume`: every run checkpoints
+  under `.openshard/osn-runs/<osn-id>/` (plan, roles, finished attempts
+  with verification results, changed files' bytes, model calls with cost
+  provenance, budget counters, repository fingerprint) at each loop
+  boundary; Ctrl-C marks it interrupted, a written Receipt marks it
+  completed. `osn resume` continues from the last finished attempt in a
+  fresh isolated copy with the same task, verify command, options and model
+  ladder, carrying the earlier calls and budget into the Receipt
+  (`osn_loop.resumed`, attempts flagged `resumed_from_checkpoint`), and
+  refuses by rule when the run completed, its process is alive, the
+  repository changed, the verify command differs or the checkpoint cannot be
+  read. `osn runs` lists checkpoints and their resumability.
+
 - Parallel writing workers (`--topology auto|single|roles|parallel`,
   `--max-workers`, default and hard cap 3): a non-trivial run whose planner
   proposes independent subtasks with disjoint write scopes (validated by the

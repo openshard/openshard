@@ -105,6 +105,9 @@ VerifierHook = Callable[[Path, list[str], "VerificationResult", int], tuple[dict
 # (policy decisions), ``advisory`` (text for the executor when conflicts or a
 # missing required subtask need resolving, else None).
 WorkersHook = Callable[[Path, dict | None, list[str]], dict]
+# Durable state: called at every boundary the loop owns with the phase and the
+# loop's resumable state (``resume_state``); the caller persists it.
+CheckpointHook = Callable[[str, dict], None]
 MAX_REVIEWS = 2
 REVIEW_EVIDENCE = "model_reported"
 RECOVERY_VERIFIED = "verified"  # the recovery attempt changed files and verification passed again
@@ -179,6 +182,9 @@ class AttemptRecord:
     # its verification describes bytes that no longer exist, so it never
     # defines the run's verification state.
     reverted: bool = False
+    # True for an attempt an earlier process finished and checkpointed; this
+    # process restored it (evidence recorded by OpenShard then, not observed now).
+    resumed: bool = False
 
 
 @dataclass
@@ -209,6 +215,8 @@ class LoopReceipt:
     topology: dict | None = None
     workers: list[dict] = field(default_factory=list)
     synthesis: dict | None = None
+    # Set when this run continued an earlier process's checkpoint: what was carried over.
+    resumed: dict | None = None
 
     @property
     def review_verdict(self) -> str | None:
@@ -260,6 +268,8 @@ class LoopReceipt:
                 item["reverted"] = True
             if a.parallel_stage:
                 item["parallel_stage"] = True
+            if a.resumed:
+                item["resumed_from_checkpoint"] = True
             attempts.append(item)
         return {
             "schema_version": self.schema_version,
@@ -278,6 +288,7 @@ class LoopReceipt:
             "topology": dict(self.topology) if self.topology else None,
             "workers": [dict(w) for w in self.workers],
             "synthesis": dict(self.synthesis) if self.synthesis else None,
+            "resumed": dict(self.resumed) if self.resumed else None,
             "command_policy": self.command_decision,
             "evidence": {
                 "actions": "agent_declared",
@@ -442,6 +453,60 @@ def _is_turn_provider(provider: Any) -> bool:
     return callable(getattr(provider, "turn", None))
 
 
+def resume_state(*, sandbox: Path, attempts: list[AttemptRecord], changed: list[str], prev_fingerprint: str | None,
+                 prev_failure: str | None, blocked_seen: list[str], prev_actions: str | None, roles: dict,
+                 plan: dict | None, reviews: list[dict], topology: dict | None, workers: list[dict],
+                 synthesis: dict | None) -> dict:
+    """The loop's resumable state as plain data (attempts in full, verification results included)."""
+    return {
+        "sandbox": str(sandbox),
+        "attempts": [asdict(a) for a in attempts],
+        "changed": list(changed),
+        "prev_fingerprint": prev_fingerprint,
+        "prev_failure": prev_failure,
+        "blocked_seen": list(blocked_seen),
+        "prev_actions": prev_actions,
+        "roles": {k: dict(v) for k, v in roles.items()},
+        "plan": dict(plan) if plan else None,
+        "reviews": [dict(r) for r in reviews],
+        "topology": dict(topology) if topology else None,
+        "workers": [dict(w) for w in workers],
+        "synthesis": dict(synthesis) if synthesis else None,
+    }
+
+
+def _restore_state(state: dict) -> dict:
+    """``resume_state`` back into live objects; every restored attempt is flagged ``resumed``."""
+    attempts: list[AttemptRecord] = []
+    for d in state.get("attempts") or []:
+        if not isinstance(d, dict):
+            continue
+        v = d.get("verification")
+        verification = None
+        if isinstance(v, dict):
+            verification = VerificationResult(**{k: val for k, val in v.items()
+                                                 if k in VerificationResult.__dataclass_fields__})
+        fields = {k: val for k, val in d.items() if k in AttemptRecord.__dataclass_fields__ and k != "verification"}
+        rec = AttemptRecord(**fields)
+        rec.verification = verification
+        rec.resumed = True
+        attempts.append(rec)
+    return {
+        "attempts": attempts,
+        "changed": [str(p) for p in state.get("changed") or []],
+        "prev_fingerprint": state.get("prev_fingerprint"),
+        "prev_failure": state.get("prev_failure"),
+        "blocked_seen": [str(p) for p in state.get("blocked_seen") or []],
+        "prev_actions": state.get("prev_actions"),
+        "roles": {str(k): dict(v) for k, v in (state.get("roles") or {}).items() if isinstance(v, dict)},
+        "plan": dict(state["plan"]) if isinstance(state.get("plan"), dict) else None,
+        "reviews": [dict(r) for r in state.get("reviews") or [] if isinstance(r, dict)],
+        "topology": dict(state["topology"]) if isinstance(state.get("topology"), dict) else None,
+        "workers": [dict(w) for w in state.get("workers") or [] if isinstance(w, dict)],
+        "synthesis": dict(state["synthesis"]) if isinstance(state.get("synthesis"), dict) else None,
+    }
+
+
 def _snapshot(root: Path, rels: list[str]) -> dict[str, bytes | None]:
     """The bytes of *rels* under *root* (None for an absent file), to restore a verified state."""
     out: dict[str, bytes | None] = {}
@@ -498,8 +563,18 @@ def run_bounded_loop(
     verifier: VerifierHook | None = None,
     max_reviews: int = MAX_REVIEWS,
     workers: WorkersHook | None = None,
+    checkpoint: CheckpointHook | None = None,
+    resume: dict | None = None,
 ) -> LoopReceipt:
     """Run the bounded loop. Never writes to *repo_root*.
+
+    With a *checkpoint* hook the loop hands its resumable state to the caller
+    at every boundary it owns (planned, workers staged, each attempt done).
+    With *resume* (a state such a hook received, see ``resume_state``) the
+    loop restores the plan, role records, topology and finished attempts,
+    skips the planner and the workers stage, and continues with the next
+    attempt in *sandbox_path*, which the caller prepared with the
+    checkpointed files.
 
     *provider* is either a turn provider (``.turn(state)``; the iterative
     agent loop, ``max_turns`` turns per attempt, ``max_verifications_per_attempt``
@@ -546,9 +621,47 @@ def run_bounded_loop(
     worker_records: list[dict] = []
     synthesis_record: dict | None = None
     max_reviews = max(0, min(int(max_reviews), MAX_REVIEWS))
+    resumed_record: dict | None = None
+    if resume:
+        restored = _restore_state(resume)
+        attempts = restored["attempts"]
+        changed = restored["changed"]
+        prev_fingerprint = restored["prev_fingerprint"]
+        prev_failure = restored["prev_failure"]
+        blocked_seen = restored["blocked_seen"]
+        prev_actions = restored["prev_actions"]
+        roles = restored["roles"]
+        plan = restored["plan"]
+        reviews = restored["reviews"]
+        topology = restored["topology"]
+        worker_records = restored["workers"]
+        synthesis_record = restored["synthesis"]
+        resumed_record = {
+            "attempts_restored": len(attempts), "plan_restored": plan is not None,
+            "topology_restored": topology is not None, "files_restored": len(changed),
+            "evidence": "checkpoint_recorded_by_openshard",
+        }
+        if plan is not None:
+            set_plan = getattr(provider, "set_plan", None)
+            if callable(set_plan):
+                set_plan(plan)
+    start_attempt = len(attempts) + 1
 
-    _emit_progress(progress, "workspace_ready", mode=mode)
+    _emit_progress(progress, "workspace_ready", mode=mode, resumed=bool(resume))
     command_record: dict | None = None
+
+    def _checkpoint(phase: str) -> None:
+        if checkpoint is None:
+            return
+        try:
+            checkpoint(phase, resume_state(
+                sandbox=sandbox, attempts=attempts, changed=changed, prev_fingerprint=prev_fingerprint,
+                prev_failure=prev_failure, blocked_seen=blocked_seen, prev_actions=prev_actions, roles=roles,
+                plan=plan, reviews=reviews, topology=topology, workers=worker_records, synthesis=synthesis_record,
+            ))
+        except Exception:
+            # Durability must never change what the run does.
+            _emit_progress(progress, "checkpoint_failed", phase=phase)
 
     def _receipt(status: str, reason: str) -> LoopReceipt:
         if verifier is not None and status != "verified" and "verifier" not in roles:
@@ -569,6 +682,7 @@ def run_bounded_loop(
             topology=topology,
             workers=worker_records,
             synthesis=synthesis_record,
+            resumed=resumed_record,
         )
 
     # --verify-cmd is an explicit user choice and historically runs as supplied.
@@ -605,7 +719,7 @@ def run_bounded_loop(
     def _verify(paths: list[str]) -> tuple[VerificationResult, str]:
         return _observe_verification(sandbox, paths, verify_command, verify_timeout, budget)
 
-    if planner is not None:
+    if planner is not None and not resume:
         # Read-only planning before any write. A plan is advisory context for the
         # executor; a planner that fails or is stopped by the budget is recorded,
         # and the run goes on without a plan.
@@ -622,6 +736,7 @@ def run_bounded_loop(
             set_plan = getattr(provider, "set_plan", None)
             if callable(set_plan):
                 set_plan(plan)
+        _checkpoint("planned")
 
     def _review_recovery(n: int, concerns: list[str], same_model: str | None) -> tuple[bool, str]:
         """One bounded executor attempt in answer to a failed independent review.
@@ -762,7 +877,7 @@ def run_bounded_loop(
         receipt.verified_file_hashes = _hash_files(sandbox, changed)
         return receipt
 
-    for n in range(1, max_attempts + 1):
+    for n in range(start_attempt, max_attempts + 1):
         if budget is not None:
             try:
                 budget.start_attempt()
@@ -771,7 +886,8 @@ def run_bounded_loop(
                 return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         model_getter = getattr(provider, "pending_model_for", None)
         pending_model = model_getter(n) if callable(model_getter) else None
-        if not (iterative and workers is not None and n == 1):
+        workers_stage = iterative and workers is not None and n == 1 and topology is None
+        if not workers_stage:
             _emit_progress(progress, "attempt_start", attempt=n, model=pending_model)
         gate = FileMutationGate(
             approver=approver,
@@ -796,7 +912,7 @@ def run_bounded_loop(
             stage: dict | None = None
             stage_advisory: str | None = None
             skip_turns = False
-            if workers is not None and n == 1:
+            if workers_stage and workers is not None:
                 _emit_progress(progress, "stage_start", stage="workers", attempt=n)
                 try:
                     stage = workers(sandbox, plan, _list_files(sandbox))
@@ -824,6 +940,7 @@ def run_bounded_loop(
                     stage = None
                     _emit_progress(progress, "stage_skipped", stage="workers", attempt=n,
                                    reason=(topology or {}).get("topology_reason"))
+                _checkpoint("workers_staged")
                 if not skip_turns:
                     _emit_progress(progress, "attempt_start", attempt=n, model=pending_model,
                                    after_workers=stage is not None)
@@ -892,6 +1009,7 @@ def run_bounded_loop(
                             "The previous attempt ended because the model's replies were not valid action "
                             f"lists ({outcome.error_message or 'unusable reply'}); nothing was written."
                         )
+                        _checkpoint("attempt_done")
                         continue
                     # Nothing was written and no attempt remains: the same outcome as a bad one-shot reply.
                     _settle_supervision("run_ended_before_retry")
@@ -1055,6 +1173,9 @@ def run_bounded_loop(
         prev_fingerprint = fingerprint
         # Always non-empty, even when the verifier prints nothing.
         prev_failure = f"verify command failed ({status_line})\n{output[-2000:]}"
+        # The run goes on: everything a later process needs to continue from here.
+        # (A supervisor escalation decided below is not carried; a resume follows the ladder.)
+        _checkpoint("attempt_done")
 
         budget_would_stop = budget is not None and budget.would_stop_next_attempt() is not None
         if supervisor is not None and n < max_attempts and not budget_would_stop:

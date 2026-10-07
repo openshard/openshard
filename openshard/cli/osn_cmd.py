@@ -280,17 +280,22 @@ def _resolve_provider(name: str | None, model: str):
 @click.option("--no-learning", "no_learning", is_flag=True, default=False,
               help="Do not consult learning signals from this repository's prior OpenShard runs.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@click.option("--resume-from", "resume_from", default=None, hidden=True,
+              help="Internal: continue the checkpointed run with this id (use `openshard osn resume`).")
 def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_attempts, loop_mode, max_turns,
             roles_mode, planner_model, verifier_model, topology_request, max_workers, explore, task_id, promote,
-            commit_result, assume_yes, no_learning, as_json):
+            commit_result, assume_yes, no_learning, as_json, resume_from=None):
     """Run TASK through the bounded OSN loop."""
     if commit_result and not promote:
         raise click.UsageError("--commit requires --promote: only promoted files can be committed.")
     if topology_request == "single":
         roles_mode = "executor"  # a single executor: no planner, no review, no workers
+    import uuid
+
     from openshard.cli.ingest import _repo_root
     from openshard.history.jsonl_store import append_jsonl
-    from openshard.osn.loop import run_bounded_loop
+    from openshard.osn import checkpoint as ckpt
+    from openshard.osn.loop import create_isolated_copy, run_bounded_loop
     from openshard.osn.model_provider import IterativeModelProvider, ModelActionProvider
     from openshard.osn.run_entry import build_osn_run_entry
 
@@ -320,6 +325,13 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     for rel in context_files:
         if Path(rel).is_absolute() or ".." in Path(rel).parts:
             raise click.UsageError(f"--context-file must be repo-relative: {rel}")
+
+    prior_checkpoint: ckpt.RunCheckpoint | None = None
+    if resume_from:
+        prior_checkpoint = _load_resumable_checkpoint(repo_root, resume_from)
+        argv = list(prior_checkpoint.verify_argv)  # the run's own command, never a new one
+    # The checkpoint's own id: never a task id (those are minted only by `openshard task new`).
+    checkpoint_id = prior_checkpoint.run_id if prior_checkpoint else f"osn-{uuid.uuid4().hex[:12]}"
 
     from openshard.config.settings import load_config_safe
     from openshard.sync.capabilities import LazyCapabilities
@@ -400,6 +412,42 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         )
     model = routing.first_model
     models = routing.models
+    run_checkpoint = ckpt.RunCheckpoint(
+        run_id=checkpoint_id, task=task, verify_argv=list(argv),
+        args={
+            "task_id": task_id, "provider": provider, "context_files": list(context_files), "max_attempts": max_attempts,
+            "loop_mode": loop_mode, "max_turns": max_turns, "roles_mode": roles_mode,
+            "planner_model": planner_model, "verifier_model": verifier_model,
+            "topology_request": topology_request, "max_workers": max_workers, "explore": explore,
+            "no_learning": no_learning,
+        },
+        repo=ckpt.repo_fingerprint(repo_root), models=list(models), routing_record=routing.record,
+    )
+    prior_usage: list = []
+    resume_state: dict | None = None
+    resume_sandbox: Path | None = None
+    if prior_checkpoint is not None:
+        run_checkpoint.created_at = prior_checkpoint.created_at
+        run_checkpoint.resumed_from = [
+            *prior_checkpoint.resumed_from,
+            f"{prior_checkpoint.status}@{prior_checkpoint.phase}@{prior_checkpoint.updated_at}",
+        ]
+        run_checkpoint.routing_record = prior_checkpoint.routing_record
+        resume_state = dict(prior_checkpoint.state)
+        prior_usage = [ckpt.usage_from_record(d) for d in prior_checkpoint.usage]
+        resume_sandbox = create_isolated_copy(repo_root)
+        try:
+            ckpt.restore_changed(repo_root, prior_checkpoint.run_id, prior_checkpoint.files, resume_sandbox)
+        except FileNotFoundError as exc:
+            raise click.ClickException(f"Cannot resume {prior_checkpoint.run_id}: {exc}") from None
+        if ckpt.restore_budget(budget, prior_checkpoint.budget) and not as_json:
+            click.echo("  Budget  counters carried over from the interrupted run")
+        if not as_json:
+            click.echo(f"  Resume  {prior_checkpoint.run_id} from '{prior_checkpoint.phase}' · "
+                       f"{prior_checkpoint.attempts_done} attempt(s) done · "
+                       f"{len(prior_checkpoint.files)} file(s) restored · "
+                       f"{len(prior_usage)} earlier model call(s) carried"
+                       + (" · planner skipped (plan restored)" if resume_state.get("plan") else ""))
     learning_for = _learning_by_model(snapshot, task, check_fingerprint)
     if learning_for is not None:
         learning = learning_for(model)  # the first model's view: never another model's statistics
@@ -461,6 +509,28 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             click.echo(line)
         click.echo(f"  Topology {topology_request}" + (" (workers possible)" if workers_hook else ""))
 
+    def _write_checkpoint(phase: str, state: dict) -> None:
+        run_checkpoint.phase = phase
+        run_checkpoint.sandbox_path = state.get("sandbox")
+        run_checkpoint.state = state
+        run_checkpoint.usage = [ckpt.usage_to_record(u) for u in (*prior_usage, *role_usage, *action_provider.usage)]
+        run_checkpoint.budget = ckpt.budget_counters(budget)
+        sandbox_dir = Path(state["sandbox"]) if state.get("sandbox") else None
+        if sandbox_dir is not None:
+            run_checkpoint.files = ckpt.snapshot_changed(sandbox_dir, list(state.get("changed") or []),
+                                                         repo_root, checkpoint_id)
+        ckpt.write_checkpoint(repo_root, run_checkpoint)
+
+    def _mark_interrupted(reason: str) -> None:
+        run_checkpoint.status = ckpt.STATUS_INTERRUPTED
+        run_checkpoint.interrupted = {"reason": reason, "phase": run_checkpoint.phase,
+                                      "attempts_done": run_checkpoint.attempts_done}
+        try:
+            ckpt.write_checkpoint(repo_root, run_checkpoint)
+        except OSError:
+            pass
+
+    ckpt.write_checkpoint(repo_root, run_checkpoint)  # phase 'started': the run exists before any model call
     started = time.monotonic()
     try:
         receipt = run_bounded_loop(
@@ -468,6 +538,9 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             budget=budget,
             supervisor=supervisor,
             progress=progress_renderer,
+            checkpoint=_write_checkpoint,
+            resume=resume_state,
+            sandbox_path=resume_sandbox,
             max_turns=max_turns,
             planner=planner_hook,
             verifier=verifier_hook,
@@ -477,6 +550,16 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             approval_write_patterns=permissions.approval_write_paths,
             blocked_command_prefixes=permissions.blocked_command_prefixes,
         )
+    except KeyboardInterrupt:
+        _mark_interrupted("keyboard_interrupt")
+        if progress_renderer is not None:
+            progress_renderer.close()
+        click.echo(f"\nInterrupted after '{run_checkpoint.phase}' ({run_checkpoint.attempts_done} attempt(s) done). "
+                   f"Resume with: openshard osn resume {checkpoint_id}", err=True)
+        raise click.Abort() from None
+    except BaseException as exc:
+        _mark_interrupted(f"{type(exc).__name__}")
+        raise
     finally:
         if progress_renderer is not None:
             progress_renderer.close()
@@ -489,7 +572,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     # Every model call of the run, in order: the planner's (attempt 0), then each
     # attempt's executor calls followed by any review of that attempt.
     all_usage = sorted(
-        enumerate([*role_usage, *action_provider.usage]),
+        enumerate([*prior_usage, *role_usage, *action_provider.usage]),
         key=lambda iu: (iu[1].attempt, {"planner": 0, "executor": 1}.get(iu[1].role, 2), iu[0]),
     )
     all_usage = [u for _, u in all_usage]
@@ -548,7 +631,36 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             if commit_result and promoted:
                 commit_record = _commit_promoted(repo_root, promoted, task, entry)
                 _attach_commit(entry, commit_record)
+    if prior_checkpoint is not None:
+        prior_costs = [u.cost_usd for u in prior_usage]
+        entry["osn_loop"]["resumed"] = {
+            **(entry["osn_loop"].get("resumed") or {}),
+            "from_run_id": prior_checkpoint.run_id,
+            "checkpoint_phase": prior_checkpoint.phase,
+            # 'interrupted' (Ctrl-C or an exception the run could still record) or
+            # 'running' (the process died without a chance to say so: a crash or kill).
+            "checkpoint_status": prior_checkpoint.status,
+            "interrupted": prior_checkpoint.interrupted,
+            "prior_model_calls": len(prior_usage),
+            "prior_cost_usd": sum(c for c in prior_costs if c is not None) if prior_costs and all(c is not None for c in prior_costs) else None,
+            "unsaved_progress_discarded": True,  # whatever ran after the last checkpoint is not in this run
+            "original_routing": prior_checkpoint.routing_record,
+            "times_resumed": len(run_checkpoint.resumed_from),
+        }
     append_jsonl(store / "runs.jsonl", entry)
+    run_checkpoint.status = ckpt.STATUS_COMPLETED
+    run_checkpoint.phase = ckpt.PHASE_COMPLETED
+    run_checkpoint.receipt_id = entry.get("receipt_id")
+    run_checkpoint.files = {}
+    try:
+        ckpt.write_checkpoint(repo_root, run_checkpoint)
+        files_dir = ckpt.checkpoint_dir(repo_root, checkpoint_id) / ckpt.FILES_DIR
+        if files_dir.exists():
+            import shutil
+
+            shutil.rmtree(files_dir, ignore_errors=True)
+    except OSError:
+        pass
 
     bound_verification: dict | None = None
     if commit_record and commit_record.get("sha"):
@@ -588,6 +700,8 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             ],
             "synthesis": entry["osn_loop"].get("synthesis"),
             "economics": entry["osn_loop"].get("economics"),
+            "resumed": entry["osn_loop"].get("resumed"),
+            "checkpoint": {"run_id": checkpoint_id, "status": run_checkpoint.status},
             **budget_output,
             "learning": _learning_json(entry.get("learning")),
         }, indent=2))
@@ -603,6 +717,14 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         click.echo(line)
     for line in _parallel_summary(entry.get("osn_loop")):
         click.echo(line)
+    resumed = entry["osn_loop"].get("resumed")
+    if isinstance(resumed, dict):
+        prior_cost = resumed.get("prior_cost_usd")
+        click.echo(f"  resumed: {resumed.get('attempts_restored', 0)} attempt(s) and "
+                   f"{resumed.get('prior_model_calls', 0)} model call(s) carried from checkpoint "
+                   f"'{resumed.get('checkpoint_phase')}' · prior cost "
+                   + (f"${prior_cost:.4f}" if isinstance(prior_cost, (int, float)) else "unknown")
+                   + " · unsaved progress after the checkpoint discarded")
     budget_line = _budget_line(entry.get("agent_budgets"))
     if budget_line:
         click.echo(f"  budget: {budget_line}")
@@ -1086,6 +1208,88 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
     else:
         role_skips[osn_roles.ROLE_VERIFIER] = (verifier_skip or "no_verifier_model", verifier_choice)
     return planner_hook, verifier_hook, role_skips, role_usage
+
+
+def _load_resumable_checkpoint(repo_root: Path, run_id: str):
+    """The checkpoint for *run_id*, or a ClickException naming the rule that refuses the resume."""
+    from openshard.osn import checkpoint as ckpt
+
+    try:
+        cp = ckpt.read_checkpoint(repo_root, run_id)
+    except FileNotFoundError:
+        raise click.ClickException(f"No checkpoint for run '{run_id}' under .openshard/osn-runs/ "
+                                   f"({ckpt.REFUSE_MISSING}). `openshard osn runs` lists the runs here.") from None
+    except ValueError as exc:
+        raise click.ClickException(f"Cannot resume '{run_id}': {exc}") from None
+    verdict = ckpt.check_resumable(cp, repo_root)
+    if not verdict.ok:
+        detail = f" ({verdict.detail})" if verdict.detail else ""
+        raise click.ClickException(f"Refusing to resume '{run_id}': {verdict.reason}{detail}.")
+    return cp
+
+
+@osn_group.command("resume")
+@click.argument("run_id")
+@click.option("--promote", is_flag=True, default=False, help="As for `osn run`: promote verified files after the run.")
+@click.option("--commit", "commit_result", is_flag=True, default=False, help="As for `osn run --commit`.")
+@click.option("--yes", "assume_yes", is_flag=True, default=False, help="Approve policy 'ask' paths without prompting.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+@click.pass_context
+def osn_resume(ctx, run_id, promote, commit_result, assume_yes, as_json):
+    """Continue an interrupted OSN run from its last checkpoint.
+
+    The run continues in a fresh isolated copy with the checkpointed files, the
+    same task, verify command, model ladder and options, the plan and finished
+    attempts restored, and the earlier model calls and budget carried into the
+    Receipt. Refused when the checkpoint is missing or unreadable, the run already
+    completed, its process is still alive, or the repository's HEAD or working
+    tree changed since the run started.
+    """
+    from openshard.cli.ingest import _repo_root
+
+    repo_root = _repo_root(None, False)
+    cp = _load_resumable_checkpoint(repo_root, run_id)
+    args = dict(cp.args or {})
+    ctx.invoke(
+        osn_run, task=cp.task, verify_cmd=" ".join(cp.verify_argv), model=cp.models[0] if cp.models else None,
+        escalate=tuple(cp.models[1:]), provider=args.get("provider"),
+        context_files=tuple(args.get("context_files") or ()), max_attempts=int(args.get("max_attempts") or 2),
+        loop_mode=args.get("loop_mode") or "agent", max_turns=int(args.get("max_turns") or 12),
+        roles_mode=args.get("roles_mode") or "auto", planner_model=args.get("planner_model"),
+        verifier_model=args.get("verifier_model"), topology_request=args.get("topology_request") or "auto",
+        max_workers=int(args.get("max_workers") or 3), explore=bool(args.get("explore", True)),
+        task_id=args.get("task_id"), promote=promote, commit_result=commit_result, assume_yes=assume_yes,
+        no_learning=bool(args.get("no_learning", False)), as_json=as_json, resume_from=run_id,
+    )
+
+
+@osn_group.command("runs")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def osn_runs(as_json):
+    """List this repository's checkpointed OSN runs and whether each can be resumed."""
+    from openshard.cli.ingest import _repo_root
+    from openshard.osn import checkpoint as ckpt
+
+    repo_root = _repo_root(None, False)
+    rows = []
+    for cp in ckpt.list_checkpoints(repo_root):
+        verdict = ckpt.check_resumable(cp, repo_root)
+        rows.append({
+            "run_id": cp.run_id, "status": cp.status, "phase": cp.phase, "attempts_done": cp.attempts_done,
+            "updated_at": cp.updated_at, "receipt_id": cp.receipt_id, "resumable": verdict.ok,
+            "refusal": verdict.reason, "task": cp.task[:80],
+        })
+    if as_json:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo("No checkpointed OSN runs under .openshard/osn-runs/.")
+        return
+    for r in rows:
+        state = "resumable" if r["resumable"] else f"not resumable ({r['refusal']})"
+        click.echo(f"{r['run_id']}  {r['status']}/{r['phase']}  attempts {r['attempts_done']}  {r['updated_at']}  "
+                   f"{state}" + (f"  receipt {r['receipt_id']}" if r["receipt_id"] else ""))
+        click.echo(f"    {r['task']}")
 
 
 def _resolve_workers(*, loop_mode, topology_request, max_workers, planner_enabled, verifier_enabled, task,
