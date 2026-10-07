@@ -36,6 +36,10 @@ MAX_CONTEXT_FILE_BYTES = 20_000
 # MAX_CONTEXT_FILE_BYTES, so a plan saves the executor its first reads without
 # flooding the prompt.
 MAX_PLAN_CONTEXT_FILES = 4
+# Plan files too large to inline are shown as a line-numbered outline instead, so
+# the executor reads the range it needs rather than paging through the file.
+MAX_PLAN_OUTLINE_FILES = 4
+MAX_PLAN_OUTLINE_BYTES = 400_000
 MAX_LISTED_FILES = 200
 MAX_FAILURE_CHARS = 2_000
 MAX_LEARNING_CHARS = 3_000
@@ -353,12 +357,15 @@ class IterativeModelProvider(ModelActionProvider):
     plan: dict[str, Any] | None = None
     # Files from the plan shown on turn 1 (repo-relative), chosen by set_plan.
     plan_context_files: list[str] = field(default_factory=list)
+    # Plan files too large to inline, shown as a line-numbered outline on turn 1.
+    plan_outline_files: list[str] = field(default_factory=list)
     _attempt_model: str | None = field(default=None, repr=False)
     _attempt_n: int = field(default=0, repr=False)
 
     def set_plan(self, plan: dict[str, Any] | None) -> None:
         self.plan = plan
         self.plan_context_files = plan_context_files(plan, self.repo_root, self.context_files)
+        self.plan_outline_files = plan_outline_files(plan, self.repo_root, self.context_files)
 
     def begin_attempt(self, attempt: int) -> None:
         """Fix this attempt's model: a pending supervisor override, else the ladder's rung."""
@@ -378,7 +385,7 @@ class IterativeModelProvider(ModelActionProvider):
         model = self._model_for_turn(state)
         learning = self._learning_for(model)
         prompt = build_turn_prompt(state, self.repo_root, [*self.context_files, *self.plan_context_files],
-                                   learning=learning, plan=self.plan,
+                                   learning=learning, plan=self.plan, outline_files=self.plan_outline_files,
                                    instructions=self.project_instructions)
         content = self._ask(state.attempt, model, prompt, learning=bool(learning), turn=state.turn)
         try:
@@ -440,6 +447,36 @@ def plan_context_files(plan: dict[str, Any] | None, repo_root: Path, already: li
     return out
 
 
+def plan_outline_files(plan: dict[str, Any] | None, repo_root: Path, already: list[str]) -> list[str]:
+    """Plan files too large to inline but worth an outline: existing, over the inline cap, in an outlined language."""
+    from openshard.osn.outline import JS_SUFFIXES, PY_SUFFIXES
+
+    if not isinstance(plan, dict):
+        return []
+    out: list[str] = []
+    seen = {p.replace("\\", "/") for p in already}
+    for raw in plan.get("files") or []:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        rel = raw.strip().replace("\\", "/")
+        if rel in seen or rel.startswith(("/", "../")) or "/../" in rel or ":" in rel:
+            continue
+        if not rel.lower().endswith(PY_SUFFIXES + JS_SUFFIXES):
+            continue
+        p = repo_root / rel
+        try:
+            size = p.stat().st_size if p.is_file() else -1
+        except OSError:
+            continue
+        if size <= MAX_CONTEXT_FILE_BYTES or size > MAX_PLAN_OUTLINE_BYTES:
+            continue
+        seen.add(rel)
+        out.append(rel)
+        if len(out) >= MAX_PLAN_OUTLINE_FILES:
+            break
+    return out
+
+
 def turn_budget_nudge(state: TurnState) -> str | None:
     """A plain statement of the turn budget when inspection is eating it, else None.
 
@@ -478,6 +515,7 @@ def build_turn_prompt(
     learning: str | None = None,
     plan: dict[str, Any] | None = None,
     instructions: str | None = None,
+    outline_files: list[str] | None = None,
 ) -> str:
     """The prompt for one turn: task, project instructions, bounded repository view, observations, constraints."""
     parts = [f"Task:\n{state.task}\n"]
@@ -514,6 +552,23 @@ def build_turn_prompt(
                 "Files shown to you on turn 1 (read_file them again if you need their content): "
                 + ", ".join(context_files)
             )
+    if outline_files:
+        if state.turn == 1:
+            from openshard.osn.outline import render_outline
+
+            for rel in outline_files:
+                p = repo_root / rel
+                try:
+                    outline = render_outline(p.read_text(encoding="utf-8", errors="replace"), rel)
+                except OSError:
+                    continue
+                if outline:
+                    parts.append(
+                        f'<untrusted file="{rel}" outline="line numbers">\n{outline}\n</untrusted>\n'
+                        "(too large to show whole: use read_file with start_line and max_lines on the range you need)"
+                    )
+        else:
+            parts.append("Outlines shown to you on turn 1: " + ", ".join(outline_files))
     if learning:
         parts.append(
             learning if len(learning) <= MAX_LEARNING_CHARS
