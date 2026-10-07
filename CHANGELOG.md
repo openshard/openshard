@@ -6,6 +6,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- A role whose calls went to more than one model (an escalation ladder, a
+  supervisor re-route) now names each model, in order of first use, with its
+  own calls, tokens and cost (`osn_loop.roles.<role>.by_model`; the ROLES
+  section shows `GPT-5.6 Sol → Grok 4.3` and one indented share per model).
+  Before, the record carried only the last model and credited it with every
+  call's cost.
 - The OSN executor is told when its turn budget is running out on inspection
   alone: once half the turns are spent with nothing written, every later turn
   says how many remain and asks for the change now; the last turn says only a

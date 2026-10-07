@@ -127,6 +127,34 @@ class RoleModelChoice:
         }
 
 
+def _usage_by_model(mine: list[AttemptUsage]) -> list[dict[str, Any]]:
+    """Each model's share of a role's calls, in order of first use; empty when one model made them all."""
+    order: list[str] = []
+    groups: dict[str, list[AttemptUsage]] = {}
+    for u in mine:
+        key = u.model or u.requested_model or "unknown"
+        if key not in groups:
+            order.append(key)
+            groups[key] = []
+        groups[key].append(u)
+    if len(order) < 2:
+        return []
+    out: list[dict[str, Any]] = []
+    for key in order:
+        calls = groups[key]
+        costs = [u.cost_usd for u in calls]
+        attempts = sorted({u.attempt for u in calls})
+        out.append({
+            "model": key,
+            "attempts": attempts,
+            "calls": len(calls),
+            "prompt_tokens": sum(u.prompt_tokens for u in calls),
+            "completion_tokens": sum(u.completion_tokens for u in calls),
+            "cost_usd": round(sum(c for c in costs if c is not None), 6) if all(c is not None for c in costs) else None,
+        })
+    return out
+
+
 @dataclass
 class RoleRun:
     """What one role did in this run: evidence for the Receipt, never prompts or output."""
@@ -148,6 +176,10 @@ class RoleRun:
     cost_source: str | None = None  # provider_reported | list_rate_estimate | None (unknown)
     duration_ms: int | None = None
     usage_complete: bool | None = None  # False: a call reported no usage; totals are partial
+    # When the role's calls went to more than one model (an escalation ladder, a
+    # supervisor re-route), each model's share, in order of first use: ``model`` alone
+    # would name only the last one and credit it with every call's cost.
+    by_model: list[dict[str, Any]] = field(default_factory=list)
     # The planner's read-only actions (``ActionRecord.to_dict``), bounded; empty for other roles.
     actions: list[dict[str, Any]] = field(default_factory=list)
     # Parallel exploration workers the planner used (``ExplorerResult.to_record``); planner only.
@@ -192,6 +224,7 @@ class RoleRun:
                          ("list_rate_estimate" if sources <= {"provider_reported", "list_rate_estimate"} else None)),
             duration_ms=sum(d for d in durations if d is not None) if any(d is not None for d in durations) else None,
             usage_complete=all(c is not None for c in costs),
+            by_model=_usage_by_model(mine),
         )
 
     def to_record(self) -> dict[str, Any]:
@@ -218,6 +251,7 @@ class RoleRun:
             "duration_ms": self.duration_ms,
             "usage_complete": self.usage_complete,
             "evidence": "provider_reported_usage" if self.calls else None,
+            "by_model": [dict(m) for m in self.by_model] if len(self.by_model) > 1 else [],
             "actions": [dict(a) for a in self.actions] if self.actions else [],
             "explorers": [dict(e) for e in self.explorers] if self.explorers else [],
         }

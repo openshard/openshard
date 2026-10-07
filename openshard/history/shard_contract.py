@@ -1858,6 +1858,27 @@ def _osn_actions(entry: dict) -> list[dict]:
     return out
 
 
+def _role_model_lines(rec: dict) -> list[str]:
+    """One indented line per model when a role's calls went to more than one: calls, tokens, cost."""
+    by_model = [m for m in (rec.get("by_model") or []) if isinstance(m, dict) and isinstance(m.get("model"), str)]
+    if len(by_model) < 2:
+        return []
+    lines = []
+    for m in by_model:
+        parts = []
+        attempts = [a for a in (m.get("attempts") or []) if isinstance(a, int)]
+        if attempts:
+            parts.append("attempt " + ", ".join(str(a) for a in attempts))
+        if isinstance(m.get("calls"), int):
+            parts.append(f"{m['calls']} call{'s' if m['calls'] != 1 else ''}")
+        if isinstance(m.get("prompt_tokens"), int) or isinstance(m.get("completion_tokens"), int):
+            parts.append(_format_token_count((m.get("prompt_tokens") or 0) + (m.get("completion_tokens") or 0)) + " tokens")
+        cost = m.get("cost_usd")
+        parts.append(f"${cost:.4f}" if isinstance(cost, (int, float)) and not isinstance(cost, bool) else "cost unknown")
+        lines.append(f"{_INDENT}  ↳ {_display_model_name(m['model'])} · " + " · ".join(parts))
+    return lines
+
+
 def _role_line(role: str, rec: dict) -> str:
     """One role on one line: model, turns/calls, cost with provenance; or why it did not run."""
     status = rec.get("status")
@@ -1865,7 +1886,13 @@ def _role_line(role: str, rec: dict) -> str:
         why = rec.get("reason") or status or "not recorded"
         return _row(role.capitalize(), f"{status or 'not run'} ({why})", width=12)
     model = rec.get("model")
-    parts = [_display_model_name(model) if isinstance(model, str) else "model unknown"]
+    by_model = [m for m in (rec.get("by_model") or []) if isinstance(m, dict) and isinstance(m.get("model"), str)]
+    if len(by_model) > 1:
+        # Several models made this role's calls (an escalation ladder): name them in
+        # order rather than crediting the last one with every call.
+        parts = [" → ".join(_display_model_name(m["model"]) for m in by_model)]
+    else:
+        parts = [_display_model_name(model) if isinstance(model, str) else "model unknown"]
     if isinstance(rec.get("turns"), int):
         parts.append(f"{rec['turns']} turn{'s' if rec['turns'] != 1 else ''}")
     elif isinstance(rec.get("calls"), int):
@@ -1925,6 +1952,7 @@ def _render_osn_roles(receipt: ShardReceipt, *, detail: str = "compact") -> list
             for ex in (rec.get("explorers") or []) if role == "planner" else []:
                 if isinstance(ex, dict):
                     lines.append(_explorer_line(ex))
+            lines.extend(_role_model_lines(rec))
     lines.append("")
     if detail == "full":
         plan = agent_loop.get("plan") if isinstance(agent_loop.get("plan"), dict) else None
