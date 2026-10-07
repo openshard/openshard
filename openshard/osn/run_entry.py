@@ -400,6 +400,7 @@ def build_osn_run_entry(
     capability_snapshot: dict | None = None,
     organisation_policy: dict | None = None,
     learning_record: dict | None = None,
+    run_index: int | None = None,
 ) -> dict:
     from openshard.adapters.claude_code_import import _sanitize_model, _sanitize_task
     from openshard.history.receipt_identity import ensure_receipt_id
@@ -589,7 +590,7 @@ def build_osn_run_entry(
         pass
 
     entry["run_id"] = entry["timestamp"]
-    entry["shard_id"] = _make_shard_id(entry["timestamp"], None)
+    entry["shard_id"] = _make_shard_id(entry["timestamp"], run_index)
     entry["attempt_number"] = 1
     ensure_receipt_id(entry)
     ensure_task_id(entry, task_id)

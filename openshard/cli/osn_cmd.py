@@ -461,9 +461,11 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         context_files_added=learning_files if action_provider.learning_supplied else [],
         snapshot=snapshot.record() if snapshot is not None else None,
     )
+    runs_path = repo_root / ".openshard" / "runs.jsonl"
+    run_index = sum(1 for _ in runs_path.open(encoding="utf-8")) if runs_path.exists() else 0
     entry = build_osn_run_entry(
         receipt, task=task, usage=all_usage, duration_seconds=duration,
-        repo_path=repo_root, task_id=task_id,
+        repo_path=repo_root, task_id=task_id, run_index=run_index,
         budget_record=budget.to_record() if budget is not None else budget_record,
         routing_decision=routing.decision, routing_record_mode=routing.record_mode,
         routing_record=routing.record, explicit_model=routing.first_model if routing.decision is None else None,
@@ -489,7 +491,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     }
     store = repo_root / ".openshard"
     store.mkdir(parents=True, exist_ok=True)
-    append_jsonl(store / "runs.jsonl", entry)
+    append_jsonl(runs_path, entry)
 
     promoted: list[str] = []
     skipped: list[str] = []
