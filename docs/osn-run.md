@@ -12,8 +12,24 @@ openshard osn run "Implement slugify in slug.py" \
 
 ## Flow
 
-task -> context -> model proposes whole-file writes -> policy gate -> isolated copy ->
-OpenShard runs `--verify-cmd` -> bounded retry / escalation -> receipt.
+task -> isolated copy -> model turn: choose bounded actions -> OpenShard validates and performs
+each action -> result shown to the model -> next turn ... -> verification run by OpenShard ->
+bounded retry / escalation -> receipt.
+
+By default (`--loop agent`) the model works in bounded turns (`--max-turns`, default 12, hard cap
+30). Each turn it replies with a JSON list of typed actions and a short note; OpenShard performs
+them in order inside the isolated copy and shows the model only their results on the next turn:
+
+| Action | What OpenShard does | Authority |
+|---|---|---|
+| `list_files`, `read_file`, `search_repo`, `get_diff` | reads the isolated copy (bounded output); `get_diff` shows the model's own changes against the repository | path safety; protected paths (secrets, `.git/`, `.openshard/`) are refused |
+| `write_file` (complete new content) | path safety, the file-mutation policy (deny / ask / allow, plus organisation write-path patterns), the agent budget, then the native `write_file` tool, which re-checks path and policy itself and records before/after hashes, sizes and line counts | a refused write ends the attempt and the run is `blocked`, exactly as a refused one-shot proposal is; nothing is retried |
+| `run_verification` | runs `--verify-cmd` in the isolated copy (at most 2 per attempt) and shows the outcome and a short output tail | the model never chooses the command; each launch counts toward the command budget |
+| `finish` | ends the attempt | if files changed after the last verification, OpenShard runs it once more |
+
+A reply that is not a valid action list is re-asked once (its spend is recorded), then the run
+ends in `error`. A turn may carry at most 8 actions; anything after `finish` is ignored.
+`--loop writes` keeps the original behaviour: one whole-file proposal per attempt.
 
 - The model is called through the existing provider layer (`BaseProvider.execute`), so any
   configured provider works. Without `--model`, the existing keyword routing picks the first model.
@@ -37,7 +53,9 @@ OpenShard runs `--verify-cmd` -> bounded retry / escalation -> receipt.
 
 | Field | Level |
 |---|---|
-| Proposed writes | agent-declared |
+| Proposed writes and every other declared action (`osn_loop.attempts[*].actions`: kind, repo-relative target, short intent, role, model, turn) | agent-declared |
+| What OpenShard decided and saw for each action (policy decision, approval, whether it executed, before/after hashes and line counts of a write, counts of a read, the outcome of a verification) | OpenShard-observed; tool output, file contents and prompts are never stored |
+| Model calls (`osn_loop.model_calls`: attempt, turn, role, requested and reported model, tokens, cost, `cost_source`, duration) | provider-reported usage; a cost is `provider_reported` only when the provider itself stated it, otherwise OpenShard's list-rate arithmetic labelled `list_rate_estimate`, and the run's `cost_provenance` says which |
 | Policy decisions, file effects | OpenShard-observed; every proposed write is stored as an allow / ask / deny `policy_decisions` entry (with whether an approver granted an ask), and an `approval_receipt` says what approval was needed and whether it was given, so `history`, failure classification and trust scoring treat an OSN policy block as a policy block |
 | Verification (exit code) | OpenShard-observed (`directly_observed` / `openshard_executed`) |
 | Model cost | recorded only when the provider reported it; otherwise unknown |

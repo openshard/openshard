@@ -492,6 +492,9 @@ class ShardReceipt:
     files_referenced: list[str] = field(default_factory=list)
     files_touched: list[str] = field(default_factory=list)
     files_detail: list[dict] = field(default_factory=list)
+    # OSN iterative runs: every declared action with the harness's decision and
+    # observed effect (``osn_loop.attempts[*].actions``), flattened in order.
+    osn_actions: list[dict] = field(default_factory=list)
     allowed_paths: list[str] = field(default_factory=list)
     blocked_paths: list[str] = field(default_factory=list)
     blocked_commands: list[str] = field(default_factory=list)
@@ -1477,6 +1480,7 @@ def build_shard_receipt(
         files_referenced=files_referenced,
         files_detail=files_detail_raw,
         files_touched=files_touched,
+        osn_actions=_osn_actions(entry),
         diff_added=diff_added,
         diff_removed=diff_removed,
         cost_raw=cost_raw,
@@ -1816,6 +1820,73 @@ def _display_receipt_number(receipt_id: str | None) -> str:
     return f"#{value[:12].upper()}"
 
 
+_MAX_OSN_ACTIONS = 200
+
+
+def _osn_actions(entry: dict) -> list[dict]:
+    """The stored action trail of an OSN iterative run, re-validated. Empty for every other record."""
+    loop = entry.get("osn_loop") if isinstance(entry.get("osn_loop"), dict) else None
+    if not loop:
+        return []
+    out: list[dict] = []
+    for attempt in loop.get("attempts") or []:
+        if not isinstance(attempt, dict):
+            continue
+        n = attempt.get("n")
+        for a in attempt.get("actions") or []:
+            if not isinstance(a, dict) or not isinstance(a.get("kind"), str):
+                continue
+            raw_target = a.get("target")
+            target: str = raw_target if isinstance(raw_target, str) else ""
+            intent = a.get("intent")
+            out.append({
+                "attempt": n if isinstance(n, int) and not isinstance(n, bool) else None,
+                "turn": a.get("turn") if isinstance(a.get("turn"), int) else None,
+                "kind": str(a["kind"])[:40],
+                "target": target[:200],
+                "intent": intent[:200] if isinstance(intent, str) else "",
+                "role": a.get("role") if isinstance(a.get("role"), str) else None,
+                "model": a.get("model") if isinstance(a.get("model"), str) else None,
+                "decision": a.get("decision") if isinstance(a.get("decision"), str) else None,
+                "executed": bool(a.get("executed")),
+                "ok": a.get("ok") if isinstance(a.get("ok"), bool) else None,
+                "summary": (a.get("result") or {}).get("summary") if isinstance(a.get("result"), dict) else None,
+            })
+            if len(out) >= _MAX_OSN_ACTIONS:
+                return out
+    return out
+
+
+def _render_osn_actions(receipt: ShardReceipt) -> list[str]:
+    """The OSN ACTIONS section of the full Receipt: what the agent asked, what OpenShard decided and saw."""
+    if not receipt.osn_actions:
+        return []
+    lines = [f"{_INDENT}OSN ACTIONS"]
+    attempts = {a["attempt"] for a in receipt.osn_actions if a.get("attempt") is not None}
+    cap = 40
+    for a in receipt.osn_actions[:cap]:
+        prefix = f"a{a['attempt']} " if len(attempts) > 1 and a.get("attempt") is not None else ""
+        turn = f"t{a['turn']} " if a.get("turn") is not None else ""
+        if a.get("decision") in (None, "not_applicable"):
+            outcome = "ok" if a.get("ok") else "failed" if a.get("executed") else "-"
+        elif a.get("executed"):
+            outcome = f"{a['decision']} · {'ok' if a.get('ok') else 'failed'}"
+        else:
+            outcome = f"{a['decision']} · refused"
+        target = a.get("target") or ""
+        summary = a.get("summary") or ""
+        detail = " · ".join(x for x in (target, summary) if x and x != target or x == target and not summary)
+        if target and summary and summary.startswith(("update:", "create:", "unchanged:")):
+            detail = summary
+        lines.append(f"{_INDENT}  {prefix}{turn}{str(a['kind']).ljust(16)} {outcome.ljust(16)} {detail}".rstrip())
+        if a.get("intent"):
+            lines.append(f"{_INDENT}      ↳ {a['intent']}")
+    if len(receipt.osn_actions) > cap:
+        lines.append(f"{_INDENT}  +{len(receipt.osn_actions) - cap} more")
+    lines.append("")
+    return lines
+
+
 def _osn_checks_display(receipt: ShardReceipt, loop: dict) -> str:
     if receipt.checks_display != "Not run":
         return checks_label(receipt)
@@ -1888,6 +1959,22 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
     ]
     if receipt.files_touched:
         lines.append(f"{_INDENT}  ↳ " + " · ".join(receipt.files_touched[:5]))
+    _agent_loop_raw = evidence.get("agent_loop")
+    _agent_loop: dict = _agent_loop_raw if isinstance(_agent_loop_raw, dict) else {}
+    _acts = _agent_loop.get("action_summary")
+    if isinstance(_acts, dict) and _acts:
+        _turns = _agent_loop.get("turns_total")
+        _parts = [f"{_acts.get('actions', 0)} actions"]
+        if _acts.get("reads") or _acts.get("searches") or _acts.get("listings"):
+            _parts.append(
+                f"{(_acts.get('reads') or 0) + (_acts.get('searches') or 0) + (_acts.get('listings') or 0)} inspect"
+            )
+        _parts.append(f"{_acts.get('writes_applied', 0)} writes")
+        if _acts.get("writes_blocked"):
+            _parts.append(f"{_acts['writes_blocked']} refused")
+        _parts.append(f"{_acts.get('verifications', 0)} verify")
+        _head = f"{_turns} turns · " if isinstance(_turns, int) else ""
+        lines.append(_row("Agent loop", _head + " · ".join(_parts), width=16))
     if receipt.duration_seconds is not None:
         minutes, seconds = divmod(int(round(receipt.duration_seconds)), 60)
         duration = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
@@ -2476,6 +2563,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         if len(receipt.policy_decisions) > _pd_cap:
             lines.append(f"{_INDENT}  +{len(receipt.policy_decisions) - _pd_cap} more")
         lines.append("")
+
+    lines.extend(_render_osn_actions(receipt))
 
     _budget = (receipt.recorded_evidence or {}).get("agent_budgets")
     if isinstance(_budget, dict):

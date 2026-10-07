@@ -51,6 +51,11 @@ def _matches(rel: str, patterns: tuple[str, ...]) -> bool:
     )
 
 
+def is_protected_path(rel: str) -> bool:
+    """True for paths OpenShard never writes *or* reads on an agent's behalf (secrets, VCS, OpenShard state)."""
+    return ":" in rel or _matches(rel, _DENY_PATTERNS)
+
+
 def evaluate_file_write(
     rel: str,
     *,

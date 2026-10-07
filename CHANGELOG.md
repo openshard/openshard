@@ -2,6 +2,45 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Added
+
+- `openshard osn run` is now an iterative agent loop by default (`--loop agent`).
+  Instead of one whole-file proposal per attempt, the model takes bounded
+  turns (`--max-turns`, default 12) choosing typed actions from what the
+  previous actions returned: `list_files`, `read_file`, `search_repo`,
+  `get_diff`, `write_file`, `run_verification` and `finish`. OpenShard decides
+  whether each action may happen (path safety, the file-mutation policy with
+  allow / ask / deny, organisation write-path patterns, the agent budget),
+  performs it in the isolated copy, and shows the model only the result. The
+  model may request the fixed verification command a bounded number of times
+  per attempt and sees its outcome and a short output tail; a verification
+  that ran on the final files is the attempt's verification, otherwise
+  OpenShard runs it after the model finishes. `--loop writes` keeps the
+  original one-shot behaviour; the `run_bounded_loop` contract for
+  write-proposing providers is unchanged.
+- `write_file` is now a real native tool (`NativeToolRunner`): path-safe,
+  re-checks the file-mutation policy even for an approved call, and reports
+  before/after hashes, sizes and line counts, never content.
+- The OSN Receipt records every declared action (kind, repo-relative target,
+  short intent, role, model, policy decision, approval, whether it executed,
+  observed effect, duration), per-attempt turn counts, an action summary, and
+  every model call (attempt, turn, role, requested and reported model, tokens,
+  cost, cost provenance, duration). The full local Receipt gets an
+  `OSN ACTIONS` section; the hosted projection carries counts and model calls
+  only, never paths or output.
+
+### Changed
+
+- Model cost provenance is explicit: `UsageStats.cost_source` says whether a
+  call's cost is the provider's own figure or OpenShard's list-rate
+  arithmetic; the OpenRouter client asks for usage accounting so the
+  provider's cost is recorded when it is returned, and labels its fallback
+  arithmetic as an estimate. An OSN run's `cost_provenance` is
+  `provider_reported` only when every call's cost was, otherwise
+  `official_rate_estimate`; an unknown origin is not claimed.
+
 ## 0.4.14 - 2026-10-06
 
 <!-- release-title: Openshard v0.4.14 - Cloud Capture -->

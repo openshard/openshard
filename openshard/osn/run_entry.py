@@ -66,9 +66,22 @@ def _verification_block(receipt: LoopReceipt) -> dict[str, Any]:
     )
 
 
+MAX_MODEL_CALLS = 60
+
+
 def _stored_loop_block(receipt: LoopReceipt) -> dict[str, Any]:
     d = receipt.to_dict()
     d.pop("sandbox_path", None)  # absolute local path; not stored
+    attempts = [a for a in d.get("attempts") or [] if isinstance(a, dict) and "actions" in a]
+    if attempts:
+        # Iterative runs: how the agent spent its turns, summed over attempts.
+        totals: dict[str, int] = {}
+        for a in attempts:
+            for key, value in (a.get("action_summary") or {}).items():
+                if isinstance(value, int) and not isinstance(value, bool):
+                    totals[key] = totals.get(key, 0) + value
+        d["action_summary"] = totals
+        d["turns_total"] = sum(int(a.get("turns") or 0) for a in attempts)
     return d
 
 
@@ -76,6 +89,27 @@ def _sum_costs(usage: list[AttemptUsage]) -> float | None:
     if not usage or any(u.cost_usd is None for u in usage):
         return None
     return sum(u.cost_usd for u in usage if u.cost_usd is not None)
+
+
+def _cost_provenance(usage: list[AttemptUsage]) -> str | None:
+    """How the run's cost figure was obtained, from every call's own provenance.
+
+    ``provider_reported`` only when every call's cost is the provider's own
+    figure; ``official_rate_estimate`` when any call's cost is OpenShard's
+    list-rate arithmetic (the whole figure is then an estimate); ``None`` when
+    a cost is unknown or a call did not say where its figure came from.
+    """
+    from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE
+    from openshard.providers.base import COST_SOURCE_LIST_RATE, COST_SOURCE_PROVIDER
+
+    if not usage or any(u.cost_usd is None for u in usage):
+        return None
+    sources = {u.cost_source for u in usage}
+    if sources == {COST_SOURCE_PROVIDER}:
+        return COST_SOURCE_PROVIDER
+    if sources <= {COST_SOURCE_PROVIDER, COST_SOURCE_LIST_RATE}:
+        return COST_PROVENANCE_OFFICIAL_RATE
+    return None
 
 
 def _file_effects(changed: list[str], repo_path: Path) -> tuple[list[dict], int, int]:
@@ -359,6 +393,17 @@ def build_osn_run_entry(
     entry["total_tokens"] = entry["prompt_tokens"] + entry["completion_tokens"]
     if usage:
         entry["tokens_provenance"] = "provider_reported"
+        cached = [u.cache_read_tokens for u in usage]
+        if any(c is not None for c in cached):
+            entry["cache_read_tokens"] = sum(c or 0 for c in cached)
+        provenance = _cost_provenance(usage)
+        if provenance:
+            entry["cost_provenance"] = provenance
+        # Every model call this run made: attempt, turn, role, requested and
+        # reported model, tokens, cost and where that cost figure came from.
+        entry["osn_loop"]["model_calls"] = [u.to_record() for u in usage[:MAX_MODEL_CALLS]]
+        if len(usage) > MAX_MODEL_CALLS:
+            entry["osn_loop"]["model_calls_truncated"] = True
 
     try:
         from openshard.analysis.repo_map import collect_git_info

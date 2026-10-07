@@ -231,7 +231,7 @@ def execution_loop_block(entry: dict) -> dict[str, Any] | None:
     loop = _dict(entry.get("osn_loop"))
     if not loop:
         return None
-    attempts: list[dict[str, int]] = []
+    attempts: list[dict[str, Any]] = []
     raw_attempts = loop.get("attempts")
     if isinstance(raw_attempts, list):
         for a in raw_attempts[:MAX_LOOP_ATTEMPTS]:
@@ -252,7 +252,7 @@ def execution_loop_block(entry: dict) -> dict[str, Any] | None:
         "policy_and_file_effects": _text(ev.get("policy_and_file_effects"), 64),
         "verification": _text(ev.get("verification"), 64),
     }
-    block = {
+    block: dict[str, Any] = {
         "status": _text(loop.get("status"), 32),
         "stop_reason": _text(loop.get("stop_reason"), 120),
         "verification_state": _text(loop.get("verification_state"), 32),
@@ -260,6 +260,89 @@ def execution_loop_block(entry: dict) -> dict[str, Any] | None:
         "evidence": None if _all_none(evidence) else evidence,
     }
     return None if _all_none(block) else block
+
+
+def agent_loop_block(entry: dict) -> dict[str, Any] | None:
+    """The iterative agent loop of an OSN run: turns, action counts and every model call.
+
+    Local Receipt surfaces only for now. The hosted sync contract
+    (``packages/contracts/src/receipt-sync.ts``) validates ``execution_loop``
+    strictly and does not yet know these keys, so they are kept out of that
+    block and out of the hosted projection; nothing here names a path, a
+    prompt or tool output.
+    """
+    loop = _dict(entry.get("osn_loop"))
+    if not loop or loop.get("mode") != "turns":
+        return None
+    attempts: list[dict[str, Any]] = []
+    raw_attempts = loop.get("attempts")
+    if isinstance(raw_attempts, list):
+        for a in raw_attempts[:MAX_LOOP_ATTEMPTS]:
+            if not isinstance(a, dict) or _count(a.get("n")) is None:
+                continue
+            attempts.append({
+                "n": _count(a.get("n")),
+                "turns": _count(a.get("turns")),
+                "turn_stop": _text(a.get("turn_stop"), 32),
+                "verifications_in_turn": _count(a.get("verifications_in_turn")),
+                "action_summary": _action_counts(a.get("action_summary")),
+            })
+    ev = _dict(loop.get("evidence"))
+    block: dict[str, Any] = {
+        "mode": "turns",
+        "turns_total": _count(loop.get("turns_total")),
+        "action_summary": _action_counts(loop.get("action_summary")),
+        "attempts": attempts or None,
+        "model_calls": model_calls_block(loop.get("model_calls")),
+        "model_calls_truncated": _bool(loop.get("model_calls_truncated")),
+        "evidence": {
+            "actions": _text(ev.get("actions"), 64),
+            "action_results": _text(ev.get("action_results"), 64),
+        },
+    }
+    return block
+
+
+_ACTION_COUNT_KEYS = (
+    "actions", "reads", "searches", "listings", "diffs", "writes_proposed", "writes_applied",
+    "writes_blocked", "verifications", "invalid",
+)
+MAX_MODEL_CALLS = 20
+_ROLE_NAMES = frozenset({"planner", "executor", "verifier", "validator", "explorer"})
+
+
+def _action_counts(raw: Any) -> dict[str, int] | None:
+    d = _dict(raw)
+    out = {k: _count(d.get(k)) for k in _ACTION_COUNT_KEYS}
+    return None if _all_none(out) else {k: v for k, v in out.items() if v is not None}
+
+
+def model_calls_block(raw: Any) -> list[dict[str, Any]] | None:
+    """Per-call model usage of an OSN run: role, model, tokens, cost and its provenance. Never prompts."""
+    if not isinstance(raw, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for c in raw[:MAX_MODEL_CALLS]:
+        if not isinstance(c, dict):
+            continue
+        model = _text(c.get("model"), 256)
+        if model is None:
+            continue
+        role = c.get("role")
+        out.append({
+            "attempt": _count(c.get("attempt")),
+            "turn": _count(c.get("turn")),
+            "role": role if isinstance(role, str) and role in _ROLE_NAMES else None,
+            "model": model,
+            "requested_model": _text(c.get("requested_model"), 256),
+            "prompt_tokens": _count(c.get("prompt_tokens")),
+            "completion_tokens": _count(c.get("completion_tokens")),
+            "cache_read_tokens": _count(c.get("cache_read_tokens")),
+            "cost_usd": _number(c.get("cost_usd")),
+            "cost_source": _text(c.get("cost_source"), 32),
+            "duration_ms": _count(c.get("duration_ms")),
+        })
+    return out or None
 
 
 _BUDGET_LIMIT_KEYS = ("max_spend_usd", "max_attempts", "max_commands", "max_writes")
@@ -728,6 +811,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "approval_detail": approval_detail_block,
         "sandbox_detail": sandbox_detail_block,
         "execution_loop": execution_loop_block,
+        "agent_loop": agent_loop_block,  # local surfaces only; see its docstring
         "agent_budgets": agent_budgets_block,
         "adaptive_routing": adaptive_routing_block,
         "supervisor_routing": supervisor_routing_block,

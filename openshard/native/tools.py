@@ -393,14 +393,139 @@ def _exec_run_verification(
     )
 
 
-def _exec_read_file(repo_root: Path, path: str) -> NativeToolResult:
+_MAX_DIFF_STAT_BYTES = 2_000_000
+
+
+def _line_delta(before: str | None, after: str) -> tuple[int | None, int | None]:
+    """(added, removed) line counts between two texts; None when too large to compare."""
+    import difflib
+
+    if before is None:
+        return len(after.splitlines()), 0
+    if len(before) > _MAX_DIFF_STAT_BYTES or len(after) > _MAX_DIFF_STAT_BYTES:
+        return None, None
+    added = removed = 0
+    for line in difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=0):
+        if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def _exec_write_file(
+    repo_root: Path,
+    path: str,
+    content: object,
+    *,
+    approved: bool,
+    blocked_patterns: tuple[str, ...] = (),
+    approval_patterns: tuple[str, ...] = (),
+) -> NativeToolResult:
+    """Write a complete file inside *repo_root* with before/after evidence.
+
+    Controlled, not trusted: the path must resolve inside the repository
+    (no traversal, no symlink, no ``.git``/``.openshard`` state), the
+    file-mutation policy is re-evaluated here even when the caller already
+    approved the write (a built-in or organisation *deny* can never be
+    approved away), and the result carries only hashes, sizes and line
+    counts, never the content. ``approved`` must be True for the write to
+    happen at all; the caller (a policy gate) decides that.
+    """
+    import hashlib
+
+    from openshard.policy.file_mutation import evaluate_file_write
+
+    if not approved:
+        return NativeToolResult(
+            tool_name="write_file", ok=False, error="Tool 'write_file' requires approval.",
+            metadata={"policy_decision": "ask", "raw_content_stored": False},
+        )
+    if not isinstance(content, str):
+        return NativeToolResult(
+            tool_name="write_file", ok=False, error="write_file requires string 'content'.",
+            metadata={"raw_content_stored": False},
+        )
+    try:
+        dest = resolve_safe_repo_path(repo_root, path)
+    except UnsafePathError as exc:
+        return NativeToolResult(
+            tool_name="write_file", ok=False, error=str(exc),
+            metadata={"policy_decision": "deny", "policy_source": "path_safety", "raw_content_stored": False},
+        )
+    rel = dest.relative_to(repo_root.resolve()).as_posix()
+    decision = evaluate_file_write(rel, blocked_patterns=blocked_patterns, approval_patterns=approval_patterns)
+    if decision.decision == "deny":
+        return NativeToolResult(
+            tool_name="write_file", ok=False, error=f"write refused by policy: {decision.reason}",
+            metadata={
+                "policy_decision": "deny", "policy_source": decision.source,
+                "policy_reason": decision.reason, "raw_content_stored": False,
+            },
+        )
+    before_text: str | None = None
+    bytes_before: int | None = None
+    sha_before: str | None = None
+    if dest.is_file():
+        try:
+            raw_before = dest.read_bytes()
+        except OSError as exc:
+            return NativeToolResult(tool_name="write_file", ok=False, error=str(exc),
+                                    metadata={"raw_content_stored": False})
+        bytes_before = len(raw_before)
+        sha_before = hashlib.sha256(raw_before).hexdigest()
+        before_text = raw_before.decode("utf-8", "replace")
+    elif dest.exists():
+        return NativeToolResult(
+            tool_name="write_file", ok=False, error="write target exists and is not a regular file",
+            metadata={"policy_decision": decision.decision, "raw_content_stored": False},
+        )
+    raw_after = content.encode("utf-8")
+    sha_after = hashlib.sha256(raw_after).hexdigest()
+    if sha_before == sha_after:
+        change_type = "unchanged"
+    else:
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(raw_after)
+        except OSError as exc:
+            return NativeToolResult(tool_name="write_file", ok=False, error=str(exc),
+                                    metadata={"policy_decision": decision.decision, "raw_content_stored": False})
+        change_type = "create" if before_text is None else "update"
+    added, removed = _line_delta(before_text, content) if change_type != "unchanged" else (0, 0)
+    delta = f" +{added}/-{removed}" if added is not None else ""
+    return NativeToolResult(
+        tool_name="write_file",
+        ok=True,
+        output=f"{change_type}: {rel} ({len(raw_after)} bytes{delta})",
+        metadata={
+            "path": rel,
+            "change_type": change_type,
+            "bytes_before": bytes_before,
+            "bytes_after": len(raw_after),
+            "sha256_before": sha_before,
+            "sha256_after": sha_after,
+            "lines_added": added,
+            "lines_removed": removed,
+            "policy_decision": decision.decision,
+            "policy_source": decision.source,
+            "policy_reason": decision.reason,
+            "raw_content_stored": False,
+        },
+    )
+
+
+def _exec_read_file(repo_root: Path, path: str, *, limit: int = 4000) -> NativeToolResult:
     try:
         safe = resolve_safe_repo_path(repo_root, path)
         text = safe.read_text(encoding="utf-8", errors="replace")
         return NativeToolResult(
             tool_name="read_file",
             ok=True,
-            output=compact_tool_result(text),
+            output=compact_tool_result(text, limit),
+            metadata={"chars": len(text), "truncated": len(text) > limit},
         )
     except UnsafePathError as exc:
         return NativeToolResult(tool_name="read_file", ok=False, error=str(exc))
