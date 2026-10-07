@@ -604,6 +604,9 @@ def build_osn_run_entry(
     entry["osn_loop"]["implementation_models"] = implementation_models
     _record_roles(entry, receipt, usage, final_model)
     _record_economics(entry, receipt, usage)
+    from openshard.osn.agents import build_agent_graph
+
+    entry["osn_loop"]["agents"] = build_agent_graph(entry["osn_loop"])
     entry["prompt_tokens"] = sum(u.prompt_tokens for u in usage)
     entry["completion_tokens"] = sum(u.completion_tokens for u in usage)
     entry["total_tokens"] = entry["prompt_tokens"] + entry["completion_tokens"]
