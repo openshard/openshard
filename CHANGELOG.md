@@ -23,8 +23,24 @@ All notable changes to OpenShard are documented here.
   records which under `osn_loop.plan_context_files`. The planner had already
   read them; the executor then spent its own turns rediscovering them.
 
+### Security
+
+- **Verifier credential scrub.** The OSN verify command, which may run agent-written code, no
+  longer receives the OpenShard Platform credentials, `*API_KEY` / `*APIKEY` variables (model
+  providers) or a listed set of VCS, package-registry and cloud credentials. This is a
+  least-privilege scrub of those classes, not process isolation. See `docs/osn-run.md`.
+
 ### Fixed
 
+- **Approval evidence.** An organisation `ask` path in `--json` / `--json-events` mode (or with no
+  terminal) was recorded as `refused` although nobody refused. It is now `unanswered`, and an
+  approver that failed classifies as approval unavailable rather than a user denial. The `--yes`
+  help text now says built-in `ask` paths are never approved inside the run.
+- **Promotion** refuses a path that resolves elsewhere through a symlinked or junctioned
+  directory, so a `deny` / `ask` location can't be reached under an `allow`ed alias.
+- **Organisation command prefixes** now match the program, not its spelling. A Windows suffix,
+  directory, case and a versioned Python name no longer bypass a rule, and a `python` rule
+  matches the interpreter OSN substitutes for a bare `python`.
 - A role whose calls went to more than one model (an escalation ladder, a
   supervisor re-route) now names each model, in order of first use, with its
   own calls, tokens and cost (`osn_loop.roles.<role>.by_model`; the ROLES

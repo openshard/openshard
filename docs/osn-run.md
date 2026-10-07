@@ -176,6 +176,16 @@ projection is unchanged until the Platform contract learns these blocks.
 - OpenShard runs the verify command itself and reads its exit code. A leading `python` runs under
   the interpreter OpenShard uses. The verifier runs with your permissions and can execute
   agent-written code: the copy isolates files, not processes.
+- The verify command gets your environment minus a least-privilege **credential scrub**. This is
+  not process isolation, and it removes only these classes of variable: every
+  `OPENSHARD_PLATFORM_*` variable and `OPENSHARD_GROK_BOT_OTLP_TOKEN`; any name ending in `API_KEY`
+  or `APIKEY` (OpenRouter, Anthropic, OpenAI and other model-provider keys); and `GITHUB_TOKEN`,
+  `GH_TOKEN`, `GITLAB_TOKEN`, `NPM_TOKEN`, `NODE_AUTH_TOKEN`, `PYPI_TOKEN`, `TWINE_PASSWORD`,
+  `TWINE_USERNAME`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AZURE_CLIENT_SECRET`,
+  `GOOGLE_APPLICATION_CREDENTIALS`, `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` and `SSH_AUTH_SOCK`.
+  Everything else is kept, including `PATH`, virtualenv, home, temp and CI variables and generic
+  `*_PASSWORD` / `*_SECRET` names that test suites commonly read. Files on disk, other variables and
+  anything reachable with your user's permissions are still readable by verifier code.
 - A retry happens only after a verification failure, only if the proposed writes and the failure
   output both changed, and never more than 5 attempts. `--escalate-model` models are used only for
   those retries.
@@ -313,6 +323,41 @@ signals reach the model as advisory context, never as instructions. Checks that 
 failures are recommended, never run. With `adaptive_routing` on, Routing V2 prefers
 repository- and task-scoped history when it clears the same sample gate. See
 [learning.md](learning.md).
+
+## Organisation policy
+
+When the repository is linked to a Platform organisation (`openshard sync connect`), every
+`osn run` fetches that organisation's policy once at its start
+(`GET {endpoint}/v1/orgs/{organisation_id}/policy`). The run is refused before any model call if a
+link exists but the policy cannot be read, is malformed, belongs to another organisation, or
+`OPENSHARD_PLATFORM_SYNC=off` is set. A Platform answer of `"policy": null` means the organisation
+has no policy, and the run proceeds under local configuration only. Without a link there is no
+organisation policy. The repository cannot loosen an organisation rule; every combination keeps the
+stricter side.
+
+What an applied policy enforces:
+
+| Rule | Enforcement |
+|---|---|
+| `allowed_models` / `blocked_models`, `allowed_providers` / `blocked_providers` (the model id's vendor prefix), `max_cost_class`, `allow_openrouter_wide` (models reachable only through OpenRouter) | Every model the run could call, the first model and every escalation-ladder model, is checked before the run starts. A disallowed model refuses the run; it is never silently substituted |
+| `allow_specialist` / `allow_experimental` / `allow_watchlist` / `allow_deprecated` / `allow_open_weight` / `allow_fallback` | Which lifecycles may enter the **routing pool** when adaptive routing chooses. They do not forbid a model you name with `--model` or `--escalate-model`; use `blocked_models` / `allowed_models` for that |
+| `budgets` (`max_spend_usd`, `max_attempts`, `max_commands`, `max_writes`) | The stricter of the organisation and repository limit applies. An organisation budget is enforced even when the `agent_budgets` capability is off |
+| `permissions.blocked_write_paths` | A matching write is denied in the isolated copy and at promotion (recorded as `deny`, source `organisation_policy`) |
+| `permissions.approval_write_paths` | A matching write needs approval. `--yes` approves it (`approval_source: flag_yes`). In a terminal you are asked. With `--json` / `--json-events` and no `--yes`, or with no terminal, nobody can answer, so the write is not made and the Receipt records `approval_receipt.outcome: unanswered`, never `refused` |
+| `permissions.blocked_command_prefixes` | The verify command is refused before any model call when its leading tokens match a prefix. The program is compared by name: directory, case, a Windows suffix (`.exe`, `.cmd`, `.bat`, `.com`, `.ps1`) and a versioned Python name (`python3.12`, `pythonw`) are ignored, so `python -m pytest` also matches the interpreter OpenShard substitutes for a bare `python`. A prefix rule cannot see through wrappers (`sh -c`, `cmd /c`, `env`, `npx`) or into processes the verifier starts |
+
+The built-in `ask` paths (CI, Docker, `pyproject.toml`, `package.json`) are never approved inside
+the run, even with `--yes`. `--yes` does approve them at `--promote`.
+
+The policy can't express a restriction on the transport provider that dispatches a request
+(`--provider`); `allowed_providers` names model vendors.
+
+The Shard entry's `organisation_policy` block records only the policy's identity: its version, the
+Platform's hash of it, whether it applied, and the effective policy hash after combining with
+repository config. It records no rule values. It appears in `osn run --json`, the full local
+Receipt and the hosted projection. The decisions it produced appear as `policy_decisions`,
+`approval_receipt` and `permission_evidence` (hosted as `permissions`). A run refused before
+execution (policy unreadable, model not allowed) writes no Receipt, because nothing ran.
 
 ## Adaptive routing (experimental)
 
