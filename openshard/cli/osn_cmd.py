@@ -136,6 +136,10 @@ class _OsnProgressRenderer:
         elif event == "budget_stop":
             self._stop()
             echo(f"  ✗ Budget stopped the run · {data.get('reason') or 'limit reached'}")
+        elif event == "malformed_reply":
+            self._stop()
+            echo(f"  ✗ Turn {data.get('turn')} · the model's reply was not a usable action list"
+                 + (f" ({data.get('message')})" if data.get("message") else "") + " · attempt ends")
         elif event == "turn_start":
             self._stop()
             role = data.get("role")

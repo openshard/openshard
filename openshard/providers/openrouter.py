@@ -261,9 +261,11 @@ class OpenRouterClient(BaseProvider):
             )
             if usage.estimated_cost is not None:
                 usage.cost_source = COST_SOURCE_LIST_RATE
+        finish = choices[0].get("finish_reason") or choices[0].get("native_finish_reason")
         return ChatResponse(
             content=content, model=resolved_model, usage=usage,
             presend_secret_scan=_presend_scan,
+            finish_reason=finish if isinstance(finish, str) and finish else None,
         )
 
     def close(self) -> None:

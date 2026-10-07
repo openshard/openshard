@@ -379,7 +379,29 @@ class TestIterativeAttempt:
 
         rec = run_bounded_loop(repo, TASK, Mute(), CHECK, max_attempts=2)
         assert rec.status == "error" and rec.stop_reason == "provider_error"
-        assert rec.attempts[0].error_class == "ActionParseError" and rec.verification_state == "not_run"
+        assert [a.error_class for a in rec.attempts] == ["ActionParseError", "ActionParseError"]
+        assert rec.verification_state == "not_run"
+
+    def test_malformed_first_attempt_hands_over_to_the_next_ladder_rung(self, repo):
+        """A model that cannot speak the contract is a model failure: the next rung gets its chance."""
+        from openshard.osn.actions import ActionParseError
+
+        class FlakyThenGood:
+            def __init__(self):
+                self.seen: list[int] = []
+
+            def turn(self, state):
+                self.seen.append(state.attempt)
+                if state.attempt == 1:
+                    raise ActionParseError("reply is not valid JSON (reply 12 chars, finish_reason=stop)")
+                assert "not valid action lists" in (state.previous_failure or "")
+                return parse_turn(_turn(_a("write_file", path="src/app.txt", content="ok"), _a("finish")))
+
+        model = FlakyThenGood()
+        rec = run_bounded_loop(repo, TASK, model, CHECK, max_attempts=2)
+        assert rec.status == "verified" and [a.n for a in rec.attempts] == [1, 2]
+        assert rec.attempts[0].turn_stop == "malformed_reply" and rec.attempts[0].applied == []
+        assert rec.attempts[0].error_class == "ActionParseError" and model.seen == [1, 2]
 
     def test_in_turn_verification_is_kept_when_the_provider_fails_afterwards(self, repo):
         class Dies:

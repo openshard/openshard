@@ -803,10 +803,19 @@ def run_bounded_loop(
             if outcome.stop == STOP_MALFORMED_REPLY:
                 rec.error_class, rec.error_message = outcome.error_class, outcome.error_message
                 if not outcome.applied:
-                    # Nothing was written and the model stopped speaking the contract:
-                    # the same outcome as a bad one-shot reply.
+                    rec.policy = {**rec.policy, "model_response_error": outcome.error_class}
+                    if n < max_attempts:
+                        # The model stopped speaking the contract before writing anything:
+                        # a model failure, so the next attempt (the ladder's next rung)
+                        # gets its chance, told why the previous one ended.
+                        _emit_progress(progress, "malformed_attempt", attempt=n, next_attempt=n + 1)
+                        prev_failure = (
+                            "The previous attempt ended because the model's replies were not valid action "
+                            f"lists ({outcome.error_message or 'unusable reply'}); nothing was written."
+                        )
+                        continue
+                    # Nothing was written and no attempt remains: the same outcome as a bad one-shot reply.
                     _settle_supervision("run_ended_before_retry")
-                    rec.policy = {**rec.policy, "provider_error": outcome.error_class}
                     return _receipt("error", "provider_error")
                 # Writes exist: they face verification like any other attempt, and a
                 # failure can still be retried or escalated.

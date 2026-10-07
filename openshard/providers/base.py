@@ -73,6 +73,10 @@ class ChatResponse:
     # Result of the pre-send secret scan applied to the outgoing prompt. None
     # when no secret-like values were found (clean path is byte-identical).
     presend_secret_scan: SecretScanResult | None = None
+    # Why the provider stopped generating, as it reported it ("stop", "length",
+    # ...); None when the provider did not say. "length" means the reply was
+    # cut off at the output limit and may be incomplete.
+    finish_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
