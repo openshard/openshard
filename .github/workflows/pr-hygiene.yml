@@ -27,12 +27,16 @@ jobs:
             ];
 
             if (!pr.assignees.some((assignee) => assignee.login === "MichaelObasa")) {
-              await github.rest.issues.addAssignees({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: pr.number,
-                assignees: ["MichaelObasa"],
-              });
+              try {
+                await github.rest.issues.addAssignees({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  assignees: ["MichaelObasa"],
+                });
+              } catch (error) {
+                core.warning(`Could not auto-assign MichaelObasa: ${error.message}`);
+              }
             }
 
             const body = pr.body ?? "";

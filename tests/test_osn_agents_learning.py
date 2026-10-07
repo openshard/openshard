@@ -52,7 +52,7 @@ class TestAgentGraph:
         assert by_id["worker-2"]["reason"] == "malformed_reply:ActionParseError"
         assert by_id["verifier"]["outcome"] == "fail, pass" and by_id["synthesis"]["model"] is None
         assert g["models_distinct"] == ["a/m", "b/m", "exec/m", "fast/m", "plan/m", "review/m"]
-        assert g["cost_usd"] == round(0.01 + 0.001 + 0.02 + 0.004 + 0.003 + 0.002, 6)
+        assert round(g["cost_usd"], 6) == round(0.01 + 0.001 + 0.02 + 0.004 + 0.003 + 0.002, 6)
         assert g["evidence"]["graph"] == "derived_from_recorded_roles" and g["topology"] == "parallel_subtasks"
 
     def test_candidates_mark_the_winner_and_a_single_executor_has_no_graph(self):
