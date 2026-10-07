@@ -401,6 +401,37 @@ def _render_observation(obs: Observation) -> str:
     )
 
 
+def turn_budget_nudge(state: TurnState) -> str | None:
+    """A plain statement of the turn budget when inspection is eating it, else None.
+
+    The harness owns the turn limit; the model cannot see it running out.
+    Once half the turns are spent with nothing written, every later turn says
+    so, and the last two turns say that only a change or a finish can still
+    count. The attempt still ends at ``max_turns`` exactly as before: this is
+    information, not a new rule.
+    """
+    turns_left = state.max_turns - state.turn
+    if state.writes_applied == 0 and state.turn > state.max_turns // 2:
+        if turns_left <= 1:
+            return (
+                f"Turn budget: this is your last turn (turn {state.turn} of {state.max_turns}) and you have written "
+                "nothing. Make the change now with edit_file or write_file, or finish and say what blocked you; "
+                "more inspection ends the attempt with no result."
+            )
+        return (
+            f"Turn budget: {state.turn} of {state.max_turns} turns are spent and you have written nothing; "
+            f"{turns_left} turn(s) remain. You have inspected enough: make the change now with what you know "
+            "(edit_file for existing files), then request verification. Only inspect further if a specific line "
+            "is missing for the edit."
+        )
+    if turns_left <= 1 and state.writes_applied > 0:
+        return (
+            f"Turn budget: this is your last turn (turn {state.turn} of {state.max_turns}). Request verification "
+            "if you have not, or finish."
+        )
+    return None
+
+
 def build_turn_prompt(
     state: TurnState,
     repo_root: Path,
@@ -423,6 +454,9 @@ def build_turn_prompt(
         f"Verification requests left this attempt: {state.verifications_left}. "
         f"Files you have written: {', '.join(state.changed_files) if state.changed_files else 'none yet'}."
     )
+    nudge = turn_budget_nudge(state)
+    if nudge:
+        parts.append(nudge)
     listed = state.repo_files[:MAX_LISTED_FILES]
     parts.append("Repository files:\n" + "\n".join(listed))
     if len(state.repo_files) > len(listed):

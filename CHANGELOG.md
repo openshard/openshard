@@ -6,6 +6,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- The OSN executor is told when its turn budget is running out on inspection
+  alone: once half the turns are spent with nothing written, every later turn
+  says how many remain and asks for the change now; the last turn says only a
+  change or a finish can still count. Found by running OSN on OpenShard's own
+  repository, where an executor spent all twelve turns reading. The attempt
+  still ends at `--max-turns` exactly as before.
 - OSN reads the verification command's output as UTF-8 (replacing
   undecodable bytes) on every platform. On Windows the locale codec (cp1252)
   raised inside subprocess's reader thread on a single undecodable byte in a
