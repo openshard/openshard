@@ -64,6 +64,26 @@ All notable changes to OpenShard are documented here.
   (planning / implementation / review) and a `tier_dispatch_receipt` so
   existing surfaces show which roles were dispatched.
 
+- Parallel writing workers (`--topology auto|single|roles|parallel`,
+  `--max-workers`, default and hard cap 3): a non-trivial run whose planner
+  proposes independent subtasks with disjoint write scopes (validated by the
+  harness: at most three, scopes disjoint and safe, dependencies acyclic)
+  runs each subtask on its own worker in its own isolated copy, on its own
+  routed model (distinct models when routing offers them), with a scoped
+  write authority on top of the file-mutation policy. Synthesis copies the
+  workers' non-overlapping files into the run's copy, surfaces conflicts,
+  out-of-scope files and missing required work to the executor as a bounded
+  advisory, and the result is verified by OpenShard like any other attempt.
+  The Receipt records the topology decision (requested, selected, reason,
+  worker count, expected and actual extra cost), every worker (status,
+  model, scope outcome, usage, cost provenance, own-copy verification,
+  actions), the synthesis outcome, `implementation_models` and an
+  `economics` block (cost by role / worker / model / attempt and
+  `cost_per_verified_success`). `execution_model` is the executor's when it
+  ran, else the first worker's; a planner's or verifier's model is never
+  reported as the execution model, and an executor that was not needed is
+  recorded `skipped (workers_synthesised_cleanly)`, not failed.
+
 - Bounded parallel read-only exploration for the planner (`--explore`, default
   on): the planner may hand up to three independent questions to exploration
   workers, each a read-only agent turn loop on the isolated copy (at most two

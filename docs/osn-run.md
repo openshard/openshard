@@ -59,6 +59,50 @@ question, outcome, model, calls, turns, findings and sources counts, tokens, cos
 duration, its read-only actions) and in `model_calls` with role `explorer`; the full local Receipt
 lists them under `ROLES`.
 
+### Parallel writing workers (`--topology`)
+
+`--topology auto` (default) lets a non-trivial run split into bounded parallel **writing workers**
+when, and only when, the planner proposes `subtasks` that the harness validates: at most three,
+each with an explicit `allowed_write_paths` scope, scopes pairwise disjoint, dependencies acyclic,
+no scope that is the whole repository or escapes it (`openshard.osn.decompose`). The topology
+decision is recorded on every run (`osn_loop.topology`: requested, selected, reason, worker count,
+distinct models, expected and actual extra cost):
+
+| Selected | When |
+|---|---|
+| `single` | `--topology single` (no planner, no review, no workers), or no planner ran |
+| `planner_executor` / `planner_executor_verifier` | the roles above; `auto` falls back here with the reason (`planner_proposed_no_decomposition`, `decomposition_invalid`, `task_not_complex_enough`, `budget_headroom_insufficient`) |
+| `parallel_subtasks` | a valid decomposition on a non-trivial task (`--topology parallel` skips the non-trivial rule) with budget headroom |
+
+Each worker is its own agent: its own isolated copy of the run's workspace, its own id, model,
+subtask, write scope and trace. A worker's writes outside its scope are denied by a scoped
+file-mutation gate on top of the ordinary policy (`decisions[].source: subtask_scope`), it gets at
+most 8 turns and one own-copy verification (informational: the run's verification is the one that
+counts), and it never sees another worker. Models come from the same `select_role_model` path as
+the other roles (Routing V2 class from the subtask's `preferred_capability`, each worker excluding
+the models already assigned, so workers land on distinct models when routing can offer them), and
+must pass the organisation's `models` policy. At most `--max-workers` (default and hard cap 3) run
+at once, only after the budget ledger agreed, and every worker's spend is recorded.
+
+**Synthesis** (`osn_loop.synthesis`) copies each accepted worker's changed files into the run's
+copy: a file written by two workers is a *conflict*, a file outside the worker's scope is
+*rejected*, a required subtask whose worker failed is *missing*. With nothing to resolve, the files
+are verified by OpenShard exactly like an executor's and the executor is recorded `skipped
+(workers_synthesised_cleanly)`. Otherwise the executor runs with a bounded advisory (what conflicted,
+what is missing, each worker's version as a diff) and resolves it in its own turns, verified as
+usual. Nothing a worker wrote reaches the repository except through synthesis, verification and
+`--promote`.
+
+The Receipt lists each worker (`osn_loop.workers`: status `changed` / `no_change` / `failed` /
+`blocked` with reason, requested and reported model, model source, files, turns, calls, tokens,
+cost with provenance, duration, own-copy verification, its actions) and `model_calls` with role
+`worker`; `osn_loop.implementation_models` names every model that made implementation calls, and
+`execution_model` is the executor's when it ran, else the first worker's (never a planner's or a
+verifier's). `osn_loop.economics` gives the run's cost by role, worker, model and attempt and
+`cost_per_verified_success` (the complete run cost when the run verified, else `null`: unknown is
+never zero). The full local Receipt shows `TOPOLOGY`, `WORKERS`, `SYNTHESIS` and `ECONOMICS`
+sections; the hosted projection is unchanged.
+
 The verdict is **model-reported evidence** beside the deterministic result and never changes the
 verification status. A `fail` buys at most one bounded executor recovery attempt on the same
 model (no escalation: nothing failed deterministically) whose result is verified like any other;

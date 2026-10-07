@@ -163,6 +163,7 @@ class ModelActionProvider:
     # The system prompt a subclass sends; the learning note is appended when history is carried.
     system_prompt: str = SYSTEM_PROMPT
     role: str = "executor"
+    _last_finish_reason: str | None = field(default=None, repr=False)
 
     def _ask(
         self, attempt: int, model: str, prompt: str, *, learning: bool | None = None, turn: int = 1,
@@ -176,6 +177,7 @@ class ModelActionProvider:
             model, prompt, system=system, max_tokens=self.max_tokens,
         )
         duration_ms = int((time.monotonic() - started) * 1000)
+        self._last_finish_reason = getattr(resp, "finish_reason", None)
         if carried:
             self.learning_supplied = True
             if model not in self.learning_models:
@@ -271,14 +273,21 @@ AGENT_SYSTEM_PROMPT = (
     "{\"actions\": [ ... ], \"note\": \"<=300 chars, what you did or learned>\"}. "
     "Allowed actions (each with a short \"intent\"): "
     "{\"kind\": \"list_files\", \"path\": \"<dir, optional>\"}; "
-    "{\"kind\": \"read_file\", \"path\": \"<repo-relative path>\"}; "
+    "{\"kind\": \"read_file\", \"path\": \"<repo-relative path>\", \"start_line\": 1, \"max_lines\": 200} "
+    "(start_line/max_lines are optional; use them to read a large file in ranges instead of re-reading it); "
     "{\"kind\": \"search_repo\", \"query\": \"<text>\", \"max_matches\": 50}; "
     "{\"kind\": \"get_diff\", \"path\": \"<optional>\"} (your changes so far); "
-    "{\"kind\": \"write_file\", \"path\": \"<repo-relative path>\", \"content\": \"<COMPLETE new file content>\"}; "
+    "{\"kind\": \"edit_file\", \"path\": \"<repo-relative path>\", \"old_string\": \"<exact existing text, unique "
+    "in the file>\", \"new_string\": \"<replacement>\", \"replace_all\": false} (preferred for changing an existing "
+    "file: the old text must match exactly once); "
+    "{\"kind\": \"write_file\", \"path\": \"<repo-relative path>\", \"content\": \"<COMPLETE new file content>\"} "
+    "(for new files or full rewrites of small files); "
     "{\"kind\": \"run_verification\"} (OpenShard runs the fixed verification command and shows the result); "
     "{\"kind\": \"finish\", \"intent\": \"<one line>\"}. "
     f"At most {MAX_ACTIONS_PER_TURN} actions per turn; they run in order and their results are shown to you next "
-    "turn. Read before you write; write complete files; use relative paths only. Never write secrets, .env, "
+    "turn. Read before you write; prefer edit_file for existing files and write complete content only for new "
+    "or small files; do not re-read a file you have already seen unless it changed; use relative paths only. "
+    "Never write secrets, .env, "
     "CI config, lockfiles or files unrelated to the task. OpenShard enforces policy on every action: a refused "
     "action is reported, do not repeat it. Verification is a fixed command you cannot change; request it after "
     "your changes (limited per attempt) or finish and OpenShard runs it. Finish only when the change is complete. "
@@ -318,6 +327,8 @@ class IterativeModelProvider(ModelActionProvider):
     """
 
     system_prompt: str = AGENT_SYSTEM_PROMPT
+    # Executor turns may carry a complete file: allow longer replies than the one-shot default.
+    max_tokens: int | None = 16000
     # The planner's plan, when a planner ran; rendered into every executor turn as advisory context.
     plan: dict[str, Any] | None = None
     _attempt_model: str | None = field(default=None, repr=False)
@@ -348,11 +359,21 @@ class IterativeModelProvider(ModelActionProvider):
         try:
             return parse_turn(content)
         except ActionParseError as exc:
+            cut = self._last_finish_reason == "length"
             repair = (
                 f"{prompt}\n\nYour previous reply was rejected: {exc}. "
-                "Reply with ONLY the JSON object described in the instructions."
+                + ("It was cut off at the output limit: make a smaller change (edit_file) or split the work "
+                   "across turns. " if cut else "")
+                + "Reply with ONLY the JSON object described in the instructions."
             )
-            return parse_turn(self._ask(state.attempt, model, repair, learning=bool(learning), turn=state.turn))
+            content = self._ask(state.attempt, model, repair, learning=bool(learning), turn=state.turn)
+            try:
+                return parse_turn(content)
+            except ActionParseError as exc2:
+                # Diagnostic without content: how long the reply was and why the provider stopped.
+                raise ActionParseError(
+                    f"{exc2} (reply {len(content or '')} chars, finish_reason={self._last_finish_reason or 'unknown'})"
+                ) from exc2
 
 
 def _render_observation(obs: Observation) -> str:

@@ -97,6 +97,14 @@ ProgressCallback = Callable[[str, dict[str, Any]], None]
 # ``BudgetExhausted`` before spending; the loop records the skip.
 PlannerHook = Callable[[Path, list[str]], tuple[dict | None, dict]]
 VerifierHook = Callable[[Path, list[str], "VerificationResult", int], tuple[dict | None, dict]]
+# The parallel stage (``openshard.osn.workers`` / ``synthesis``): given the main
+# copy, the plan and its file list it decides the topology, runs bounded isolated
+# writing workers, synthesises their results INTO the main copy and returns a
+# dict: ``topology`` (record), ``ran`` (bool), ``workers`` (records),
+# ``synthesis`` (record), ``applied`` / ``blocked`` (paths), ``decisions``
+# (policy decisions), ``advisory`` (text for the executor when conflicts or a
+# missing required subtask need resolving, else None).
+WorkersHook = Callable[[Path, dict | None, list[str]], dict]
 MAX_REVIEWS = 2
 REVIEW_EVIDENCE = "model_reported"
 RECOVERY_VERIFIED = "verified"  # the recovery attempt changed files and verification passed again
@@ -164,6 +172,9 @@ class AttemptRecord:
     final_note: str = ""
     # True for the bounded executor attempt an independent review asked for.
     review_recovery: bool = False
+    # True when this attempt's writes came (at least partly) from parallel workers
+    # combined by synthesis; its actions are then the executor's resolution turns only.
+    parallel_stage: bool = False
     # True when that recovery attempt did not verify and its changes were undone:
     # its verification describes bytes that no longer exist, so it never
     # defines the run's verification state.
@@ -192,6 +203,12 @@ class LoopReceipt:
     roles: dict[str, dict] = field(default_factory=dict)
     plan: dict | None = None
     reviews: list[dict] = field(default_factory=list)
+    # Execution topology (``openshard.osn.topology``), the parallel workers that
+    # ran (``openshard.osn.workers`` records) and how their results were combined
+    # (``openshard.osn.synthesis`` record). Empty / None for single-executor runs.
+    topology: dict | None = None
+    workers: list[dict] = field(default_factory=list)
+    synthesis: dict | None = None
 
     @property
     def review_verdict(self) -> str | None:
@@ -241,6 +258,8 @@ class LoopReceipt:
                 item["review_recovery"] = True
             if a.reverted:
                 item["reverted"] = True
+            if a.parallel_stage:
+                item["parallel_stage"] = True
             attempts.append(item)
         return {
             "schema_version": self.schema_version,
@@ -256,6 +275,9 @@ class LoopReceipt:
             "roles": {k: dict(v) for k, v in self.roles.items()},
             "plan": dict(self.plan) if self.plan else None,
             "reviews": [dict(r) for r in self.reviews],
+            "topology": dict(self.topology) if self.topology else None,
+            "workers": [dict(w) for w in self.workers],
+            "synthesis": dict(self.synthesis) if self.synthesis else None,
             "command_policy": self.command_decision,
             "evidence": {
                 "actions": "agent_declared",
@@ -475,6 +497,7 @@ def run_bounded_loop(
     planner: PlannerHook | None = None,
     verifier: VerifierHook | None = None,
     max_reviews: int = MAX_REVIEWS,
+    workers: WorkersHook | None = None,
 ) -> LoopReceipt:
     """Run the bounded loop. Never writes to *repo_root*.
 
@@ -519,6 +542,9 @@ def run_bounded_loop(
     roles: dict[str, dict] = {}
     plan: dict | None = None
     reviews: list[dict] = []
+    topology: dict | None = None
+    worker_records: list[dict] = []
+    synthesis_record: dict | None = None
     max_reviews = max(0, min(int(max_reviews), MAX_REVIEWS))
 
     _emit_progress(progress, "workspace_ready", mode=mode)
@@ -540,6 +566,9 @@ def run_bounded_loop(
             roles=roles,
             plan=plan,
             reviews=reviews,
+            topology=topology,
+            workers=worker_records,
+            synthesis=synthesis_record,
         )
 
     # --verify-cmd is an explicit user choice and historically runs as supplied.
@@ -742,7 +771,8 @@ def run_bounded_loop(
                 return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
         model_getter = getattr(provider, "pending_model_for", None)
         pending_model = model_getter(n) if callable(model_getter) else None
-        _emit_progress(progress, "attempt_start", attempt=n, model=pending_model)
+        if not (iterative and workers is not None and n == 1):
+            _emit_progress(progress, "attempt_start", attempt=n, model=pending_model)
         gate = FileMutationGate(
             approver=approver,
             organisation_approver=organisation_approver,
@@ -760,24 +790,73 @@ def run_bounded_loop(
         in_turn_output = ""
 
         if iterative:
+            # Parallel stage, first attempt only: the hook decides the topology; when
+            # it ran workers, their synthesised files are already in the main copy and
+            # the executor's turns are needed only to resolve what synthesis could not.
+            stage: dict | None = None
+            stage_advisory: str | None = None
+            skip_turns = False
+            if workers is not None and n == 1:
+                _emit_progress(progress, "stage_start", stage="workers", attempt=n)
+                try:
+                    stage = workers(sandbox, plan, _list_files(sandbox))
+                except BudgetExhausted as exc:
+                    topology = {"topology_requested": "auto", "topology_selected": "single",
+                                "topology_reason": "budget_headroom_insufficient", "worker_count": 0}
+                    _settle_supervision("run_ended_before_retry")
+                    attempts.append(AttemptRecord(n, [], [], [], {"budget_stop": exc.stop_reason}))
+                    return _receipt(STATUS_BUDGET_EXHAUSTED, exc.stop_reason)
+                topology = dict(stage.get("topology") or {}) or None
+                if stage.get("ran"):
+                    worker_records.extend(dict(w) for w in stage.get("workers") or [])
+                    synthesis_record = dict(stage.get("synthesis") or {}) or None
+                    for p in stage.get("applied") or []:
+                        if p not in changed:
+                            changed.append(p)
+                    stage_advisory = stage.get("advisory") or None
+                    skip_turns = stage_advisory is None and bool(stage.get("applied"))
+                    _emit_progress(
+                        progress, "stage_end", stage="workers", workers=len(stage.get("workers") or []),
+                        applied=len(stage.get("applied") or []), conflicts=len((synthesis_record or {}).get("conflicts") or []),
+                        resolution="executor_turns" if stage_advisory else "none_needed",
+                    )
+                else:
+                    stage = None
+                    _emit_progress(progress, "stage_skipped", stage="workers", attempt=n,
+                                   reason=(topology or {}).get("topology_reason"))
+                if not skip_turns:
+                    _emit_progress(progress, "attempt_start", attempt=n, model=pending_model,
+                                   after_workers=stage is not None)
             begin = getattr(provider, "begin_attempt", None)
             if callable(begin):
                 begin(n)
-            outcome = run_attempt_turns(
-                repo_root=repo_root, sandbox=sandbox, task=task, attempt=n, provider=provider,
-                gate=gate, verify=_verify, budget=budget, previous_failure=prev_failure,
-                blocked_seen=list(blocked_seen), changed_so_far=list(changed),
-                max_turns=max_turns, max_verifications=max_verifications_per_attempt, progress=progress,
-                model_label=lambda: pending_model,
-                blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
-                repo_files=_list_files(sandbox),
-            )
+            if skip_turns:
+                from openshard.osn.agent_loop import AttemptOutcome
+
+                outcome = AttemptOutcome(stop="finished", final_note="parallel workers' files synthesised")
+                outcome.turns = 0
+            else:
+                outcome = run_attempt_turns(
+                    repo_root=repo_root, sandbox=sandbox, task=task, attempt=n, provider=provider,
+                    gate=gate, verify=_verify, budget=budget,
+                    previous_failure=stage_advisory if stage_advisory else prev_failure,
+                    blocked_seen=list(blocked_seen), changed_so_far=list(changed),
+                    max_turns=max_turns, max_verifications=max_verifications_per_attempt, progress=progress,
+                    model_label=lambda: pending_model,
+                    blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
+                    repo_files=_list_files(sandbox),
+                )
+            stage_applied = list((stage or {}).get("applied") or [])
+            stage_blocked = list((stage or {}).get("blocked") or [])
+            stage_decisions = list((stage or {}).get("decisions") or [])
             rec = AttemptRecord(
-                n, list(outcome.proposed), list(outcome.applied), list(outcome.blocked), gate.summary(),
-                decisions=list(outcome.decisions), turns=outcome.turns,
+                n, [*stage_applied, *stage_blocked, *outcome.proposed],
+                [*stage_applied, *[p for p in outcome.applied if p not in stage_applied]],
+                [*stage_blocked, *outcome.blocked], gate.summary(),
+                decisions=[*stage_decisions, *outcome.decisions], turns=outcome.turns,
                 actions=[r.to_dict() for r in outcome.records],
                 verifications_in_turn=outcome.verifications_run, turn_stop=outcome.stop,
-                final_note=outcome.final_note,
+                final_note=outcome.final_note, parallel_stage=stage is not None,
             )
             attempts.append(rec)
             for p in outcome.applied:
@@ -803,10 +882,19 @@ def run_bounded_loop(
             if outcome.stop == STOP_MALFORMED_REPLY:
                 rec.error_class, rec.error_message = outcome.error_class, outcome.error_message
                 if not outcome.applied:
-                    # Nothing was written and the model stopped speaking the contract:
-                    # the same outcome as a bad one-shot reply.
+                    rec.policy = {**rec.policy, "model_response_error": outcome.error_class}
+                    if n < max_attempts:
+                        # The model stopped speaking the contract before writing anything:
+                        # a model failure, so the next attempt (the ladder's next rung)
+                        # gets its chance, told why the previous one ended.
+                        _emit_progress(progress, "malformed_attempt", attempt=n, next_attempt=n + 1)
+                        prev_failure = (
+                            "The previous attempt ended because the model's replies were not valid action "
+                            f"lists ({outcome.error_message or 'unusable reply'}); nothing was written."
+                        )
+                        continue
+                    # Nothing was written and no attempt remains: the same outcome as a bad one-shot reply.
                     _settle_supervision("run_ended_before_retry")
-                    rec.policy = {**rec.policy, "provider_error": outcome.error_class}
                     return _receipt("error", "provider_error")
                 # Writes exist: they face verification like any other attempt, and a
                 # failure can still be retried or escalated.
@@ -830,10 +918,13 @@ def run_bounded_loop(
                 # proposal would be blocked again and a human decision is needed.
                 # Writes applied before the refusal stay in the isolated copy, unverified.
                 return _receipt("blocked", "policy_or_path_block")
-            if not outcome.applied:
+            if not outcome.applied and not stage_applied:
                 _emit_progress(progress, "no_actions", attempt=n)
                 return _receipt("no_actions", "provider proposed no actions")
-            applied, blocked = list(outcome.applied), list(outcome.blocked)
+            # Files synthesised from workers count as this attempt's writes: they are
+            # verified below exactly like the executor's own.
+            applied = [*stage_applied, *[p for p in outcome.applied if p not in stage_applied]]
+            blocked = [*stage_blocked, *outcome.blocked]
             actions_fp = state_fingerprint(sandbox, changed)
             if actions_fp == prev_actions:
                 # The attempt ended with the same bytes as the last (failed) one: no progress.

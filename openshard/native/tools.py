@@ -85,6 +85,12 @@ _BUILTIN_TOOLS: list[NativeTool] = [
         categories=["repo", "mutation"],
     ),
     NativeTool(
+        name="edit_file",
+        description="Replace an exact text span inside an existing repository file.",
+        risk="needs_approval",
+        categories=["repo", "mutation"],
+    ),
+    NativeTool(
         name="run_verification",
         description="Run the project verification plan (tests, lint, typecheck).",
         risk="safe",
@@ -482,6 +488,9 @@ def _exec_write_file(
             tool_name="write_file", ok=False, error="write target exists and is not a regular file",
             metadata={"policy_decision": decision.decision, "raw_content_stored": False},
         )
+    if before_text is not None and "\r\n" in before_text and "\r" not in content:
+        # Keep an existing CRLF file's line endings when the model writes LF text.
+        content = content.replace("\n", "\r\n")
     raw_after = content.encode("utf-8")
     sha_after = hashlib.sha256(raw_after).hexdigest()
     if sha_before == sha_after:
@@ -517,15 +526,126 @@ def _exec_write_file(
     )
 
 
-def _exec_read_file(repo_root: Path, path: str, *, limit: int = 4000) -> NativeToolResult:
+def _exec_edit_file(
+    repo_root: Path,
+    path: str,
+    old_string: object,
+    new_string: object,
+    *,
+    approved: bool,
+    replace_all: bool = False,
+    blocked_patterns: tuple[str, ...] = (),
+    approval_patterns: tuple[str, ...] = (),
+) -> NativeToolResult:
+    """Replace *old_string* with *new_string* inside an existing file, with the same controls as write_file.
+
+    Fails closed: the file must exist, the old text must occur exactly once
+    (or ``replace_all`` must be set), and the path and policy checks of
+    ``write_file`` apply unchanged. The result carries counts and hashes only.
+    """
+    import hashlib
+
+    from openshard.policy.file_mutation import evaluate_file_write
+
+    if not approved:
+        return NativeToolResult(tool_name="edit_file", ok=False, error="Tool 'edit_file' requires approval.",
+                                metadata={"policy_decision": "ask", "raw_content_stored": False})
+    if not isinstance(old_string, str) or not old_string or not isinstance(new_string, str):
+        return NativeToolResult(tool_name="edit_file", ok=False,
+                                error="edit_file requires non-empty string 'old_string' and string 'new_string'.",
+                                metadata={"raw_content_stored": False})
+    try:
+        dest = resolve_safe_repo_path(repo_root, path)
+    except UnsafePathError as exc:
+        return NativeToolResult(tool_name="edit_file", ok=False, error=str(exc),
+                                metadata={"policy_decision": "deny", "policy_source": "path_safety",
+                                          "raw_content_stored": False})
+    rel = dest.relative_to(repo_root.resolve()).as_posix()
+    decision = evaluate_file_write(rel, blocked_patterns=blocked_patterns, approval_patterns=approval_patterns)
+    if decision.decision == "deny":
+        return NativeToolResult(tool_name="edit_file", ok=False, error=f"edit refused by policy: {decision.reason}",
+                                metadata={"policy_decision": "deny", "policy_source": decision.source,
+                                          "policy_reason": decision.reason, "raw_content_stored": False})
+    if not dest.is_file():
+        return NativeToolResult(tool_name="edit_file", ok=False, error=f"edit_file target does not exist: {rel}",
+                                metadata={"policy_decision": decision.decision, "raw_content_stored": False})
+    try:
+        raw_before = dest.read_bytes()
+    except OSError as exc:
+        return NativeToolResult(tool_name="edit_file", ok=False, error=str(exc), metadata={"raw_content_stored": False})
+    before_raw_text = raw_before.decode("utf-8", "replace")
+    # Models see LF text (reads use universal newlines); a CRLF file is matched
+    # and edited in LF form and written back with its own line endings.
+    crlf = "\r\n" in before_raw_text
+    before = before_raw_text.replace("\r\n", "\n") if crlf else before_raw_text
+    old_norm = old_string.replace("\r\n", "\n")
+    new_norm = new_string.replace("\r\n", "\n")
+    count = before.count(old_norm)
+    if count == 0:
+        return NativeToolResult(tool_name="edit_file", ok=False,
+                                error="old_string was not found in the file (match the current text exactly).",
+                                metadata={"occurrences": 0, "raw_content_stored": False})
+    if count > 1 and not replace_all:
+        return NativeToolResult(tool_name="edit_file", ok=False,
+                                error=f"old_string occurs {count} times; include more context or set replace_all.",
+                                metadata={"occurrences": count, "raw_content_stored": False})
+    after = before.replace(old_norm, new_norm) if replace_all else before.replace(old_norm, new_norm, 1)
+    raw_after = (after.replace("\n", "\r\n") if crlf else after).encode("utf-8")
+    sha_before = hashlib.sha256(raw_before).hexdigest()
+    sha_after = hashlib.sha256(raw_after).hexdigest()
+    if sha_before == sha_after:
+        change_type = "unchanged"
+    else:
+        try:
+            dest.write_bytes(raw_after)
+        except OSError as exc:
+            return NativeToolResult(tool_name="edit_file", ok=False, error=str(exc),
+                                    metadata={"policy_decision": decision.decision, "raw_content_stored": False})
+        change_type = "update"
+    added, removed = _line_delta(before, after) if change_type != "unchanged" else (0, 0)
+    delta = f" +{added}/-{removed}" if added is not None else ""
+    return NativeToolResult(
+        tool_name="edit_file",
+        ok=True,
+        output=f"{change_type}: {rel} ({count} replacement{'s' if count != 1 else ''}{delta})",
+        metadata={
+            "path": rel, "change_type": change_type, "occurrences": count,
+            "bytes_before": len(raw_before), "bytes_after": len(raw_after),
+            "sha256_before": sha_before, "sha256_after": sha_after,
+            "lines_added": added, "lines_removed": removed,
+            "policy_decision": decision.decision, "policy_source": decision.source,
+            "policy_reason": decision.reason, "raw_content_stored": False,
+        },
+    )
+
+
+def _exec_read_file(
+    repo_root: Path, path: str, *, limit: int = 4000, start_line: int | None = None, max_lines: int | None = None,
+) -> NativeToolResult:
+    """Read a file (or a line range of it). The output is bounded by *limit* characters."""
     try:
         safe = resolve_safe_repo_path(repo_root, path)
         text = safe.read_text(encoding="utf-8", errors="replace")
+        total_lines = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+        if start_line is not None or max_lines is not None:
+            lines = text.splitlines(keepends=True)
+            start = max(1, int(start_line or 1))
+            count = max(1, int(max_lines or 400))
+            chunk = "".join(lines[start - 1:start - 1 + count])
+            end = min(total_lines, start - 1 + count)
+            header = f"[lines {start}-{end} of {total_lines}]\n"
+            return NativeToolResult(
+                tool_name="read_file",
+                ok=True,
+                output=header + compact_tool_result(chunk, limit),
+                metadata={"chars": len(text), "total_lines": total_lines, "start_line": start, "end_line": end,
+                          "truncated": len(chunk) > limit or end < total_lines},
+            )
         return NativeToolResult(
             tool_name="read_file",
             ok=True,
             output=compact_tool_result(text, limit),
-            metadata={"chars": len(text), "truncated": len(text) > limit},
+            metadata={"chars": len(text), "total_lines": total_lines, "truncated": len(text) > limit},
         )
     except UnsafePathError as exc:
         return NativeToolResult(tool_name="read_file", ok=False, error=str(exc))

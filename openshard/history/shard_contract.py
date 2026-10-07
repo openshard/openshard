@@ -1951,6 +1951,61 @@ def _render_osn_roles(receipt: ShardReceipt, *, detail: str = "compact") -> list
     return lines
 
 
+def _render_osn_parallel(receipt: ShardReceipt) -> list[str]:
+    """TOPOLOGY / WORKERS / SYNTHESIS / ECONOMICS sections for a run that decided its topology."""
+    evidence = receipt.recorded_evidence or {}
+    agent_loop_raw = evidence.get("agent_loop")
+    agent_loop: dict = agent_loop_raw if isinstance(agent_loop_raw, dict) else {}
+    topo = agent_loop.get("topology") if isinstance(agent_loop.get("topology"), dict) else None
+    workers = agent_loop.get("workers") if isinstance(agent_loop.get("workers"), list) else []
+    synth = agent_loop.get("synthesis") if isinstance(agent_loop.get("synthesis"), dict) else None
+    econ = agent_loop.get("economics") if isinstance(agent_loop.get("economics"), dict) else None
+    lines: list[str] = []
+    if topo:
+        lines.append(f"{_INDENT}TOPOLOGY")
+        lines.append(_row("Selected", f"{topo.get('selected')} (requested {topo.get('requested')})", width=12))
+        lines.append(_row("Reason", str(topo.get("reason") or "not recorded"), width=12))
+        if topo.get("worker_count"):
+            cost = topo.get("actual_extra_cost_usd")
+            extra = f" · workers cost ${cost:.4f}" if isinstance(cost, (int, float)) else ""
+            lines.append(_row("Workers", f"{topo['worker_count']} · {topo.get('distinct_models') or '?'} distinct model(s){extra}", width=12))
+        lines.append("")
+    if workers:
+        lines.append(f"{_INDENT}WORKERS")
+        for w in workers:
+            model = w.get("model")
+            cost = w.get("cost_usd")
+            label = {"provider_reported": "provider-reported", "list_rate_estimate": "list-rate estimate"}.get(
+                str(w.get("cost_source") or ""), "origin not recorded")
+            cost_text = f"${cost:.4f} ({label})" if isinstance(cost, (int, float)) else "cost unknown"
+            status = str(w.get("status") or "?") + (f" ({w.get('reason')})" if w.get("reason") else "")
+            own = f" · own-copy check {w['own_copy_verification']}" if w.get("own_copy_verification") else ""
+            lines.append(_row(str(w.get("worker_id") or "worker"),
+                              f"{w.get('subtask_id')} · {status} · "
+                              f"{_display_model_name(model) if isinstance(model, str) else 'model unknown'} · "
+                              f"{w.get('turns') or 0} turn(s) · {w.get('files_changed') or 0} file(s) · {cost_text}{own}",
+                              width=12))
+        lines.append("")
+    if synth:
+        lines.append(f"{_INDENT}SYNTHESIS")
+        lines.append(_row("Applied", f"{synth.get('applied_count') or 0} file(s) from {synth.get('workers_accepted') or 0} worker(s)", width=12))
+        lines.append(_row("Conflicts", f"{synth.get('conflict_count') or 0} · rejected {synth.get('rejected_count') or 0} · missing required {synth.get('missing_required') or 0}", width=12))
+        lines.append(_row("Resolution", str(synth.get("resolution") or "not recorded"), width=12))
+        lines.append("")
+    if econ and econ.get("total_cost_usd") is not None:
+        lines.append(f"{_INDENT}ECONOMICS")
+        total = econ["total_cost_usd"]
+        lines.append(_row("Run cost", f"${total:.4f}" + ("" if econ.get("cost_complete") else " (incomplete)"), width=12))
+        cpvs = econ.get("cost_per_verified_success")
+        lines.append(_row("Per success", f"${cpvs:.4f}" if isinstance(cpvs, (int, float)) else "not verified", width=12))
+        by_role = econ.get("by_role") or {}
+        if by_role:
+            lines.append(_row("By role", " · ".join(
+                f"{r} ${c:.4f}" if isinstance(c, (int, float)) else f"{r} unknown" for r, c in by_role.items()), width=12))
+        lines.append("")
+    return lines
+
+
 def _render_osn_actions(receipt: ShardReceipt) -> list[str]:
     """The OSN ACTIONS section of the full Receipt: what the agent asked, what OpenShard decided and saw."""
     if not receipt.osn_actions:
@@ -2663,6 +2718,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append("")
 
     lines.extend(_render_osn_roles(receipt, detail="full"))
+    lines.extend(_render_osn_parallel(receipt))
     lines.extend(_render_osn_actions(receipt))
 
     _budget = (receipt.recorded_evidence or {}).get("agent_budgets")

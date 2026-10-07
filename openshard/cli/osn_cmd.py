@@ -85,8 +85,23 @@ class _OsnProgressRenderer:
             self._stop()
             model = _friendly_model(data.get("model"))
             tag = " · recovery after independent review" if data.get("review_recovery") else ""
+            if data.get("after_workers"):
+                tag = " · resolving what synthesis could not"
             echo(f"\nAttempt {data.get('attempt')} · {model}{tag}")
             self._start(f"Calling {model}")
+        elif event == "stage_start":
+            self._stop()
+            echo(f"\nAttempt {data.get('attempt')} · deciding topology from the plan")
+            self._start("Deciding topology")
+        elif event == "stage_skipped":
+            self._stop()
+            echo(f"  No parallel workers ({data.get('reason') or 'not selected'})")
+        elif event == "stage_end":
+            self._stop()
+            echo(f"  ✓ Workers done · {data.get('workers')} worker(s) · synthesis applied {data.get('applied')} file(s)"
+                 f" · {data.get('conflicts')} conflict(s) · "
+                 + ("executor resolves the rest" if data.get("resolution") == "executor_turns"
+                    else "no executor turns needed"))
         elif event == "model_response":
             self._stop()
             n = data.get("proposed") or 0
@@ -136,6 +151,10 @@ class _OsnProgressRenderer:
         elif event == "budget_stop":
             self._stop()
             echo(f"  ✗ Budget stopped the run · {data.get('reason') or 'limit reached'}")
+        elif event == "malformed_reply":
+            self._stop()
+            echo(f"  ✗ Turn {data.get('turn')} · the model's reply was not a usable action list"
+                 + (f" ({data.get('message')})" if data.get("message") else "") + " · attempt ends")
         elif event == "turn_start":
             self._stop()
             role = data.get("role")
@@ -238,21 +257,37 @@ def _resolve_provider(name: str | None, model: str):
                    "executor: no planner, no review. full: both, always (the review may reuse the executor's model).")
 @click.option("--planner-model", default=None, help="Model for the planner role (default: routed).")
 @click.option("--verifier-model", default=None, help="Model for the independent review (default: routed, never the executor's).")
+@click.option("--topology", "topology_request", type=click.Choice(["auto", "single", "roles", "parallel"]),
+              default="auto", show_default=True,
+              help="Execution topology. auto: one executor unless the planner proposes independent subtasks "
+                   "with disjoint write scopes on a non-trivial task, then bounded parallel workers + synthesis. "
+                   "single: one executor, no roles. roles: planner/verifier but never workers. parallel: workers "
+                   "whenever the planner's decomposition validates (falls back with the reason otherwise).")
+@click.option("--max-workers", default=3, type=click.IntRange(1, 3), show_default=True,
+              help="Most parallel writing workers (each in its own isolated copy).")
 @click.option("--explore/--no-explore", "explore", default=True, show_default=True,
               help="Let the planner answer up to 3 independent questions with parallel read-only workers "
                    "(at most 3 at once, never writing). Only when the planner runs and only when it asks.")
 @click.option("--task-id", default=None, help="Explicit task id (from `openshard task new`).")
 @click.option("--promote", is_flag=True, default=False,
               help="After verified success, copy changed files into the repo through the policy gate.")
+@click.option("--commit", "commit_result", is_flag=True, default=False,
+              help="With --promote: commit the promoted files on the current branch, then re-run the "
+                   "verification command on that exact commit so the Receipt's verification is bound to it "
+                   "(requires a clean working tree apart from the promoted files).")
 @click.option("--yes", "assume_yes", is_flag=True, default=False,
               help="Approve policy 'ask' paths during the OSN run and promotion without prompting.")
 @click.option("--no-learning", "no_learning", is_flag=True, default=False,
               help="Do not consult learning signals from this repository's prior OpenShard runs.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_attempts, loop_mode, max_turns,
-            roles_mode, planner_model, verifier_model, explore, task_id, promote, assume_yes, no_learning,
-            as_json):
+            roles_mode, planner_model, verifier_model, topology_request, max_workers, explore, task_id, promote,
+            commit_result, assume_yes, no_learning, as_json):
     """Run TASK through the bounded OSN loop."""
+    if commit_result and not promote:
+        raise click.UsageError("--commit requires --promote: only promoted files can be committed.")
+    if topology_request == "single":
+        roles_mode = "executor"  # a single executor: no planner, no review, no workers
     from openshard.cli.ingest import _repo_root
     from openshard.history.jsonl_store import append_jsonl
     from openshard.osn.loop import run_bounded_loop
@@ -408,15 +443,23 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     progress_renderer = _OsnProgressRenderer() if not as_json else None
     planner_hook, verifier_hook, role_skips, role_usage = _resolve_roles(
         loop_mode=loop_mode, roles_mode=roles_mode, planner_model=planner_model, verifier_model=verifier_model,
-        explore=explore,
+        explore=explore, decompose=topology_request in ("auto", "parallel"),
         task=task, repo_root=repo_root, executor_model=model, routing=routing, provider_name=provider_name,
         provider_obj=provider_obj, model_policy=model_policy, budget=budget, learning=learning,
         context_files=[*context_files, *learning_files], action_provider=action_provider, argv=argv,
         progress=progress_renderer,
     )
+    workers_hook = _resolve_workers(
+        loop_mode=loop_mode, topology_request=topology_request, max_workers=max_workers,
+        planner_enabled=planner_hook is not None, verifier_enabled=verifier_hook is not None,
+        task=task, repo_root=repo_root, executor_model=model, routing=routing, provider_name=provider_name,
+        provider_obj=provider_obj, model_policy=model_policy, budget=budget, argv=argv, role_usage=role_usage,
+        permissions=permissions, progress=progress_renderer,
+    )
     if not as_json and loop_mode == "agent":
         for line in _roles_preamble(role_skips, planner_hook is not None, verifier_hook is not None):
             click.echo(line)
+        click.echo(f"  Topology {topology_request}" + (" (workers possible)" if workers_hook else ""))
 
     started = time.monotonic()
     try:
@@ -428,6 +471,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             max_turns=max_turns,
             planner=planner_hook,
             verifier=verifier_hook,
+            workers=workers_hook,
             organisation_approver=run_approver,
             blocked_write_patterns=permissions.blocked_write_paths,
             approval_write_patterns=permissions.approval_write_paths,
@@ -491,16 +535,29 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     }
     store = repo_root / ".openshard"
     store.mkdir(parents=True, exist_ok=True)
-    append_jsonl(runs_path, entry)
 
+    # Promotion (and the optional commit) happen before the Receipt is written, so
+    # the Receipt can carry the commit OpenShard itself created and observed.
     promoted: list[str] = []
     skipped: list[str] = []
+    commit_record: dict | None = None
     if promote:
         if receipt.status != "verified":
             if not as_json:
                 click.echo(f"Not promoting: loop status is '{receipt.status}'.")
         else:
             promoted, skipped = _promote(repo_root, receipt, entry, assume_yes, permissions)
+            if commit_result and promoted:
+                commit_record = _commit_promoted(repo_root, promoted, task, entry)
+                _attach_commit(entry, commit_record)
+    append_jsonl(runs_path, entry)
+
+    bound_verification: dict | None = None
+    if commit_record and commit_record.get("sha"):
+        # Re-run the run's own verification command on the committed tree and record
+        # it as later evidence bound to that commit (verifications.jsonl), the same
+        # path `openshard verify` uses. The Receipt itself is not modified.
+        bound_verification = _bind_verification(repo_root, entry, argv, as_json=as_json)
 
     if as_json:
         click.echo(json.dumps({
@@ -510,6 +567,8 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "provider": provider_name, "models": models, "attempts": len(receipt.attempts),
             "changed_files": receipt.changed_files, "promoted": promoted, "skipped": skipped,
             "sandbox_path": receipt.sandbox_path,
+            "commit": commit_record,
+            "bound_verification": bound_verification,
             "mode": receipt.mode,
             "turns": entry["osn_loop"].get("turns_total"),
             "action_summary": entry["osn_loop"].get("action_summary"),
@@ -522,16 +581,29 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             "roles": entry["osn_loop"].get("roles"),
             "plan": entry["osn_loop"].get("plan"),
             "reviews": entry["osn_loop"].get("reviews"),
+            "topology": entry["osn_loop"].get("topology"),
+            "workers": [
+                {k: w.get(k) for k in ("worker_id", "subtask_id", "status", "reason", "model", "requested_model",
+                                       "changed_files", "turns", "calls", "total_tokens", "cost_usd", "cost_source",
+                                       "duration_ms", "verification")}
+                for w in entry["osn_loop"].get("workers") or []
+            ],
+            "synthesis": entry["osn_loop"].get("synthesis"),
+            "economics": entry["osn_loop"].get("economics"),
             **budget_output,
             "learning": _learning_json(entry.get("learning")),
         }, indent=2))
         return
     click.echo(f"OSN loop: {receipt.status} ({receipt.stop_reason}); verification {receipt.verification_state}")
-    click.echo(f"  attempts: {len(receipt.attempts)}   model(s): {', '.join(models)}   provider: {provider_name}")
+    used = entry["osn_loop"].get("implementation_models") or []
+    models_text = ", ".join(used) if used else ", ".join(models) + " (ladder; none ran)"
+    click.echo(f"  attempts: {len(receipt.attempts)}   implementation model(s): {models_text}   provider: {provider_name}")
     agent_line = _agent_loop_line(entry.get("osn_loop"), entry)
     if agent_line:
         click.echo(f"  agent loop: {agent_line}")
     for line in _roles_summary(entry.get("osn_loop")):
+        click.echo(line)
+    for line in _parallel_summary(entry.get("osn_loop")):
         click.echo(line)
     budget_line = _budget_line(entry.get("agent_budgets"))
     if budget_line:
@@ -558,7 +630,22 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
         if receipt.verification_state == "not_run":
             click.echo("  Verification did not run.")
     if promote and promoted:
-        click.echo(f"  Promoted {len(promoted)} file(s) into the repository (not re-verified there).")
+        click.echo(f"  Promoted {len(promoted)} file(s) into the repository"
+                   + ("." if commit_record else " (not re-verified there)."))
+        if commit_record:
+            if commit_record.get("sha"):
+                click.echo(f"  Committed {commit_record['sha'][:12]} on {commit_record.get('branch') or 'HEAD'}"
+                           f" ({len(commit_record.get('files') or [])} file(s)).")
+            else:
+                click.echo(f"  Not committed: {commit_record.get('reason') or 'unknown reason'}.")
+        if bound_verification:
+            status = bound_verification.get("status")
+            if bound_verification.get("bound"):
+                click.echo(f"  Re-verified on commit {str(bound_verification.get('artifact_sha') or '')[:12]}: "
+                           f"{status} (evidence bound to the commit).")
+            else:
+                click.echo(f"  Re-verified after commit: {status}; NOT bound to the commit "
+                           f"({bound_verification.get('reason') or 'working tree not clean'}).")
     elif receipt.status == "verified":
         click.echo(f"  Not promoted. Review the copy at {receipt.sandbox_path}, or re-run with --promote.")
     if skipped:
@@ -892,7 +979,7 @@ def _count_repo_files(repo_root: Path, cap: int = 200) -> int:
 
 def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task, repo_root, executor_model,
                    routing, provider_name, provider_obj, model_policy, budget, learning, context_files,
-                   action_provider, argv, progress, explore=True):
+                   action_provider, argv, progress, explore=True, decompose=False):
     """Planner and verifier hooks for this run, the roles that will not run and why, and their usage list.
 
     Role models come from ``openshard.osn.roles.select_role_model`` and must pass
@@ -965,6 +1052,7 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
                 repo_files=repo_files, choice=planner_choice, provider_name=provider_name, budget=budget,
                 learning_context=learning.prompt_text if learning is not None else None,
                 context_files=list(context_files), progress=progress, explorer_model=explorer_model,
+                decompose=decompose,
             )
             role_usage.extend(usage)
             return plan, role.to_record()
@@ -1000,6 +1088,150 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
     else:
         role_skips[osn_roles.ROLE_VERIFIER] = (verifier_skip or "no_verifier_model", verifier_choice)
     return planner_hook, verifier_hook, role_skips, role_usage
+
+
+def _resolve_workers(*, loop_mode, topology_request, max_workers, planner_enabled, verifier_enabled, task,
+                     repo_root, executor_model, routing, provider_name, provider_obj, model_policy, budget, argv,
+                     role_usage, permissions, progress):
+    """The parallel-stage hook for this run, or None when workers can never run.
+
+    The hook decides the topology from the planner's decomposition at run time
+    (``openshard.osn.topology``), routes each worker (distinct models when
+    routing can offer them), runs them in isolated copies, synthesises their
+    files into the run's copy and reports every decision for the Receipt.
+    """
+    if loop_mode != "agent" or topology_request in ("single", "roles") or not planner_enabled:
+        return None
+    from openshard.osn import roles as osn_roles
+    from openshard.osn.decompose import decomposition_from_plan
+    from openshard.osn.loop import _observe_verification
+    from openshard.osn.synthesis import resolution_advisory, synthesize
+    from openshard.osn.topology import TOPOLOGY_PARALLEL_SUBTASKS, decide_topology
+    from openshard.osn.workers import WorkerSpec, run_workers
+    from openshard.routing.engine import route
+    from openshard.sync.policies import enforce_models_allowed
+
+    task_category = route(task).category
+    repo_file_count = _count_repo_files(repo_root)
+    catalog_knows = None
+    try:
+        from openshard.models.catalog import load_catalog
+
+        _catalog = load_catalog(refresh="never")
+
+        def catalog_knows(model_id: str) -> bool:  # noqa: E306
+            try:
+                return _catalog.resolve(model_id) is not None
+            except Exception:
+                return False
+    except Exception:
+        catalog_knows = None
+
+    def workers_hook(sandbox, plan, repo_files):
+        decomposition = decomposition_from_plan(plan)
+        headroom = None if budget is None else budget.would_stop_next_attempt() is None
+        planner_cost = None
+        planner_costs = [u.cost_usd for u in role_usage if getattr(u, "role", "") == osn_roles.ROLE_PLANNER]
+        if planner_costs and all(c is not None for c in planner_costs):
+            planner_cost = sum(planner_costs)
+        candidates: list[osn_roles.RoleModelChoice] = []
+        if decomposition is not None and decomposition.valid:
+            taken: list[str] = []
+            for subtask in decomposition.parallel_subtasks[:max_workers]:
+                choice = osn_roles.select_role_model(
+                    osn_roles.ROLE_WORKER, explicit=None, executor_model=executor_model, routing=routing,
+                    provider_name=provider_name, catalog_knows=catalog_knows,
+                    requirement_class=subtask.preferred_capability, exclude=tuple(taken),
+                )
+                if choice.model:
+                    taken.append(choice.model)
+                candidates.append(choice)
+        distinct = len({c.model for c in candidates if c.model}) or 1
+        decision = decide_topology(
+            topology_request, planner_ran=plan is not None, verifier_wanted=verifier_enabled,
+            decomposition=decomposition, task_complex=(task_category in ("complex", "security") or repo_file_count > 12),
+            budget_headroom=headroom, distinct_models_available=distinct, max_workers=max_workers,
+            planner_cost_usd=planner_cost,
+        )
+        record = decision.to_record()
+        if decision.selected != TOPOLOGY_PARALLEL_SUBTASKS or decomposition is None:
+            return {"topology": record, "ran": False}
+        subtasks = decomposition.parallel_subtasks[: decision.worker_count]
+        models = [c.model or executor_model for c in candidates[: len(subtasks)]]
+        try:
+            enforce_models_allowed([m for m in models if m != executor_model], model_policy)
+        except ValueError as exc:
+            record["topology_selected"] = "planner_executor_verifier" if verifier_enabled else "planner_executor"
+            record["topology_reason"] = f"worker_model_not_allowed:{str(exc)[:80]}"
+            return {"topology": record, "ran": False}
+        specs = [
+            WorkerSpec(worker_id=f"worker-{i + 1}", subtask=st, model=models[i],
+                       model_source=candidates[i].source if i < len(candidates) else "routing",
+                       provider_name=provider_name)
+            for i, st in enumerate(subtasks)
+        ]
+        record["workers"] = [{"worker_id": s.worker_id, "subtask_id": s.subtask.id, "model": s.model,
+                              "model_source": s.model_source} for s in specs]
+        record["distinct_models"] = len({s.model for s in specs})
+
+        def verify_in_copy(copy, paths):
+            return _observe_verification(copy, paths, argv, 120.0, None)
+
+        results, usage = run_workers(
+            specs, provider=provider_obj, task=task, plan=plan, repo_root=repo_root, base_sandbox=sandbox,
+            verify=verify_in_copy, budget=budget, max_workers=max_workers,
+            blocked_write_patterns=permissions.blocked_write_paths,
+            approval_write_patterns=permissions.approval_write_paths, progress=progress,
+        )
+        role_usage.extend(usage)
+        synth = synthesize(results, main_sandbox=sandbox,
+                           scopes={s.worker_id: s.subtask.allowed_write_paths for s in specs})
+        costs = [r.cost_usd for r in results]
+        record["actual_extra_cost_usd"] = sum(c for c in costs if c is not None) if all(c is not None for c in costs) else None
+        return {
+            "topology": record, "ran": True,
+            "workers": [r.to_record() for r in results],
+            "synthesis": synth.to_record(),
+            "applied": list(synth.applied),
+            "blocked": [r["path"] for r in synth.rejected],
+            "decisions": [d for r in results for d in r.decisions],
+            "advisory": resolution_advisory(synth, results) if synth.needs_resolution else None,
+        }
+
+    return workers_hook
+
+
+def _parallel_summary(loop: dict | None) -> list[str]:
+    """Topology, workers and synthesis after the run, one line each."""
+    if not isinstance(loop, dict):
+        return []
+    out: list[str] = []
+    topo = loop.get("topology")
+    if isinstance(topo, dict):
+        line = f"  topology: {topo.get('topology_selected')} (requested {topo.get('topology_requested')}; {topo.get('topology_reason')})"
+        if topo.get("worker_count"):
+            line += f" · {topo['worker_count']} worker(s)"
+        if isinstance(topo.get("actual_extra_cost_usd"), (int, float)):
+            line += f" · workers cost ${topo['actual_extra_cost_usd']:.4f}"
+        out.append(line)
+    for w in loop.get("workers") or []:
+        cost = w.get("cost_usd")
+        cost_text = f"${cost:.4f}" if isinstance(cost, (int, float)) else "cost unknown"
+        v = (w.get("verification") or {}).get("status")
+        out.append(f"  {w.get('worker_id')} [{w.get('subtask_id')}]: {w.get('status')}"
+                   + (f" ({w.get('reason')})" if w.get("reason") else "")
+                   + f" · {_friendly_model(w.get('model'))} · {w.get('turns')} turn(s) · "
+                   f"{len(w.get('changed_files') or [])} file(s) · {cost_text}"
+                   + (f" · own-copy verification {v}" if v else ""))
+    synth = loop.get("synthesis")
+    if isinstance(synth, dict):
+        out.append(f"  synthesis: applied {len(synth.get('applied') or [])} file(s), "
+                   f"{len(synth.get('conflicts') or [])} conflict(s), {len(synth.get('rejected') or [])} rejected, "
+                   f"resolution {synth.get('resolution')}")
+    econ = loop.get("economics")
+    if isinstance(econ, dict) and econ.get("cost_per_verified_success") is not None:
+        out.append(f"  cost per verified success: ${econ['cost_per_verified_success']:.4f}")
+    return out
 
 
 def _roles_preamble(role_skips: dict, planner: bool, verifier: bool) -> list[str]:
@@ -1063,9 +1295,18 @@ def _agent_loop_line(loop: dict | None, entry: dict) -> str | None:
     if acts.get("writes_blocked"):
         parts.append(f"{acts['writes_blocked']} refused")
     parts.append(f"{acts.get('verifications', 0)} model-requested verification(s)")
+    workers = [w for w in loop.get("workers") or [] if isinstance(w, dict)]
+    if workers:
+        w_turns = sum(int(w.get("turns") or 0) for w in workers)
+        w_actions = sum(len(w.get("actions") or []) for w in workers)
+        parts.append(f"workers {w_turns} turn(s) · {w_actions} action(s)")
     calls = loop.get("model_calls") or []
     if calls:
-        cost = entry.get("estimated_cost")
+        from openshard.history.run_cost import run_total_cost
+
+        cost, complete = run_total_cost(entry)  # first attempt plus every retry, or None when any is unknown
+        if cost is not None and not complete:
+            cost = None
         prov = entry.get("cost_provenance")
         label = {"provider_reported": "provider-reported", "official_rate_estimate": "list-rate estimate"}.get(
             prov or "", "origin not recorded",
@@ -1094,6 +1335,167 @@ def _budget_line(record: dict | None) -> str | None:
     if record.get("action") and record["action"] != "none":
         tail += f"; {record['action']}"
     return f"enforced ({limits}); used {used}{tail}"
+
+
+_COMMIT_TITLE_CAP = 72
+
+
+def _commit_title(task: str, entry: dict) -> str:
+    """A commit title from what the run recorded: the executor's final note, else the plan summary,
+    else the task's first sentence, cut at a word boundary."""
+    loop: dict = entry["osn_loop"] if isinstance(entry.get("osn_loop"), dict) else {}
+    candidates: list[str] = []
+    for attempt in reversed(loop.get("attempts") or []):
+        note = attempt.get("final_note") if isinstance(attempt, dict) else None
+        if isinstance(note, str) and note.strip():
+            candidates.append(note)
+            break
+    plan: dict = loop["plan"] if isinstance(loop.get("plan"), dict) else {}
+    if isinstance(plan.get("summary"), str) and plan["summary"].strip():
+        candidates.append(plan["summary"])
+    candidates.append(task)
+    for text in candidates:
+        clean = " ".join(text.split())
+        first = clean.split(". ")[0].rstrip(".")
+        if len(first) <= _COMMIT_TITLE_CAP and first:
+            return first
+        words = first.split()
+        out: list[str] = []
+        for w in words:
+            if len(" ".join([*out, w])) > _COMMIT_TITLE_CAP - 1:
+                break
+            out.append(w)
+        if out:
+            return " ".join(out).rstrip(",;:(`'\"") + "…"
+    return "OSN change"
+
+
+def _commit_promoted(repo_root: Path, files: list[str], task: str, entry: dict) -> dict:
+    """Commit exactly the promoted *files* on the current branch. Never raises.
+
+    Returns ``{"sha", "branch", "files", "reason"}``: ``sha`` is None with a
+    reason when nothing was committed (nothing staged, git identity missing,
+    a hook refused). Only the promoted paths are staged, so unrelated local
+    changes are never swept into the commit.
+    """
+    from openshard.util.git import run_git
+
+    title = _commit_title(task, entry)
+    receipt_id = entry.get("receipt_id") or ""
+    task_text = " ".join(task.split())
+    message = (
+        f"{title}\n\nTask: {task_text}\n\n"
+        f"Made by Openshard Native (OSN) from an isolated, verified copy.\nReceipt: {receipt_id}\n"
+    )
+    branch = (run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip() or None
+    record: dict = {"sha": None, "branch": branch, "files": list(files), "reason": None}
+    if run_git(repo_root, ["add", "--", *files]) is None:
+        record["reason"] = "git_add_failed"
+        return record
+    staged = run_git(repo_root, ["diff", "--cached", "--name-only"])
+    if staged is None or not staged.strip():
+        record["reason"] = "nothing_staged"
+        return record
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["git", "commit", "-q", "-F", "-"], cwd=str(repo_root), input=message, text=True,
+            capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        record["reason"] = f"git_commit_failed:{type(exc).__name__}"
+        return record
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        record["reason"] = "git_commit_refused:" + (tail[-1][:120] if tail else f"exit {proc.returncode}")
+        return record
+    sha = (run_git(repo_root, ["rev-parse", "HEAD"]) or "").strip().lower()
+    record["sha"] = sha if len(sha) >= 40 else None
+    if record["sha"] is None:
+        record["reason"] = "head_unreadable_after_commit"
+    return record
+
+
+def _attach_commit(entry: dict, commit_record: dict | None) -> None:
+    """Record the commit OpenShard created on the Receipt, in the shape capture uses for git-observed commits."""
+    if not commit_record or not commit_record.get("sha"):
+        if commit_record:
+            entry["osn_commit"] = {"attempted": True, "sha": None, "reason": commit_record.get("reason")}
+        return
+    sha = commit_record["sha"]
+    entry["git_end_head"] = sha
+    entry["session_commits"] = {"source": "git_observed", "shas": [sha], "truncated": False}
+    entry["osn_commit"] = {
+        "attempted": True, "sha": sha, "branch": commit_record.get("branch"),
+        "files": list(commit_record.get("files") or []), "source": "openshard_committed",
+    }
+
+
+def _bind_verification(repo_root: Path, entry: dict, argv: list[str], *, as_json: bool) -> dict:
+    """Run the run's verify command on the committed tree and record it as evidence bound to that commit.
+
+    Uses the post-session verification path (``openshard verify``): the check
+    is OpenShard-executed, ``directly_observed``, and bound to HEAD only when
+    the tree was clean before and after. Nothing is claimed otherwise.
+    """
+    from openshard.cli.main import _utc_stamp
+    from openshard.history.verification import CHECK_FAILED, CHECK_PASSED, CHECK_UNKNOWN
+    from openshard.osn.loop import _run_verification
+    from openshard.verification.plan import VerificationSource
+    from openshard.verification.post_session import (
+        CheckRun,
+        _planned,
+        build_attestation,
+        record_attestation,
+        summarize_attestation,
+        tree_state,
+    )
+
+    # The run's --verify-cmd is an explicit user command that OpenShard already
+    # executed in the isolated copy (organisation command policy was applied at
+    # run start); it is executed here the same way, never through a shell. The
+    # generic post-session classifier is not re-applied to it.
+    planned = _planned(list(argv), "osn_run", VerificationSource.user)
+    started = _utc_stamp()
+    before = tree_state(repo_root)
+    t0 = time.monotonic()
+    observed, _output = _run_verification(list(argv), repo_root, 600.0)
+    duration = round(time.monotonic() - t0, 2)
+    if observed.timed_out:
+        results = [CheckRun(planned, CHECK_UNKNOWN, duration_seconds=duration, note="timed out; no exit code")]
+    elif not observed.ran:
+        results = [CheckRun(planned, CHECK_UNKNOWN, duration_seconds=duration, note="could not start")]
+    else:
+        results = [CheckRun(planned, CHECK_PASSED if observed.passed else CHECK_FAILED,
+                            exit_code=observed.exit_code, duration_seconds=duration)]
+    after = tree_state(repo_root)
+    attestation = build_attestation(entry, results, before=before, after=after, started_at=started,
+                                    completed_at=_utc_stamp())
+    record_attestation(repo_root, attestation)
+    summary = summarize_attestation(attestation)
+    verification = summary.get("verification") if isinstance(summary, dict) else {}
+    verification = verification if isinstance(verification, dict) else {}
+    sha = verification.get("artifact_sha")
+    reason = None
+    if not sha:
+        if before.head is None:
+            reason = "no_git_head"
+        elif before.dirty or (after.tracked_dirty if after.tracked_dirty is not None else after.dirty):
+            reason = "working_tree_not_clean"
+        elif after.head != before.head:
+            reason = "head_moved_during_verification"
+        else:
+            reason = "not_bound"
+    return {
+        "attestation_id": attestation.get("attestation_id"),
+        "status": verification.get("status"),
+        "source": verification.get("source"),
+        "artifact_sha": sha,
+        "bound": bool(sha),
+        "reason": reason,
+        "checks": [{"name": r.check.name, "status": r.status, "exit_code": r.exit_code} for r in results],
+    }
 
 
 def _promote(repo_root: Path, receipt, entry: dict, assume_yes: bool, permissions) -> tuple[list[str], list[str]]:

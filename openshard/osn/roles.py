@@ -226,7 +226,9 @@ class RoleRun:
 # ---------------------------------------------------------------------------
 
 ROLE_EXPLORER = "explorer"
-_ROLE_CLASS = {ROLE_PLANNER: "deep_reasoning", ROLE_VERIFIER: "verifier", ROLE_EXPLORER: "fast_control"}
+ROLE_WORKER = "worker"
+_ROLE_CLASS = {ROLE_PLANNER: "deep_reasoning", ROLE_VERIFIER: "verifier", ROLE_EXPLORER: "fast_control",
+               ROLE_WORKER: "routine_coding"}
 
 
 def select_role_model(
@@ -237,11 +239,21 @@ def select_role_model(
     routing: Any,
     provider_name: str | None,
     catalog_knows: Callable[[str], bool] | None = None,
+    requirement_class: str | None = None,
+    exclude: tuple[str, ...] = (),
 ) -> RoleModelChoice:
-    """Choose the model for *role* with the sources listed in the module docstring. Never raises."""
+    """Choose the model for *role* with the sources listed in the module docstring. Never raises.
+
+    *requirement_class* overrides the role's default Routing V2 class (a
+    subtask's preferred capability); *exclude* lists models already given to
+    other workers so a parallel team is heterogeneous when routing can offer
+    distinct models, and honestly shares a model when it cannot.
+    """
     if explicit:
         return RoleModelChoice(role, explicit, SOURCE_EXPLICIT, explicit != executor_model, "user named the model")
     need_independent = role == ROLE_VERIFIER
+    requested_class = requirement_class or _ROLE_CLASS.get(role, "routine_coding")
+    tried = tuple(dict.fromkeys([*(exclude or ()), *((executor_model,) if need_independent else ())]))
     # Routing V2 over the run's own candidate pool (applied path only).
     decision = getattr(routing, "decision", None)
     candidates = getattr(routing, "candidates", None)
@@ -251,16 +263,16 @@ def select_role_model(
             from openshard.routing.adaptive.step_types import STEP_EXECUTE
 
             ctx = replace(
-                decision.context, requested_class=_ROLE_CLASS[role], step_type=STEP_EXECUTE, attempt=1,
-                models_tried=(executor_model,) if need_independent else (),
-                read_only=role == ROLE_PLANNER, write_requested=role != ROLE_PLANNER,
+                decision.context, requested_class=requested_class, step_type=STEP_EXECUTE, attempt=1,
+                models_tried=tried,
+                read_only=role in (ROLE_PLANNER, ROLE_EXPLORER), write_requested=role not in (ROLE_PLANNER, ROLE_EXPLORER),
             )
             picked = decide_route(ctx, candidates, policy=getattr(routing, "policy", None),
                                   class_pins=getattr(routing, "class_pins", None))
             chosen = picked.selected_model
             via = tuple(picked.selected_via or ())
             if chosen and (not provider_name or not via or provider_name in via) \
-                    and not (need_independent and chosen == executor_model):
+                    and not (need_independent and chosen == executor_model) and chosen not in (exclude or ()):
                 return RoleModelChoice(
                     role, chosen, SOURCE_ADAPTIVE_V2, chosen != executor_model, "routing_v2:" + ",".join(picked.reasons[-2:]),
                     requested_class=picked.requested_class, resolved_class=picked.resolved_class,
@@ -274,12 +286,12 @@ def select_role_model(
         from openshard.native.dispatch import resolve_role
 
         tier_model, tier, _fb, _reason = resolve_role(
-            "validator" if role == ROLE_VERIFIER else "executor" if role == ROLE_EXPLORER else role,
+            "validator" if role == ROLE_VERIFIER else "executor" if role in (ROLE_EXPLORER, ROLE_WORKER) else role,
         )
     except Exception:
         tier_model, tier = None, ""
     if tier_model and catalog_knows is not None and catalog_knows(tier_model) \
-            and not (need_independent and tier_model == executor_model):
+            and not (need_independent and tier_model == executor_model) and tier_model not in (exclude or ()):
         return RoleModelChoice(role, tier_model, SOURCE_ROLE_TIER, tier_model != executor_model, f"tier:{tier}")
     return RoleModelChoice(
         role, executor_model, SOURCE_EXECUTOR_REUSED, False,
@@ -348,13 +360,30 @@ def parse_plan(raw: Any) -> dict[str, Any] | None:
     files = [p.replace("\\", "/")[:200] for p in _clean_list(raw.get("files"), cap=MAX_PLAN_FILES, item_cap=400)
              if _safe_rel(p)]
     simple = raw.get("simple", raw.get("skip_decomposition"))
-    return {
+    plan: dict[str, Any] = {
         "summary": summary,
         "files": files,
         "steps": steps,
         "verification": _clean_list(raw.get("verification"), cap=MAX_PLAN_ITEMS, item_cap=MAX_PLAN_ITEM),
         "simple": simple if isinstance(simple, bool) else None,
     }
+    if isinstance(raw.get("subtasks"), list) and raw["subtasks"]:
+        # Kept raw and bounded here; ``openshard.osn.decompose`` types and validates it.
+        plan["subtasks"] = [s for s in raw["subtasks"][:4] if isinstance(s, dict)]
+    return plan
+
+
+PLANNER_DECOMPOSE_NOTE = (
+    " If, and only if, the task contains 2 or 3 genuinely INDEPENDENT pieces of work that touch DISJOINT files "
+    "(for example an implementation module, its tests, and a separate CLI/integration piece), you may add to the "
+    "plan \"subtasks\": [{\"id\": \"api\", \"objective\": \"<what this worker must do>\", "
+    "\"allowed_write_paths\": [\"<repo-relative path or glob this worker alone may write>\"], "
+    "\"likely_scope\": [\"<paths it will read>\"], \"dependencies\": [], \"required_evidence\": [\"...\"], "
+    "\"expected_output\": \"...\", \"verification_criteria\": [\"...\"], \"parallel_safe\": true, "
+    "\"required\": true, \"preferred_capability\": \"routine_coding\"|\"deep_reasoning\"}]. Write scopes of "
+    "parallel subtasks must not overlap. Do NOT decompose when pieces depend on each other's code, when ordering "
+    "matters, or when the task is small: a single executor is the right answer then."
+)
 
 
 class ReviewParseError(ValueError):
@@ -405,8 +434,13 @@ def run_planner_turns(
     max_turns: int = PLANNER_MAX_TURNS,
     progress: Callable[[str, dict[str, Any]], None] | None = None,
     explorer_model: str | None = None,
+    decompose: bool = False,
 ) -> tuple[dict[str, Any] | None, RoleRun, list[AttemptUsage]]:
     """Run the planner role: a few read-only turns ending in a bounded plan.
+
+    With *decompose*, the planner is told it may propose independent subtasks
+    with disjoint write scopes (``PLANNER_DECOMPOSE_NOTE``); without it the
+    plan's ``subtasks`` are still kept when offered but never asked for.
 
     Returns ``(plan or None, role record, the usage of its model calls)``.
     Writes and verification requests are refused by the harness (``read_only``);
@@ -427,6 +461,8 @@ def run_planner_turns(
     )
     if explorer_model:
         turn_provider.system_prompt = PLANNER_SYSTEM_PROMPT + PLANNER_EXPLORE_NOTE
+    if decompose:
+        turn_provider.system_prompt = turn_provider.system_prompt + PLANNER_DECOMPOSE_NOTE
     explorer_usage: list[AttemptUsage] = []
     explorer_records: list[dict[str, Any]] = []
 

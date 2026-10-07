@@ -298,6 +298,10 @@ def agent_loop_block(entry: dict) -> dict[str, Any] | None:
         "roles": roles_block(loop.get("roles")),
         "plan": plan_block(loop.get("plan")),
         "reviews": reviews_block(loop.get("reviews")),
+        "topology": topology_block(loop.get("topology")),
+        "workers": workers_block(loop.get("workers")),
+        "synthesis": synthesis_block(loop.get("synthesis")),
+        "economics": economics_block(loop.get("economics")),
         "evidence": {
             "actions": _text(ev.get("actions"), 64),
             "action_results": _text(ev.get("action_results"), 64),
@@ -305,6 +309,102 @@ def agent_loop_block(entry: dict) -> dict[str, Any] | None:
         },
     }
     return block
+
+
+_TOPOLOGIES = frozenset({"single", "planner_executor", "planner_executor_verifier", "parallel_subtasks",
+                         "parallel_candidates"})
+_WORKER_STATUSES = frozenset({"changed", "no_change", "failed", "blocked"})
+MAX_WORKERS_PROJECTED = 3
+
+
+def topology_block(raw: Any) -> dict[str, Any] | None:
+    """The execution topology decision: requested, selected, why, how many workers, expected and actual extra cost."""
+    d = _dict(raw)
+    if not d:
+        return None
+    selected = d.get("topology_selected")
+    return {
+        "requested": _text(d.get("topology_requested"), 16),
+        "selected": selected if selected in _TOPOLOGIES else None,
+        "reason": _text(d.get("topology_reason"), 80),
+        "worker_count": _count(d.get("worker_count")),
+        "distinct_models": _count(d.get("distinct_models")),
+        "expected_extra_cost_usd": _number(d.get("expected_extra_cost_usd")),
+        "actual_extra_cost_usd": _number(d.get("actual_extra_cost_usd")),
+    }
+
+
+def workers_block(raw: Any) -> list[dict[str, Any]] | None:
+    """Parallel writing workers: outcome, model, scope and usage per worker; file counts, never paths."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[dict[str, Any]] = []
+    for w in raw[:MAX_WORKERS_PROJECTED]:
+        if not isinstance(w, dict):
+            continue
+        status = w.get("status")
+        verification = _dict(w.get("verification"))
+        out.append({
+            "worker_id": _text(w.get("worker_id"), 32),
+            "subtask_id": _text(w.get("subtask_id"), 32),
+            "status": status if status in _WORKER_STATUSES else None,
+            "reason": _text(w.get("reason"), 64),
+            "required": _bool(w.get("required")),
+            "model": _text(w.get("model"), 256),
+            "requested_model": _text(w.get("requested_model"), 256),
+            "model_source": _text(w.get("model_source"), 32),
+            "files_changed": len(w["changed_files"]) if isinstance(w.get("changed_files"), list) else None,
+            "files_blocked": len(w["blocked"]) if isinstance(w.get("blocked"), list) else None,
+            "turns": _count(w.get("turns")),
+            "calls": _count(w.get("calls")),
+            "prompt_tokens": _count(w.get("prompt_tokens")),
+            "completion_tokens": _count(w.get("completion_tokens")),
+            "cost_usd": _number(w.get("cost_usd")),
+            "cost_source": _text(w.get("cost_source"), 32),
+            "duration_ms": _count(w.get("duration_ms")),
+            "own_copy_verification": _text(verification.get("status"), 16) if verification else None,
+        })
+    return out or None
+
+
+def synthesis_block(raw: Any) -> dict[str, Any] | None:
+    """How workers' results were combined: counts and the resolution route, never paths."""
+    d = _dict(raw)
+    if not d:
+        return None
+    return {
+        "applied_count": len(d["applied"]) if isinstance(d.get("applied"), list) else None,
+        "conflict_count": len(d["conflicts"]) if isinstance(d.get("conflicts"), list) else None,
+        "rejected_count": len(d["rejected"]) if isinstance(d.get("rejected"), list) else None,
+        "workers_accepted": len(d["workers_accepted"]) if isinstance(d.get("workers_accepted"), list) else None,
+        "workers_rejected": len(d["workers_rejected"]) if isinstance(d.get("workers_rejected"), list) else None,
+        "missing_required": len(d["missing_required"]) if isinstance(d.get("missing_required"), list) else None,
+        "resolution": _text(d.get("resolution"), 32),
+    }
+
+
+def economics_block(raw: Any) -> dict[str, Any] | None:
+    """Cost per role / worker / model / attempt and per verified success; unknown stays None."""
+    d = _dict(raw)
+    if not d:
+        return None
+
+    def _map(key: str) -> dict[str, float | None] | None:
+        m = _dict(d.get(key))
+        if not m:
+            return None
+        return {str(k)[:64]: _number(v) if v is not None else None for k, v in list(m.items())[:12]}
+
+    return {
+        "total_cost_usd": _number(d.get("total_cost_usd")),
+        "cost_complete": _bool(d.get("cost_complete")),
+        "model_calls": _count(d.get("model_calls")),
+        "verified": _bool(d.get("verified")),
+        "cost_per_verified_success": _number(d.get("cost_per_verified_success")),
+        "by_role": _map("by_role"),
+        "by_worker": _map("by_worker"),
+        "by_attempt": _map("by_attempt"),
+    }
 
 
 _ROLE_STATUSES = frozenset({"ran", "skipped", "failed"})
