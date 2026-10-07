@@ -6,6 +6,11 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- The OSN verifier role receives the repository's `AGENTS.md` / `CLAUDE.md`
+  block, as the planner and executor do, so a review can check conventions.
+  This change was made by OSN itself on its own repository (Receipt
+  `rcpt_24cd298e…`, verified, reviewed and committed with the verification
+  bound to the commit).
 - The files the planner names as likely to change are shown to the OSN
   executor on its first turn, as `--context-file` does: existing, within the
   context-file size cap, not already supplied, at most four. The Receipt
