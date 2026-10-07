@@ -112,6 +112,16 @@ All notable changes to OpenShard are documented here.
   (planning / implementation / review) and a `tier_dispatch_receipt` so
   existing surfaces show which roles were dispatched.
 
+- The Receipt of a multi-agent OSN run records its agent graph
+  (`osn_loop.agents`: every agent with role, model, status, usage, cost and
+  outcome, and the edges between them), derived from the recorded roles,
+  workers, candidates, synthesis and reviews; the full local Receipt shows an
+  `AGENTS` section. The learning loop derives two new signal kinds from
+  OpenShard-observed runs: `topology_outcomes` (verified runs, cost per
+  verified success and the extra cost of parallel agents per topology) and
+  `agent_model_outcomes` (per model as a worker or candidate: usable
+  results, action-contract failures, own-copy verification, wins).
+
 - Parallel candidates (`--topology candidates`): the whole task on up to
   `--max-workers` distinct models at once, each in its own isolated copy;
   OpenShard runs the verify command in every candidate's copy and ranks them

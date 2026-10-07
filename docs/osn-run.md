@@ -191,6 +191,28 @@ own-copy verification, files, refused writes, cost, turns, whether selected; the
 candidates' total and losers' cost, the latter also as the topology's `actual_extra_cost_usd`) and
 each candidate under `osn_loop.workers`; the full local Receipt shows a `CANDIDATES` section.
 
+### The agent graph
+
+Every run that used more than one agent records `osn_loop.agents`, a graph **derived from the
+records above** (never observed anew; `evidence.graph: derived_from_recorded_roles`): one node per
+agent (`planner`, `explorer-N`, `executor`, `worker-N` or `candidate-N`, `verifier`) plus
+`synthesis`, the harness step that combined files, each with its role, model, status, calls, turns,
+cost and outcome; and edges naming what happened between them (`asked` / `answered`,
+`planned_for`, `decomposed_into`, `produced_for`, `evaluated_by` / `selected_by`, `resolved_by` /
+`verified_without`, `reviewed_by`, `recovery_requested_from`, `carried_from_checkpoint`). The full
+local Receipt shows it as `AGENTS`; the projection keeps ids, roles, models, outcomes and edges and
+never paths or prompts.
+
+### What the learning loop takes from multi-agent runs
+
+Two signal kinds join the learning snapshot, derived like the others only from Receipts whose
+verification OpenShard observed: `topology_outcomes` (per task category and selected topology:
+runs, runs verified, cost per verified success, the median extra cost parallel agents added) and
+`agent_model_outcomes` (per task category, model and role worker / candidate: how often it produced a
+usable result, ended with replies that were not valid actions, passed or failed OpenShard's
+verification in its own copy, and was chosen as the winning candidate). They are advisory context
+like every other signal; routing and verification are never changed by them.
+
 ## Checkpoints and `osn resume`
 
 Every `osn run` keeps durable state under `.openshard/osn-runs/<osn-id>/` (local only, never synced):

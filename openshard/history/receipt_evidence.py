@@ -303,6 +303,7 @@ def agent_loop_block(entry: dict) -> dict[str, Any] | None:
         "synthesis": synthesis_block(loop.get("synthesis")),
         "economics": economics_block(loop.get("economics")),
         "candidates": candidates_block(loop.get("candidates")),
+        "agents": agents_block(loop.get("agents")),
         "resumed": resumed_block(loop.get("resumed")),
         "evidence": {
             "actions": _text(ev.get("actions"), 64),
@@ -417,6 +418,48 @@ def candidates_block(raw: Any) -> dict[str, Any] | None:
         "losers_cost_usd": _number(d.get("losers_cost_usd")),
         "evaluated": evaluated or None,
         "verification_evidence": _text(_dict(d.get("evidence")).get("verification"), 48),
+    }
+
+
+_AGENT_ROLES = frozenset({"planner", "executor", "verifier", "explorer", "worker", "candidate", "harness"})
+
+
+def agents_block(raw: Any) -> dict[str, Any] | None:
+    """The run's agent graph: ids, roles, models, outcomes and edges; never paths or prompts."""
+    d = _dict(raw)
+    if not d:
+        return None
+    nodes: list[dict[str, Any]] = []
+    for n in (d.get("nodes") or [])[:16]:
+        if not isinstance(n, dict):
+            continue
+        role = n.get("role")
+        nodes.append({
+            "agent_id": _text(n.get("agent_id"), 32),
+            "role": role if role in _AGENT_ROLES else None,
+            "parent": _text(n.get("parent"), 32),
+            "status": _text(n.get("status"), 16),
+            "reason": _text(n.get("reason"), 64),
+            "model": _text(n.get("model"), 256),
+            "independent": _bool(n.get("independent")),
+            "calls": _count(n.get("calls")),
+            "turns": _count(n.get("turns")),
+            "cost_usd": _number(n.get("cost_usd")),
+            "cost_source": _text(n.get("cost_source"), 32),
+            "outcome": _text(n.get("outcome"), 96),
+        })
+    edges = [
+        {"from": _text(e.get("from"), 32), "to": _text(e.get("to"), 32), "kind": _text(e.get("kind"), 32)}
+        for e in (d.get("edges") or [])[:48] if isinstance(e, dict)
+    ]
+    return {
+        "topology": _text(d.get("topology"), 32),
+        "agents": _count(d.get("agents")),
+        "models_distinct": [str(m)[:256] for m in (d.get("models_distinct") or [])[:8] if isinstance(m, str)],
+        "cost_usd": _number(d.get("cost_usd")),
+        "nodes": nodes or None,
+        "edges": edges or None,
+        "evidence": _text(_dict(d.get("evidence")).get("graph"), 48),
     }
 
 
