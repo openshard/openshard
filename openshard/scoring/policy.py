@@ -30,6 +30,7 @@ CATEGORY_PREFERRED: dict[str, list[str]] = {
         "anthropic/claude-sonnet-4.6",
     ],
     "boilerplate": [
+        "deepseek/deepseek-v4.1-flash",
         "deepseek/deepseek-v4-flash",
         "openai/gpt-5.4-mini",
         "openai/gpt-5.4-nano",

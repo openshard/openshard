@@ -58,7 +58,7 @@ OPUS_47 = "anthropic/claude-opus-4.7"         # active_specialist
 FALLBACK_ID = "~anthropic/claude-haiku-latest"  # fallback lifecycle
 MYTHOS_ID = "anthropic/claude-mythos-5"         # watchlist + RESTRICTED
 OPEN_WEIGHT_ID = "google/gemma-4-26b-a4b-it"    # open_weight lifecycle
-DEEPSEEK_ID = "deepseek/deepseek-v4-flash"       # active_default, cheap
+DEEPSEEK_ID = "deepseek/deepseek-v4.1-flash"     # active_default, cheap
 
 
 # ---------------------------------------------------------------------------

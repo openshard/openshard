@@ -85,7 +85,8 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     # Main worker
     "z-ai/glm-5.1":                         (0.10,   0.10),   # ~est
     # Cheap coding
-    "deepseek/deepseek-v4-flash":          (0.10,   0.28),   # ~est
+    "deepseek/deepseek-v4.1-flash":        (0.13,   0.52),   # OpenRouter headline rate 2026-10-07
+    "deepseek/deepseek-v4-flash":          (0.10,   0.28),   # ~est (deprecated 0423 snapshot)
     "deepseek/deepseek-v4-pro":            (0.27,   1.10),   # ~est
     # Visual / multimodal
     "moonshotai/kimi-k2.5":                 (0.45,   2.20),
@@ -234,7 +235,8 @@ class OpenRouterClient(BaseProvider):
         if not choices:
             raise OpenRouterError("API returned no choices in response")
 
-        content = choices[0].get("message", {}).get("content", "")
+        # Reasoning-only exhaustion may return content: null.
+        content = (choices[0].get("message") or {}).get("content") or ""
         usage_raw = data.get("usage") or {}
         raw_cost = usage_raw.get("cost")
         resolved_model = data.get("model", model)
