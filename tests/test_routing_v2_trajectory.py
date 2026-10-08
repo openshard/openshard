@@ -296,10 +296,12 @@ class TestTrajectoryPolicy:
             harness="osn_loop", entries_scanned=None, availability=availability,
         )
         d = _decide(_ctx(), cands, policy=TrajectoryPolicyV2(history=history))
-        assert d.selected_model == "zeta/mid-2"
+        # Price now wins the final tie-break, so the cheapest otherwise-equal
+        # eligible model wins instead of either legacy-hinted mid model.
+        assert d.selected_model == "acme/cheap-1"
         assert d.history_evidence["reason"] == f"history_{availability}"
         assert d.history_evidence["fallback_ranking"] == "price_before_curated_hint"
-        assert d.ranking[0]["components"]["output_price_per_mtok"] == pytest.approx(1.5)
+        assert d.ranking[0]["components"]["output_price_per_mtok"] == pytest.approx(0.3)
 
         # Explicit class pins and policy gates still outrank the fallback order.
         pinned = _decide(
@@ -307,12 +309,12 @@ class TestTrajectoryPolicy:
             pins={"routine_coding": "acme/mid-1"},
         )
         assert pinned.selected_model == "acme/mid-1"
-        blocked = ModelPolicyConfig(blocked_models=frozenset({"zeta/mid-2"}))
+        blocked = ModelPolicyConfig(blocked_models=frozenset({"acme/cheap-1"}))
         gated = _decide(
             _ctx(), _cands(blocked, catalog=cheaper_zeta),
             policy=TrajectoryPolicyV2(history=history),
         )
-        assert gated.selected_model == "acme/mid-1"
+        assert gated.selected_model == "zeta/mid-2"
 
     def test_history_from_receipts_counts_only_observed_verification(self):
         def o(model, verified_success, cost=0.01):
