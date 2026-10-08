@@ -50,6 +50,24 @@ All notable changes to OpenShard are documented here.
   for `.claude/settings.local.json`) with `.openshard/config.yml` re-included, so a team can still
   commit its verification contract. A repository that already ignores the directory is left alone;
   files git already tracks are unaffected.
+- **`openshard doctor` no longer calls a configured agent "Ready" before it has captured
+  anything.** Installed hooks are structural evidence only: a hook command that never runs
+  (`openshard` not on the PATH of the process that launches the agent, a sandbox that drops it, an
+  agent that skips hooks until trusted or approved) leaves no trace, and a capture service that
+  refuses the hooks looks healthy. The `Capture verified` line that OpenCode and Grok Build already
+  had now appears for Claude Code, Codex, Cursor, Google Antigravity and Hermes Agent too: green
+  once a session from that agent is recorded in the repository's history, otherwise
+  `Configured but unverified` with what to check for that agent. `doctor --json` carries
+  `capture_observed` per agent (and under `claude_code`).
+- **The context an agent is given about prior work no longer calls an agent-reported pass
+  "passed".** `relevant_context` (the local MCP tool, `openshard context`) took the Receipt's flat
+  verification token, so a Claude Code session whose hook merely relayed the agent's own
+  `pytest` exit code read `Status: Passed | Verification: passed`, and a later `openshard verify`
+  re-run was ignored. It now reads the shared verification truth: an agent-reported pass is
+  `unknown` and named as the agent's claim (`Not verified by OpenShard (agent reported 1/1
+  passed)`), a later OpenShard re-run or CI verdict describes the current outcome with its commit,
+  and a hook session's status is its turn status, not `Passed`. The context text names who vouches
+  for each token. Native runs OpenShard verified itself read as before.
 - **A later verification now reaches the Status row and `openshard history`.** After
   `openshard verify` re-ran a Shard's checks (or CI reported on its commit), `openshard last` still
   printed `Status  Turn completed (unverified)` two rows above `Verified  Passed (OpenShard re-ran

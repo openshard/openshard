@@ -432,8 +432,25 @@ class TestDoctorClaudeSection(_RepoCase):
              patch(f"{_MCP_MODULE}.subprocess.run", side_effect=_subprocess_router(resolved)):
             result = runner.invoke(cli, ["doctor", "--repo-path", str(self.root)])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Ready -- use Claude Code normally.", result.output)
-        self.assertIn("Claude Code", result.output)
+        # Installed hooks are structural evidence only: until a session is
+        # recorded here, doctor says so instead of "Ready".
+        self.assertIn("✗ Capture verified (no Claude Code session captured in this repository yet", result.output)
+        self.assertIn("Configured but unverified: Claude Code", result.output)
+        self.assertNotIn("Ready -- use Claude Code normally.", result.output)
+        (self.root / ".openshard").mkdir(exist_ok=True)
+        (self.root / ".openshard" / "runs.jsonl").write_text(
+            json.dumps({"timestamp": "2026-10-08T07:00:00Z", "run_id": "r1", "task": "t",
+                        "executor": "claude_code_hooks", "import_source": "claude_code"}) + "\n",
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, _NO_KEYS, clear=False), \
+             patch(f"{_MCP_MODULE}.shutil.which", side_effect=_which), \
+             patch(f"{_MCP_MODULE}.subprocess.run", side_effect=_subprocess_router(resolved)):
+            proven = runner.invoke(cli, ["doctor", "--repo-path", str(self.root)])
+            proven_json = runner.invoke(cli, ["doctor", "--json", "--repo-path", str(self.root)])
+        self.assertIn("✓ Capture verified", proven.output)
+        self.assertIn("Ready -- use Claude Code normally.", proven.output)
+        self.assertIs(json.loads(proven_json.output)["claude_code"]["capture_observed"], True)
 
     def test_doctor_json_includes_claude_code_block(self):
         runner = CliRunner()
