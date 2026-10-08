@@ -2319,6 +2319,74 @@ def _ensure_record(buf: dict, repo_root: Path) -> None:
             ev["attempt_number"] = 1
 
 
+def _finalize_hook_shard_id(
+    entry: dict,
+    buf: dict,
+    existing_lines: list[str],
+    matched_record: dict | None,
+) -> dict:
+    """Finalize a hook record history-position Shard id under the runs lock.
+
+    _ensure_record gives the live buffer a provisional id so Events can be
+    assembled before the first fold. The first persistence boundary is the
+    authoritative place to mint that position-derived id because another
+    process may have appended after the provisional line count was read.
+
+    Replacing an existing Receipt preserves its persisted Shard id. Appending a
+    new Receipt uses the current locked line count and skips any id a surviving
+    record already holds. If the id changes, the buffer, embedded Events and
+    content hash are all updated together before the record is written.
+    """
+    from openshard.history.shard_contract import _make_shard_id
+    from openshard.history.shard_hash import SHARD_HASH_FIELD, compute_shard_hash
+
+    persisted = matched_record.get("shard_id") if isinstance(matched_record, dict) else None
+    if isinstance(persisted, str) and persisted:
+        final_id = persisted
+    else:
+        taken: set[str] = set()
+        for raw in existing_lines:
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict) and isinstance(parsed.get("shard_id"), str):
+                taken.add(parsed["shard_id"])
+        timestamp = entry.get("timestamp") if isinstance(entry.get("timestamp"), str) else _now()
+        index = len(existing_lines)
+        final_id = _make_shard_id(timestamp, index)
+        while final_id in taken:
+            index += 1
+            final_id = _make_shard_id(timestamp, index)
+
+    if entry.get("shard_id") == final_id:
+        return entry
+
+    final = dict(entry)
+    final["shard_id"] = final_id
+    events = []
+    for event in final.get("events") or []:
+        if isinstance(event, dict):
+            updated = dict(event)
+            updated["shard_id"] = final_id
+            events.append(updated)
+        else:
+            events.append(event)
+    if isinstance(final.get("events"), list):
+        final["events"] = events
+
+    record = buf.get("record")
+    if isinstance(record, dict):
+        record["shard_id"] = final_id
+    for event in buf.get("events") or []:
+        if isinstance(event, dict):
+            event["shard_id"] = final_id
+
+    final.pop(SHARD_HASH_FIELD, None)
+    final[SHARD_HASH_FIELD] = compute_shard_hash(final)
+    return final
+
+
 def _cached_repo_identity(buf: dict, repo_root: Path) -> str | None:
     """The repo's ``git config --get remote.origin.url`` identity, computed once per session.
 
@@ -3589,7 +3657,7 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
     costs a few git calls and possibly one ``gh`` call, so it never runs on
     an ordinary turn or tool snapshot.
     """
-    from openshard.history.jsonl_store import upsert_jsonl
+    from openshard.history.jsonl_store import upsert_jsonl_with
 
     if finalize:
         stored = buf.get("git_outcome") if isinstance(buf.get("git_outcome"), dict) else None
@@ -3615,9 +3683,9 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
     else:  # a record rebuilt from pre-0.4.4 history has no receipt_id
         def match(e: dict) -> bool:
             return _is_session_entry(e, session_id, executor)
-    outcome = upsert_jsonl(
+    entry, outcome = upsert_jsonl_with(
         repo_root / ".openshard" / "runs.jsonl",
-        entry,
+        lambda lines, matched: _finalize_hook_shard_id(entry, buf, lines, matched),
         match,
         timeout=_LOCK_TIMEOUT_SECONDS,
     )
