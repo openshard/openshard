@@ -4,9 +4,9 @@
     openshard osn steer <run id> --stop      -> the run stops before its next turn
 
 Both append one line to ``.openshard/osn-runs/<run id>/steering.jsonl``. The
-executor reads the file at the start of every turn (one small read; nothing
-is read while a model call is in flight), shows new notes on that turn as
-operator notes, and on a stop request ends the attempt before any further
+active planner or executor reads the file at the start of every turn (one
+small read; nothing is read while a model call is in flight), shows new notes
+on that turn as operator notes, and on a stop request ends before any further
 model call so the run checkpoints as interrupted and ``osn resume`` can pick
 it up. A note is advisory context from the person running OpenShard: it
 never changes policy, the verify command or the file-mutation gate, and the

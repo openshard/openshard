@@ -16,6 +16,7 @@ from click.testing import CliRunner
 
 from openshard.cli.main import cli
 from openshard.osn import checkpoint as ckpt
+from openshard.osn import roles
 from openshard.osn.actions import parse_turn
 from openshard.osn.agent_loop import STOP_OPERATOR_STOP, TurnState, run_attempt_turns
 from openshard.osn.loop import OperatorStopped, run_bounded_loop
@@ -180,6 +181,65 @@ class FakeModel(BaseProvider):
         if self.on_call:
             self.on_call(len(self.prompts))
         return ChatResponse(self.replies.pop(0), model, UsageStats(10, 5, 15, 0.001, cost_source="provider_reported"))
+
+
+class TestPlannerSteering:
+    def test_a_note_written_during_planning_reaches_the_next_planner_turn(self, repo):
+        run_id = _checkpointed(repo)
+        reader = SteeringReader(repo, run_id)
+        model = FakeModel([
+            _turn(_a("read_file", path="src/app.txt")),
+            json.dumps({
+                "plan": {
+                    "summary": "Update the app value",
+                    "files": ["src/app.txt"],
+                    "steps": ["write ok"],
+                    "verification": ["the verifier passes"],
+                    "simple": True,
+                },
+                "actions": [_a("finish")],
+            }),
+        ], on_call=lambda n: write_steering(repo, run_id, KIND_NOTE, "keep it minimal") if n == 1 else None)
+
+        plan, role, _usage = roles.run_planner_turns(
+            model, "m/a", task="t", repo_root=repo, sandbox=repo,
+            repo_files=["src/app.txt"], steer=reader.poll,
+        )
+
+        assert plan is not None and role.status == roles.STATUS_RAN
+        assert "keep it minimal" not in model.prompts[0]
+        assert "(turn 2) keep it minimal" in model.prompts[1]
+        record = reader.to_record()
+        assert record["events"][0]["role"] == roles.ROLE_PLANNER
+        assert record["events"][0]["turn"] == 2
+
+    def test_a_stop_during_planning_interrupts_before_executor_work(self, repo):
+        run_id = _checkpointed(repo)
+        reader = SteeringReader(repo, run_id)
+        planner_model = FakeModel(
+            [_turn(_a("read_file", path="src/app.txt")), _turn(_a("finish"))],
+            on_call=lambda n: write_steering(repo, run_id, KIND_STOP) if n == 1 else None,
+        )
+
+        def planner(sandbox, repo_files):
+            plan, role, _usage = roles.run_planner_turns(
+                planner_model, "plan/m", task="t", repo_root=repo, sandbox=sandbox,
+                repo_files=repo_files, steer=reader.poll,
+            )
+            assert role.reason == STOP_OPERATOR_STOP
+            return plan, role.to_record()
+
+        executor_model = FakeModel([])
+        executor = IterativeModelProvider(executor_model, ["m/a"], repo)
+        with pytest.raises(OperatorStopped) as exc:
+            run_bounded_loop(repo, "t", executor, VERIFY, max_attempts=1, planner=planner, steering=reader)
+
+        assert (exc.value.attempt, exc.value.turn) == (0, 2)
+        assert len(planner_model.prompts) == 1
+        assert executor_model.prompts == []
+        record = reader.to_record()
+        assert record["stop_requested"] is True
+        assert record["events"][-1]["role"] == roles.ROLE_PLANNER
 
 
 class TestBoundedLoop:

@@ -816,6 +816,13 @@ def run_bounded_loop(
         _emit_progress(progress, "role_end", role="planner", status=planner_record.get("status"),
                        model=planner_record.get("model"), has_plan=plan is not None,
                        reason=planner_record.get("reason"), **_plan_progress_fields(plan))
+        if planner_record.get("reason") == STOP_OPERATOR_STOP:
+            # The planner uses the same turn-boundary steering contract as the
+            # executor. A stop is an interruption, not a planner failure that
+            # should silently fall through into execution.
+            _checkpoint("planner_stopped")
+            turns = planner_record.get("turns")
+            raise OperatorStopped(0, turns if isinstance(turns, int) and turns > 0 else 1)
         if plan is not None:
             set_plan = getattr(provider, "set_plan", None)
             if callable(set_plan):

@@ -713,13 +713,19 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     supervisor = _resolve_supervisor(routing, budget, action_provider, capabilities, user_ladder=list(escalate),
                                      explicit_model=explicit_model)
     progress_renderer = events if events is not None else (_OsnProgressRenderer() if not machine else None)
+    from openshard.osn.steering import SteeringReader
+
+    # Construct the reader before role hooks so planning and execution share one
+    # ordered steering stream. The checkpoint file itself is written below,
+    # before any model call can run.
+    steering = SteeringReader(repo_root, checkpoint_id)
     planner_hook, verifier_hook, role_skips, role_usage = _resolve_roles(
         loop_mode=loop_mode, roles_mode=roles_mode, planner_model=planner_model, verifier_model=verifier_model,
         explore=explore, decompose=topology_request in ("auto", "parallel"),
         task=task, repo_root=repo_root, executor_model=model, routing=routing, provider_name=provider_name,
         provider_obj=provider_obj, model_policy=model_policy, budget=budget, learning=learning,
         context_files=[*context_files, *learning_files], action_provider=action_provider, argv=argv,
-        progress=progress_renderer,
+        progress=progress_renderer, steering=steering,
     )
     workers_hook = _resolve_workers(
         loop_mode=loop_mode, topology_request=topology_request, max_workers=max_workers,
@@ -755,9 +761,6 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             pass
 
     ckpt.write_checkpoint(repo_root, run_checkpoint)  # phase 'started': the run exists before any model call
-    from openshard.osn.steering import SteeringReader
-
-    steering = SteeringReader(repo_root, checkpoint_id)
     if not machine:
         click.echo(f"  Run     {checkpoint_id} · while it runs: openshard osn steer {checkpoint_id} \"note\" | --stop")
     started = time.monotonic()
@@ -1449,7 +1452,7 @@ def _count_repo_files(repo_root: Path, cap: int = 200) -> int:
 
 def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task, repo_root, executor_model,
                    routing, provider_name, provider_obj, model_policy, budget, learning, context_files,
-                   action_provider, argv, progress, explore=True, decompose=False):
+                   action_provider, argv, progress, explore=True, decompose=False, steering=None):
     """Planner and verifier hooks for this run, the roles that will not run and why, and their usage list.
 
     Role models come from ``openshard.osn.roles.select_role_model`` and must pass
@@ -1522,7 +1525,7 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
                 repo_files=repo_files, choice=planner_choice, provider_name=provider_name, budget=budget,
                 learning_context=learning.prompt_text if learning is not None else None,
                 context_files=list(context_files), progress=progress, explorer_model=explorer_model,
-                decompose=decompose,
+                decompose=decompose, steer=steering.poll if steering is not None else None,
             )
             role_usage.extend(usage)
             return plan, role.to_record()
