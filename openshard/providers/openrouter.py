@@ -83,15 +83,15 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "anthropic/claude-opus-5.5":            (4.00,  20.00),
     "anthropic/claude-fable-5.1":           (10.00, 50.00),
     # Main worker
-    "z-ai/glm-5.1":                         (0.10,   0.10),   # ~est
+    "z-ai/glm-5.1":                         (0.96,   3.03),   # 2026-09-25 OpenRouter snapshot (was a 0.10/0.10 ~est, 10-30x low)
     # Cheap coding
     "deepseek/deepseek-v4.1-flash":        (0.13,   0.52),   # OpenRouter headline rate 2026-10-07
     "deepseek/deepseek-v4-flash":          (0.10,   0.28),   # ~est (deprecated 0423 snapshot)
-    "deepseek/deepseek-v4-pro":            (0.27,   1.10),   # ~est
+    "deepseek/deepseek-v4-pro":            (0.69,   1.39),   # 2026-09-25 OpenRouter snapshot (was a 0.27/1.10 ~est)
     # Visual / multimodal
     "moonshotai/kimi-k2.5":                 (0.45,   2.20),
     # Long-horizon
-    "minimax/m2.7":                         (0.20,   1.10),   # ~est
+    "minimax/m2.7":                         (0.30,   1.20),   # minimax/minimax-m2.7 in the 2026-09-25 OpenRouter snapshot (retired id kept for old Receipts)
     # OpenAI
     "openai/gpt-4o":                        (2.50,  10.00),
     "openai/gpt-4o-mini":                   (0.15,   0.60),

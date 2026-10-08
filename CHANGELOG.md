@@ -42,6 +42,10 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- Static OpenRouter price fallbacks for `z-ai/glm-5.1`, `deepseek/deepseek-v4-pro` and the retired
+  `minimax/m2.7` id were `~est` values 2 to 30 times below the 2026-09-25 OpenRouter snapshot; they
+  now carry the snapshot's rates with the date. The fallback applies only when the catalog cache is
+  absent and the provider reported no cost.
 - **OSN Shard identity under the lock.** An OSN run's `shard_id` was minted from an unlocked
   line count, so two runs writing at the same moment could share one and `history`, MCP
   `get_shard` and the hosted Receipt would merge unrelated runs into one Shard. The id is now
