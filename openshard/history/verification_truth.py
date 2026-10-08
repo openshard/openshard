@@ -534,6 +534,64 @@ def verification_label(truth: VerificationTruth) -> str:
     return "Not recorded"
 
 
+def _later_basis_word(truth: VerificationTruth) -> tuple[str, str] | None:
+    """``(outcome word, who vouches)`` for an observed outcome, else None."""
+    if not truth.observed:
+        return None
+    word = {STATE_VERIFIED_PASSED: "passed", STATE_VERIFIED_FAILED: "failed"}.get(truth.state, "partial")
+    if truth.basis == BASIS_CI:
+        return word, "independent CI"
+    if truth.basis == BASIS_POST_SESSION:
+        return word, "OpenShard re-run"
+    who = {SOURCE_INDEPENDENTLY_VERIFIED: "independently verified", SOURCE_GIT_VERIFIED: "git-verified"}.get(
+        truth.authority, "OpenShard-observed")
+    return word, who
+
+
+def turn_status_label(task_completion: str | None, truth: VerificationTruth) -> str | None:
+    """The turn-status row (``Turn completed (unverified)``) resolved by later evidence.
+
+    A Stop hook proves the agent's *turn* ended, so the capture labels it
+    ``(unverified)``. Once a later ``openshard verify`` re-run or a CI verdict
+    bound to the commit gives the Receipt an observed outcome, that suffix
+    would contradict the Verified row; it then names the outcome and who
+    vouches for it instead. Anything else is returned unchanged.
+    """
+    if not task_completion:
+        return task_completion
+    later = _later_basis_word(truth)
+    if later is None or "(unverified)" not in task_completion:
+        return task_completion
+    word, who = later
+    return task_completion.replace("(unverified)", f"(verified later: {word}, {who})")
+
+
+def checks_row_label(truth: VerificationTruth) -> str | None:
+    """The compact checks column for a history row when later evidence decides it.
+
+    ``1/1 passed (OpenShard re-run @ 59f31c55f399)`` / ``failed (independent
+    CI @ ...)``; None when the current outcome is the session's own, so the
+    caller keeps the session's checks display (and its agent-reported
+    marker).
+    """
+    if truth.basis == BASIS_POST_SESSION:
+        ratio = _ratio(truth.post_session_passed, truth.post_session_attempted)
+        sha = truth.post_session_artifact_sha
+    elif truth.basis == BASIS_CI:
+        ratio = _ratio(truth.checks_passed, truth.checks_attempted)
+        sha = truth.artifact_sha
+    else:
+        return None
+    later = _later_basis_word(truth)
+    if later is None:
+        return None
+    word, who = later
+    text = ratio or word
+    if ratio and truth.state == STATE_VERIFIED_PARTIAL:
+        text += ", rest not completed"
+    return f"{text} ({who}" + (f" @ {sha[:12]})" if sha else ")")
+
+
 def verification_phrase(truth: VerificationTruth) -> str:
     """Lower-case clause for summary sentences (quality summary, trust reasons)."""
     if truth.basis == BASIS_CI:

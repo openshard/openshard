@@ -42,6 +42,15 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **A later verification now reaches the Status row and `openshard history`.** After
+  `openshard verify` re-ran a Shard's checks (or CI reported on its commit), `openshard last` still
+  printed `Status  Turn completed (unverified)` two rows above `Verified  Passed (OpenShard re-ran
+  the check(s) ...)`, and the `history` row kept saying `(unverified) · checks: not run` with no
+  sign of the re-run. Both now read the same interpretation as the Verified row: the turn status
+  becomes `Turn completed (verified later: passed, OpenShard re-run)` (or `failed`, or
+  `independent CI`), the history checks column shows `1/1 passed (OpenShard re-run @ <commit>)`,
+  and `history --json` carries `verification_truth` per row as `last --json` does. Without later
+  evidence nothing changes, and the stored record is never rewritten.
 - **A capture service that is not this installation's is no longer adopted.** `openshard setup`
   and the hooks took any OpenShard service answering `/health` on the port as theirs. One started
   from another `OPENSHARD_HOME` or by another user account on the same machine then refused every
