@@ -286,7 +286,13 @@ def build_state(
         )
 
     if not config_found:
-        next_steps.append("Run `openshard init` to create your configuration.")
+        # Receipt capture (`openshard setup` + a coding agent) needs no
+        # configuration; the config file is for OpenShard's own executor.
+        next_steps.append(
+            "Receipt capture needs no configuration. To run tasks with OpenShard's own "
+            "executor (`openshard run`, `openshard osn run`), run `openshard init` to create "
+            "your configuration."
+        )
 
     # Provider selected but its direct key is missing.
     if provider in IMPLEMENTED_PROVIDERS and not keys_present.get(provider, False):
@@ -314,8 +320,9 @@ def build_state(
     # No supported key at all -> local-only.
     if not any_key:
         next_steps.append(
-            "Local-only mode: no API key required, limited to local help, planning, "
-            "dry-run, receipt inspection, and PR comment generation."
+            "Local-only mode (no API key): receipt capture, inspection and history work fully; "
+            "OpenShard's own executor is limited to local help, planning, dry-run and PR comment "
+            "generation."
         )
         if mode not in (None, "local_only"):
             warnings.append(
