@@ -257,15 +257,28 @@ def _run_one(
     def _verify(paths: list[str]):
         return verify(sandbox, paths)
 
-    outcome = run_attempt_turns(
-        repo_root=repo_root, sandbox=sandbox, task=worker_text, attempt=1, provider=turn_provider, gate=gate,
-        verify=_verify, budget=None, previous_failure=None, blocked_seen=[], changed_so_far=[],
-        max_turns=spec.max_turns, max_verifications=spec.max_verifications,
-        progress=_worker_progress(progress, spec),
-        role=ROLE_WORKER, model_label=lambda: spec.model, repo_files=repo_files,
-        blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
-        cancel=cancel,
-    )
+    try:
+        outcome = run_attempt_turns(
+            repo_root=repo_root, sandbox=sandbox, task=worker_text, attempt=1, provider=turn_provider, gate=gate,
+            verify=_verify, budget=None, previous_failure=None, blocked_seen=[], changed_so_far=[],
+            max_turns=spec.max_turns, max_verifications=spec.max_verifications,
+            progress=_worker_progress(progress, spec),
+            role=ROLE_WORKER, model_label=lambda: spec.model, repo_files=repo_files,
+            blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
+            cancel=cancel,
+        )
+    except Exception:
+        raise
+    except BaseException:
+        # Ctrl-C (or SystemExit) inside this worker: cancel the run from the
+        # worker's own thread, before the pool thread can pick up the next
+        # queued worker. ``run_workers`` sets the flag too once ``fut.result()``
+        # re-raises, but on a loaded machine the pool thread reaches the next
+        # worker's first turn before the main thread wakes; the flag must
+        # already be set by then.
+        if cancel is not None:
+            cancel.set()
+        raise
     summary = _usage_summary(turn_provider.usage)
     if outcome.stop == STOP_CANCELLED:
         status, reason = STATUS_FAILED, "cancelled"

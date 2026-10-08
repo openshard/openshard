@@ -134,6 +134,23 @@ def test_a_keyboard_interrupt_in_a_worker_reaches_the_caller_and_queued_workers_
     assert cancel.is_set() and fake.calls == ["fast/m"]
 
 
+def test_a_worker_sets_the_cancel_flag_itself_when_it_is_interrupted(tmp_path, repo):
+    # The pool thread that ran the interrupted worker picks up the next queued
+    # worker at once; the flag must be set from the worker's thread, not only
+    # by run_workers once the interrupt reaches the main thread.
+    from openshard.osn.workers import _run_one
+
+    fake = ScriptedByModel({"fast/m": [KeyboardInterrupt()]})
+    cancel = threading.Event()
+    with pytest.raises(KeyboardInterrupt):
+        _run_one(
+            _spec(1, "fast/m"), provider=fake, task="t", plan=None, repo_root=repo,
+            base_sandbox=_sandbox(tmp_path, repo), verify=_ok_verify, blocked_write_patterns=(),
+            approval_write_patterns=(), progress=None, cancel=cancel,
+        )
+    assert cancel.is_set() and fake.calls == ["fast/m"]
+
+
 def test_explorers_honour_the_cancel_flag_too(tmp_path, repo):
     cancel = threading.Event()
     fake = ScriptedByModel({
