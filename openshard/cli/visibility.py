@@ -38,6 +38,11 @@ from openshard.history.shard_contract import (
     agent_reported_suffix,
 )
 from openshard.history.stats import HistoryStats
+from openshard.history.verification_truth import (
+    checks_row_label,
+    interpret_receipt,
+    turn_status_label,
+)
 from openshard.history.views import receipt_to_dict, relevant_match_to_dict
 
 _INDENT = "  "
@@ -126,7 +131,9 @@ def status_label(receipt: ShardReceipt) -> str:
     verification-derived status (``Passed`` / ``Failed`` / ``No checks run``).
     """
     if receipt.task_completion:
-        return receipt.task_completion
+        # A later `openshard verify` re-run or CI verdict resolves the turn's
+        # "(unverified)" suffix; without one the turn status stands as captured.
+        return turn_status_label(receipt.task_completion, interpret_receipt(receipt)) or receipt.task_completion
     status = receipt.status or "Not recorded"
     if status.startswith("Checks:"):
         # Review-style checks carry their detail in the checks column already.
@@ -135,6 +142,12 @@ def status_label(receipt: ShardReceipt) -> str:
 
 
 def checks_label(receipt: ShardReceipt) -> str:
+    # Later evidence (an OpenShard re-run, a CI verdict bound to the commit)
+    # describes the current outcome and wins over the session's own display,
+    # exactly as the Verified row of `openshard last` already reads it.
+    later = checks_row_label(interpret_receipt(receipt))
+    if later:
+        return later
     display = (receipt.checks_display or "Not recorded").strip()
     if not display:
         return "not recorded"
@@ -217,6 +230,9 @@ def history_json_body(page: HistoryPage, loc: HistoryLocation) -> dict:
                 **receipt_to_dict(item.receipt, extended=True),
                 "attempt_count": item.attempt_count,
                 "has_failure": item.has_failure,
+                # The same interpretation `openshard last --json` carries, so a
+                # later re-run or CI verdict is visible per row here too.
+                "verification_truth": interpret_receipt(item.receipt).to_dict(),
             }
             for item in page.items
         ],

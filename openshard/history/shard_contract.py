@@ -43,6 +43,7 @@ from openshard.history.verification_truth import (
     counts_phrase,
     integrity_label,
     interpret_receipt,
+    turn_status_label,
     verification_label,
 )
 from openshard.models.pricing import (
@@ -2327,7 +2328,10 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         lines.append(_row("Task ID", receipt.task_id))
     lines += _capture_rows(receipt)
     if receipt.task_completion:
-        lines.append(_row("Status", receipt.task_completion))
+        # Resolved by later evidence (see verification_truth.turn_status_label)
+        # so this row never contradicts the Verified row below it.
+        lines.append(_row("Status", turn_status_label(receipt.task_completion, interpret_receipt(receipt))
+                          or receipt.task_completion))
     lines.append(_row(model_label, model_value))
     if receipt.duration_seconds is not None:
         lines.append(_row("Duration", f"{receipt.duration_seconds:.1f}s"))

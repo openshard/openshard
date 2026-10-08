@@ -593,7 +593,10 @@ external agent completes
 
 A Receipt records what was known when the session ended and is never
 rewritten. Evidence that arrives later is appended to
-`.openshard/verifications.jsonl` and joined at read time, so the same Shard
+`.openshard/verifications.jsonl` and joined at read time (`last`, `history`,
+the TUI, MCP and the hosted projection all read the same interpretation,
+`history/verification_truth.py`: the `Verified` row, the turn `Status` row's
+`(unverified)` suffix and the `history` checks column), so the same Shard
 can read, over time:
 
 ```
