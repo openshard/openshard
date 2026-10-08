@@ -86,9 +86,14 @@ class TestConcurrentSessions:
         shard_ids = [e["shard_id"] for e in entries]
         assert len(set(shard_ids)) == len(sids), "shard_id collided inside one repository"
         from openshard.history.shard_hash import verify_shard_hash
+
         assert all(verify_shard_hash(e)["status"] == "valid" for e in entries)
         assert all(
-            all(event.get("shard_id") == entry["shard_id"] for event in entry.get("events", []) if isinstance(event, dict))
+            all(
+                event.get("shard_id") == entry["shard_id"]
+                for event in entry.get("events", [])
+                if isinstance(event, dict)
+            )
             for entry in entries
         )
 
