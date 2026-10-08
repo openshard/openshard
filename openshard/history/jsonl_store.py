@@ -402,6 +402,7 @@ def upsert_jsonl_with(
             os.fsync(fh.fileno())
         return record, "appended"
 
+
 @_learning_update
 def amend_last_jsonl(
     path: Path, transform: Callable[[dict], dict], *, timeout: float | None = None
