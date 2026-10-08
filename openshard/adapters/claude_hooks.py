@@ -2283,11 +2283,12 @@ def _count_history_lines(repo_root: Path) -> int | None:
 
 
 def _ensure_record(buf: dict, repo_root: Path) -> None:
-    """Mint run/shard identity once per session: a new Shard, attempt 1.
+    """Mint run/Receipt identity and a provisional Shard id for a new session.
 
-    Uses the same ``_make_shard_id(timestamp, run_index)`` minting as the
-    import/wrap adapters and the native pipeline. No existing-Shard
-    linkage is guessed; that stays an explicit future extension.
+    Events need a Shard id before the first fold, so the history line count is
+    used provisionally here. _fold finalizes that position-derived id while it
+    holds the runs.jsonl lock. No existing-Shard linkage is guessed; that stays
+    an explicit future extension.
     """
     if buf.get("record"):
         return
