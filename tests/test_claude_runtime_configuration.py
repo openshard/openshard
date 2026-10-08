@@ -23,8 +23,11 @@ def test_cloud_session_model_and_effective_effort(repo):
     assert entry["capture"]["model_source"] == "claude_hook"
     assert "claude-opus-5-5" in str(entry)
     assert "requested-not-observed" not in str(entry)
+    # The fixture's payloads carry Claude Code's permission mode too; it is
+    # the agent's own report, recorded next to the effort level.
     assert receipt_payload(entry, 1)["runtime_configuration"] == {
-        "effort": "xhigh", "source": "claude_hook", "evidence": "agent_reported"}
+        "effort": "xhigh", "permission_mode": "default", "permission_modes_seen": ["default"],
+        "source": "claude_hook", "evidence": "agent_reported"}
 
 
 def test_model_switch_is_observed_and_queue_preserves_effort(repo):
@@ -53,4 +56,5 @@ def test_requested_or_invalid_configuration_never_becomes_evidence(repo, level):
             "ANTHROPIC_MODEL": "claude-opus-5-5", "CLAUDE_CODE_EFFORT_LEVEL": "max"})
     entry = _lines(repo)[0]
     assert entry["capture"]["model_source"] == "not_captured"
-    assert "runtime_configuration" not in receipt_payload(entry, 1)
+    assert "effort_level" not in entry["capture"]
+    assert "effort" not in (receipt_payload(entry, 1).get("runtime_configuration") or {})
