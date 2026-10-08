@@ -871,7 +871,7 @@ class TestCli:
         assert status["events_missing"] == [] and status["capture_observed"] is None
         # Installed but never proven: doctor says so and names the trust step.
         assert "\nGrok Build\n" in human.output
-        assert "no Grok Build session captured yet" in human.output and "/hooks-trust" in human.output
+        assert "no Grok Build session captured in this repository yet" in human.output and "/hooks-trust" in human.output
         assert "Configured but unverified: Grok Build" in human.output
         assert json.loads(proven.output)["grok_build"]["capture_observed"] is True
         assert "Capture verified" in proven_human.output and "no Grok Build session captured" not in proven_human.output

@@ -42,6 +42,15 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **`openshard doctor` no longer calls a configured agent "Ready" before it has captured
+  anything.** Installed hooks are structural evidence only: a hook command that never runs
+  (`openshard` not on the PATH of the process that launches the agent, a sandbox that drops it, an
+  agent that skips hooks until trusted or approved) leaves no trace, and a capture service that
+  refuses the hooks looks healthy. The `Capture verified` line that OpenCode and Grok Build already
+  had now appears for Claude Code, Codex, Cursor, Google Antigravity and Hermes Agent too: green
+  once a session from that agent is recorded in the repository's history, otherwise
+  `Configured but unverified` with what to check for that agent. `doctor --json` carries
+  `capture_observed` per agent (and under `claude_code`).
 - **A capture service that is not this installation's is no longer adopted.** `openshard setup`
   and the hooks took any OpenShard service answering `/health` on the port as theirs. One started
   from another `OPENSHARD_HOME` or by another user account on the same machine then refused every
