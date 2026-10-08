@@ -1176,3 +1176,70 @@ class TestForeignService:
         # Our own home sees it as its own.
         result = CliRunner().invoke(cli, ["doctor"], env=dict(capture_env))
         assert "✓ Capture service" in result.output, result.output
+
+
+# ---------------------------------------------------------------------------
+# A service of ours left over from another OpenShard version
+# ---------------------------------------------------------------------------
+
+
+class TestStaleVersion:
+    """After an upgrade the old service keeps folding sessions with the old code until it idles out."""
+
+    def test_another_version_is_asked_to_drain_and_exit(self, service, capture_env, monkeypatch):
+        monkeypatch.setattr(svc, "_version", lambda: "0.0.1")
+        doc = client.health(service.port, env=capture_env, credential=True)
+        assert client.service_version_stale(doc) is True
+        assert svc.service_status(capture_env)["stale_version"] is True
+        # NO_SPAWN is set: the stale service is replaced (drained) and nothing new starts here.
+        assert client.ensure_service(capture_env) == (None, "unavailable")
+        assert service.server.shutdown_requested.is_set()
+        service.thread.join(30)
+        assert client.health(service.port) is None
+
+    def test_the_same_or_an_unknown_version_is_left_alone(self, service, capture_env, monkeypatch):
+        assert client.ensure_service(capture_env) == (service.port, "running")
+        assert svc.service_status(capture_env)["stale_version"] is False
+        monkeypatch.setattr(svc, "_version", lambda: "unknown")
+        assert client.service_version_stale(client.health(service.port)) is False
+        assert client.ensure_service(capture_env) == (service.port, "running")
+        assert not service.server.shutdown_requested.is_set()
+
+    def test_another_installations_service_is_never_touched(self, service, capture_env, tmp_path, monkeypatch):
+        from openshard.adapters import capture_auth
+
+        monkeypatch.setattr(svc, "_version", lambda: "0.0.1")
+        other = {**capture_env, "OPENSHARD_HOME": str(tmp_path / "other-home")}
+        Path(other["OPENSHARD_HOME"]).mkdir(parents=True, exist_ok=True)
+        capture_auth.ensure_token(other)
+        Path(client.state_path(other)).write_text(json.dumps({"port": service.port}), encoding="utf-8")
+        assert client.ensure_service(other) == (None, "unavailable")
+        assert not service.server.shutdown_requested.is_set()
+        assert svc.service_status(other)["stale_version"] is False  # not ours, so not "ours but stale"
+
+    def test_a_session_start_replaces_a_stale_service_after_forwarding(self, service, repo, capture_env, monkeypatch):
+        import io
+
+        monkeypatch.setattr(svc, "_version", lambda: "0.0.1")
+        env = {**capture_env, "CLAUDE_PROJECT_DIR": str(repo)}
+        label = client.run_hook_via_service(io.BytesIO(_payload("SessionStart", repo, source="startup")), env=env)
+        assert label == "forwarded"  # the old service took the event, then was asked to drain
+        assert service.server.shutdown_requested.is_set()
+        service.thread.join(30)
+        # The event was folded before the old service left.
+        assert _wait_for(lambda: bool(_lines(repo)), timeout=10) or _session_dir(repo).exists()
+
+    def test_cli_reports_a_stale_service(self, service, capture_env, monkeypatch):
+        from click.testing import CliRunner
+
+        from openshard import __version__
+        from openshard.cli.main import cli
+
+        monkeypatch.setattr(svc, "_version", lambda: "0.0.1")
+        env = dict(capture_env)
+        result = CliRunner().invoke(cli, ["capture", "status"], env=env)
+        assert result.exit_code == 0, result.output
+        assert f"stale (running OpenShard 0.0.1 while this installation is {__version__}" in result.output
+        result = CliRunner().invoke(cli, ["doctor"], env=env)
+        assert "✗ Capture service (running OpenShard 0.0.1 while this installation is" in result.output
+        assert "openshard setup" in result.output

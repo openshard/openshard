@@ -82,6 +82,14 @@ the in-process fallback fold still records the current one). `openshard
 doctor` reports Claude hooks and OpenCode plugins with a missing or stale
 credential and shows the service's `refused` counters.
 
+**Upgrades.** A service keeps the code it was started with. When one of
+this installation's services reports another OpenShard version than the
+client (`/health` carries `version`), `openshard setup`, `capture start`
+and every session-start hook ask it to drain and exit and start this
+version's service in its place; `doctor` and `capture status` report a
+stale service until then. Hooks that arrive during the swap take the
+command-client and in-process fallback path, as for any restart.
+
 **Which service is ours.** Only a service that shares this installation's
 token is ever adopted. Every client of ours (`openshard setup`, the hook
 commands, the status line, `doctor`, `capture status`) presents the token on

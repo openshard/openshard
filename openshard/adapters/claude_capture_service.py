@@ -1464,6 +1464,9 @@ def service_status(env: dict | os._Environ | None = None) -> dict:
             # by this home's state file -- not adopted either.
             "credential": "accepted" if ours else "refused" if ours is False else "unknown",
             "version": doc.get("version"),
+            # A service of ours left over from another OpenShard version:
+            # replaced at the next `openshard setup` / session start.
+            "stale_version": bool(ours) and client.service_version_stale(doc),
             "uptime_seconds": doc.get("uptime_seconds"),
             "pending": doc.get("pending"),
             "stats": doc.get("stats"),
