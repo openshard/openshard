@@ -63,4 +63,32 @@ def render_outline(text: str, path: str, *, max_entries: int = MAX_OUTLINE_ENTRI
     return f"{total} lines; definitions start at:\n{body}{more}"
 
 
-__all__ = ["MAX_OUTLINE_ENTRIES", "outline_entries", "render_outline"]
+def top_level_symbols(text: str, path: str, *, max_symbols: int = MAX_OUTLINE_ENTRIES) -> list[str]:
+    """The names defined at the top level of a file (``class Receipt``, ``async def fetch``,
+    ``function load``, ``const save``), in file order, bounded. Empty for unknown languages."""
+    lower = path.lower()
+    if lower.endswith(PY_SUFFIXES):
+        pattern = _PY_DEF
+    elif lower.endswith(JS_SUFFIXES):
+        pattern = _JS_DEF
+    else:
+        return []
+    out: list[str] = []
+    for line in text.splitlines():
+        m = pattern.match(line)
+        if not m or m.group("indent"):
+            continue
+        kind, name = m.group("kind"), m.group("name")
+        if pattern is _PY_DEF:
+            label = ("async " if line.lstrip().startswith("async") else "") + f"{kind} {name}"
+        elif kind:
+            label = f"{kind} {name}"
+        else:
+            label = f"const {m.group('binding')}"
+        out.append(label)
+        if len(out) >= max_symbols:
+            break
+    return out
+
+
+__all__ = ["MAX_OUTLINE_ENTRIES", "outline_entries", "render_outline", "top_level_symbols"]

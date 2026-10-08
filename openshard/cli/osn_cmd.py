@@ -876,6 +876,9 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     # Files from the plan the executor was shown on its first turn (repo-relative).
     entry["osn_loop"]["plan_context_files"] = list(getattr(action_provider, "plan_context_files", []) or [])
     entry["osn_loop"]["plan_outline_files"] = list(getattr(action_provider, "plan_outline_files", []) or [])
+    # The observed repository map the executor was shown on its first turn: counts only.
+    _map_record = getattr(action_provider, "repo_map_record", None)
+    entry["osn_loop"]["repo_map"] = _map_record() if callable(_map_record) else None
     if prior_checkpoint is not None:
         prior_costs = [u.cost_usd for u in prior_usage]
         entry["osn_loop"]["resumed"] = {

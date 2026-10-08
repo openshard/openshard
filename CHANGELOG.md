@@ -6,6 +6,12 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- Every OSN role that takes turns is shown, on its first turn, a bounded map of the
+  repository observed from its files: directories with counts, file roles by fixed path
+  rules, and the top-level definitions of source files (at most 60 files, 12 names each,
+  6,000 characters; vendored trees skipped; a cut map says so). It replaces turns spent
+  reading files to learn what they hold. The Receipt records counts only under
+  `osn_loop.repo_map`.
 - The OSN verifier role receives the repository's `AGENTS.md` / `CLAUDE.md`
   block, as the planner and executor do, so a review can check conventions.
   This change was made by OSN itself on its own repository (Receipt
