@@ -230,11 +230,16 @@ class TrajectoryPolicyV2:
         states = self._states(candidates, requirement)
         for_class = self._dogfood_for(requirement, candidates)
 
-        def _rank(history: Mapping[str, ObservedEvidence] | None):
+        def _rank(
+            history: Mapping[str, ObservedEvidence] | None,
+            *,
+            prefer_price_over_hint: bool = False,
+        ):
             return rank_for_requirement(
                 cls, entries, states=states, dogfood_enabled=context.dogfood_enabled,
                 dogfood_for_class=for_class, history=history, cost_sensitivity=cost_sensitivity,
                 min_context_tokens=context.min_context_tokens, exclude=exclude,
+                prefer_price_over_hint=prefer_price_over_hint,
             )
 
         ranked, rejected = _rank(None)
@@ -243,6 +248,12 @@ class TrajectoryPolicyV2:
             evidence, record = self.history.gate([r.model_id for r in ranked])
             if evidence:
                 ranked, rejected = _rank(evidence)
+            elif record.get("reason") in {"history_timeout", "history_unavailable"}:
+                # Fail open without letting a transient learning-read failure
+                # resurrect an old curated role preference. Current provider
+                # price is observed catalog data; the legacy hint is advisory.
+                ranked, rejected = _rank(None, prefer_price_over_hint=True)
+                record["fallback_ranking"] = "price_before_curated_hint"
         return ranked, rejected, record
 
     def _pin_for(self, requirement: str, pins: Mapping[str, str]) -> str | None:
