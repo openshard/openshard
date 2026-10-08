@@ -1,10 +1,10 @@
 """v0.4.4 Phase 1/2 -- global Receipt identity.
 
-``shard_id`` is ``shard-YYYYMMDD-NNNN`` from the runs.jsonl line count and
-cannot be a global identity. ``receipt_id`` is minted at record creation,
-independently of history position, and never collides under concurrent
-session creation across threads or repositories. ``shard_id`` keeps its
-historic meaning and old records without a ``receipt_id`` keep rendering.
+``shard_id`` is ``shard-YYYYMMDD-NNNN`` from the runs.jsonl line position
+and cannot be a global identity across repositories. Hook writers finalize that
+position under the history lock so concurrent sessions in one repository do not
+share it. ``receipt_id`` is minted independently at record creation and remains
+the global Receipt identity. Old records without a ``receipt_id`` keep rendering.
 """
 
 from __future__ import annotations
@@ -59,6 +59,9 @@ class TestConcurrentSessions:
         from openshard.adapters import claude_hooks as ch
 
         monkeypatch.setattr(ch, "_LOCK_TIMEOUT_SECONDS", 60.0)
+        # Force every session to mint the same provisional history-position id.
+        # The persisted id must still be finalized uniquely under runs.jsonl lock.
+        monkeypatch.setattr(ch, "_count_history_lines", lambda _repo: 0)
         repo = _make_repo(tmp_path / "repo")
         sids = [f"{i:08d}-0000-4000-8000-000000000000" for i in range(24)]
         errors: list[BaseException] = []
@@ -80,6 +83,19 @@ class TestConcurrentSessions:
         receipt_ids = [e[RECEIPT_ID_FIELD] for e in entries]
         assert all(is_receipt_id(r) for r in receipt_ids)
         assert len(set(receipt_ids)) == len(sids), "receipt_id collided under concurrent session creation"
+        shard_ids = [e["shard_id"] for e in entries]
+        assert len(set(shard_ids)) == len(sids), "shard_id collided inside one repository"
+        from openshard.history.shard_hash import verify_shard_hash
+
+        assert all(verify_shard_hash(e)["status"] == "valid" for e in entries)
+        assert all(
+            all(
+                event.get("shard_id") == entry["shard_id"]
+                for event in entry.get("events", [])
+                if isinstance(event, dict)
+            )
+            for entry in entries
+        )
 
     def test_same_history_position_in_two_repos_gives_distinct_receipt_ids(self, tmp_path):
         repo_a = _make_repo(tmp_path / "a")

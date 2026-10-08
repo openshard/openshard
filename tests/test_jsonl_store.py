@@ -21,6 +21,7 @@ from openshard.history.jsonl_store import (
     append_jsonl_with,
     history_file_lock,
     upsert_jsonl,
+    upsert_jsonl_with,
     write_jsonl,
 )
 
@@ -316,6 +317,29 @@ def test_history_file_lock_and_upsert_jsonl_accept_timeout_kwarg(tmp_path: Path)
     # Contention gone: the same calls now succeed normally.
     upsert_jsonl(path, {"n": 1}, lambda e: True, timeout=5.0)
     assert [json.loads(ln) for ln in _read_lines(path)] == [{"n": 1}]
+
+
+def test_upsert_jsonl_with_builds_from_locked_state_and_returns_written_record(tmp_path: Path) -> None:
+    path = tmp_path / "runs.jsonl"
+    path.write_text('{"id": "a", "n": 1}\n', encoding="utf-8")
+
+    written, outcome = upsert_jsonl_with(
+        path,
+        lambda lines, matched: {"id": "a", "n": int((matched or {}).get("n") or 0) + 1, "seen": len(lines)},
+        lambda entry: entry.get("id") == "a",
+    )
+    assert outcome == "replaced"
+    assert written == {"id": "a", "n": 2, "seen": 1}
+    assert [json.loads(ln) for ln in _read_lines(path)] == [written]
+
+    appended, outcome = upsert_jsonl_with(
+        path,
+        lambda lines, matched: {"id": "b", "seen": len(lines), "matched": matched is not None},
+        lambda entry: entry.get("id") == "b",
+    )
+    assert outcome == "appended"
+    assert appended == {"id": "b", "seen": 1, "matched": False}
+    assert [json.loads(ln)["id"] for ln in _read_lines(path)] == ["a", "b"]
 
 
 def test_append_jsonl_with_decides_under_the_lock(tmp_path: Path) -> None:
