@@ -42,6 +42,8 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Hook Shard identity is finalized under the history lock.** Agent hook sessions still get a provisional `shard_id` while their live Events are buffered, but the first `runs.jsonl` persistence now remints that position-derived id from the locked file state and preserves it on later folds. Concurrent sessions in one repository can no longer share a Shard id; embedded Events and the Receipt content hash are restamped with the persisted id. Cross-repository `shard_id` collisions remain expected, so `receipt_id` remains the global Receipt identity.
+
 - **Adaptive routing no longer resurrects a stale curated model preference when learning history cannot be read in time.** A `history_timeout` or `history_unavailable` still fails open and records that evidence was not used, but among otherwise-equal eligible candidates it now uses current provider price before the legacy role hint. Explicit model choices, class pins, policy/capability gates, promotion, requirement fit, supersession and price-band rules are unchanged.
 
 - Static OpenRouter price fallbacks for `z-ai/glm-5.1`, `deepseek/deepseek-v4-pro` and the retired
