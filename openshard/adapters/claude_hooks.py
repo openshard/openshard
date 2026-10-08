@@ -2353,7 +2353,8 @@ def _finalize_hook_shard_id(
                 continue
             if isinstance(parsed, dict) and isinstance(parsed.get("shard_id"), str):
                 taken.add(parsed["shard_id"])
-        timestamp = entry.get("timestamp") if isinstance(entry.get("timestamp"), str) else _now()
+        raw_timestamp = entry.get("timestamp")
+        timestamp = raw_timestamp if isinstance(raw_timestamp, str) else _now()
         index = len(existing_lines)
         final_id = _make_shard_id(timestamp, index)
         while final_id in taken:
