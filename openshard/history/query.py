@@ -510,7 +510,7 @@ def search_history(
             shard=shard,
             score=score,
             matched_fields=matched,
-            status=receipt.status,
+            status=_context_claims(receipt)[0],  # the same claim relevant_context makes
             repo=receipt.repo,
         )))
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from openshard.history.query import relevant_context
+from openshard.history.query import relevant_context, search_history
 from openshard.verification import post_session as ps
 from tests.test_cli_visibility import HOOKS_FULL, NATIVE_PASSED, _invoke, _ok, _repo
 
@@ -104,3 +104,14 @@ class TestUnchangedCases:
         assert m.status == "Passed"
         assert m.verification_status == "passed"
         assert "Verification: passed — Passed (OpenShard ran the check(s)" in ctx.context_text
+
+
+class TestSearchHistory:
+    def test_hits_carry_the_same_status_claim(self, tmp_path: Path):
+        repo = _repo(tmp_path, [HOOKS_AGENT_REPORTED, NATIVE_PASSED])
+        greet = search_history("greet", repo_path=repo)
+        assert [h.shard.shard_id for h in greet] == ["shard-hooks-agent"]
+        assert greet[0].status == "Turn completed (unverified)"  # never "Passed" for the agent's own claim
+        jwt = search_history("JWT", repo_path=repo)
+        assert [h.shard.shard_id for h in jwt] == ["shard-native-1"]
+        assert jwt[0].status == "Passed"
