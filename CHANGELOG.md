@@ -58,6 +58,15 @@ All notable changes to OpenShard are documented here.
   The hosted projection now sends exactly `effort` / `source` / `evidence` and omits the block when
   the record carries no effort. The local Receipt, `last --json` and `history --json` keep the full
   block; the hosted permission mode follows once the Platform accepts it.
+- **A capture service left over from an older OpenShard is replaced instead of kept.** The service
+  keeps the code it was started with; after `pipx upgrade openshard` the old one went on folding every
+  session until it idled out (four hours of inactivity), so the upgrade's fixes and new evidence
+  silently did not apply, and `doctor` was green. `openshard setup`, `capture start` and every
+  session-start hook now ask a service of this installation that reports another version to drain
+  and exit, then start this version's service on the usual path; hooks that arrive during the
+  swap fall back to the command client and in-process fold as for any restart. `doctor` and
+  `capture status` report a stale service (`stale_version` in `--json`). Another installation's
+  service is never touched; an unknown version on either side is never called stale.
 - The TUI's result Checks block reads the same verification truth as `openshard history`: a
   later `openshard verify` re-run or CI verdict (`1/1 passed (OpenShard re-run @ <commit>)`) wins
   over the session's own checks display, so an agent's claim is not shown as current once
