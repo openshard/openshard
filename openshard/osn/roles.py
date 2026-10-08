@@ -472,6 +472,7 @@ def run_planner_turns(
     progress: Callable[[str, dict[str, Any]], None] | None = None,
     explorer_model: str | None = None,
     decompose: bool = False,
+    steer: Callable[[int, int, str], tuple[list[str], bool]] | None = None,
 ) -> tuple[dict[str, Any] | None, RoleRun, list[AttemptUsage]]:
     """Run the planner role: a few read-only turns ending in a bounded plan.
 
@@ -485,9 +486,10 @@ def run_planner_turns(
     continues without one. ``BudgetExhausted`` propagates before any spend.
     With *explorer_model*, exploration questions the planner asks are answered
     by bounded parallel read-only workers (``openshard.osn.explore``) whose
-    usage joins the planner's and whose records are kept on the role.
+    usage joins the planner's and whose records are kept on the role. *steer*
+    uses the same turn-boundary operator notes/stop contract as the executor.
     """
-    from openshard.osn.agent_loop import run_attempt_turns
+    from openshard.osn.agent_loop import STOP_OPERATOR_STOP, run_attempt_turns
     from openshard.osn.model_provider import IterativeModelProvider
     from openshard.policy.file_mutation import FileMutationGate
 
@@ -536,10 +538,13 @@ def run_planner_turns(
         gate=FileMutationGate(), verify=_no_verification, budget=None, previous_failure=None,
         blocked_seen=[], changed_so_far=[], max_turns=max_turns, max_verifications=0, progress=progress,
         role=ROLE_PLANNER, model_label=lambda: model, repo_files=repo_files, read_only=True,
-        explore_hook=_explore if explorer_model else None,
+        explore_hook=_explore if explorer_model else None, steer=steer,
     )
     plan = parse_plan(outcome.plan)
-    if outcome.stop == "provider_error":
+    if outcome.stop == STOP_OPERATOR_STOP:
+        status, reason = STATUS_FAILED, STOP_OPERATOR_STOP
+        plan = None
+    elif outcome.stop == "provider_error":
         status, reason = STATUS_FAILED, f"provider_error:{outcome.error_class}"
     elif plan is None:
         status, reason = STATUS_FAILED, "no_plan_returned" if outcome.plan is None else "plan_unusable"
