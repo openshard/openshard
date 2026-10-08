@@ -53,6 +53,11 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **A Ctrl-C inside one OSN worker cancels the run from that worker's thread.** `run_workers`
+  set the cancel flag only once the interrupt reached the main thread; on a loaded machine the
+  pool thread had already started the next queued worker and its first model call by then. The
+  interrupted worker now sets the flag itself before re-raising, so a queued worker never starts a
+  turn after an interrupt (seen as a rare CI failure of the keyboard-interrupt test).
 - **A capture service left over from an older OpenShard is replaced instead of kept.** The service
   keeps the code it was started with; after `pipx upgrade openshard` the old one went on folding every
   session until it idled out (four hours of inactivity), so the upgrade's fixes and new evidence
