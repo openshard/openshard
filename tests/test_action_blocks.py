@@ -373,3 +373,27 @@ def test_render_result_section_all_sentinel_values_returns_empty():
 def test_render_result_section_ends_with_newline():
     result = render_result_section(_make_receipt())
     assert result.endswith("\n")
+
+
+# ---------------------------------------------------------------------------
+# render_result_section: the Checks block reads the shared verification truth
+# ---------------------------------------------------------------------------
+
+
+def test_result_section_checks_prefer_a_later_openshard_rerun(tmp_path):
+    from openshard.history.query import recent_shards
+    from openshard.tui.action_blocks import render_result_section
+    from openshard.verification import post_session as ps
+    from tests.test_cli_visibility import HOOKS_FULL, _repo
+
+    repo = _repo(tmp_path, [HOOKS_FULL])
+    before = render_result_section(recent_shards(repo_path=repo).items[0].receipt)
+    assert "Checks" not in before  # the session's own display is "Not run"
+    planned = ps.plan_checks(repo, {"verification_commands": [["python", "-m", "pytest"]]}, HOOKS_FULL)
+    tree = ps.TreeState(head="59f31c55f399" + "0" * 28, dirty=False, tracked_dirty=False)
+    ps.record_attestation(repo, ps.build_attestation(
+        HOOKS_FULL, [ps.CheckRun(planned[0], "passed", exit_code=0)], before=tree, after=tree,
+        started_at="2026-10-08T07:15:00Z", completed_at="2026-10-08T07:15:01Z",
+    ))
+    after = render_result_section(recent_shards(repo_path=repo).items[0].receipt)
+    assert "Checks" in after and "1/1 passed (OpenShard re-run @ 59f31c55f399)" in after

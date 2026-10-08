@@ -42,6 +42,10 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- The TUI's result Checks block reads the same verification truth as `openshard history`: a
+  later `openshard verify` re-run or CI verdict (`1/1 passed (OpenShard re-run @ <commit>)`) wins
+  over the session's own checks display, so an agent's claim is not shown as current once
+  OpenShard has re-run the checks.
 - **`openshard setup` keeps the repository's `.openshard/` runtime state out of git.** Receipts
   (`runs.jsonl`), verification attestations, live session buffers, learning caches and locks are
   per-clone state; after the first session a fresh setup left `git status` showing `?? .openshard/`

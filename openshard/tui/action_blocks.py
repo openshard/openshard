@@ -109,6 +109,21 @@ def render_evidence_section(evidence: list[FileEvidence]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _checks_text(receipt: ShardReceipt) -> str | None:
+    """The checks line: a later OpenShard re-run or CI verdict wins over the session's own display.
+
+    The same rule `openshard history` rows use (``verification_truth.checks_row_label``),
+    so the TUI never shows an agent's claim as current once OpenShard has re-run the checks.
+    """
+    from openshard.history.verification_truth import checks_row_label, interpret_receipt
+
+    try:
+        later = checks_row_label(interpret_receipt(receipt))
+    except Exception:
+        later = None
+    return later or receipt.checks_display
+
+
 def render_result_section(receipt: ShardReceipt) -> str:
     rows: list[str] = []
 
@@ -121,8 +136,9 @@ def render_result_section(receipt: ShardReceipt) -> str:
     if receipt.approval and receipt.approval not in _NOT_RECORDED:
         rows.append(render_action_block(f"Approval  {receipt.approval}"))
 
-    if receipt.checks_display and receipt.checks_display not in _NOT_RECORDED:
-        rows.append(render_action_block("Checks", receipt.checks_display))
+    checks = _checks_text(receipt)
+    if checks and checks not in _NOT_RECORDED:
+        rows.append(render_action_block("Checks", checks))
 
     if receipt.shard_id:
         rows.append(render_action_block("Receipt", receipt.shard_id))
