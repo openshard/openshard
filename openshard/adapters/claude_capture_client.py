@@ -258,9 +258,28 @@ def _request(
     return int(parts[1]), raw[header_end + 4:]
 
 
-def health(port: int, *, timeout: float = 1.0) -> dict | None:
-    """The service's health document if an OpenShard capture service answers on *port*."""
-    result = _request("GET", port, HEALTH_PATH, timeout=timeout)
+def health(
+    port: int,
+    *,
+    timeout: float = 1.0,
+    env: dict | os._Environ | None = None,
+    credential: bool = False,
+) -> dict | None:
+    """The service's health document if an OpenShard capture service answers on *port*.
+
+    With *credential*, this home's capture token is presented on the
+    request and the document says whether the service accepts it
+    (``credential``: ``accepted`` / ``refused``; absent from a service too
+    old to answer). No token is created here (read-only callers such as
+    ``doctor`` rely on that); without one there is nothing to compare and
+    the document comes back as without the flag. See :func:`service_is_ours`.
+    """
+    headers: dict[str, str] | None = None
+    if credential:
+        token = _auth.load_token(env)
+        if token:
+            headers = {_auth.TOKEN_HEADER: token}
+    result = _request("GET", port, HEALTH_PATH, headers=headers, timeout=timeout)
     if result is None or result[0] != 200:
         return None
     try:
@@ -270,6 +289,39 @@ def health(port: int, *, timeout: float = 1.0) -> dict | None:
     if not isinstance(data, dict) or data.get("service") != SERVICE_NAME:
         return None
     return data
+
+
+def service_is_ours(doc: dict | None, env: dict | os._Environ | None = None) -> bool | None:
+    """Whether the service that answered a credential-carrying :func:`health` call is this installation's.
+
+    ``True``: it accepts this home's capture token (``credential`` =
+    ``accepted``), so the hooks and plugin files written for it will be
+    accepted too. ``False``: it refused the token -- an OpenShard service
+    started from another ``OPENSHARD_HOME`` or user account holds the port
+    and would refuse every event of ours (``401``) while looking perfectly
+    healthy, so it must never be adopted. A service older than that field
+    is ours only when this home's state file names its ``instance_id`` (the
+    file a service writes into its own home when it starts); otherwise the
+    answer is ``None``: nothing proves it shares our token, and it is not
+    adopted either.
+    """
+    if not isinstance(doc, dict):
+        return None
+    answer = doc.get("credential")
+    if answer == "accepted":
+        return True
+    if answer == "refused":
+        return False
+    state = read_state(env)
+    instance = doc.get("instance_id")
+    if state and isinstance(instance, str) and instance and state.get("instance_id") == instance:
+        return True
+    return None
+
+
+def _usable_service(port: int, env: dict | os._Environ | None) -> bool:
+    """An OpenShard service answers on *port* and is provably this installation's."""
+    return service_is_ours(health(port, env=env, credential=True), env) is True
 
 
 def _auth_headers(env: dict | os._Environ | None, project_dir: str | None) -> dict[str, str]:
@@ -449,7 +501,7 @@ def _spawn_once_and_wait(env: dict | os._Environ, *, wait_seconds: float) -> tup
     ``_SPAWN_COOLDOWN_SECONDS`` for the *cross-call* throttle instead.
     """
     port = resolve_port(env)
-    if health(port) is not None:
+    if _usable_service(port, env):
         return port, "running"
     if _in_cooldown(env):
         return None, "unavailable"
@@ -458,8 +510,11 @@ def _spawn_once_and_wait(env: dict | os._Environ, *, wait_seconds: float) -> tup
         return None, "unavailable"
     deadline = time.monotonic() + max(0.0, wait_seconds)
     while True:
+        # Until our child publishes its state file, resolve_port may still
+        # name a port another installation's service answers on; only a
+        # service that takes our token counts as the one we started.
         port = resolve_port(env)
-        if health(port) is not None:
+        if _usable_service(port, env):
             _clear_backoff(env)
             return port, "started"
         if time.monotonic() >= deadline:
@@ -546,10 +601,16 @@ def ensure_service(
     env = os.environ if env is None else env
     if disabled(env):
         return None, "disabled"
+    # A healthy-looking OpenShard service is adopted only when it takes this
+    # home's capture token. One started from another OPENSHARD_HOME or user
+    # account (its token differs) would answer /health and then refuse every
+    # hook we configure for it, silently losing the whole session; such a
+    # service is treated like any other program holding the port, and ours
+    # starts on the next one (see the service's _bind).
     port = resolve_port(env)
-    if health(port) is not None:
+    if _usable_service(port, env):
         return port, "running"
-    if pinned_port(env) is None and port != DEFAULT_PORT and health(DEFAULT_PORT) is not None:
+    if pinned_port(env) is None and port != DEFAULT_PORT and _usable_service(DEFAULT_PORT, env):
         return DEFAULT_PORT, "running"
     if env.get("OPENSHARD_CAPTURE_NO_SPAWN"):
         return None, "unavailable"
@@ -558,7 +619,7 @@ def ensure_service(
             # Someone else is already deciding; converge on their result
             # with one more bounded look rather than racing a second spawn.
             port = resolve_port(env)
-            return (port, "running") if health(port) is not None else (None, "unavailable")
+            return (port, "running") if _usable_service(port, env) else (None, "unavailable")
         return _spawn_once_and_wait(env, wait_seconds=wait_seconds)
 
 
@@ -581,7 +642,7 @@ def maybe_spawn_service(
     env = os.environ if env is None else env
     if disabled(env) or env.get("OPENSHARD_CAPTURE_NO_SPAWN"):
         return
-    if health(resolve_port(env)) is not None:
+    if _usable_service(resolve_port(env), env):
         return
     with _start_lock(env, timeout=lock_wait_seconds) as acquired:
         if not acquired:
@@ -593,9 +654,11 @@ def request_shutdown(env: dict | os._Environ | None = None, *, wait_seconds: flo
     """Ask a running service to drain and exit. True when it is gone afterwards."""
     env = os.environ if env is None else env
     port = resolve_port(env)
-    doc = health(port)
+    doc = health(port, env=env, credential=True)
     if doc is None:
         return True
+    if service_is_ours(doc, env) is False:
+        return False  # another installation's service: not ours to stop, and it would refuse anyway
     body = json.dumps({"instance_id": doc.get("instance_id")}).encode("utf-8")
     _request("POST", port, SHUTDOWN_PATH, body, _auth_headers(env, None), timeout=2.0)
     deadline = time.monotonic() + wait_seconds
@@ -822,7 +885,7 @@ def run_claude_watchdog(
         return "ignored"
     try:
         port = resolve_port(env)
-        if health(port) is not None and _claude_http_path_ready(raw, env, port):
+        if _usable_service(port, env) and _claude_http_path_ready(raw, env, port):
             return "healthy"
     except Exception:
         pass
@@ -831,7 +894,7 @@ def run_claude_watchdog(
     if label == "forwarded":
         try:
             port = resolve_port(env)
-            if health(port) is not None:
+            if _usable_service(port, env):
                 _heal_claude_hook_config(raw, env, desired_port=port)
         except Exception:
             pass

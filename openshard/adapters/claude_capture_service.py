@@ -1004,9 +1004,34 @@ class _Handler(BaseHTTPRequestHandler):
         self.server.touch()
         path, _ = self._path_and_query()
         if path == client.HEALTH_PATH:
-            self._send(200, json.dumps(self.server.health_document()).encode("utf-8"))
+            doc = self.server.health_document()
+            credential = self._health_credential()
+            if credential is not None:
+                doc["credential"] = credential
+            self._send(200, json.dumps(doc).encode("utf-8"))
             return
         self._send(404, b'{"error":"not found"}')
+
+    def _health_credential(self) -> str | None:
+        """``accepted`` / ``refused`` for a capture token presented on ``/health``, else None.
+
+        This is how a client of ours tells *its* service from another
+        OpenShard service on the same port (one started from a different
+        ``OPENSHARD_HOME`` or user account, whose token differs): a service
+        that refuses the client's token would refuse every hook the client
+        configures, so it must not be adopted. Only the token itself is
+        compared (``/health`` has no repository context for a capability);
+        the answer authorises nothing, and a request without the header gets
+        the document unchanged. Browser contexts are not answered (defence
+        in depth, as for every POST).
+        """
+        presented = self.headers.get(auth.TOKEN_HEADER)
+        if presented is None or auth.has_browser_headers(self.headers):
+            return None
+        token = auth.load_token(self.server.env)
+        if token is None:
+            return "refused"
+        return "accepted" if auth.verify_presented(presented, token, None) == "token" else "refused"
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib naming
         self.server.touch()
@@ -1166,7 +1191,7 @@ def _candidate_ports(env: dict | os._Environ, explicit: int | None) -> list[int]
 _FOREIGN_PORT_GRACE_SECONDS = 2.0
 
 
-def _wait_for_owner_health(port: int, *, timeout: float) -> bool:
+def _wait_for_owner_health(port: int, *, timeout: float, env: dict | os._Environ | None = None) -> bool:
     """True if an OpenShard service answers on *port* within *timeout*.
 
     A sibling that has just bound the port is briefly unable to answer
@@ -1176,11 +1201,18 @@ def _wait_for_owner_health(port: int, *, timeout: float) -> bool:
     conclude the port belongs to an unrelated foreign program, and bind the
     *next* port instead, leaving two live services. Bounded, not a retry
     loop: gives up after *timeout* seconds either way.
+
+    With *env*, an OpenShard service that answers but is not provably this
+    home's (``client.service_is_ours``: it refuses our capture token, or is
+    too old to say and our state file does not name it) does not count: it
+    is another installation's service, which would refuse every event of
+    ours too, so the caller treats the port as taken by another program.
     """
     deadline = time.monotonic() + max(0.0, timeout)
     while True:
-        if client.health(port) is not None:
-            return True
+        doc = client.health(port) if env is None else client.health(port, env=env, credential=True)
+        if doc is not None:
+            return env is None or client.service_is_ours(doc, env) is True
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.05)
@@ -1192,10 +1224,11 @@ def _bind(env: dict | os._Environ, explicit: int | None, recorder: CaptureRecord
         try:
             return CaptureServer(port, recorder, instance_id=instance_id, started_at=started_at, env=env)
         except OSError:
-            if _wait_for_owner_health(port, timeout=_FOREIGN_PORT_GRACE_SECONDS):
+            if _wait_for_owner_health(port, timeout=_FOREIGN_PORT_GRACE_SECONDS, env=env):
                 _log(f"another OpenShard capture service already listens on {port}; exiting")
                 return None
-            _log(f"port {port} is in use by another program; trying the next one")
+            _log(f"port {port} is in use by another program (or an OpenShard capture service that is "
+                 "not this installation's); trying the next one")
             continue
     return None
 
@@ -1409,7 +1442,7 @@ def service_status(env: dict | os._Environ | None = None) -> dict:
     env = os.environ if env is None else env
     state = client.read_state(env)
     port = client.resolve_port(env)
-    doc = client.health(port)
+    doc = client.health(port, env=env, credential=True)
     stale_state = bool(state) and doc is None and not _pid_alive((state or {}).get("pid"))
     result: dict = {
         "running": doc is not None,
@@ -1419,9 +1452,17 @@ def service_status(env: dict | os._Environ | None = None) -> dict:
         "default_port": DEFAULT_PORT,
     }
     if doc is not None:
+        ours = client.service_is_ours(doc, env)
         result.update({
             "pid": doc.get("pid"),
             "instance_id": doc.get("instance_id"),
+            # "accepted": it takes this home's capture token (or this home's
+            # state file names it), so the hooks setup writes will be
+            # accepted too; "refused": another installation's service
+            # (different OPENSHARD_HOME or user) holds the port and would
+            # refuse every event; "unknown": too old to answer and not named
+            # by this home's state file -- not adopted either.
+            "credential": "accepted" if ours else "refused" if ours is False else "unknown",
             "version": doc.get("version"),
             "uptime_seconds": doc.get("uptime_seconds"),
             "pending": doc.get("pending"),
@@ -1441,6 +1482,11 @@ def stop_service(env: dict | os._Environ | None = None, *, wait_seconds: float =
     """
     env = os.environ if env is None else env
     before = service_status(env)
+    if before.get("credential") == "refused":
+        # Not ours to stop: another installation's service holds the port.
+        # Its token is not ours, so a shutdown request would be refused
+        # anyway; say so instead of reporting a drain that never happens.
+        return {"was_running": False, "stopped": True, "port": before.get("port"), "foreign": True}
     stopped = client.request_shutdown(env, wait_seconds=wait_seconds) if before.get("running") else True
     if stopped:
         state = client.read_state(env)

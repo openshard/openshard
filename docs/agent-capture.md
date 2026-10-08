@@ -82,6 +82,24 @@ the in-process fallback fold still records the current one). `openshard
 doctor` reports Claude hooks and OpenCode plugins with a missing or stale
 credential and shows the service's `refused` counters.
 
+**Which service is ours.** Only a service that shares this installation's
+token is ever adopted. Every client of ours (`openshard setup`, the hook
+commands, the status line, `doctor`, `capture status`) presents the token on
+`GET /health`, and the service answers `credential: accepted` or `refused`
+(the field is absent without the header, in a browser context, and from a
+service older than it; a service that cannot answer counts as ours only when
+this home's state file names its `instance_id`). A service that answers but
+is not provably ours -- one started from another `OPENSHARD_HOME` or by
+another user account on the same machine -- is treated exactly like any
+other program holding the port: `setup` and the hooks start this
+installation's own service, which binds the next port in the fallback range
+(`claude-capture.log` says why), and the hook entries are written for that
+port. Before this, such a service was adopted on the strength of `/health`
+alone and then refused every event with `401` while `setup` and `doctor`
+reported ready. `doctor` and `capture status` now report a foreign service
+on the expected port (`credential: refused` / `unknown` in `--json`), and
+`capture stop` does not try to stop one.
+
 **Agents stay fail-open.** A refused or unreachable service never blocks
 the agent: command hooks exit 0 (Cursor still receives its decision reply),
 HTTP hook failures are non-blocking in Claude Code, the OpenCode plugin
