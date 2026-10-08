@@ -44,7 +44,10 @@ openshard context "some task"    # what Openshard would surface for that task, a
 openshard stats                  # counts over everything recorded here
 ```
 
-These work from any subdirectory of the repository and never need a network connection or account. `openshard doctor` answers "is Openshard actually working here?", and `openshard mcp uninstall claude` removes Openshard's Claude Code configuration again (local history is never deleted).
+These work from any subdirectory of the repository and never need a network connection or account.
+The history lives in `.openshard/` inside the repository; `setup` keeps that runtime state out of
+git through the repository's local `.git/info/exclude` (only `.openshard/config.yml`, the
+verification contract, stays committable). `openshard doctor` answers "is Openshard actually working here?", and `openshard mcp uninstall claude` removes Openshard's Claude Code configuration again (local history is never deleted).
 
 Or run the TUI:
 

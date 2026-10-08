@@ -42,6 +42,14 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **`openshard setup` keeps the repository's `.openshard/` runtime state out of git.** Receipts
+  (`runs.jsonl`), verification attestations, live session buffers, learning caches and locks are
+  per-clone state; after the first session a fresh setup left `git status` showing `?? .openshard/`
+  and a `git add .` would have published the Receipts. Setup now adds `.openshard/*` to the
+  repository's local `.git/info/exclude` (documented git, never committed, exactly as it already does
+  for `.claude/settings.local.json`) with `.openshard/config.yml` re-included, so a team can still
+  commit its verification contract. A repository that already ignores the directory is left alone;
+  files git already tracks are unaffected.
 - **`openshard doctor` no longer calls a configured agent "Ready" before it has captured
   anything.** Installed hooks are structural evidence only: a hook command that never runs
   (`openshard` not on the PATH of the process that launches the agent, a sandbox that drops it, an
