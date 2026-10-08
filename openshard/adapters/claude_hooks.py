@@ -457,6 +457,11 @@ class HookPayload:
     # ``CLAUDE_CODE_ENTRYPOINT`` surface. See ``claude_agent_env``.
     agent_provider: str | None = None
     effort_level: str | None = None
+    # Claude Code's own permission mode on every hook payload (documented
+    # ``permission_mode``: default | acceptEdits | plan | bypassPermissions |
+    # dontAsk). The agent's report of the regime it ran under; OpenShard
+    # observes it and never enforces it.
+    permission_mode: str | None = None
     agent_surface: str | None = None
 
 
@@ -569,6 +574,14 @@ def _effort_level(value: object) -> str | None:
     return value if isinstance(value, str) and value in {"low", "medium", "high", "xhigh", "max"} else None
 
 
+PERMISSION_MODES: frozenset[str] = frozenset({"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"})
+
+
+def _permission_mode(value: object) -> str | None:
+    """A documented Claude Code permission mode, else None (never a free-form string)."""
+    return value if isinstance(value, str) and value in PERMISSION_MODES else None
+
+
 def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None = None) -> HookPayload | None:
     """Pick the supported fields out of a decoded hook payload.
 
@@ -633,6 +646,7 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
             data.get("to_model") if event == EVENT_MODEL_SWITCH else None, 200)),
         effort_level=_effort_level(data.get("effort", {}).get("level"))
         if isinstance(data.get("effort"), dict) else None,
+        permission_mode=_permission_mode(data.get("permission_mode")),
     )
 
 
@@ -1435,6 +1449,7 @@ class ReducedHookPayload:
     transcript_path: str | None = None  # see HookPayload.transcript_path
     agent_provider: str | None = None  # see HookPayload.agent_provider
     effort_level: str | None = None
+    permission_mode: str | None = None  # see HookPayload.permission_mode
     agent_surface: str | None = None
 
     def to_dict(self) -> dict:
@@ -1484,6 +1499,8 @@ class ReducedHookPayload:
             data["agent_provider"] = self.agent_provider
         if self.effort_level is not None:
             data["effort_level"] = self.effort_level
+        if self.permission_mode is not None:
+            data["permission_mode"] = self.permission_mode
         if self.agent_surface is not None:
             data["agent_surface"] = self.agent_surface
         return data
@@ -1550,6 +1567,7 @@ class ReducedHookPayload:
             transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id, agent=agent_key),
             agent_provider=_agent_provider_or_none(data.get("agent_provider")),
             effort_level=_effort_level(data.get("effort_level")),
+            permission_mode=_permission_mode(data.get("permission_mode")),
             agent_surface=_agent_surface_or_none(data.get("agent_surface")),
         )
 
@@ -1613,6 +1631,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         transcript_path=_valid_transcript_path(payload.transcript_path, payload.session_id, agent=payload.agent),
         agent_provider=_agent_provider_or_none(payload.agent_provider),
         effort_level=_effort_level(payload.effort_level),
+        permission_mode=_permission_mode(payload.permission_mode),
         agent_surface=_agent_surface_or_none(payload.agent_surface),
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT:
@@ -1994,6 +2013,9 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "effort_level": _effort_level(capture.get("effort_level")),
         "effort_levels_seen": [v for v in capture.get("effort_levels_seen", []) if _effort_level(v)]
         if isinstance(capture.get("effort_levels_seen"), list) else [],
+        "permission_mode": _permission_mode(capture.get("permission_mode")),
+        "permission_modes_seen": [v for v in capture.get("permission_modes_seen", []) if _permission_mode(v)]
+        if isinstance(capture.get("permission_modes_seen"), list) else [],
         "usage_by_key": usage_by_key,
         "usage_provenance": next(
             (v for v in (entry.get("tokens_provenance"), entry.get("cost_provenance")) if isinstance(v, str)),
@@ -3601,6 +3623,12 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         entry["capture"]["effort_level"] = buf["effort_level"]
         entry["capture"]["effort_source"] = "claude_hook"
         entry["capture"]["effort_levels_seen"] = list(buf.get("effort_levels_seen", []))
+    if _permission_mode(buf.get("permission_mode")):
+        # The permission regime Claude Code itself reported running under,
+        # last seen and every distinct one in order: observed, never enforced.
+        entry["capture"]["permission_mode"] = buf["permission_mode"]
+        entry["capture"]["permission_mode_source"] = "claude_hook"
+        entry["capture"]["permission_modes_seen"] = list(buf.get("permission_modes_seen", []))
     if raw_usage:
         # Per-message usage memory (OpenCode), bounded; lets a buffer rebuilt
         # from this record keep deduplicating re-reported messages.
@@ -3820,6 +3848,11 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         levels = buf.setdefault("effort_levels_seen", [])
         if payload.effort_level not in levels:
             levels.append(payload.effort_level)
+    if payload.agent == AGENT_CLAUDE_CODE and payload.permission_mode:
+        buf["permission_mode"] = payload.permission_mode
+        modes = buf.setdefault("permission_modes_seen", [])
+        if payload.permission_mode not in modes and len(modes) < len(PERMISSION_MODES):
+            modes.append(payload.permission_mode)
     if payload.model_id:
         # The agent's own hook stream names the model (Codex: every payload;
         # OpenCode: the user message's selected model). Recorded as observed.

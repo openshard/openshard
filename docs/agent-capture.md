@@ -203,6 +203,17 @@ It is never inferred from prompt similarity, timing, or
 Requested by / Approved by are not recorded locally and are never inferred
 from git config or the OS user; only the executing agent is known.
 
+**Permission mode (Claude Code).** Every Claude Code hook payload carries
+`permission_mode`, the regime the agent ran under by its own report
+(`default`, `acceptEdits`, `plan`, `bypassPermissions`, `dontAsk`). Capture
+keeps the last one and every distinct one in order
+(`capture.permission_mode`, `permission_modes_seen`), the Receipt's
+`runtime_configuration` evidence carries it as `agent_reported`, and the
+compact Receipt shows a `Permissions` row that says OpenShard did not
+enforce it. Undocumented values are never recorded. This is observation
+of an external agent's own setting; the enforced permission evidence OSN
+records for execution it controls is a different block.
+
 Nothing in the fold, the Shard model, the receipt renderer, `history`/
 `context`/`relevant_context` or the MCP server was redesigned for
 multi-agent capture. What was added is the smallest thing that lets the

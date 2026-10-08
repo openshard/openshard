@@ -126,6 +126,7 @@ def _stdout_supports_unicode() -> bool:
 _UNICODE_OK: bool = _stdout_supports_unicode()
 _SEP: str = ("━" if _UNICODE_OK else "-") * 40
 _EM: str = "—" if _UNICODE_OK else "-"
+_ARROW: str = "→" if _UNICODE_OK else "->"
 _INDENT: str = "  "
 _COL: int = 12
 
@@ -746,6 +747,25 @@ def agent_reported_suffix(receipt: ShardReceipt) -> str:
     ):
         return " (agent-reported)"
     return ""
+
+
+def permission_mode_label(receipt: ShardReceipt) -> str | None:
+    """The permission regime an external agent reported running under, or None.
+
+    ``acceptEdits (Claude Code's own permission mode, agent-reported; not
+    enforced by OpenShard)``; a session that changed mode reads ``default →
+    acceptEdits``. Only from ``runtime_configuration`` evidence a Claude hook
+    carried; OSN's own, enforced permission evidence is a different row.
+    """
+    runtime = (receipt.recorded_evidence or {}).get("runtime_configuration")
+    if not isinstance(runtime, dict):
+        return None
+    mode = runtime.get("permission_mode")
+    if not isinstance(mode, str) or not mode:
+        return None
+    seen = [m for m in (runtime.get("permission_modes_seen") or []) if isinstance(m, str) and m]
+    path = f" {_ARROW} ".join(seen) if len(seen) > 1 else mode
+    return f"{path} (Claude Code's own permission mode, agent-reported; not enforced by OpenShard)"
 
 
 def verified_label(receipt: ShardReceipt) -> str:
@@ -2365,8 +2385,11 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         _row("Risk", receipt.risk),
         _row("Sandbox", receipt.sandbox),
         _row("Approval", receipt.approval),
-        _row("Cost", receipt.cost_display),
     ]
+    _permissions = permission_mode_label(receipt)
+    if _permissions:
+        lines.append(_row("Permissions", _permissions))
+    lines.append(_row("Cost", receipt.cost_display))
     if receipt.tokens_input is not None or receipt.tokens_output is not None:
         _tok_in = _format_token_count(receipt.tokens_input or 0)
         _tok_out = _format_token_count(receipt.tokens_output or 0)
