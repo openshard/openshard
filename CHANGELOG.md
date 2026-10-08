@@ -52,6 +52,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Hosted sync keeps `runtime_configuration` within the Platform's contract.** The Platform's
+  receipt-sync schema declares that block as a strict object with `effort` required; the permission
+  mode added to the local block would have made the Platform refuse every Claude Code Receipt whole.
+  The hosted projection now sends exactly `effort` / `source` / `evidence` and omits the block when
+  the record carries no effort. The local Receipt, `last --json` and `history --json` keep the full
+  block; the hosted permission mode follows once the Platform accepts it.
 - **A capture service left over from an older OpenShard is replaced instead of kept.** The service
   keeps the code it was started with; after `pipx upgrade openshard` the old one went on folding every
   session until it idled out (four hours of inactivity), so the upgrade's fixes and new evidence
