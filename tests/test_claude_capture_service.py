@@ -1038,3 +1038,141 @@ class TestDrainWithPendingRetry:
         elapsed = time.monotonic() - t0
         assert elapsed < 3.0, elapsed
         assert not recorder._worker.is_alive()
+
+
+# ---------------------------------------------------------------------------
+# Another installation's service on our port (different OPENSHARD_HOME / user)
+# ---------------------------------------------------------------------------
+
+
+def _two_free_consecutive_ports() -> int:
+    for _ in range(50):
+        base = _free_port()
+        try:
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", base + 1))
+        except OSError:
+            continue
+        return base
+    raise RuntimeError("no two consecutive free ports")
+
+
+class TestForeignService:
+    """A healthy-looking OpenShard service that does not share our token is never adopted.
+
+    Before this, ``openshard setup`` wrote hooks for whichever OpenShard
+    service answered ``/health`` on the port; one started from another
+    ``OPENSHARD_HOME`` (or by another user) then refused every event with
+    ``401`` while setup and doctor reported ready, and the whole session's
+    evidence was lost.
+    """
+
+    @staticmethod
+    def _other_home(capture_env: dict, tmp_path: Path) -> dict:
+        """Another installation's home, with its own capture token (as setup creates one)."""
+        from openshard.adapters import capture_auth
+
+        env = {**capture_env, "OPENSHARD_HOME": str(tmp_path / "other-home")}
+        Path(env["OPENSHARD_HOME"]).mkdir(parents=True, exist_ok=True)
+        assert capture_auth.ensure_token(env) != capture_auth.ensure_token(capture_env)
+        return env
+
+    def test_ensure_service_does_not_adopt_another_homes_service(self, service, capture_env, tmp_path):
+        other = self._other_home(capture_env, tmp_path)
+        # Our state file (a stale one, or a pinned port) points at their service.
+        Path(client.state_path(other)).write_text(json.dumps({"port": service.port}), encoding="utf-8")
+        assert client.resolve_port(other) == service.port
+        with patch.object(client, "spawn_service") as mock_spawn:
+            assert client.ensure_service(other) == (None, "unavailable")  # NO_SPAWN: nothing to adopt
+            client.maybe_spawn_service(other)
+        mock_spawn.assert_not_called()
+        # Our own home still adopts it.
+        assert client.ensure_service(capture_env) == (service.port, "running")
+        # Pinned to their port: the same answer, never "running".
+        pinned = {**other, "OPENSHARD_CAPTURE_PORT": str(service.port)}
+        assert client.ensure_service(pinned) == (None, "unavailable")
+
+    def test_service_status_and_stop_report_a_foreign_service(self, service, capture_env, tmp_path):
+        other = self._other_home(capture_env, tmp_path)
+        Path(client.state_path(other)).write_text(json.dumps({"port": service.port}), encoding="utf-8")
+        status = svc.service_status(other)
+        assert status["running"] is True and status["port"] == service.port
+        assert status["credential"] == "refused"
+        assert svc.service_status(capture_env)["credential"] == "accepted"
+        # Not ours to stop: it stays up and the result says why.
+        result = svc.stop_service(other, wait_seconds=5)
+        assert result == {"was_running": False, "stopped": True, "port": service.port, "foreign": True}
+        assert client.health(service.port) is not None
+        assert not service.server.shutdown_requested.is_set()
+
+    def test_a_service_of_another_home_moves_to_the_next_port(self, capture_env, tmp_path, monkeypatch):
+        base = _two_free_consecutive_ports()
+        monkeypatch.setattr(client, "DEFAULT_PORT", base)
+        monkeypatch.setattr(svc, "DEFAULT_PORT", base)
+        monkeypatch.setattr(svc, "_FOREIGN_PORT_GRACE_SECONDS", 0.5)
+        theirs = _Service(capture_env, port=base)
+        try:
+            assert theirs.port == base
+            other = self._other_home(capture_env, tmp_path)
+            # Our home: no state file, so the default port is tried first;
+            # the occupant answers /health but refuses our token.
+            ours = _Service(other, port=None)
+            try:
+                assert ours.port == base + 1
+                assert client.resolve_port(other) == base + 1
+                assert client.ensure_service(other) == (base + 1, "running")
+                assert client.ensure_service(capture_env) == (base, "running")
+                log = Path(client.log_path(other)).read_text(encoding="utf-8") if Path(
+                    client.log_path(other)).exists() else ""
+                assert "already listens" not in log
+            finally:
+                ours.stop()
+        finally:
+            theirs.stop()
+
+    def test_a_sibling_of_our_own_home_still_exits_instead_of_moving(self, capture_env, monkeypatch):
+        base = _two_free_consecutive_ports()
+        monkeypatch.setattr(client, "DEFAULT_PORT", base)
+        monkeypatch.setattr(svc, "DEFAULT_PORT", base)
+        monkeypatch.setattr(svc, "_FOREIGN_PORT_GRACE_SECONDS", 0.5)
+        first = _Service(capture_env, port=base)
+        try:
+            box: list = []
+            exit_code: list[int] = []
+            thread = threading.Thread(
+                target=lambda: exit_code.append(svc.serve(port=None, env=capture_env, server_box=box)),
+                daemon=True,
+            )
+            thread.start()
+            thread.join(30)
+            assert not thread.is_alive()
+            assert exit_code == [0] and box == []  # a sibling is running: nothing bound, clean exit
+            assert client.health(base + 1) is None
+            assert client.ensure_service(capture_env) == (base, "running")
+        finally:
+            first.stop()
+
+    def test_cli_reports_a_foreign_service(self, service, capture_env, tmp_path):
+        from click.testing import CliRunner
+
+        from openshard.cli.main import cli
+
+        other = self._other_home(capture_env, tmp_path)
+        Path(client.state_path(other)).write_text(json.dumps({"port": service.port}), encoding="utf-8")
+        result = CliRunner().invoke(cli, ["capture", "status"], env=other)
+        assert result.exit_code == 0, result.output
+        assert "not this installation's" in result.output
+        assert "another OpenShard home or user account" in result.output
+        assert "openshard setup" in result.output
+        result = CliRunner().invoke(cli, ["capture", "stop"], env=other)
+        assert result.exit_code == 0, result.output
+        assert "not stopped" in result.output
+        assert client.health(service.port) is not None
+        result = CliRunner().invoke(cli, ["doctor"], env=other)
+        assert result.exit_code == 0, result.output
+        assert "✗ Capture service (the service on 127.0.0.1:" in result.output
+        assert "does not accept this installation's capture token" in result.output
+        assert "✓ Capture service" not in result.output
+        # Our own home sees it as its own.
+        result = CliRunner().invoke(cli, ["doctor"], env=dict(capture_env))
+        assert "✓ Capture service" in result.output, result.output
