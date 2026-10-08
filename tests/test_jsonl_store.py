@@ -341,6 +341,7 @@ def test_upsert_jsonl_with_builds_from_locked_state_and_returns_written_record(t
     assert appended == {"id": "b", "seen": 1, "matched": False}
     assert [json.loads(ln)["id"] for ln in _read_lines(path)] == ["a", "b"]
 
+
 def test_append_jsonl_with_decides_under_the_lock(tmp_path: Path) -> None:
     """A record derived from the file's current length never collides across threads."""
     path = tmp_path / "runs.jsonl"
