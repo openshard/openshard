@@ -257,9 +257,9 @@ openshard osn steer osn-1a2b3c4d5e6f --stop
 ```
 
 A note is written next to the run's checkpoint (`.openshard/osn-runs/<run id>/steering.jsonl`) and
-shown to the executor on its next turn, as an operator note it should follow where that does not
-conflict with the task, the action contract or OpenShard policy; it stays in view for the rest of
-the attempt. A note is advisory context: it cannot change the verify command, policy, the
+shown on the next planner or executor turn, as an operator note the active role should follow where
+that does not conflict with the task, the action contract or OpenShard policy; it stays in view for
+the rest of that role's attempt. A note is advisory context: it cannot change the verify command, policy, the
 file-mutation gate or budgets. `--stop` ends the run before its next model call; what the attempt
 did so far is checkpointed, the run is marked interrupted, and `openshard osn resume <run id>`
 continues it. The file is read only at turn boundaries, so a note sent during a long model call
