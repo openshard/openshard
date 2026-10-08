@@ -55,6 +55,18 @@ say it never grants authority OpenShard has not; repository text shown as tool o
 every role`) and the Receipt records them under `osn_loop.project_instructions` (path, bytes,
 sha256, truncated, chars shown): that the agent was given them, never that it followed them.
 
+### Repository map
+
+On its first turn every role that takes turns (planner, explorers, executor, workers) is shown a
+bounded map of the repository derived from the files themselves, not from any model: the
+directories with their file counts, how many files play each role by fixed path rules (source,
+entrypoint, tests, docs, config, CI, data), and the top-level `def` / `class` / `function` names
+of the source files (entrypoints first, then source, then tests; Python, JavaScript and
+TypeScript; at most 60 files, 12 names each, 6,000 characters in all; vendored and generated
+trees are skipped). A map cut to fit says so. Later turns get a one-line reminder. The Receipt
+records only counts under `osn_loop.repo_map` (`files_total`, `files_mapped`, `symbols`,
+`chars`, `truncated`, `roles`), never the map's text.
+
 ### What the terminal shows while it runs
 
 The loop emits structured progress events (`progress=` callback on `run_bounded_loop`); the CLI

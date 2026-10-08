@@ -359,6 +359,10 @@ class IterativeModelProvider(ModelActionProvider):
     plan_context_files: list[str] = field(default_factory=list)
     # Plan files too large to inline, shown as a line-numbered outline on turn 1.
     plan_outline_files: list[str] = field(default_factory=list)
+    # The observed repository map (``openshard.osn.repo_map``): directories, file
+    # roles and top-level definitions, built once from the loop's file list on the
+    # first turn and shown on turn 1; later turns get a one-line reminder.
+    repo_map: Any | None = field(default=None, repr=False)
     _attempt_model: str | None = field(default=None, repr=False)
     _attempt_n: int = field(default=0, repr=False)
 
@@ -381,12 +385,20 @@ class IterativeModelProvider(ModelActionProvider):
         assert self._attempt_model is not None
         return self._attempt_model
 
+    def repo_map_record(self) -> dict[str, Any] | None:
+        """Counts of what the map held (never its text), for the Receipt; None before the first turn."""
+        return self.repo_map.to_record() if self.repo_map is not None else None
+
     def turn(self, state: TurnState) -> TurnResult:
         model = self._model_for_turn(state)
         learning = self._learning_for(model)
+        if self.repo_map is None:
+            from openshard.osn.repo_map import build_repo_map
+
+            self.repo_map = build_repo_map(self.repo_root, state.repo_files)
         prompt = build_turn_prompt(state, self.repo_root, [*self.context_files, *self.plan_context_files],
                                    learning=learning, plan=self.plan, outline_files=self.plan_outline_files,
-                                   instructions=self.project_instructions)
+                                   instructions=self.project_instructions, repo_map=self.repo_map.text)
         content = self._ask(state.attempt, model, prompt, learning=bool(learning), turn=state.turn)
         try:
             return parse_turn(content)
@@ -516,6 +528,7 @@ def build_turn_prompt(
     plan: dict[str, Any] | None = None,
     instructions: str | None = None,
     outline_files: list[str] | None = None,
+    repo_map: str | None = None,
 ) -> str:
     """The prompt for one turn: task, project instructions, bounded repository view, observations, constraints."""
     parts = [f"Task:\n{state.task}\n"]
@@ -538,6 +551,11 @@ def build_turn_prompt(
     parts.append("Repository files:\n" + "\n".join(listed))
     if len(state.repo_files) > len(listed):
         parts.append(f"... and {len(state.repo_files) - len(listed)} more files (use list_files / search_repo)")
+    if repo_map:
+        if state.turn == 1:
+            parts.append(repo_map)
+        else:
+            parts.append("Repository map shown on turn 1 (directories, roles, top-level definitions).")
     if context_files:
         if state.turn == 1:
             for rel in context_files:
