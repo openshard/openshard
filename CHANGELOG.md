@@ -15,7 +15,8 @@ All notable changes to OpenShard are documented here.
   `default → acceptEdits` when the mode changed during the session. Undocumented values are never
   recorded; nothing is written when the payload has no mode. This is observed authority evidence
   about an external agent, kept apart from the permission evidence OSN records for execution it
-  controls.
+  controls. The hosted Receipt carries the same block (Platform receipt-sync contract: `effort`
+  and/or `permission_mode`, closed to other keys; Platform #122).
 - `openshard osn steer <run id> "note"` adds an operator note to a running OSN run, shown on
   the next planner or executor turn; `--stop` ends the run before its next model call with the
   attempt checkpointed so `osn resume` can continue it. Notes are advisory and change no policy;
@@ -52,12 +53,6 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
-- **Hosted sync keeps `runtime_configuration` within the Platform's contract.** The Platform's
-  receipt-sync schema declares that block as a strict object with `effort` required; the permission
-  mode added to the local block would have made the Platform refuse every Claude Code Receipt whole.
-  The hosted projection now sends exactly `effort` / `source` / `evidence` and omits the block when
-  the record carries no effort. The local Receipt, `last --json` and `history --json` keep the full
-  block; the hosted permission mode follows once the Platform accepts it.
 - **A capture service left over from an older OpenShard is replaced instead of kept.** The service
   keeps the code it was started with; after `pipx upgrade openshard` the old one went on folding every
   session until it idled out (four hours of inactivity), so the upgrade's fixes and new evidence

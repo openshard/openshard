@@ -8,8 +8,10 @@ shows it on a ``Permissions`` row that says OpenShard did not enforce it.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import jsonschema
 import pytest
 from click.testing import CliRunner
 
@@ -23,9 +25,11 @@ from openshard.adapters.claude_hooks import (
 from openshard.cli.main import cli
 from openshard.history.receipt_evidence import runtime_configuration_block
 from openshard.history.shard_contract import build_shard_receipt, permission_mode_label
-from openshard.sync.envelope import receipt_payload
+from openshard.sync.envelope import build_envelope, receipt_payload
 from tests.capture_fixtures import _lines
 from tests.test_task_context_capture import SID1, _claude_docs
+
+SCHEMA_PATH = Path(__file__).parent / "fixtures" / "platform" / "receipt-sync-envelope.v1.json"
 
 
 def _drive(repo: Path, docs: list[dict]) -> dict:
@@ -50,9 +54,13 @@ class TestCapture:
             "permission_mode": "acceptEdits", "permission_modes_seen": ["acceptEdits"],
             "source": "claude_hook", "evidence": "agent_reported",
         }
-        # Hosted projection: the Platform's strict contract has no permission
-        # keys yet and requires effort, so a mode-only block is not sent.
-        assert "runtime_configuration" not in receipt_payload(entry, 1)
+        # The hosted projection sends the same block; the Platform contract
+        # accepts a mode without an effort level and refuses unknown keys, so
+        # the envelope is checked against the contract's JSON schema.
+        assert receipt_payload(entry, 1)["runtime_configuration"] == block
+        envelope = build_envelope(entry, 1, core_version="0.5.0")
+        validator = jsonschema.Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
+        assert not list(validator.iter_errors(envelope)), [e.message for e in validator.iter_errors(envelope)][:3]
         # No enforced-permission evidence is invented for an external agent.
         assert "permission_evidence" not in entry
 

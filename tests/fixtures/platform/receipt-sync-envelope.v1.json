@@ -585,6 +585,30 @@
                 "max"
               ]
             },
+            "permission_mode": {
+              "type": "string",
+              "enum": [
+                "default",
+                "acceptEdits",
+                "plan",
+                "bypassPermissions",
+                "dontAsk"
+              ]
+            },
+            "permission_modes_seen": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "default",
+                  "acceptEdits",
+                  "plan",
+                  "bypassPermissions",
+                  "dontAsk"
+                ]
+              }
+            },
             "source": {
               "type": "string",
               "const": "claude_hook"
@@ -595,7 +619,6 @@
             }
           },
           "required": [
-            "effort",
             "source",
             "evidence"
           ],
