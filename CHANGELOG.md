@@ -6,6 +6,10 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- `openshard osn steer <run id> "note"` adds an operator note to a running OSN run, shown to
+  the executor on its next turn; `--stop` ends the run before its next model call with the
+  attempt checkpointed so `osn resume` can continue it. Notes are advisory and change no policy;
+  the Receipt records that a note was shown (attempt, turn, size, hash), never its text.
 - Every OSN role that takes turns is shown, on its first turn, a bounded map of the
   repository observed from its files: directories with counts, file roles by fixed path
   rules, and the top-level definitions of source files (at most 60 files, 12 names each,

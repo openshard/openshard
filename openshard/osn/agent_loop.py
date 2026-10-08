@@ -85,6 +85,7 @@ STOP_FINISHED = "finished"
 STOP_BUDGET = "budget"
 STOP_PROVIDER_ERROR = "provider_error"
 STOP_CANCELLED = "cancelled"  # the run was cancelled (Ctrl-C) before this turn started
+STOP_OPERATOR_STOP = "operator_stop"  # the operator asked for a stop (osn steer --stop) before this turn started
 STOP_VERIFIER_TAINTED = "verifier_modified_files"
 STOP_VERIFIER_TIMEOUT = "verifier_timeout"
 STOP_VERIFIER_SETUP = "verifier_setup_failed"
@@ -131,6 +132,8 @@ class TurnState:
     verifications_left: int
     writes_applied: int
     last_verification: str | None = None  # "passed" | "failed (exit 1)" | None
+    # Operator notes added during the run (``osn steer``), as (turn shown, text); kept for the attempt.
+    operator_notes: list[tuple[int, str]] = field(default_factory=list)
 
 
 class TurnProvider(Protocol):
@@ -326,6 +329,7 @@ def run_attempt_turns(
     read_only: bool = False,
     explore_hook: Callable[[list[dict[str, Any]], int], tuple[list[Observation], list[dict[str, Any]]]] | None = None,
     cancel: threading.Event | None = None,
+    steer: Callable[[int, int, str], tuple[list[str], bool]] | None = None,
 ) -> AttemptOutcome:
     """Run one attempt of the iterative loop inside *sandbox*. Never touches *repo_root*.
 
@@ -333,6 +337,10 @@ def run_attempt_turns(
     attempt's verification, retry and the Receipt status from it. With
     ``read_only`` (the planner role) every write and verification request is
     refused as invalid and reported back; nothing in the copy changes.
+    ``steer`` (``openshard.osn.steering``) is asked at the start of every turn
+    for new operator notes, shown on that turn and kept for the attempt, and
+    for a stop request, which ends the attempt before the model is called
+    (``STOP_OPERATOR_STOP``).
     """
     max_turns = max(1, min(int(max_turns), MAX_TURNS_HARD_CAP))
     max_verifications = max(0, min(int(max_verifications), MAX_VERIFICATIONS_HARD_CAP))
@@ -372,6 +380,7 @@ def run_attempt_turns(
               decision=rec.decision, executed=rec.executed, ok=rec.ok, status=status,
               summary=rec.result.get("summary"))
 
+    notes: list[tuple[int, str]] = []
     for turn in range(1, max_turns + 1):
         if cancel is not None and cancel.is_set():
             # No new turn once the run is cancelled: the model call in flight (if any,
@@ -380,11 +389,23 @@ def run_attempt_turns(
             _emit(progress, "cancelled", attempt=attempt, turn=turn, role=role)
             return out
         out.turns = turn
+        if steer is not None:
+            try:
+                new_notes, stop_requested = steer(attempt, turn, role)
+            except Exception:
+                new_notes, stop_requested = [], False
+            notes.extend((turn, text) for text in new_notes)
+            if stop_requested:
+                # The operator asked for a stop: no further model call; the caller
+                # checkpoints the run as interrupted so `osn resume` can continue it.
+                out.stop = STOP_OPERATOR_STOP
+                _emit(progress, "operator_stop", attempt=attempt, turn=turn, role=role)
+                return out
         state = TurnState(
             task=task, attempt=attempt, turn=turn, max_turns=max_turns, repo_files=files,
             observations=observations, changed_files=list(changed), blocked_paths=list(blocked_seen) + out.blocked,
             previous_failure=previous_failure, verifications_left=max_verifications - out.verifications_run,
-            writes_applied=len(out.applied), last_verification=last_verification,
+            writes_applied=len(out.applied), last_verification=last_verification, operator_notes=list(notes),
         )
         _emit(progress, "turn_start", attempt=attempt, turn=turn, max_turns=max_turns, model=model_name(), role=role)
         started = time.monotonic()

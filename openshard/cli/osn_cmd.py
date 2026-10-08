@@ -518,7 +518,7 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     from openshard.cli.ingest import _repo_root
     from openshard.history.jsonl_store import append_jsonl_with
     from openshard.osn import checkpoint as ckpt
-    from openshard.osn.loop import create_isolated_copy, run_bounded_loop
+    from openshard.osn.loop import OperatorStopped, create_isolated_copy, run_bounded_loop
     from openshard.osn.model_provider import IterativeModelProvider, ModelActionProvider
     from openshard.osn.run_entry import assign_history_shard_id, build_osn_run_entry
 
@@ -755,6 +755,11 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             pass
 
     ckpt.write_checkpoint(repo_root, run_checkpoint)  # phase 'started': the run exists before any model call
+    from openshard.osn.steering import SteeringReader
+
+    steering = SteeringReader(repo_root, checkpoint_id)
+    if not machine:
+        click.echo(f"  Run     {checkpoint_id} · while it runs: openshard osn steer {checkpoint_id} \"note\" | --stop")
     started = time.monotonic()
     try:
         receipt = run_bounded_loop(
@@ -776,7 +781,20 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             blocked_write_patterns=permissions.blocked_write_paths,
             approval_write_patterns=permissions.approval_write_paths,
             blocked_command_prefixes=permissions.blocked_command_prefixes,
+            steering=steering,
         )
+    except OperatorStopped as stop:
+        _mark_interrupted("operator_stop")
+        if events is not None:
+            events("interrupted", {"run_id": checkpoint_id, "phase": run_checkpoint.phase, "reason": "operator_stop",
+                                   "attempts_done": run_checkpoint.attempts_done,
+                                   "resume_with": f"openshard osn resume {checkpoint_id}"})
+        if progress_renderer is not None:
+            progress_renderer.close()
+        click.echo(f"\nStopped by the operator before attempt {stop.attempt} turn {stop.turn} "
+                   f"({run_checkpoint.attempts_done} attempt(s) done). Resume with: openshard osn resume {checkpoint_id}",
+                   err=True)
+        raise click.Abort() from None
     except KeyboardInterrupt:
         _mark_interrupted("keyboard_interrupt")
         if events is not None:
@@ -879,6 +897,8 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
     # The observed repository map the executor was shown on its first turn: counts only.
     _map_record = getattr(action_provider, "repo_map_record", None)
     entry["osn_loop"]["repo_map"] = _map_record() if callable(_map_record) else None
+    # Operator steering during the run: notes shown (counts, hashes) and any stop; never the text.
+    entry["osn_loop"]["steering"] = steering.to_record()
     if prior_checkpoint is not None:
         prior_costs = [u.cost_usd for u in prior_usage]
         entry["osn_loop"]["resumed"] = {
@@ -1596,6 +1616,39 @@ def osn_resume(ctx, run_id, promote, commit_result, assume_yes, as_json, json_ev
         no_learning=bool(args.get("no_learning", False)), as_json=as_json, resume_from=run_id,
         json_events=json_events,
     )
+
+
+@osn_group.command("steer")
+@click.argument("run_id")
+@click.argument("note", nargs=-1)
+@click.option("--stop", "stop", is_flag=True, default=False,
+              help="Ask the run to stop before its next model call (it checkpoints and can be resumed).")
+def osn_steer(run_id, note, stop):
+    """Add a note to a running OSN run (shown to the model on its next turn), or ask it to stop."""
+    from openshard.cli.ingest import _repo_root
+    from openshard.osn import checkpoint as ckpt
+    from openshard.osn.steering import KIND_NOTE, KIND_STOP, write_steering
+
+    repo_root = _repo_root(None, False)
+    text = " ".join(note).strip()
+    if not text and not stop:
+        raise click.UsageError("Give a note or --stop.")
+    try:
+        cp = ckpt.read_checkpoint(repo_root, run_id)
+    except (OSError, ValueError, KeyError):
+        raise click.ClickException(f"no checkpointed OSN run '{run_id}' under .openshard/osn-runs/") from None
+    if cp.status != ckpt.STATUS_RUNNING:
+        raise click.ClickException(f"run {run_id} is not running ({cp.status}); nothing to steer")
+    try:
+        if text:
+            write_steering(repo_root, run_id, KIND_NOTE, text)
+            click.echo(f"Note queued for {run_id}: shown to the model on its next turn (advisory; policy unchanged).")
+        if stop:
+            write_steering(repo_root, run_id, KIND_STOP)
+            click.echo(f"Stop requested for {run_id}: it ends before its next model call and can be resumed "
+                       f"with: openshard osn resume {run_id}")
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
 
 
 @osn_group.command("runs")

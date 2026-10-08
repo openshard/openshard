@@ -247,6 +247,26 @@ usable result, ended with replies that were not valid actions, passed or failed 
 verification in its own copy, and was chosen as the winning candidate). They are advisory context
 like every other signal; routing and verification are never changed by them.
 
+## Steering a run while it runs
+
+The header prints the run id (`Run osn-…`). From another terminal:
+
+```
+openshard osn steer osn-1a2b3c4d5e6f "reuse count.count_words instead of re-implementing it"
+openshard osn steer osn-1a2b3c4d5e6f --stop
+```
+
+A note is written next to the run's checkpoint (`.openshard/osn-runs/<run id>/steering.jsonl`) and
+shown to the executor on its next turn, as an operator note it should follow where that does not
+conflict with the task, the action contract or OpenShard policy; it stays in view for the rest of
+the attempt. A note is advisory context: it cannot change the verify command, policy, the
+file-mutation gate or budgets. `--stop` ends the run before its next model call; what the attempt
+did so far is checkpointed, the run is marked interrupted, and `openshard osn resume <run id>`
+continues it. The file is read only at turn boundaries, so a note sent during a long model call
+lands on the turn after. The Receipt records under `osn_loop.steering` that a note was shown
+(attempt, turn, size, hash) and whether a stop was requested; never the text, and never that the
+model followed it.
+
 ## Checkpoints and `osn resume`
 
 Ctrl-C interrupts a run at once. Parallel workers, candidates and explorers stop at their next
