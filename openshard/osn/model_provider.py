@@ -592,6 +592,12 @@ def build_turn_prompt(
             learning if len(learning) <= MAX_LEARNING_CHARS
             else learning[:MAX_LEARNING_CHARS] + "\n</openshard_history>"
         )
+    if state.operator_notes:
+        parts.append(
+            "Operator notes added during the run by the person running OpenShard (follow them where they do not "
+            "conflict with the task, the action contract or OpenShard policy):\n"
+            + "\n".join(f"- (turn {t}) {text}" for t, text in state.operator_notes)
+        )
     if state.blocked_paths:
         parts.append("Paths blocked by policy (do not write): " + ", ".join(state.blocked_paths))
     if state.previous_failure:

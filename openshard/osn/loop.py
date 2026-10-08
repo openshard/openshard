@@ -41,6 +41,7 @@ from openshard.osn.agent_loop import (
     DEFAULT_MAX_VERIFICATIONS,
     STOP_BUDGET,
     STOP_MALFORMED_REPLY,
+    STOP_OPERATOR_STOP,
     STOP_POLICY_BLOCK,
     STOP_PROVIDER_ERROR,
     STOP_VERIFIER_SETUP,
@@ -444,6 +445,15 @@ def verification_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     return {k: v for k, v in source.items() if not _scrubbed(k)}
 
 
+class OperatorStopped(RuntimeError):
+    """The operator asked the run to stop (``osn steer --stop``); raised after the attempt so far is recorded
+    and checkpointed, before any further model call. The CLI marks the checkpoint interrupted."""
+
+    def __init__(self, attempt: int, turn: int) -> None:
+        super().__init__(f"stopped by the operator before attempt {attempt} turn {turn}")
+        self.attempt, self.turn = attempt, turn
+
+
 def _run_verification(command: list[str], cwd: Path, timeout: float) -> tuple[VerificationResult, str]:
     try:
         # Decode as UTF-8 with replacement on every platform: with the locale codec
@@ -618,6 +628,7 @@ def run_bounded_loop(
     approver: Approver | None = None,
     organisation_approver: Approver | None = None,
     verify_timeout: float = 120.0,
+    steering: Any | None = None,  # openshard.osn.steering.SteeringReader: operator notes and stop, per turn
     sandbox_path: Path | None = None,
     budget: BudgetLedger | None = None,
     supervisor: Any | None = None,
@@ -849,7 +860,7 @@ def run_bounded_loop(
             changed_so_far=list(changed), max_turns=max_turns, max_verifications=max_verifications_per_attempt,
             progress=progress, model_label=lambda: pending,
             blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
-            repo_files=_list_files(sandbox),
+            repo_files=_list_files(sandbox), steer=steering.poll if steering is not None else None,
         )
         rec = AttemptRecord(
             n, list(outcome.proposed), list(outcome.applied), list(outcome.blocked), gate.summary(),
@@ -860,6 +871,8 @@ def run_bounded_loop(
         if outcome.stop == STOP_PROVIDER_ERROR:
             rec.error_class, rec.error_message = outcome.error_class, outcome.error_message
         attempts.append(rec)
+        if outcome.stop == STOP_OPERATOR_STOP:
+            raise OperatorStopped(n, outcome.turns)
         for p in outcome.applied:
             if p not in changed:
                 changed.append(p)
@@ -1033,7 +1046,7 @@ def run_bounded_loop(
                     max_turns=max_turns, max_verifications=max_verifications_per_attempt, progress=progress,
                     model_label=lambda: pending_model,
                     blocked_write_patterns=blocked_write_patterns, approval_write_patterns=approval_write_patterns,
-                    repo_files=_list_files(sandbox),
+                    repo_files=_list_files(sandbox), steer=steering.poll if steering is not None else None,
                 )
             stage_applied = list((stage or {}).get("applied") or [])
             stage_blocked = list((stage or {}).get("blocked") or [])
@@ -1052,6 +1065,11 @@ def run_bounded_loop(
                 if p not in changed:
                     changed.append(p)
             blocked_seen.extend(p for p in outcome.blocked if p not in blocked_seen)
+            if outcome.stop == STOP_OPERATOR_STOP:
+                # What the attempt did so far is recorded and checkpointed; the run
+                # ends here with no Receipt (nothing was verified) and can be resumed.
+                _checkpoint("attempt_done")
+                raise OperatorStopped(n, outcome.turns)
             if outcome.model_calls:
                 _settle_supervision(None)  # the recommended model was called
             # A verification the model requested on exactly the files the attempt
