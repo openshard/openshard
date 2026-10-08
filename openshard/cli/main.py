@@ -3820,7 +3820,26 @@ def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool) -> None
         raise SystemExit(1)
 
 
+def _foreign_capture_service_detail(status: dict) -> str:
+    """Why a running capture service is not one this installation can use (see ``service_status``)."""
+    port = status.get("port")
+    if status.get("credential") == "refused":
+        return (
+            f"the service on 127.0.0.1:{port} does not accept this installation's capture token "
+            "(it was started from another OpenShard home or user account), so it refuses every "
+            "event from here; run `openshard setup` to start one for this installation"
+        )
+    return (
+        f"the service on 127.0.0.1:{port} cannot be confirmed as this installation's (an older "
+        "OpenShard started it, and this home's state file does not name it); run `openshard setup` "
+        "to start one for this installation"
+    )
+
+
 def _render_capture_status(status: dict) -> None:
+    if status.get("running") and status.get("credential") in ("refused", "unknown"):
+        click.echo(f"Capture service: not this installation's ({_foreign_capture_service_detail(status)})")
+        return
     if status.get("running"):
         click.echo(f"Capture service: running on 127.0.0.1:{status['port']} (pid {status.get('pid')})")
         uptime = status.get("uptime_seconds")
@@ -3906,6 +3925,9 @@ def capture_stop(as_json: bool) -> None:
     result = stop_service()
     if as_json:
         click.echo(json.dumps(result, indent=2))
+    elif result.get("foreign"):
+        click.echo(f"Capture service: {_foreign_capture_service_detail({**result, 'credential': 'refused'})}; "
+                   "not stopped.")
     elif not result["was_running"]:
         click.echo("Capture service was not running.")
     elif result["stopped"]:
@@ -7166,7 +7188,10 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     # three agents is required for OpenShard to be "ready"; each is ready
     # on its own terms and all share one capture service.
     service_running = bool(claude_status.capture_service.get("running"))
-    service_port = claude_status.capture_service.get("port") if service_running else None
+    # A service that is not this installation's (see service_status) is not
+    # the one the agents' hooks and plugins should target.
+    service_foreign = claude_status.capture_service.get("credential") in ("refused", "unknown")
+    service_port = claude_status.capture_service.get("port") if service_running and not service_foreign else None
     agent_statuses = detect_agent_integrations(root, service_port=service_port)
     for key, status in agent_statuses.items():
         state[key] = status.to_dict()
@@ -7206,7 +7231,10 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
         else:
             hooks_detail = "older hook configuration; run `openshard setup` to switch to the fast capture path"
     service_ok = bool(claude_status.capture_service.get("running"))
-    if service_ok and claude_status.capture_port_mismatch:
+    if service_ok and service_foreign:
+        service_ok = False
+        service_detail = _foreign_capture_service_detail(claude_status.capture_service)
+    elif service_ok and claude_status.capture_port_mismatch:
         service_ok = False
         service_detail = (
             f"hooks target port {claude_status.hooks_port} but the service listens on "
@@ -7252,7 +7280,8 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     elif core_ready:
         limited_agents.append("Claude Code")
     service_detail_shared = (
-        f"running on 127.0.0.1:{claude_status.capture_service.get('port')}" if service_running
+        _foreign_capture_service_detail(claude_status.capture_service) if service_foreign
+        else f"running on 127.0.0.1:{claude_status.capture_service.get('port')}" if service_running
         else "not running; it starts automatically at the next session (`openshard capture start`)"
     )
     for key, status in agent_statuses.items():
@@ -7281,7 +7310,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
             ("Local history", history_writable, f"{HISTORY_RELPATH.as_posix()} is not writable"),
             (label, status.cli_available, cli_detail),
             (integration_label, integration_ok, integration_detail),
-            ("Capture service", service_running, service_detail_shared),
+            ("Capture service", service_running and not service_foreign, service_detail_shared),
         ]
         # The OpenCode plugin runs inside OpenCode's own runtime, so a valid
         # plugin file is not proof capture works: only an actually-recorded

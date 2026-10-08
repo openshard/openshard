@@ -372,3 +372,59 @@ class TestFailOpen:
             env=service.env, spawn=False,
         )
         assert reply == client.CURSOR_ALLOW_RESPONSE
+
+
+class TestHealthCredentialAnswer:
+    """``GET /health`` says whether a presented capture token is this service's.
+
+    This is how a client tells its own service from another installation's
+    on the same port (a different ``OPENSHARD_HOME`` or user account). The
+    answer authorises nothing and the document never carries the token.
+    """
+
+    def test_health_without_a_header_is_unchanged(self, service):
+        doc = client.health(service.port)
+        assert doc is not None and "credential" not in doc
+
+    def test_health_accepts_this_homes_token(self, service):
+        token = auth.ensure_token(service.env)
+        doc = client.health(service.port, env=service.env, credential=True)
+        assert doc is not None and doc["credential"] == "accepted"
+        assert token not in json.dumps(doc)
+        assert client.service_is_ours(doc, service.env) is True
+
+    def test_health_refuses_another_homes_token_and_a_capability(self, service, tmp_path):
+        other_env = {**service.env, "OPENSHARD_HOME": str(tmp_path / "other-home")}
+        other = auth.ensure_token(other_env)
+        assert other != auth.ensure_token(service.env)
+        doc = client.health(service.port, env=other_env, credential=True)
+        assert doc is not None and doc["credential"] == "refused"
+        assert client.service_is_ours(doc, other_env) is False
+        # A repository capability is not the token; /health has no repository context.
+        capability = auth.repo_capability(auth.ensure_token(service.env), tmp_path, "claude_code")
+        status, body = client._request("GET", service.port, client.HEALTH_PATH,
+                                       headers={auth.TOKEN_HEADER: capability})
+        assert status == 200 and json.loads(body)["credential"] == "refused"
+
+    def test_health_does_not_answer_a_browser_context(self, service):
+        token = auth.ensure_token(service.env)
+        status, body = client._request("GET", service.port, client.HEALTH_PATH,
+                                       headers={auth.TOKEN_HEADER: token, "Origin": "http://evil.example"})
+        assert status == 200 and "credential" not in json.loads(body)
+
+    def test_a_service_without_the_answer_is_ours_only_through_the_state_file(self, service):
+        legacy = {k: v for k, v in client.health(service.port).items() if k != "credential"}
+        # Our state file names this instance: an older service of ours.
+        assert client.service_is_ours(legacy, service.env) is True
+        # Another home's state file does not: nothing proves it shares our token.
+        other_env = {**service.env, "OPENSHARD_HOME": str(Path(service.env["OPENSHARD_HOME"]) / "other")}
+        assert client.service_is_ours(legacy, other_env) is None
+        assert client.service_is_ours({**legacy, "instance_id": "someone-else"}, service.env) is None
+        assert client.service_is_ours(None, service.env) is None
+
+    def test_asking_health_about_a_credential_creates_no_token(self, service, tmp_path):
+        fresh = {**service.env, "OPENSHARD_HOME": str(tmp_path / "fresh-home")}
+        doc = client.health(service.port, env=fresh, credential=True)
+        assert doc is not None and "credential" not in doc  # nothing to compare yet
+        assert not Path(auth.token_path(fresh)).exists()
+        assert client.service_is_ours(doc, fresh) is None  # and nothing proves it is ours

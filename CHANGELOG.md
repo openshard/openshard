@@ -51,6 +51,16 @@ All notable changes to OpenShard are documented here.
   `independent CI`), the history checks column shows `1/1 passed (OpenShard re-run @ <commit>)`,
   and `history --json` carries `verification_truth` per row as `last --json` does. Without later
   evidence nothing changes, and the stored record is never rewritten.
+- **A capture service that is not this installation's is no longer adopted.** `openshard setup`
+  and the hooks took any OpenShard service answering `/health` on the port as theirs. One started
+  from another `OPENSHARD_HOME` or by another user account on the same machine then refused every
+  hook with `401` (its token differs) while `setup` and `doctor` reported ready, and the whole
+  session's evidence was lost. Clients now present the capture token on `/health` and the service
+  answers whether it accepts it; a service that does not (or is too old to say and is not named by
+  this home's state file) is treated like any other program holding the port: this installation's
+  own service starts on the next port and the hooks are written for it. `doctor` and
+  `capture status` report such a service instead of a green check, and `capture stop` leaves it
+  alone. Found by running a real Claude Code session on a machine with a second OpenShard install.
 - **Hook Shard identity is finalized under the history lock.** Agent hook sessions still get a provisional `shard_id` while their live Events are buffered, but the first `runs.jsonl` persistence now remints that position-derived id from the locked file state and preserves it on later folds. Concurrent sessions in one repository can no longer share a Shard id; embedded Events and the Receipt content hash are restamped with the persisted id. Cross-repository `shard_id` collisions remain expected, so `receipt_id` remains the global Receipt identity.
 
 - **Adaptive routing no longer resurrects a stale curated model preference when learning history cannot be read in time.** A `history_timeout` or `history_unavailable` still fails open and records that evidence was not used, but among otherwise-equal eligible candidates it now uses current provider price before the legacy role hint. Explicit model choices, class pins, policy/capability gates, promotion, requirement fit, supersession and price-band rules are unchanged.
