@@ -42,6 +42,8 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Adaptive routing no longer resurrects a stale curated model preference when learning history cannot be read in time.** A `history_timeout` or `history_unavailable` still fails open and records that evidence was not used, but among otherwise-equal eligible candidates it now uses current provider price before the legacy role hint. Explicit model choices, class pins, policy/capability gates, promotion, requirement fit, supersession and price-band rules are unchanged.
+
 - Static OpenRouter price fallbacks for `z-ai/glm-5.1`, `deepseek/deepseek-v4-pro` and the retired
   `minimax/m2.7` id were `~est` values 2 to 30 times below the 2026-09-25 OpenRouter snapshot; they
   now carry the snapshot's rates with the date. The fallback applies only when the catalog cache is
