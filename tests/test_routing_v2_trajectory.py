@@ -277,6 +277,43 @@ class TestTrajectoryPolicy:
         assert d.selected_model == "zeta/mid-2"
         assert [r for r in d.ranking if r["model"] == "acme/mid-1"][0]["components"]["history"] == "observed_failures_only"
 
+    @pytest.mark.parametrize("availability", ["timeout", "unavailable"])
+    def test_unavailable_history_falls_back_to_price_before_legacy_hint(self, availability):
+        cheaper_zeta = build_catalog(CURATED, [
+            {
+                **raw,
+                "pricing": {**raw["pricing"], "completion": "0.0000015"},
+            } if raw["id"] == "zeta/mid-2" else raw
+            for raw in DISCOVERED
+        ], synced_at=SYNCED_AT)
+        cands = _cands(catalog=cheaper_zeta)
+
+        # Normal no-history ranking keeps the legacy hint as its final advisory
+        # tie-break, so the better-hinted acme model wins despite costing more.
+        assert _decide(_ctx(), cands).selected_model == "acme/mid-1"
+
+        history = HistoryEvidence(
+            harness="osn_loop", entries_scanned=None, availability=availability,
+        )
+        d = _decide(_ctx(), cands, policy=TrajectoryPolicyV2(history=history))
+        assert d.selected_model == "zeta/mid-2"
+        assert d.history_evidence["reason"] == f"history_{availability}"
+        assert d.history_evidence["fallback_ranking"] == "price_before_curated_hint"
+        assert d.ranking[0]["components"]["output_price_per_mtok"] == pytest.approx(1.5)
+
+        # Explicit class pins and policy gates still outrank the fallback order.
+        pinned = _decide(
+            _ctx(), cands, policy=TrajectoryPolicyV2(history=history),
+            pins={"routine_coding": "acme/mid-1"},
+        )
+        assert pinned.selected_model == "acme/mid-1"
+        blocked = ModelPolicyConfig(blocked_models=frozenset({"zeta/mid-2"}))
+        gated = _decide(
+            _ctx(), _cands(blocked, catalog=cheaper_zeta),
+            policy=TrajectoryPolicyV2(history=history),
+        )
+        assert gated.selected_model == "acme/mid-1"
+
     def test_history_from_receipts_counts_only_observed_verification(self):
         def o(model, verified_success, cost=0.01):
             return RoutingOutcome(
