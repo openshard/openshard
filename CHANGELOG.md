@@ -6,6 +6,16 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- **Claude Code's permission mode on the Receipt.** Every Claude Code hook payload carries the
+  permission regime the agent ran under (`default`, `acceptEdits`, `plan`, `bypassPermissions`,
+  `dontAsk`); capture now records it under `capture.permission_mode` / `permission_modes_seen`
+  (last seen and every distinct mode in order), the Receipt's `runtime_configuration` evidence
+  carries it as `agent_reported`, and the compact Receipt gets a `Permissions` row:
+  `acceptEdits (Claude Code's own permission mode, agent-reported; not enforced by OpenShard)`, or
+  `default → acceptEdits` when the mode changed during the session. Undocumented values are never
+  recorded; nothing is written when the payload has no mode. This is observed authority evidence
+  about an external agent, kept apart from the permission evidence OSN records for execution it
+  controls.
 - `openshard osn steer <run id> "note"` adds an operator note to a running OSN run, shown on
   the next planner or executor turn; `--stop` ends the run before its next model call with the
   attempt checkpointed so `osn resume` can continue it. Notes are advisory and change no policy;

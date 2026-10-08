@@ -1247,13 +1247,34 @@ def stage_metrics(entry: dict) -> list[dict[str, float | int | None]]:
     ]
 
 
+_CLAUDE_PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "dontAsk")
+
+
 def runtime_configuration_block(entry: dict) -> dict | None:
-    """Effective settings explicitly reported by Claude hooks, never requested env settings."""
+    """Effective settings explicitly reported by Claude hooks, never requested env settings.
+
+    ``effort`` is the effective effort level; ``permission_mode`` is the
+    permission regime Claude Code reported running under (last seen) with
+    every distinct mode in ``permission_modes_seen``, first-seen order. Both
+    are the agent's own report (``agent_reported``): OpenShard observed them
+    and enforced neither.
+    """
     capture = _dict(entry.get("capture"))
+    block: dict[str, Any] = {}
     level = capture.get("effort_level")
-    if capture.get("effort_source") != "claude_hook" or level not in ("low", "medium", "high", "xhigh", "max"):
+    if capture.get("effort_source") == "claude_hook" and level in ("low", "medium", "high", "xhigh", "max"):
+        block["effort"] = level
+    mode = capture.get("permission_mode")
+    if capture.get("permission_mode_source") == "claude_hook" and mode in _CLAUDE_PERMISSION_MODES:
+        block["permission_mode"] = mode
+        seen = capture.get("permission_modes_seen")
+        block["permission_modes_seen"] = [
+            m for m in (seen if isinstance(seen, list) else []) if m in _CLAUDE_PERMISSION_MODES
+        ][:len(_CLAUDE_PERMISSION_MODES)] or [mode]
+    if not block:
         return None
-    return {"effort": level, "source": "claude_hook", "evidence": "agent_reported"}
+    block.update({"source": "claude_hook", "evidence": "agent_reported"})
+    return block
 
 
 def project_entry_evidence(entry: Any) -> dict[str, Any]:
