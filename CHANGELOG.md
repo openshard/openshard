@@ -51,6 +51,24 @@ All notable changes to OpenShard are documented here.
   once a session from that agent is recorded in the repository's history, otherwise
   `Configured but unverified` with what to check for that agent. `doctor --json` carries
   `capture_observed` per agent (and under `claude_code`).
+- **The context an agent is given about prior work no longer calls an agent-reported pass
+  "passed".** `relevant_context` (the local MCP tool, `openshard context`) took the Receipt's flat
+  verification token, so a Claude Code session whose hook merely relayed the agent's own
+  `pytest` exit code read `Status: Passed | Verification: passed`, and a later `openshard verify`
+  re-run was ignored. It now reads the shared verification truth: an agent-reported pass is
+  `unknown` and named as the agent's claim (`Not verified by OpenShard (agent reported 1/1
+  passed)`), a later OpenShard re-run or CI verdict describes the current outcome with its commit,
+  and a hook session's status is its turn status, not `Passed`. The context text names who vouches
+  for each token. Native runs OpenShard verified itself read as before.
+- **A later verification now reaches the Status row and `openshard history`.** After
+  `openshard verify` re-ran a Shard's checks (or CI reported on its commit), `openshard last` still
+  printed `Status  Turn completed (unverified)` two rows above `Verified  Passed (OpenShard re-ran
+  the check(s) ...)`, and the `history` row kept saying `(unverified) · checks: not run` with no
+  sign of the re-run. Both now read the same interpretation as the Verified row: the turn status
+  becomes `Turn completed (verified later: passed, OpenShard re-run)` (or `failed`, or
+  `independent CI`), the history checks column shows `1/1 passed (OpenShard re-run @ <commit>)`,
+  and `history --json` carries `verification_truth` per row as `last --json` does. Without later
+  evidence nothing changes, and the stored record is never rewritten.
 - **A capture service that is not this installation's is no longer adopted.** `openshard setup`
   and the hooks took any OpenShard service answering `/health` on the port as theirs. One started
   from another `OPENSHARD_HOME` or by another user account on the same machine then refused every
