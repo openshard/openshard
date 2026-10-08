@@ -263,6 +263,7 @@ def rank_for_requirement(
     cost_sensitivity: str | None = None,
     min_context_tokens: int | None = None,
     exclude: frozenset[str] = frozenset(),
+    prefer_price_over_hint: bool = False,
 ) -> tuple[list[RankedCandidate], list[tuple[str, str]]]:
     """Rank *entries* for *cls*. Returns (ranked, rejected) where rejected pairs
     each id with the first hard rule it failed. Deterministic."""
@@ -321,7 +322,11 @@ def rank_for_requirement(
             notes.append("price_above_band" if price is not None else "price_unknown")
         hints = sum(1 for h in cls.legacy_hint_roles if h in e.roles)
         price_key = price if price is not None else float("inf")
-        key = (promotion_rank, history_rank, history_cost, fit_missing, sup, band_rank, -hints, price_key, e.id)
+        # A caller that could not read its observed history may choose the
+        # current provider price before the legacy curated role hint. The hint
+        # remains the normal final advisory tie-break everywhere else.
+        tail = (price_key, -hints) if prefer_price_over_hint else (-hints, price_key)
+        key = (promotion_rank, history_rank, history_cost, fit_missing, sup, band_rank, *tail, e.id)
         ranked.append((key, RankedCandidate(
             model_id=e.id,
             promotion_state=state,
