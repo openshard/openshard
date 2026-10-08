@@ -50,7 +50,9 @@ class TestCapture:
             "permission_mode": "acceptEdits", "permission_modes_seen": ["acceptEdits"],
             "source": "claude_hook", "evidence": "agent_reported",
         }
-        assert receipt_payload(entry, 1)["runtime_configuration"] == block
+        # Hosted projection: the Platform's strict contract has no permission
+        # keys yet and requires effort, so a mode-only block is not sent.
+        assert "runtime_configuration" not in receipt_payload(entry, 1)
         # No enforced-permission evidence is invented for an external agent.
         assert "permission_evidence" not in entry
 

@@ -52,6 +52,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Hosted sync keeps `runtime_configuration` within the Platform's contract.** The Platform's
+  receipt-sync schema declares that block as a strict object with `effort` required; the permission
+  mode added to the local block would have made the Platform refuse every Claude Code Receipt whole.
+  The hosted projection now sends exactly `effort` / `source` / `evidence` and omits the block when
+  the record carries no effort. The local Receipt, `last --json` and `history --json` keep the full
+  block; the hosted permission mode follows once the Platform accepts it.
 - The TUI's result Checks block reads the same verification truth as `openshard history`: a
   later `openshard verify` re-run or CI verdict (`1/1 passed (OpenShard re-run @ <commit>)`) wins
   over the session's own checks display, so an agent's claim is not shown as current once

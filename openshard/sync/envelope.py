@@ -90,7 +90,27 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
     payload = receipt_to_dict(build_shard_receipt(entry, index=index), extended=True)
     if not multi_agent:
         payload.pop("multi_agent", None)
+    _narrow_runtime_configuration(payload)
     return payload
+
+
+# The hosted ``runtime_configuration`` contract (Platform
+# ``receipt-sync.ts``) is a strict object: ``effort`` (required) + ``source`` +
+# ``evidence``, nothing else. Core's local block also carries Claude Code's
+# permission mode; until the Platform accepts those keys, the projection
+# sends exactly the contract shape, and the block is omitted when the record
+# carries no effort (a block without ``effort`` would be refused whole).
+_HOSTED_RUNTIME_CONFIGURATION_KEYS = ("effort", "source", "evidence")
+
+
+def _narrow_runtime_configuration(payload: dict) -> None:
+    block = payload.get("runtime_configuration")
+    if not isinstance(block, dict):
+        return
+    if not block.get("effort"):
+        payload.pop("runtime_configuration", None)
+        return
+    payload["runtime_configuration"] = {k: block[k] for k in _HOSTED_RUNTIME_CONFIGURATION_KEYS if k in block}
 
 
 def build_envelope(entry: dict, index: int, *, core_version: str, multi_agent: bool = False) -> dict:

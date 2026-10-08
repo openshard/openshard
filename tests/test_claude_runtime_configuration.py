@@ -24,10 +24,15 @@ def test_cloud_session_model_and_effective_effort(repo):
     assert "claude-opus-5-5" in str(entry)
     assert "requested-not-observed" not in str(entry)
     # The fixture's payloads carry Claude Code's permission mode too; it is
-    # the agent's own report, recorded next to the effort level.
-    assert receipt_payload(entry, 1)["runtime_configuration"] == {
+    # the agent's own report, recorded next to the effort level locally. The
+    # hosted projection sends the Platform's strict contract shape only.
+    from openshard.history.receipt_evidence import runtime_configuration_block
+
+    assert runtime_configuration_block(entry) == {
         "effort": "xhigh", "permission_mode": "default", "permission_modes_seen": ["default"],
         "source": "claude_hook", "evidence": "agent_reported"}
+    assert receipt_payload(entry, 1)["runtime_configuration"] == {
+        "effort": "xhigh", "source": "claude_hook", "evidence": "agent_reported"}
 
 
 def test_model_switch_is_observed_and_queue_preserves_effort(repo):
@@ -57,4 +62,6 @@ def test_requested_or_invalid_configuration_never_becomes_evidence(repo, level):
     entry = _lines(repo)[0]
     assert entry["capture"]["model_source"] == "not_captured"
     assert "effort_level" not in entry["capture"]
-    assert "effort" not in (receipt_payload(entry, 1).get("runtime_configuration") or {})
+    # Locally the block still carries the permission mode; the hosted
+    # projection omits a block that has no effort (the contract requires it).
+    assert "runtime_configuration" not in receipt_payload(entry, 1)
