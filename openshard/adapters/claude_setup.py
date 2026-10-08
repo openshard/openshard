@@ -45,6 +45,7 @@ from openshard.adapters.claude_hooks_install import (
     SETTINGS_RELPATH,
     ClaudeHooksInstallResult,
     capability_state,
+    ensure_history_state_ignored,
     install_claude_hooks,
     install_claude_statusline,
     installed_events,
@@ -365,6 +366,13 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
                 "for Grok Build, `openshard capture install grok-build`.",
             ],
         )
+
+    # Runtime state under .openshard/ is per-clone and never meant to be
+    # committed; keep it out of `git status` and `git add .` locally
+    # (.git/info/exclude), with the shareable config.yml re-included.
+    ignore_warning = ensure_history_state_ignored(root)
+    if ignore_warning:
+        next_steps.append(ignore_warning)
 
     # The capture service first: the Claude HTTP hooks and the OpenCode
     # plugin written below must target the port it actually listens on

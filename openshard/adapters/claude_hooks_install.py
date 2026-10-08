@@ -573,6 +573,62 @@ def ensure_local_settings_ignored(
         return f"Could not update .git/info/exclude; add {rel} to your gitignore."
 
 
+HISTORY_EXCLUDE_LINES: tuple[str, ...] = (".openshard/*", "!.openshard/config.yml")
+
+
+def ensure_history_state_ignored(repo_root: Path, *, note: str = "added by openshard setup") -> str | None:
+    """Keep the repository's OpenShard runtime state out of git, locally.
+
+    ``.openshard/`` holds Receipts (``runs.jsonl``), verification attestations,
+    live session buffers, learning caches and locks: per-clone state that is
+    never meant to be committed (this project ignores the whole directory).
+    A fresh ``openshard setup`` otherwise leaves the user's ``git status``
+    showing ``?? .openshard/`` and a ``git add .`` would publish their
+    Receipts. The rule lives in ``.git/info/exclude`` (documented git, never
+    committed) so nothing of the user's is changed; ``.openshard/config.yml``
+    (the verification contract a team may share) is re-included. Files git
+    already tracks are unaffected. Returns a warning when the rule could not
+    be confirmed; never raises.
+    """
+    probe = ".openshard/runs.jsonl"
+    try:
+        check = subprocess.run(
+            ["git", "check-ignore", "-q", probe],
+            cwd=str(repo_root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return f"Could not run git to confirm {probe} is ignored; make sure .openshard/ is not committed."
+    if check.returncode == 0:
+        return None
+    if check.returncode != 1:
+        return f"Could not confirm {probe} is git-ignored; make sure .openshard/ is not committed."
+    try:
+        where = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=str(repo_root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=_GIT_TIMEOUT_SECONDS,
+        )
+        if where.returncode != 0 or not where.stdout.strip():
+            return "Could not locate .git/info/exclude; add .openshard/ to your gitignore."
+        exclude_path = Path(where.stdout.strip())
+        if not exclude_path.is_absolute():
+            exclude_path = repo_root / exclude_path
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        present = {ln.strip() for ln in existing.splitlines()}
+        missing = [line for line in HISTORY_EXCLUDE_LINES if line not in present]
+        if not missing:
+            return None
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        with exclude_path.open("a", encoding="utf-8") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write(f"# {note}\n" + "".join(f"{line}\n" for line in missing))
+        return None
+    except Exception:
+        return "Could not update .git/info/exclude; add .openshard/ to your gitignore."
+
+
 def install_claude_hooks(
     *, repo_root: Path, port: int | None = None, env: dict | os._Environ | None = None
 ) -> ClaudeHooksInstallResult:

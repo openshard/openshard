@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -488,3 +490,67 @@ class TestDoctorClaudeSection(_RepoCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHistoryStateIgnored(unittest.TestCase):
+    """`openshard setup` keeps the repository's .openshard/ runtime state out of git, locally."""
+
+    def _repo(self) -> Path:
+        root = Path(tempfile.mkdtemp()) / "proj"
+        root.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        self.addCleanup(shutil.rmtree, root.parent, True)
+        return root
+
+    def _ignored(self, root: Path, rel: str) -> bool:
+        return subprocess.run(["git", "check-ignore", "-q", rel], cwd=root).returncode == 0
+
+    def test_runtime_state_is_excluded_but_config_stays_committable(self):
+        from openshard.adapters.claude_hooks_install import ensure_history_state_ignored
+
+        root = self._repo()
+        (root / ".openshard" / "claude_sessions").mkdir(parents=True)
+        (root / ".openshard" / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+        (root / ".openshard" / "claude_sessions" / "s.json").write_text("{}", encoding="utf-8")
+        (root / ".openshard" / "config.yml").write_text("verification_commands: []\n", encoding="utf-8")
+        self.assertIsNone(ensure_history_state_ignored(root))
+        self.assertTrue(self._ignored(root, ".openshard/runs.jsonl"))
+        self.assertTrue(self._ignored(root, ".openshard/claude_sessions/s.json"))
+        self.assertTrue(self._ignored(root, ".openshard/verifications.jsonl"))
+        self.assertFalse(self._ignored(root, ".openshard/config.yml"))
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "-uall"], cwd=root, capture_output=True, text=True,
+        ).stdout
+        self.assertIn(".openshard/config.yml", status)
+        self.assertNotIn("runs.jsonl", status)
+        # Idempotent: a second call adds nothing.
+        exclude = root / ".git" / "info" / "exclude"
+        before = exclude.read_text(encoding="utf-8")
+        self.assertIsNone(ensure_history_state_ignored(root))
+        self.assertEqual(exclude.read_text(encoding="utf-8"), before)
+        self.assertEqual(before.count(".openshard/*"), 1)
+        # The rule is local (info/exclude), never a committed file.
+        self.assertFalse((root / ".gitignore").exists())
+
+    def test_an_existing_gitignore_rule_is_left_alone(self):
+        from openshard.adapters.claude_hooks_install import ensure_history_state_ignored
+
+        root = self._repo()
+        (root / ".gitignore").write_text(".openshard/\n", encoding="utf-8")
+        self.assertIsNone(ensure_history_state_ignored(root))
+        exclude = root / ".git" / "info" / "exclude"
+        self.assertNotIn(".openshard/*", exclude.read_text(encoding="utf-8") if exclude.exists() else "")
+
+    def test_setup_adds_the_rule_and_surfaces_a_warning(self):
+        # The harness routes every git call through a fake, so prove the
+        # wiring: setup calls the helper for the repository root and shows
+        # its warning as a next step.
+        root = self._repo()
+        with patch.dict(os.environ, _NO_KEYS, clear=False), \
+             patch(f"{_MCP_MODULE}.shutil.which", side_effect=_which), \
+             patch(f"{_MCP_MODULE}.subprocess.run", side_effect=_subprocess_router()), \
+             patch("openshard.adapters.claude_setup.ensure_history_state_ignored",
+                   return_value="Could not update .git/info/exclude; add .openshard/ to your gitignore.") as helper:
+            result = run_setup(repo_path=root)
+        helper.assert_called_once_with(root.resolve())
+        self.assertIn("Could not update .git/info/exclude; add .openshard/ to your gitignore.", result.next_steps)
