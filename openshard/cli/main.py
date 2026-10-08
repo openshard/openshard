@@ -3836,10 +3836,22 @@ def _foreign_capture_service_detail(status: dict) -> str:
     )
 
 
+def _stale_capture_service_detail(status: dict) -> str:
+    from openshard import __version__
+
+    return (
+        f"running OpenShard {status.get('version')} while this installation is {__version__}; it still folds "
+        "sessions with the old code until replaced -- run `openshard setup` (or start a new session) to "
+        "replace it now"
+    )
+
+
 def _render_capture_status(status: dict) -> None:
     if status.get("running") and status.get("credential") in ("refused", "unknown"):
         click.echo(f"Capture service: not this installation's ({_foreign_capture_service_detail(status)})")
         return
+    if status.get("running") and status.get("stale_version"):
+        click.echo(f"Capture service: stale ({_stale_capture_service_detail(status)})")
     if status.get("running"):
         click.echo(f"Capture service: running on 127.0.0.1:{status['port']} (pid {status.get('pid')})")
         uptime = status.get("uptime_seconds")
@@ -7234,6 +7246,9 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     if service_ok and service_foreign:
         service_ok = False
         service_detail = _foreign_capture_service_detail(claude_status.capture_service)
+    elif service_ok and claude_status.capture_service.get("stale_version"):
+        service_ok = False
+        service_detail = _stale_capture_service_detail(claude_status.capture_service)
     elif service_ok and claude_status.capture_port_mismatch:
         service_ok = False
         service_detail = (

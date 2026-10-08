@@ -324,6 +324,48 @@ def _usable_service(port: int, env: dict | os._Environ | None) -> bool:
     return service_is_ours(health(port, env=env, credential=True), env) is True
 
 
+def _installed_version() -> str | None:
+    try:
+        import openshard
+
+        version = str(openshard.__version__)
+    except Exception:
+        return None
+    return version if version and version != "unknown" else None
+
+
+def service_version_stale(doc: dict | None) -> bool:
+    """Whether the service that answered :func:`health` runs a different OpenShard version than this client.
+
+    A service keeps the code it was started with; after an upgrade (``pipx
+    upgrade openshard``) the old one goes on folding every session until
+    it idles out (hours), so fixes and new evidence in the upgrade silently
+    do not apply. ``True`` only when both versions are known and differ;
+    an unknown version on either side is never called stale.
+    """
+    if not isinstance(doc, dict):
+        return False
+    theirs = doc.get("version")
+    ours = _installed_version()
+    if not isinstance(theirs, str) or not theirs or theirs == "unknown" or ours is None:
+        return False
+    return theirs != ours
+
+
+def _replace_if_stale(port: int, env: dict | os._Environ, *, wait_seconds: float = 5.0) -> bool:
+    """Ask a service of ours that runs another OpenShard version to drain and exit. True when it is gone.
+
+    Only a service that is provably ours is touched (another installation's
+    service is never ours to stop). The caller then starts this version's
+    service through the usual spawn path; hooks that arrive in between fall
+    back to the command client and the in-process fold, as for any restart.
+    """
+    doc = health(port, env=env, credential=True)
+    if doc is None or service_is_ours(doc, env) is not True or not service_version_stale(doc):
+        return False
+    return request_shutdown(env, wait_seconds=wait_seconds)
+
+
 def _auth_headers(env: dict | os._Environ | None, project_dir: str | None) -> dict[str, str]:
     """Request headers for an authenticated POST: the project dir (when known)
     and the capture token (created on first use; see ``capture_auth``)."""
@@ -608,9 +650,11 @@ def ensure_service(
     # service is treated like any other program holding the port, and ours
     # starts on the next one (see the service's _bind).
     port = resolve_port(env)
-    if _usable_service(port, env):
+    if _usable_service(port, env) and not _replace_if_stale(port, env):
         return port, "running"
-    if pinned_port(env) is None and port != DEFAULT_PORT and _usable_service(DEFAULT_PORT, env):
+    if pinned_port(env) is None and port != DEFAULT_PORT and _usable_service(DEFAULT_PORT, env) and not (
+        _replace_if_stale(DEFAULT_PORT, env)
+    ):
         return DEFAULT_PORT, "running"
     if env.get("OPENSHARD_CAPTURE_NO_SPAWN"):
         return None, "unavailable"
@@ -762,6 +806,11 @@ def _run_hook_raw(
                          hook_path=hook_path, env=env, task_id=task_id, agent_env=agent_env_header):
                 if claude_session_start:
                     _heal_claude_hook_config(raw, env, desired_port=port)
+                if spawn and _is_claude_session_start(raw, event_override) and _replace_if_stale(port, env):
+                    # The event is queued and folded by the old service (it
+                    # drains before exiting); this installation's service
+                    # takes the rest of the session. Bounded: one drain wait.
+                    ensure_service(env)
                 return "forwarded"
             if spawn:
                 port_after, _state = ensure_service(env)
