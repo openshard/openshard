@@ -113,6 +113,11 @@ from openshard.history.shard_contract import (
     _verification_from_osn_contract,
     build_shard_receipt,
 )
+from openshard.history.verification_truth import (
+    interpret_receipt,
+    turn_status_label,
+    verification_label,
+)
 from openshard.safety.sanitize import is_absolute_path, sanitize_text
 from openshard.verification.post_session import latest_for_entry, load_attestations
 
@@ -1191,6 +1196,21 @@ def _bounded_attempts(attempts: list[tuple[int, dict]]) -> list[tuple[int, dict]
     return ordered[: _MAX_CONTEXT_ATTEMPTS - 1] + [ordered[-1]]
 
 
+def _context_claims(receipt: ShardReceipt) -> tuple[str, str, str]:
+    """``(status, verification token, verification sentence)`` an agent may be told about a Receipt.
+
+    Read through ``verification_truth`` rather than the Receipt's flat
+    fields: an agent-reported pass is ``unknown`` there (recorded, named as
+    the agent's claim, never equal to "OpenShard verified this"), and a later
+    ``openshard verify`` re-run or CI verdict describes the current outcome.
+    The status is the turn status a hook capture carries (resolved by that
+    later evidence), else the Receipt's own status.
+    """
+    truth = interpret_receipt(receipt)
+    status = turn_status_label(receipt.task_completion, truth) or receipt.task_completion or receipt.status
+    return status, truth.effective_status, verification_label(truth)
+
+
 def _build_relevant_match(group: _ShardGroup, score: int, signals: list[str]) -> RelevantMatch:
     receipt = _receipt_for(group)
     shard = receipt.shard or _shard_for(group)
@@ -1199,23 +1219,25 @@ def _build_relevant_match(group: _ShardGroup, score: int, signals: list[str]) ->
     for attempt in _bounded_attempts(group.attempts):
         _, entry = attempt
         a_receipt = receipt if attempt is group.latest else _receipt_for(group, attempt)
+        a_status, a_verification, a_reason = _context_claims(a_receipt)
         attempts.append(RelevantAttempt(
             run_id=_entry_run_id(entry),
             attempt_number=a_receipt.attempt_number,
-            status=a_receipt.status,
-            verification_status=a_receipt.verification_status,
-            verification_reason=a_receipt.verification_reason,
+            status=a_status,
+            verification_status=a_verification,
+            verification_reason=a_reason,
         ))
 
     findings = [f for f in receipt.findings if f.severity != "Note"][:_MAX_CONTEXT_FINDINGS]
+    status, verification_status, verification_reason = _context_claims(receipt)
 
     return RelevantMatch(
         shard=shard,
         score=score,
         signals=signals,
-        status=receipt.status,
-        verification_status=receipt.verification_status,
-        verification_reason=receipt.verification_reason,
+        status=status,
+        verification_status=verification_status,
+        verification_reason=verification_reason,
         result=receipt.result,
         repo=receipt.repo,
         files=list(receipt.files_touched[:_MAX_CONTEXT_FILES]),
@@ -1247,6 +1269,11 @@ def _render_context_text(task: str, matches: list[RelevantMatch]) -> str:
     for i, m in enumerate(matches, start=1):
         lines.append(f"{i}. Shard {m.shard.shard_id} — {m.shard.task_short}")
         v = f" | Verification: {m.verification_status}" if m.verification_status else ""
+        if v and m.verification_reason:
+            # Who vouches for that token (the agent's own claim, an OpenShard
+            # re-run, CI): a static sentence from verification_truth, never
+            # output or paths.
+            v += f" — {m.verification_reason}"
         lines.append(f"   Status: {m.status}{v}")
         if m.result:
             lines.append(f"   Result: {m.result}")
