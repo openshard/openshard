@@ -7260,6 +7260,15 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
             ),
         ),
     ]
+    # Installed hooks are structural evidence only; a recorded session is
+    # proof of delivery. Surface that as its own line rather than letting the
+    # green hook and service lines imply capture works.
+    claude_unverified = hooks_ok and claude_status.capture_observed is not True
+    if hooks_ok:
+        checks.append((
+            "Capture verified", claude_status.capture_observed is True,
+            _capture_unverified_detail("claude_code", "Claude Code"),
+        ))
     click.echo("\nClaude Code\n")
     for label, ok, detail in checks:
         mark = "✓" if ok else "✗"
@@ -7275,7 +7284,9 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     ready_agents: list[str] = []
     limited_agents: list[str] = []
     unverified_agents: list[str] = []
-    if fully_ready:
+    if fully_ready and claude_unverified:
+        unverified_agents.append("Claude Code")
+    elif fully_ready:
         ready_agents.append("Claude Code")
     elif core_ready:
         limited_agents.append("Claude Code")
@@ -7312,38 +7323,24 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
             (integration_label, integration_ok, integration_detail),
             ("Capture service", service_running and not service_foreign, service_detail_shared),
         ]
-        # The OpenCode plugin runs inside OpenCode's own runtime, so a valid
-        # plugin file is not proof capture works: only an actually-recorded
-        # OpenCode session is. Surface that distinction as its own line rather
-        # than letting "Capture plugin ✓" imply delivery.
-        opencode_unverified = False
-        if key == "opencode" and integration_ok:
+        # A valid plugin or hook file is not proof capture works: the plugin
+        # can fail to load, the hook command can fail to run, and neither
+        # leaves a trace. Only an actually-recorded session is proof, so that
+        # is its own line rather than letting the configured line imply it.
+        agent_unverified = False
+        if integration_ok:
             if status.capture_observed is True:
                 agent_checks.append(("Capture verified", True, ""))
             else:
-                opencode_unverified = True
-                agent_checks.append((
-                    "Capture verified", False,
-                    "no OpenCode session captured yet; run one to verify (if a completed session "
-                    "records nothing, OpenCode is not loading the plugin)",
-                ))
-        elif key == "grok_build" and integration_ok:
-            if status.capture_observed is True:
-                agent_checks.append(("Capture verified", True, ""))
-            else:
-                opencode_unverified = True
-                agent_checks.append((
-                    "Capture verified", False,
-                    "no Grok Build session captured yet; run one to verify (Grok Build skips project "
-                    "hooks until the folder is trusted: `/hooks-trust` inside Grok Build, or launch with `--trust`)",
-                ))
+                agent_unverified = True
+                agent_checks.append(("Capture verified", False, _capture_unverified_detail(key, label)))
         click.echo(f"\n{label}\n")
         for check_label, ok, detail in agent_checks:
             mark = "✓" if ok else "✗"
             suffix = "" if ok else f" ({detail})"
             click.echo(f"  {mark} {check_label}{suffix}")
         if root is not None and history_writable and status.cli_available and integration_ok:
-            if opencode_unverified:
+            if agent_unverified:
                 unverified_agents.append(label)
             else:
                 ready_agents.append(label)
@@ -7359,11 +7356,34 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     if unverified_agents:
         click.echo(
             f"Configured but unverified: {', '.join(unverified_agents)} -- the integration is installed but "
-            "no capture has been recorded yet. Run a session to confirm. If nothing is captured: OpenCode "
-            "may not be loading the plugin (e.g. `--pure` or an OpenCode build that cannot load it); "
-            "Grok Build needs the folder trusted (`/hooks-trust` or `--trust`)."
+            "no session has been captured in this repository yet. Run one, then `openshard last`; "
+            "if nothing is captured, the agent's block above says what to check."
         )
     click.echo("")
+
+
+# Why a configured integration may still deliver nothing, per agent: the
+# detail doctor shows next to a red "Capture verified" line.
+_CAPTURE_UNVERIFIED_WHY: dict[str, str] = {
+    "claude_code": (
+        "if a completed session records nothing, check `openshard capture status` for refused "
+        "requests and that `openshard` is on the PATH of the shell that runs `claude`"
+    ),
+    "opencode": "if a completed session records nothing, OpenCode is not loading the plugin",
+    "grok_build": (
+        "Grok Build skips project hooks until the folder is trusted: `/hooks-trust` inside Grok Build, "
+        "or launch with `--trust`"
+    ),
+    "hermes": "if a completed session records nothing, Hermes has not approved the hooks or runs in safe mode",
+}
+
+
+def _capture_unverified_detail(key: str, label: str) -> str:
+    why = _CAPTURE_UNVERIFIED_WHY.get(key) or (
+        f"if a completed session records nothing, the hook command `openshard hooks {key.replace('_', '-')}` "
+        f"did not run: check that `openshard` is on the PATH of the process that launches {label}"
+    )
+    return f"no {label} session captured in this repository yet; run one to verify ({why})"
 
 
 @cli.group("telemetry")

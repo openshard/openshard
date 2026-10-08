@@ -100,6 +100,15 @@ reported ready. `doctor` and `capture status` now report a foreign service
 on the expected port (`credential: refused` / `unknown` in `--json`), and
 `capture stop` does not try to stop one.
 
+**Configured is not captured.** An installed hook or plugin is structural
+evidence only: a hook command that never runs (`openshard` not on the PATH of
+the process that launches the agent, a sandbox that drops it, an agent that
+skips hooks until trusted or approved) leaves no trace, and a plugin can fail
+to load. `openshard doctor` therefore shows a separate `Capture verified`
+line per agent, green only once a session from that agent is recorded in the
+repository's `.openshard/runs.jsonl`, and reports a configured agent with no
+recorded session as `Configured but unverified` with what to check.
+
 **Agents stay fail-open.** A refused or unreachable service never blocks
 the agent: command hooks exit 0 (Cursor still receives its decision reply),
 HTTP hook failures are non-blocking in Claude Code, the OpenCode plugin

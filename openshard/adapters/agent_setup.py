@@ -262,6 +262,29 @@ def _capture_observed(repo_root: Path | None, markers: tuple[tuple[str, str], ..
         return None
 
 
+def agent_capture_observed(agent: str, repo_root: Path | None) -> bool | None:
+    """Whether OpenShard has an actual capture from *agent* recorded for *repo_root*.
+
+    ``opencode_capture_observed``'s tri-state for any agent in the capture
+    registry (``capture_agents``), matched on the executor and import source
+    its records carry. A configured hook is structural evidence only: the
+    command it names may never run (not on the PATH of the process that
+    launches the agent, a sandbox that drops it, an agent that skips hooks
+    until trusted or approved), and a hook that does not run leaves no trace.
+    """
+    try:
+        from openshard.adapters.capture_agents import profile_for
+
+        profile = profile_for(agent)
+    except Exception:
+        return None
+    markers: tuple[tuple[str, str], ...] = tuple(
+        (key, value) for key, value in (("executor", profile.executor), ("import_source", profile.import_source))
+        if isinstance(value, str) and value
+    )
+    return _capture_observed(repo_root, markers) if markers else None
+
+
 def grok_build_capture_observed(repo_root: Path | None) -> bool | None:
     """Whether OpenShard has an actual Grok Build capture recorded for *repo_root*.
 
@@ -305,9 +328,9 @@ class AgentIntegrationStatus:
     capture_port_mismatch: bool = False
     # v0.4.5: whether an actual capture from this agent has been recorded for
     # this repository (proof of delivery, not just of a config file). True /
-    # False / None (unknown -- not applicable or could not tell). Only the
-    # OpenCode plugin, which runs inside OpenCode's own runtime and can silently
-    # fail to load, sets this today; hook-based agents run `openshard` directly.
+    # False / None (unknown -- not applicable or could not tell). Set for every
+    # agent whose integration is fully configured: a plugin can fail to load
+    # and a hook command can fail to run, and neither leaves a trace.
     capture_observed: bool | None = None
 
     @property
@@ -364,6 +387,7 @@ def detect_codex_integration(repo_root: Path | None) -> AgentIntegrationStatus:
     return AgentIntegrationStatus(
         AGENT_CODEX, available, path, repo_root, state, detail, rel,
         events_installed=installed, events_missing=missing,
+        capture_observed=agent_capture_observed(AGENT_CODEX, repo_root) if state == "openshard" else None,
     )
 
 
@@ -476,6 +500,7 @@ def detect_cursor_integration(repo_root: Path | None) -> AgentIntegrationStatus:
     return AgentIntegrationStatus(
         AGENT_CURSOR, available, path, repo_root, state, detail, rel,
         events_installed=installed, events_missing=missing,
+        capture_observed=agent_capture_observed(AGENT_CURSOR, repo_root) if state == "openshard" else None,
     )
 
 
@@ -507,6 +532,7 @@ def detect_antigravity_integration(repo_root: Path | None) -> AgentIntegrationSt
     return AgentIntegrationStatus(
         AGENT_ANTIGRAVITY, available, path, repo_root, state, detail, rel,
         events_installed=installed, events_missing=missing,
+        capture_observed=agent_capture_observed(AGENT_ANTIGRAVITY, repo_root) if state == "openshard" else None,
     )
 
 
@@ -600,6 +626,7 @@ def detect_hermes_integration(repo_root: Path | None) -> AgentIntegrationStatus:
     return AgentIntegrationStatus(
         AGENT_HERMES, available, path, repo_root, "openshard", f"configured ({rel})", rel,
         events_installed=installed, events_missing=[],
+        capture_observed=agent_capture_observed(AGENT_HERMES, repo_root),
     )
 
 

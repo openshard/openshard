@@ -826,7 +826,20 @@ class TestCli:
         assert codex["events_missing"] == []
         assert json.loads(after.output)["claude_code"]["claude_cli_available"] is False
         assert "Codex" in human.output and "OpenCode" in human.output
-        assert "Ready" in human.output and "use Codex normally" in human.output
+        # Installed hooks are structural evidence only; "Ready" needs a recorded session.
+        assert codex["capture_observed"] is None
+        assert "no Codex session captured in this repository yet" in human.output
+        assert "Configured but unverified: Codex" in human.output
+        assert "use Codex normally" not in human.output
+        (repo / ".openshard").mkdir(exist_ok=True)
+        (repo / ".openshard" / "runs.jsonl").write_text(
+            json.dumps({"timestamp": "2026-10-08T07:00:00Z", "run_id": "r1", "task": "t",
+                        "executor": "codex_hooks", "import_source": "codex"}) + "\n",
+            encoding="utf-8",
+        )
+        with patch("shutil.which", side_effect=_which):
+            proven = runner.invoke(cli, ["doctor", "--repo-path", str(repo)])
+        assert "✓ Capture verified" in proven.output and "use Codex normally" in proven.output
         assert human.output.index("Claude Code\n") < human.output.index("\nCodex\n")
 
     def test_setup_agent_snapshot_includes_codex(self, repo):

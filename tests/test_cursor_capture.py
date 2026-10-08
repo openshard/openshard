@@ -761,8 +761,25 @@ class TestCli:
         assert json.loads(before.output)["cursor"]["configured"] is False
         cursor = json.loads(after.output)["cursor"]
         assert cursor["configured"] is True and cursor["cli_available"] is True
-        assert cursor["events_missing"] == []
-        assert "\nCursor\n" in human.output and "Ready -- use Cursor normally" in human.output
+        assert cursor["events_missing"] == [] and cursor["capture_observed"] is None
+        # Installed hooks are structural evidence only: a hook command that
+        # never runs (not on the launching process's PATH) leaves no trace.
+        assert "\nCursor\n" in human.output
+        assert "no Cursor session captured in this repository yet" in human.output
+        assert "`openshard hooks cursor` did not run" in human.output
+        assert "Configured but unverified: Cursor" in human.output
+        assert "Ready -- use Cursor normally" not in human.output
+        (repo / ".openshard").mkdir(exist_ok=True)
+        (repo / ".openshard" / "runs.jsonl").write_text(
+            json.dumps({"timestamp": "2026-10-08T07:00:00Z", "run_id": "r1", "task": "t",
+                        "executor": "cursor_hooks", "import_source": "cursor"}) + "\n",
+            encoding="utf-8",
+        )
+        with patch("shutil.which", side_effect=_which):
+            proven = runner.invoke(cli, ["doctor", "--json", "--repo-path", str(repo)])
+            proven_human = runner.invoke(cli, ["doctor", "--repo-path", str(repo)])
+        assert json.loads(proven.output)["cursor"]["capture_observed"] is True
+        assert "✓ Capture verified" in proven_human.output and "Ready -- use Cursor normally" in proven_human.output
         with patch("shutil.which", return_value=None):
             absent = runner.invoke(cli, ["doctor", "--repo-path", str(repo)])
         assert "openshard capture install cursor" in absent.output

@@ -99,6 +99,11 @@ class ClaudeIntegrationStatus:
     # v0.4.4: "ok" | "missing" | "stale" | "no_token" | "n/a" (no HTTP hooks installed)
     hooks_auth_state: str = "n/a"
     capture_port_mismatch: bool = False  # hooks target a port the service is not on
+    # Whether a Claude Code session has actually been recorded for this
+    # repository (``agent_setup.agent_capture_observed``): True / False / None
+    # (no history yet, or hooks not fully installed). Installed hooks are
+    # structural evidence only; a recorded session is proof of delivery.
+    capture_observed: bool | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -118,6 +123,7 @@ class ClaudeIntegrationStatus:
             "hooks_need_upgrade": self.hooks_need_upgrade,
             "hooks_auth_state": self.hooks_auth_state,
             "capture_port_mismatch": self.capture_port_mismatch,
+            "capture_observed": self.capture_observed,
         }
 
 
@@ -202,6 +208,13 @@ def detect_claude_integration(repo_root: Path | None) -> ClaudeIntegrationStatus
 
     service = service_status()
     mismatch = bool(service.get("running")) and hooks_port is not None and hooks_port != service.get("port")
+    hooks_complete = bool(hook_events_installed) and not hook_events_missing and not hooks_need_upgrade
+    if hooks_complete and repo_root is not None:
+        from openshard.adapters.agent_setup import agent_capture_observed
+
+        capture_observed = agent_capture_observed("claude_code", repo_root)
+    else:
+        capture_observed = None
 
     return ClaudeIntegrationStatus(
         claude_cli=claude_avail,
@@ -217,6 +230,7 @@ def detect_claude_integration(repo_root: Path | None) -> ClaudeIntegrationStatus
         hooks_need_upgrade=hooks_need_upgrade,
         capture_port_mismatch=mismatch,
         hooks_auth_state=hooks_auth_state,
+        capture_observed=capture_observed,
     )
 
 
