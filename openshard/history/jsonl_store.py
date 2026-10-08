@@ -13,6 +13,8 @@ Helpers exposed:
 - ``upsert_jsonl(path, record, match)`` — replace the first line whose record
   satisfies ``match`` in place, else append; other lines are preserved
   byte-for-byte (malformed lines included).
+- ``upsert_jsonl_with(path, build, match)`` — the same upsert, but build the
+  record under the lock from the current raw lines and matched record.
 - ``amend_last_jsonl(path, transform)`` — replace the *last* well-formed
   record with ``transform(record)`` in place; every other line is preserved
   byte-for-byte. The read-transform-write is one critical section.
@@ -341,6 +343,64 @@ def upsert_jsonl(
             os.fsync(fh.fileno())
         return "appended"
 
+
+@_learning_update
+def upsert_jsonl_with(
+    path: Path,
+    build: Callable[[list[str], dict | None], dict],
+    match: Callable[[dict], bool],
+    *,
+    timeout: float | None = None,
+) -> tuple[dict, str]:
+    """Build and upsert one record while holding the history lock.
+
+    This is the position-dependent counterpart to upsert_jsonl. The current
+    raw lines are read under the lock and the first parsed record satisfying
+    match is passed to build(existing_lines, matched_record). The builder
+    therefore sees the exact history state that will be written and can safely
+    finalize an identity derived from history position.
+
+    Returns (record_as_written, "replaced"|"appended"). Blank, malformed and
+    unrelated lines are preserved byte-for-byte. The builder runs under the
+    lock, so it must stay cheap and must not re-enter this module on path.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _file_lock(_lock_path_for(path), timeout=timeout):
+        existing: list[str] = []
+        if path.exists():
+            with path.open("r", encoding="utf-8") as fh:
+                existing = fh.read().splitlines(keepends=True)
+
+        matched_index: int | None = None
+        matched_record: dict | None = None
+        for i, raw in enumerate(existing):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and match(parsed):
+                matched_index = i
+                matched_record = parsed
+                break
+
+        record = build(existing, matched_record)
+        line = json.dumps(record) + "\n"
+        if matched_index is not None:
+            existing[matched_index] = line
+            _atomic_replace(path, "".join(existing))
+            return record, "replaced"
+
+        with path.open("a", encoding="utf-8") as fh:
+            if existing and not existing[-1].endswith("\n"):
+                fh.write("\n")
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return record, "appended"
 
 @_learning_update
 def amend_last_jsonl(
