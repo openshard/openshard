@@ -44,6 +44,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import urllib.error
 import urllib.parse
@@ -60,7 +61,9 @@ from openshard.history.usage_evidence import (
     KIND_USAGE,
     OUTCOME_RECORDED,
     OUTCOME_UNCHANGED,
+    SOURCE_PROVIDER,
     SOURCE_RUNTIME,
+    STATUS_ESTIMATED,
     STATUS_RECONCILED,
     STATUS_UNKNOWN,
     SURFACE_CURSOR_ADMIN_EVENTS,
@@ -144,12 +147,15 @@ class Match:
     detail: str = ""
 
 
-def match_receipt(entries: list[dict], key_kind: str, key_value: str, *, receipt_ref: str | None = None) -> Match:
+def match_receipt(entries: list[dict], key_kind: str, key_value: str, *,
+                  receipt_ref: str | None = None, run_id: str | None = None) -> Match:
     """The one Receipt carrying *key_value* as *key_kind*, or why there is none."""
     carriers = [
         (i, e) for i, e in enumerate(entries)
         if isinstance(e, dict) and receipt_keys(e).get(key_kind, ("",))[0] == key_value
     ]
+    if run_id is not None:
+        carriers = [(i, e) for i, e in carriers if stored_cursor_run_id(e) == run_id]
     if not carriers:
         return Match(refusal=OUTCOME_NO_MATCH, detail=f"no Receipt in this history carries {key_kind} {key_value}")
     if len(carriers) > 1:
@@ -259,6 +265,7 @@ class UsageEvent:
     conversation_id: str | None
     cloud_agent_id: str | None
     model: str | None
+    chargeable: bool | None
     tokens: dict[str, int] | None
     model_cents: float | None
     charged_cents: float | None
@@ -293,6 +300,7 @@ def _event(raw: dict) -> UsageEvent:
         conversation_id=conv if isinstance(conv, str) and _KEY_RE.match(conv) else None,
         cloud_agent_id=agent if isinstance(agent, str) and _KEY_RE.match(agent) else None,
         model=model_id(raw.get("model")),
+        chargeable=raw.get("isChargeable") if isinstance(raw.get("isChargeable"), bool) else None,
         tokens=tokens,
         model_cents=model_cents,
         charged_cents=_cents(raw.get("chargedCents")),
@@ -403,13 +411,20 @@ def events_usage_block(events: list[UsageEvent]) -> dict[str, Any]:
         model_cents = [ev.model_cents for ev in events]
         fees = [ev.token_fee_cents for ev in events]
         cost.update(
-            status=STATUS_RECONCILED, source=SOURCE_RUNTIME, surface=SURFACE_CURSOR_ADMIN_EVENTS, complete=True,
+            status=STATUS_ESTIMATED if any(ev.chargeable is False for ev in events) else STATUS_RECONCILED,
+            source=SOURCE_PROVIDER if all(ev.chargeable is True for ev in events) else SOURCE_RUNTIME,
+            surface=SURFACE_CURSOR_ADMIN_EVENTS, complete=True,
             usd=round(sum(c for c in charged if c is not None) / 100, 8),
             model_cost_usd=round(sum(m for m in model_cents if m is not None) / 100, 8)
             if all(m is not None for m in model_cents) else None,
             platform_fee_usd=round(sum(f for f in fees if f is not None) / 100, 8)
             if all(f is not None for f in fees) else None,
         )
+    if cost.get("usd") is not None:
+        if all(ev.chargeable is True for ev in events):
+            cost["kind"] = "provider_billed"
+        elif any(ev.chargeable is False for ev in events):
+            cost["kind"] = "runtime_estimate"
     models = list(dict.fromkeys(ev.model for ev in events if ev.model))[:5]
     single = models[0] if len(models) == 1 and all(ev.model for ev in events) else None
     model = {"id": single, "source": SURFACE_CURSOR_ADMIN_EVENTS if models else None, "models": models}
@@ -478,7 +493,7 @@ def reconcile_agent_usage(
         return ReconcileResult(OUTCOME_UNAVAILABLE, "not a Cursor cloud agent id (bc-<uuid>)")
     if run_id is not None and not _RUN_ID_RE.match(run_id):
         return ReconcileResult(OUTCOME_UNAVAILABLE, "not a Cursor run id (run-...)")
-    match = match_receipt(entries, KEY_CLOUD_AGENT, agent_id, receipt_ref=receipt_ref)
+    match = match_receipt(entries, KEY_CLOUD_AGENT, agent_id, receipt_ref=receipt_ref, run_id=run_id)
     if match.entry is None:
         return ReconcileResult(match.refusal or OUTCOME_NO_MATCH, match.detail)
     rid = match.entry.get("receipt_id")
@@ -603,6 +618,51 @@ def fetch_usage_events(
         if pagination.get("hasNextPage") is not True:
             return pages, ""
     return None, f"more than {MAX_EVENT_PAGES} pages of usage events in the window; narrow it"
+
+
+AUTO_POLL_SECONDS = 300.0
+
+
+def auto_reconcile_usage(
+    repo_root: Path, entries: list[dict], entry: dict, *, env: dict | os._Environ,
+) -> bool:
+    """Poll supported Cursor usage off the hook path; False if no safe query exists.
+
+    Provider credentials are explicit environment configuration. Refuse agent-wide
+    totals without a captured run id, and reused session IDs that cannot be split.
+    HTTP failures and pending exports leave existing usage untouched for a later poll.
+    """
+    keys = receipt_keys(entry)
+    if not keys:
+        return False
+    agent_key = env.get(ENV_API_KEY, "").strip()
+    admin_key = env.get(ENV_ADMIN_API_KEY, "").strip()
+    agent_id = keys.get(KEY_CLOUD_AGENT, (None,))[0]
+    run_id = stored_cursor_run_id(entry)
+    queried = False
+    if agent_key and agent_id and run_id:
+        # Match before querying: ambiguous identity does not spend API quota.
+        match = match_receipt(entries, KEY_CLOUD_AGENT, agent_id, receipt_ref=entry.get("receipt_id"), run_id=run_id)
+        if match.entry is not None:
+            queried = True
+            body, _ = fetch_agent_usage(agent_id, agent_key, run_id=run_id, timeout=10.0)
+            if body is not None:
+                reconcile_agent_usage(repo_root, entries, agent_id, body,
+                                      run_id=run_id, receipt_ref=entry.get("receipt_id"))
+    if admin_key:
+        key_kind = KEY_CLOUD_AGENT if agent_id else KEY_CONVERSATION
+        value = keys[key_kind][0]
+        match = match_receipt(entries, key_kind, value, receipt_ref=entry.get("receipt_id"))
+        start, end = receipt_window_ms(entry)
+        if match.entry is not None and start is not None and end is not None:
+            queried = True
+            pages, _ = fetch_usage_events(
+                admin_key, start_ms=start - EVENT_WINDOW_SLACK_MS, end_ms=end + EVENT_WINDOW_SLACK_MS,
+                cloud_agent_id=agent_id, timeout=10.0,
+            )
+            if pages is not None:
+                reconcile_usage_events(repo_root, entries, entry, pages)
+    return queried
 
 
 __all__ = [

@@ -236,6 +236,7 @@ class FlushReport:
     evidence_recorded: int = 0
     evidence_not_accepted: int = 0
     evidence_unsupported: bool = False
+    usage_pending: int = 0
     usage_sent: int = 0
     usage_recorded: int = 0
     usage_not_accepted: int = 0
@@ -461,11 +462,43 @@ def _flush_usage(
     from openshard.history.usage_evidence import load_usage_attestations
     from openshard.sync.usage import build_usage_envelope, usage_hash
 
+    records = _outbox.load_outbox(root)
+    entries = load_history(root / HISTORY_RELPATH, coerce=True)
+    # One bounded provider poll per flush; existing outbox stores retry cadence.
+    from openshard.adapters.cursor_usage import AUTO_POLL_SECONDS, auto_reconcile_usage
+
+    current = stamp if stamp is not None else datetime.now(UTC).timestamp()
+    for entry in entries:
+        rid = stored_receipt_id(entry)
+        record = records.get(rid) if rid is not None else None
+        if (rid is None or record is None or record.get("state") != _outbox.STATE_SYNCED
+                or (receipt_ids is not None and rid not in receipt_ids)
+                or not _outbox.matches_link(record, endpoint=link.endpoint, organisation_id=link.organisation_id)
+                or stored_shard_hash(entry) != record.get("record_hash")):
+            continue
+        # Keep delayed provider usage eligible for bounded background polling.
+        synced_at = record.get("synced_at")
+        try:
+            synced = datetime.fromisoformat(str(synced_at).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if current - synced > 7 * 24 * 60 * 60:
+            continue
+        if record.get("cursor_usage_polling"):
+            report.usage_pending += 1
+        checked = record.get("cursor_usage_poll_at")
+        if isinstance(checked, (int, float)) and current - checked < AUTO_POLL_SECONDS:
+            continue
+        if auto_reconcile_usage(root, entries, entry, env=env):
+            record = dict(record, cursor_usage_poll_at=current, cursor_usage_polling=True)
+            if not records[rid].get("cursor_usage_polling"):
+                report.usage_pending += 1
+            _outbox.put(root, record)
+            records[rid] = record
+            break
     attestations = load_usage_attestations(root / HISTORY_RELPATH.parent)
     if not attestations:
         return
-    records = _outbox.load_outbox(root)
-    entries = load_history(root / HISTORY_RELPATH, coerce=True)
     budget = max(0, int(limit))
     for entry in entries:
         if budget <= 0:
@@ -503,6 +536,7 @@ def _flush_usage(
                 status=result.status, code=result.code, details=result.details,
             ))
         elif result.kind == _transport.KIND_RECEIPT_PENDING:
+            report.usage_pending += 1
             continue
         elif result.kind == _transport.KIND_UNSUPPORTED:
             report.usage_unsupported = True

@@ -55,7 +55,8 @@ STATES: frozenset[str] = frozenset({STATE_SYNCED, STATE_STALE, STATE_CONFLICT, S
 TERMINAL_STATES: frozenset[str] = frozenset({STATE_CONFLICT, STATE_REJECTED})
 
 EVIDENCE_KEYS: tuple[str, ...] = ("evidence_hash", "evidence_state", "evidence_at", "evidence_error")
-USAGE_KEYS: tuple[str, ...] = ("usage_hash", "usage_state", "usage_at", "usage_error")
+USAGE_KEYS: tuple[str, ...] = ("usage_hash", "usage_state", "usage_at", "usage_error",
+                                "cursor_usage_poll_at", "cursor_usage_polling")
 
 _LOCK_TIMEOUT_SECONDS = 5.0
 _MAX_DETAIL_ITEMS = 20

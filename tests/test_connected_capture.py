@@ -576,3 +576,35 @@ class TestMissingSessionEnd:
         report = collector.flush(client=fake, heartbeat=True, now=state["activity_at"] + 16 * 60)
         assert not report.heartbeat
         assert len(fake.batches) == 1
+
+
+class TestCursorCloudTurn:
+    def test_stop_delivers_a_partial_turn_without_waiting_for_session_end(self, home, repo, monkeypatch):
+        from openshard.adapters.claude_hooks import handle_hook
+
+        _connected_env(monkeypatch, "cursor-cloud")
+        sid = "bc-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        def hook(event, **fields):
+            return handle_hook({"conversation_id": sid, "generation_id": "run-first", "cwd": str(repo),
+                                "workspace_roots": [str(repo)], "hook_event_name": event, **fields}, agent="cursor")
+        hook("beforeSubmitPrompt", prompt="cloud task")
+        hook("stop", status="completed")
+        fake = FakeConnectedPlatform()
+        report = collector.flush(client=fake)
+        assert report.receipts["created"] == 1
+        original = load_history(repo / ".openshard" / "runs.jsonl", coerce=False)[0]
+        assert original["capture"]["session_end_observed"] is False
+        assert original["capture"]["task_status"] == "turn_completed"
+        assert not any(e["event_type"] == "run.completed" for b in fake.batches for e in b["events"])
+        hook("beforeSubmitPrompt", prompt="next turn")
+        hook("stop", status="completed")
+        first, second = load_history(repo / ".openshard" / "runs.jsonl", coerce=False)
+        assert first == original
+        assert second["receipt_id"] != first["receipt_id"]
+
+
+def test_delayed_usage_keeps_detached_delivery_retryable():
+    report = collector.RemoteFlushReport(receipts={"usage_pending": 1})
+    assert collector._retryable_work(report)
+    report.receipts = {"usage_pending": 0}
+    assert not collector._retryable_work(report)

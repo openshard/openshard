@@ -146,7 +146,7 @@ def record(
             spool.update_state(env, capture_id, connected=connected.to_state())
         # Keep asking until the existing sync eligibility gate seals the Receipt.
         # Providers without SessionEnd still need the ordinary idle sweep/upload.
-        if finalized or isinstance(entry, dict):
+        if finalized or isinstance(entry, dict) or (isinstance(record, dict) and record.get("receipt_id")):
             spool.update_state(env, capture_id, deliver=True)
         if count or finalized:
             notify(env)
@@ -221,17 +221,15 @@ def _deliver(env: dict | os._Environ | None, link: Any, client: Any, state: dict
     """Deliver finalised Receipts and later verification through the selected capture transport."""
     from openshard.sync import client as sync_client
     totals: dict[str, Any] = {"sent": 0, "created": 0, "duplicate": 0, "conflict": 0, "rejected": 0, "pending": 0,
-                              "in_progress": 0, "evidence_recorded": 0, "usage_recorded": 0, "stopped": None}
+                              "in_progress": 0, "evidence_recorded": 0, "usage_recorded": 0, "usage_pending": 0, "stopped": None}
     for repo in [r for r in (state.get("repos") or []) if isinstance(r, str)]:
         root = Path(repo)
-        if not (root / ".openshard" / "runs.jsonl").is_file():
-            continue
         receipt_ids = frozenset(item["receipt_id"] for item in state.get("links", [])
                                 if isinstance(item, dict) and isinstance(item.get("receipt_id"), str))
         report = sync_client.flush(root, env=env, link=link, transport=client,
                                    limit=spool.MAX_LINKS, receipt_ids=receipt_ids)
         for key in ("sent", "created", "duplicate", "conflict", "rejected", "pending", "in_progress",
-                    "evidence_recorded", "usage_recorded"):
+                    "evidence_recorded", "usage_recorded", "usage_pending"):
             totals[key] += int(getattr(report, key, 0) or 0)
         totals["stopped"] = totals["stopped"] or report.stopped
     return totals
@@ -386,7 +384,7 @@ def flush(
                         source=SOURCE_ENV,
                     )
                 report.receipts = _deliver(env, delivery_link, client, state)
-                settled = report.receipts is not None and not report.receipts.get("stopped") and not report.receipts.get("pending") and not report.receipts.get("in_progress")
+                settled = report.receipts is not None and not report.receipts.get("stopped") and not report.receipts.get("pending") and not report.receipts.get("in_progress") and not report.receipts.get("usage_pending")
                 if settled and state.get("deliver"):
                     spool.update_state(env, capture_id, deliver=False)
             report.pending = spool.pending_count(env)
@@ -498,7 +496,8 @@ def _retryable_work(report: RemoteFlushReport) -> bool:
     stopped = receipts.get("stopped")
     if stopped and stopped != "paused: unavailable":
         return False
-    return bool(report.pending or receipts.get("pending") or stopped == "paused: unavailable")
+    return bool(report.pending or receipts.get("pending") or receipts.get("usage_pending")
+                or stopped == "paused: unavailable")
 
 
 def run_background_flusher(env: dict | os._Environ | None = None, *, settle_seconds: float = 2.0, max_seconds: float = 120.0) -> RemoteFlushReport:
