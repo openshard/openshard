@@ -4394,11 +4394,13 @@ def apply_reduced_hook(
                                    repo_root=repo_root, detail="duplicate event id")
             detail, should_fold, should_delete = _apply(payload, buf, repo_root, now=now)
             cloud_turn_closed = (
-                payload.agent == "cursor" and payload.event == EVENT_STOP
-                and os.environ.get("OPENSHARD_CONNECTED_SURFACE") == "cursor-cloud"
+                payload.event == EVENT_STOP
+                and (payload.agent, os.environ.get("OPENSHARD_CONNECTED_SURFACE")) in {
+                    ("cursor", "cursor-cloud"), ("claude_code", "claude-code-web"),
+                }
             )
             if cloud_turn_closed:
-                # Cursor cloud may reclaim its VM after Stop without SessionEnd.
+                # Hosted runtimes may reclaim their VM after Stop without SessionEnd.
                 # Seal this observed turn now, without manufacturing a session end.
                 losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
                 if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
