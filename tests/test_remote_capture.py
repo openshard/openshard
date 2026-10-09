@@ -300,7 +300,7 @@ class TestHookPath:
         entry = load_history(repo / RUNS, coerce=False)[-1]
         assert [link["receipt_id"] for link in state["links"]] == [entry["receipt_id"]]
         assert state["repos"] == [str(repo)]
-        assert state.get("deliver") is not True  # nothing is finalised yet
+        assert state.get("deliver") is True  # sync eligibility still waits for end or quiescence
 
     def test_session_end_is_one_more_event_and_asks_for_the_receipt_to_be_delivered(self, attached, repo):
         _work(repo, tool_calls=1)

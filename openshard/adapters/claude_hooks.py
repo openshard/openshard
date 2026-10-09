@@ -2189,7 +2189,13 @@ def _find_persisted_entry(repo_root: Path, session_id: str, executor: str = EXEC
 
 def _entry_ended(entry: dict) -> bool:
     capture = entry.get("capture")
-    return isinstance(capture, dict) and capture.get("session_end_observed") is True
+    if not isinstance(capture, dict):
+        return False
+    reasons = (capture.get("completeness") or {}).get("reasons") or []
+    return capture.get("session_end_observed") is True or any(
+        isinstance(reason, dict) and reason.get("kind") == REASON_SESSION_END_NOT_OBSERVED
+        for reason in reasons
+    )
 
 
 def _resumed_segment(
@@ -3731,10 +3737,10 @@ def sweep_stale_buffers(
 
     Called (outside the caller's own session lock) on SessionStart, and by
     Platform sync before it picks what to send (sync/client.py). A stale
-    buffer is snapshotted into runs.jsonl exactly as a Stop would do it --
+    buffer is sealed into runs.jsonl as a partial segment --
     ``capture.session_end_observed`` stays False and no ``run.completed``
     Event is fabricated -- then removed; a later hook for that session
-    rebuilds its buffer from the persisted record. Returns the session ids
+    opens a new Receipt segment. Returns the session ids
     folded. Never raises.
     """
     folded: list[str] = []
@@ -3776,6 +3782,14 @@ def sweep_stale_buffers(
                             losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
                         buf["capture_losses"] = losses
                         swept_entry, _ = _fold(buf, repo_root, finalize=True)
+                        # The idle boundary seals a partial Receipt, not a session end.
+                        # Reuse the existing remote spool and delivery path.
+                        remote_events = _remote_capture_new_events(buf)
+                        if remote_events is not None:
+                            _remote_capture_record(
+                                repo_root, remote_events, buf.get("record") or {}, swept_entry,
+                                finalized=True,
+                            )
                         _schedule_post_session_verify(repo_root, swept_entry)
                     path.unlink()
                 folded.append(sid)
