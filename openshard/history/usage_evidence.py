@@ -213,6 +213,8 @@ def price_tokens(model: str | None, tokens: dict[str, Any]) -> dict[str, Any] | 
         return None
     if tokens.get("reasoning") or tokens.get("other"):
         return None
+    if any(_count(tokens.get(key)) is None for key in ("input", "output", "cache_read", "cache_write")):
+        return None
     rate = official_rate(model)
     estimate = estimate_usage_cost(
         model,
@@ -225,7 +227,7 @@ def price_tokens(model: str | None, tokens: dict[str, Any]) -> dict[str, Any] | 
         return None
     cost = empty_cost(STATUS_ESTIMATED)
     cost.update(source=SOURCE_OPENSHARD, surface=tokens.get("surface"), usd=estimate.usd, complete=True,
-                rate=rate_snapshot(rate))
+                rate=rate_snapshot(rate), kind="calculated_estimate")
     return cost
 
 
@@ -374,6 +376,16 @@ def parse_usage_block(value: object) -> dict[str, Any] | None:
         cost = empty_cost()  # a calculation without the rate it used cannot be shown honestly
     if cost["source"] == SOURCE_OPENSHARD and cost["status"] != STATUS_UNKNOWN:
         cost["status"] = STATUS_ESTIMATED
+    kind = raw_cost.get("kind")
+    valid_kind = (
+        kind == "provider_billed" and cost["source"] == SOURCE_PROVIDER
+        and cost["status"] in (STATUS_OBSERVED, STATUS_RECONCILED)
+    ) or (
+        kind in ("runtime_estimate", "calculated_estimate") and cost["status"] == STATUS_ESTIMATED
+        and (kind != "calculated_estimate" or cost["source"] == SOURCE_OPENSHARD)
+    )
+    if valid_kind and cost["usd"] is not None:
+        cost["kind"] = kind
     models = [m for m in (model_id(x) for x in (raw_model.get("models") or [])) if m][:_MAX_MODELS]
     raw_source = raw_model.get("source")
     model: dict[str, Any] = {
@@ -394,7 +406,9 @@ def _replaces(candidate: dict[str, Any], current: dict[str, Any], ranks: dict[st
     cand_rank, cur_rank = ranks.get(candidate["source"], 0), ranks.get(current["source"], 0)
     if cand_rank != cur_rank:
         return cand_rank > cur_rank
-    if current["status"] == STATUS_RECONCILED:
+    if current["status"] == STATUS_RECONCILED or (
+        current["status"] == STATUS_ESTIMATED and current.get("surface") != SURFACE_RECORD
+    ):
         return True  # a newer reconciliation of equal strength supersedes an older one
     return current.get("complete") is False and candidate.get("complete") is True
 
@@ -531,7 +545,11 @@ def usage_line(block: dict[str, Any] | None) -> str:
     else:
         parts.append("cost unknown")
     t_label = _source_label(tokens.get("source"), tokens.get("surface")) if t_known else None
-    c_label = _source_label(cost.get("source"), cost.get("surface")) if c_known else None
+    c_label = (
+        {"provider_billed": "provider-billed", "runtime_estimate": "runtime estimate",
+         "calculated_estimate": "calculated estimate"}.get(str(cost.get("kind")))
+        or _source_label(cost.get("source"), cost.get("surface"))
+    ) if c_known else None
     if t_label and c_label and t_label != c_label:
         parts.append(f"tokens {t_label}, cost {c_label}")
     else:

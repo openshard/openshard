@@ -132,6 +132,8 @@ def usage_payload(block: dict[str, Any]) -> dict[str, Any]:
             else None,
         } if rate_in else None,
     }
+    if cost_in.get("kind") in {"provider_billed", "runtime_estimate", "calculated_estimate"}:
+        cost["kind"] = cost_in["kind"]
     models = [m for m in (model_in.get("models") or []) if isinstance(m, str)][:5]
     model = {
         "id": model_in.get("id") if isinstance(model_in.get("id"), str) else None,

@@ -108,10 +108,10 @@ The cloud runtimes do not expose identical evidence. Openshard uses the
 provider-native hook/runtime path that actually exists and leaves unavailable
 fields unknown.
 
-| | Codex Cloud / ChatGPT Work coding runtime | Claude Code on the web | Cursor Cloud Agents |
+| | Codex Cloud runtime | Claude Code on the web | Cursor Cloud Agents |
 |---|---|---|---|
 | reusable cloud setup | yes: published Codex Cloud environments | yes | yes |
-| repository lifecycle hooks | yes in the Codex runtime, including ChatGPT Work, when the hook scripts exist in the execution environment and the user trusts them; ordinary Chat does **not** run these hooks | yes | yes: project command hooks; cloud/background agents may omit session start/end |
+| repository lifecycle hooks | only where the execution environment supports trusted command hooks; cloud-orchestrated ChatGPT Work does **not** run local command/plugin hooks | yes | yes: project command hooks; cloud/background agents may omit session start/end |
 | secret safe from agent code | OpenAI-hosted vault environment credential: sandbox sees an opaque placeholder and the network proxy supplies the real secret only to approved hosts | API Credentials host-scoped proxy | Cursor Runtime Secrets are redacted from agent outputs/transcripts but still exist as environment variables inside the VM |
 | outbound Platform access | allow `api.openshard.dev` in the environment network policy | allow the Platform host | allow the Platform host |
 | model evidence | hook `model`; matching runtime transcript can also name provider/model | hook/status/transcript | hook `model` / `model_id` |
@@ -120,9 +120,11 @@ fields unknown.
 
 Current official references:
 - OpenAI Codex Cloud environments: reusable prepared environments can be used from desktop, web and mobile.
-- OpenAI plugin/hook docs: lifecycle hooks run in the Codex runtime, including
-  ChatGPT Work and Codex; hook scripts must exist in the execution environment
-  and be trusted. Ordinary Chat does not run these handlers.
+- OpenAI [hook documentation](https://learn.chatgpt.com/docs/hooks): local
+  command/plugin/environment hooks are unsupported for cloud-orchestrated
+  ChatGPT Work tasks. Admin-managed remote MCP hooks may be available, but
+  OpenShard has not implemented that separate integration. Trusted command
+  hooks require scripts in a supported execution environment.
 - OpenAI sandbox/vault docs: an environment-variable credential gives sandbox
   code only a placeholder; a network proxy replaces it for approved HTTPS hosts.
 - Cursor Cloud Agents docs: project command hooks run in cloud workspaces;
@@ -134,14 +136,16 @@ What this means:
   Once the environment is configured, normal Claude work streams events and
   the completed Receipt automatically. If the host never delivers a final
   lifecycle event, Openshard keeps the evidence and labels the capture partial.
-- **Codex Cloud / ChatGPT Work coding tasks.** Install Openshard and its Codex
+- **Codex Cloud tasks with supported command hooks.** Install Openshard and its Codex
   project hooks in the published environment, trust the hooks, and use an
   OpenAI-hosted vault environment credential named
   `OPENSHARD_CONNECTED_TOKEN`, scoped to `api.openshard.dev`. Set
   `OPENSHARD_CONNECTED_CREDENTIAL_MODE=proxy`; the vault's opaque placeholder
   is sent unchanged and OpenAI's proxy supplies the real `osc_` credential.
   Current-task transcript usage is read only after the transcript proves the
-  same Codex session id. Ordinary Chat is not claimed as passive capture.
+  same Codex session id. Verify a first Remote event before relying on capture.
+  Cloud-orchestrated ChatGPT Work cannot use this command-hook setup; without
+  a supported hook or runtime record delivery path, automatic capture is unavailable.
 - **Cursor Cloud Agents.** Install project hooks in the cloud environment and
   store `OPENSHARD_CONNECTED_TOKEN` as a Cursor Runtime Secret. The hook stream
   creates the Receipt; later official Cursor usage evidence can strengthen that
@@ -196,3 +200,38 @@ agent pushes: a branch, a pull request, CI. From a trusted checkout,
 `openshard verify --ci` attaches the CI verdict for that exact commit to a
 Receipt it has locally; attaching it to a hosted Receipt that only exists
 on the Platform is not yet possible.
+
+
+## Automatic provider usage reconciliation
+
+Capture service flushes now use the existing usage-evidence path to poll Cursor
+when `CURSOR_API_KEY` or `CURSOR_ADMIN_API_KEY` is explicitly configured in the
+collector environment. Tokens from the Cloud Agents endpoint require an exact
+captured `bc-...` agent and `run-...` run ID. Admin events still require the
+captured conversation/agent identity and a non-ambiguous Receipt. Reused session
+IDs that cannot be split are refused; branch, PR and task similarity never bind.
+
+Polling runs off the hook path, at most once per Receipt per five minutes, for
+seven days after its first successful sync. A live collector or later trusted
+checkout is required; polling does not survive destruction of its machine.
+Pending exports and HTTP failures leave usage unknown and are retried. Provider
+credentials are never stored in the outbox or journal. The old Platform may not
+support the new optional cost-kind field; install the companion Platform update
+before using explicit billed/runtime-estimate labels.
+
+Cursor events with `isChargeable: true` and `chargedCents` carry provider-billed
+cost. Explicitly non-chargeable events with a nominal cost remain runtime
+estimates. Missing chargeability remains reported cost with billing unestablished.
+Codex runtime counters provide tokens and, where defensible, API-list-rate
+estimates; they do not establish the account's actual subscription bill.
+A resumed Codex segment uses counters observed at its opening as a baseline.
+Without that baseline it does not reuse cumulative session totals as run usage.
+
+
+In an explicitly configured `cursor-cloud` connection, a completed `stop` hook
+now seals and delivers that observed turn immediately. It does not invent
+SessionEnd or `run.completed`: the Remote session can remain partial while its
+canonical turn Receipt is available. Further prompts create new sealed segments.
+Distinct observed Cloud Agents run IDs can reconcile those separate Receipts;
+several segments of the same provider run still cannot receive its entire total
+individually. Other runtimes retain the existing end/idle boundary rules.

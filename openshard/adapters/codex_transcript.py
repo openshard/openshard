@@ -86,6 +86,7 @@ def read_codex_transcript_usage(path: Path, session_id: str) -> dict[str, Any] |
     models: list[str] = []
     provider: str | None = None
     latest: dict[str, int] | None = None
+    complete = True
 
     try:
         with path.open("rb") as stream:
@@ -121,8 +122,9 @@ def read_codex_transcript_usage(path: Path, session_id: str) -> dict[str, Any] |
                         continue
                     input_total = _count(total.get("input_tokens"))
                     output = _count(total.get("output_tokens"))
-                    cached = _count(total.get("cached_input_tokens")) or 0
-                    if input_total is None or output is None or cached > input_total:
+                    cached = _count(total.get("cached_input_tokens"))
+                    if input_total is None or output is None or cached is None or cached > input_total:
+                        complete = False
                         continue
                     latest = {
                         "input": input_total - cached,
@@ -148,7 +150,8 @@ def read_codex_transcript_usage(path: Path, session_id: str) -> dict[str, Any] |
         "messages": 1,
         "totals": dict(latest),
         "by_model": {model: row},
-        "complete": True,
+        "complete": complete,
+        **({"incomplete_reason": "malformed_runtime_counter"} if not complete else {}),
         "provider": provider,
         "models": models[:5],
     }

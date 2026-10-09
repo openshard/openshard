@@ -567,7 +567,8 @@ class TestReceiptViewsAndSync:
         assert doc["receipt_id"] == entry["receipt_id"]
         assert set(doc["usage"]) == USAGE_KEYS
         assert set(doc["usage"]["tokens"]) == TOKEN_KEYS
-        assert set(doc["usage"]["cost"]) == COST_KEYS
+        assert set(doc["usage"]["cost"]) == COST_KEYS | {"kind"}
+        assert doc["usage"]["cost"]["kind"] == "calculated_estimate"
         assert set(doc["evidence"][0]) == EVIDENCE_KEYS
         assert set(doc["evidence"][0]["correlation"]) == CORR_KEYS
         blob = json.dumps(doc)
@@ -609,6 +610,32 @@ class TestUsageFlush:
         record = outbox.load_outbox(repo)[entry["receipt_id"]]
         assert record["state"] == "synced" and record["usage_state"] == "synced"
         assert record["usage_hash"] == sync_usage.usage_hash(recording.usage_envelopes[0])
+
+    def test_automatic_usage_polling_throttles_and_revisits_pending_exports(self, repo, env, link, recording, monkeypatch):
+        from datetime import timedelta
+
+        from openshard.adapters import cursor_usage as cu
+
+        _cursor_session(repo, ended=True)
+        env[cu.ENV_API_KEY] = "test-key"
+        responses = iter([_agent_body(_run(RUN, _ZERO, uuid=None)), _agent_body(_run(RUN, _counts(8, 2)))])
+        calls = []
+        def fetch(*args, **kwargs):
+            calls.append(kwargs["run_id"])
+            return next(responses), ""
+        monkeypatch.setattr(cu, "fetch_agent_usage", fetch)
+        now = datetime.now(UTC)
+        first = client.flush(repo, env=env, now=now)
+        assert first.created == 1 and first.usage_recorded == 0 and first.usage_pending == 1
+        assert load_usage_attestations(repo / ".openshard") == []
+        assert client.flush(repo, env=env, now=now + timedelta(seconds=10)).usage_pending == 1
+        assert len(calls) == 1
+        later = client.flush(repo, env=env, now=now + timedelta(seconds=301))
+        assert later.usage_recorded == 1 and later.usage_pending == 1
+        assert calls == [RUN, RUN]
+        assert recording.usage_envelopes[0]["usage"]["tokens"]["total"] == 10
+        assert len(recording.envelopes) == 1
+        assert client.flush(repo, env=env, now=now + timedelta(days=8)).usage_pending == 0
 
     def test_a_platform_without_the_route_is_skipped_quietly(self, repo, env, link):
         entry = _cursor_session(repo, ended=True)
@@ -726,3 +753,67 @@ class TestUsageCli:
             catch_exceptions=False,
         )
         assert ok.exit_code == 0 and "Recorded" in ok.output
+
+
+class TestAutomaticCursorUsage:
+    def test_api_collection_requires_observed_run_and_preserves_receipt(self, repo, monkeypatch):
+        from openshard.adapters import cursor_usage as cu
+
+        _cursor_session(repo, AGENT)
+        entries = load_history(repo / ".openshard" / "runs.jsonl", coerce=False)
+        entry = entries[0]
+        entry["capture"]["cursor_run_id"] = RUN
+        before = (repo / ".openshard" / "runs.jsonl").read_bytes()
+        requests = []
+        def fetch(agent_id, key, **kwargs):
+            requests.append((agent_id, kwargs["run_id"]))
+            return _agent_body(_run(RUN, _counts(100, 20, 3, 4))), ""
+        monkeypatch.setattr(cu, "fetch_agent_usage", fetch)
+        assert cu.auto_reconcile_usage(repo, entries, entry, env={cu.ENV_API_KEY: "test-key"})
+        assert requests == [(AGENT, RUN)]
+        assert load_usage_attestations(repo / ".openshard")[-1]["usage"]["tokens"]["total"] == 127
+        assert (repo / ".openshard" / "runs.jsonl").read_bytes() == before
+        del entry["capture"]["cursor_run_id"]
+        entry["capture"].pop("cursor_generation_id", None)
+        assert not cu.auto_reconcile_usage(repo, entries, entry, env={cu.ENV_API_KEY: "test-key"})
+        assert len(requests) == 1
+
+    def test_pending_and_unavailable_api_never_fabricate_usage(self, repo, monkeypatch):
+        from openshard.adapters import cursor_usage as cu
+
+        _cursor_session(repo, AGENT)
+        entries = load_history(repo / ".openshard" / "runs.jsonl", coerce=False)
+        entries[0]["capture"]["cursor_run_id"] = RUN
+        monkeypatch.setattr(cu, "fetch_agent_usage", lambda *args, **kwargs: (_agent_body(_run(RUN, _ZERO, uuid=None)), ""))
+        assert cu.auto_reconcile_usage(repo, entries, entries[0], env={cu.ENV_API_KEY: "test-key"})
+        assert load_usage_attestations(repo / ".openshard") == []
+        monkeypatch.setattr(cu, "fetch_agent_usage", lambda *args, **kwargs: (None, "unavailable"))
+        assert cu.auto_reconcile_usage(repo, entries, entries[0], env={cu.ENV_API_KEY: "test-key"})
+        assert load_usage_attestations(repo / ".openshard") == []
+
+    def test_chargeability_distinguishes_reported_estimate_from_billed_cost(self):
+        from openshard.adapters import cursor_usage as cu
+        charged = cu.events_usage_block(cu.parse_usage_events(_events(_event(isChargeable=True))))
+        included = cu.events_usage_block(cu.parse_usage_events(_events(_event(isChargeable=False))))
+        assert charged["cost"]["source"] == "provider_reported"
+        assert charged["cost"]["status"] == "reconciled"
+        assert included["cost"]["source"] == "runtime_reported"
+        assert included["cost"]["status"] == "estimated"
+        assert charged["cost"]["kind"] == "provider_billed"
+        assert included["cost"]["kind"] == "runtime_estimate"
+        from openshard.history.usage_evidence import parse_usage_block
+        assert parse_usage_block(charged)["cost"]["kind"] == "provider_billed"
+
+
+    def test_exact_captured_run_id_disambiguates_multiple_cloud_receipts(self, repo, monkeypatch):
+        from openshard.adapters import cursor_usage as cu
+
+        first = _cursor_session(repo, generation_id="run-first", ended=True)
+        second = _cursor_session(repo, generation_id="run-second", ended=True)
+        entries = load_history(repo / ".openshard" / "runs.jsonl", coerce=False)
+        assert len(entries) == 2
+        monkeypatch.setattr(cu, "fetch_agent_usage", lambda *args, **kwargs: (_agent_body(_run(kwargs["run_id"], _counts(8, 2))), ""))
+        assert cu.auto_reconcile_usage(repo, entries, first, env={cu.ENV_API_KEY: "test-key"})
+        attestations = load_usage_attestations(repo / ".openshard")
+        assert attestations[0]["receipt_id"] == first["receipt_id"]
+        assert attestations[0]["receipt_id"] != second["receipt_id"]

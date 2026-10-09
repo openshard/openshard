@@ -1033,6 +1033,15 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
                 mid in (other or {}).get("recent", {}) for k, other in state["files"].items() if k != key
             )):
                 continue  # already counted (earlier in this file, or in another transcript)
+            # Missing or malformed counters are not zero usage. Keep any older
+            # observed lower bound, but withhold completeness and pricing until
+            # a valid later record for this exact message resolves it.
+            invalid = state.setdefault("invalid_usage", {})
+            fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+            if any(not isinstance(usage.get(f), int) or isinstance(usage.get(f), bool) or usage[f] < 0 for f in fields):
+                invalid[mid] = True
+                continue
+            invalid.pop(mid, None)
             recent.pop(mid, None)  # the latest line of a streamed message wins
             recent[mid] = [name, *_usage_row(usage)]
             while len(recent) > _TRANSCRIPT_RECENT_IDS:
@@ -1065,9 +1074,10 @@ def _summarise_transcript_state(state: dict) -> dict | None:
         m: {**{f: acc[i] for i, f in enumerate(_USAGE_FIELDS)}, "messages": acc[-1]}
         for m, acc in sorted(per_model.items(), key=lambda kv: -kv[1][-1])
     }
-    complete = not state.get("capped") and len(by_model) <= _MAX_USAGE_MODELS
+    complete = not state.get("capped") and not state.get("invalid_usage") and len(by_model) <= _MAX_USAGE_MODELS
     return {"messages": messages, "totals": totals, "by_model": dict(list(by_model.items())[:_MAX_USAGE_MODELS]),
-            "complete": complete}
+            "complete": complete,
+            **({"incomplete_reason": "malformed_runtime_counter"} if state.get("invalid_usage") else {})}
 
 
 def read_transcript_usage(path: Path, *, since: datetime | str | None = None) -> dict | None:
@@ -1114,6 +1124,21 @@ def _transcript_usage(buf: dict) -> dict | None:
             return cached
         if usage is None:
             return cached
+        if buf.get("codex_usage_baseline_required"):
+            baseline = buf.get("codex_usage_baseline")
+            totals = usage.get("totals")
+            if not isinstance(baseline, dict) or not isinstance(totals, dict):
+                return None
+            delta = {}
+            for key, value in totals.items():
+                before = baseline.get(key)
+                if (not isinstance(value, int) or not isinstance(before, int)
+                        or isinstance(value, bool) or isinstance(before, bool) or value < before):
+                    return None  # reset/changed counter: never manufacture a delta
+                delta[key] = value - before
+            usage = dict(usage, totals=delta, by_model={
+                model: {**delta, "messages": 1} for model in usage.get("by_model", {})
+            })
         buf["codex_transcript_marker"] = marker
         buf["transcript_usage"] = usage
         return usage
@@ -2191,7 +2216,8 @@ def _entry_ended(entry: dict) -> bool:
     capture = entry.get("capture")
     if not isinstance(capture, dict):
         return False
-    reasons = (capture.get("completeness") or {}).get("reasons") or []
+    completeness = capture.get("completeness")
+    reasons = completeness.get("reasons", []) if isinstance(completeness, dict) else []
     return capture.get("session_end_observed") is True or any(
         isinstance(reason, dict) and reason.get("kind") == REASON_SESSION_END_NOT_OBSERVED
         for reason in reasons
@@ -2215,6 +2241,8 @@ def _resumed_segment(
     """
     buf = _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline)
     buf["start_source"] = "resume"
+    if agent == AGENT_CODEX:
+        buf["codex_usage_baseline_required"] = True
     previous = persisted.get("receipt_id")
     if isinstance(previous, str) and previous:
         buf["resumed_from_receipt_id"] = previous
@@ -3659,8 +3687,10 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         if not transcript_usage.get("complete"):
             # Some subagent transcripts (or models) were left out: the totals
             # are a lower bound, and no cost is derived from them.
-            entry["capture"]["tokens_incomplete_reason"] = TOKENS_INCOMPLETE_FILES_CAPPED
-            entry["summary"] = entry["summary"] + " Token usage is incomplete (transcript files capped)."
+            reason = transcript_usage.get("incomplete_reason") or TOKENS_INCOMPLETE_FILES_CAPPED
+            entry["capture"]["tokens_incomplete_reason"] = reason
+            note = "runtime counters malformed" if reason == "malformed_runtime_counter" else "transcript files capped"
+            entry["summary"] = entry["summary"] + f" Token usage is incomplete ({note})."
     elif tokens_not_recorded is not None:
         entry["capture"]["tokens_not_recorded_reason"] = tokens_not_recorded
     if cost_not_recorded is not None:
@@ -3851,6 +3881,17 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     if payload.transcript_path:
         # Transient: read at fold for token usage only (see _transcript_usage).
         buf["transcript_path"] = payload.transcript_path
+    if (payload.agent == AGENT_CODEX and buf.get("codex_usage_baseline_required")
+            and not buf.get("codex_usage_baseline_attempted")):
+        # Read cumulative counters before the resumed segment does any work.
+        # A late tool hook cannot establish an opening baseline.
+        buf["codex_usage_baseline_attempted"] = True
+        if event in (EVENT_SESSION_START, EVENT_USER_PROMPT_SUBMIT) and payload.transcript_path:
+            from openshard.adapters.codex_transcript import read_codex_transcript_usage
+
+            baseline = read_codex_transcript_usage(Path(payload.transcript_path), payload.session_id)
+            if baseline is not None and baseline.get("complete") is True:
+                buf["codex_usage_baseline"] = baseline.get("totals")
     if payload.agent_provider and not buf.get("provider_current"):
         # First observation wins: a session's environment does not change.
         buf["provider_current"] = payload.agent_provider
@@ -4352,6 +4393,18 @@ def apply_reduced_hook(
                 return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
                                    repo_root=repo_root, detail="duplicate event id")
             detail, should_fold, should_delete = _apply(payload, buf, repo_root, now=now)
+            cloud_turn_closed = (
+                payload.agent == "cursor" and payload.event == EVENT_STOP
+                and os.environ.get("OPENSHARD_CONNECTED_SURFACE") == "cursor-cloud"
+            )
+            if cloud_turn_closed:
+                # Cursor cloud may reclaim its VM after Stop without SessionEnd.
+                # Seal this observed turn now, without manufacturing a session end.
+                losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
+                if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
+                    losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
+                buf["capture_losses"] = losses
+                should_fold, should_delete = True, True
             _mark_applied(buf, dedup_id)
             remote_events = _remote_capture_new_events(buf)
             if remote_events is not None:
@@ -4370,7 +4423,7 @@ def apply_reduced_hook(
             if should_fold and payload.event == EVENT_STOP and not buf.get("ended"):
                 _refresh_git_outcome_on_stop(buf, repo_root)
             if should_fold:
-                entry, outcome = _fold(buf, repo_root, finalize=bool(buf.get("ended")))
+                entry, outcome = _fold(buf, repo_root, finalize=bool(buf.get("ended")) or cloud_turn_closed)
             if should_delete:
                 try:
                     if path.exists():
@@ -4397,7 +4450,7 @@ def apply_reduced_hook(
 
         record = buf.get("record") or {}
         if entry is not None:
-            if payload.event == EVENT_SESSION_END:
+            if payload.event == EVENT_SESSION_END or cloud_turn_closed:
                 action = "record_finalized"
             elif outcome == "appended":
                 action = "record_created"
