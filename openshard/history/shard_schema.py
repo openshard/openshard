@@ -29,7 +29,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from openshard.history.shard_hash import SHARD_HASH_FIELD, compute_shard_hash
+from openshard.history.shard_hash import (
+    INTEGRITY_AS_STORED_FIELD,
+    SHARD_HASH_FIELD,
+    compute_shard_hash,
+)
 from openshard.safety.sanitize import sanitize_metadata
 
 if TYPE_CHECKING:
@@ -146,11 +150,13 @@ def coerce_shard_entry(entry: object, *, stamp_hash: bool = True) -> dict:
     if not isinstance(entry, dict):
         return {"schema_version": "unknown", "_coerce_warning": "invalid_entry"}
 
-    # Step 1 — recursively strip blocked fields (fail closed).
+    # Step 1 — recursively strip blocked fields (fail closed). The loader's
+    # as-stored integrity marker is reserved: a copy found in a record is
+    # dropped here so only ``history.store.load_history`` can set it.
     result: dict = {
         k: _strip_blocked(v)
         for k, v in entry.items()
-        if k not in SHARD_BLOCKED_FIELDS
+        if k not in SHARD_BLOCKED_FIELDS and k != INTEGRITY_AS_STORED_FIELD
     }
 
     # Step 2 — remaining coercion; any exception returns the stripped result.

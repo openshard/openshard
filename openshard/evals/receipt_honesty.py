@@ -54,7 +54,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from openshard.history.shard_hash import compute_shard_hash
+from openshard.history.shard_hash import compute_shard_hash, integrity_as_stored
 from openshard.history.verification_truth import OBSERVED_STATES
 
 SUITE = "receipt_honesty"
@@ -404,7 +404,12 @@ def check_rules(
         out.append(Violation(RULE_PRICE_INDEPENDENT, "the same run's evidence differs between a $0 and a paid cost"))
 
     stored = entry.get("content_hash")
-    if isinstance(stored, str) and stored and stored != compute_shard_hash(entry) and obs["integrity"] != "mismatch":
+    # A coerced record carries the loader's verdict over the stored bytes; only
+    # a record without one is judged by recomputing over its current content.
+    edited = integrity_as_stored(entry) == "mismatch" if integrity_as_stored(entry) is not None else (
+        isinstance(stored, str) and stored and stored != compute_shard_hash(entry)
+    )
+    if edited and obs["integrity"] != "mismatch":
         out.append(Violation(RULE_EDIT_DETECTED, f"record no longer matches its hash; integrity {obs['integrity']!r}"))
     return out
 

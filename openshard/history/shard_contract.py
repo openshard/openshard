@@ -22,7 +22,7 @@ from openshard.history.shard import (
     control_evidence_view,
     derive_shard_identity,
 )
-from openshard.history.shard_hash import verify_shard_hash
+from openshard.history.shard_hash import integrity_as_stored, verify_shard_hash
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
 from openshard.history.usage_evidence import effective_usage, usage_line
@@ -893,8 +893,17 @@ def _changes_summary(block: dict | None) -> dict | None:
 
 
 def integrity_status(entry: dict) -> str:
-    """``valid`` / ``mismatch`` / ``missing`` from ``shard_hash.verify_shard_hash``. Never raises."""
+    """``valid`` / ``mismatch`` / ``missing``. Never raises.
+
+    The verdict is over the record as stored: a coerced record carries the
+    loader's verdict (``shard_hash.integrity_as_stored``), which wins over a
+    recompute over the coerced content. A record read as stored, or built in
+    memory, is verified directly (``shard_hash.verify_shard_hash``).
+    """
     try:
+        as_stored = integrity_as_stored(entry)
+        if as_stored is not None:
+            return as_stored
         status = verify_shard_hash(entry).get("status")
     except Exception:
         return "missing"
