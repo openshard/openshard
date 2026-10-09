@@ -161,6 +161,13 @@ jobs:
           }
 
           overall_failed=0
+          delivered=0
+          skipped=0
+          {
+            echo "## Cloud Receipt delivery"
+            echo "| Commit | Outcome |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
           while IFS= read -r sha; do
             echo "::group::Cloud Receipt $sha"
@@ -212,7 +219,10 @@ jobs:
 
             [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
             if [[ -z "$agent" ]]; then
-              echo "::notice::Skipping $sha because neither the commit nor associated PR declares Openshard-Agent."
+              echo "::warning::No Receipt created for $sha: missing Openshard-Agent evidence."
+              echo "| $sha | Skipped: missing agent evidence |" >> "$GITHUB_STEP_SUMMARY"
+              skipped=$((skipped + 1))
+              if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then overall_failed=1; fi
               echo "::endgroup::"
               continue
             fi
@@ -308,13 +318,19 @@ jobs:
             [[ -n "$oidc_token" && "$oidc_token" != "null" ]] || exit 1
 
             if ! deliver_receipt; then
+              echo "| $sha | Delivery failed |" >> "$GITHUB_STEP_SUMMARY"
               if jq -e --arg sha "$sha" 'index($sha) != null' <<<"$required_shas" >/dev/null; then
-                exit 1
+                overall_failed=1
+              else
+                echo "::warning::Receipt backfill delivery for $sha failed."
               fi
-              echo "::warning::Receipt backfill delivery for $sha failed."
+            else
+              delivered=$((delivered + 1))
+              echo "| $sha | API acknowledged or verification attached |" >> "$GITHUB_STEP_SUMMARY"
             fi
 
             echo "::endgroup::"
           done < <(jq -r '.[]' <<<"$shas")
 
+          echo "Delivery acknowledgements: $delivered; skipped: $skipped. Green CI does not guarantee Receipt creation." >> "$GITHUB_STEP_SUMMARY"
           exit "$overall_failed"
