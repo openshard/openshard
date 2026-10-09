@@ -72,6 +72,10 @@ def eligibility(entry: dict, *, now: datetime | None = None) -> Eligibility:
         return Eligibility(True, REASON_RECORD_COMPLETE)
     if capture.get("session_end_observed") is True or capture.get("status") == "ended":
         return Eligibility(True, REASON_SESSION_ENDED)
+    completeness = capture.get("completeness")
+    reasons = completeness.get("reasons", []) if isinstance(completeness, dict) else []
+    if any(isinstance(r, dict) and r.get("kind") == "session_end_not_observed" for r in reasons):
+        return Eligibility(True, REASON_SESSION_QUIESCENT)
     current = now if now is not None else datetime.now(UTC)
     age = _seconds_since(capture.get("last_activity_at"), current)
     if age is None or age >= QUIESCENT_SECONDS:

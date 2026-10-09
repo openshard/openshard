@@ -514,3 +514,65 @@ class TestConcurrentConnectedSessions:
         assert report.events_sent > first
         assert len({batch["collector_id"] for batch in fake.batches}) == 2
         assert spool.pending_count() == 0
+
+
+class TestMissingSessionEnd:
+    def test_idle_session_delivers_partial_receipt_and_resume_preserves_it(self, home, repo, monkeypatch):
+        from datetime import UTC, datetime, timedelta
+
+        from openshard.adapters.claude_hooks import buffer_path, sweep_stale_buffers
+
+        _connected_env(monkeypatch)
+        _work(repo)
+        _hook(repo, "Stop")
+        fake = FakeConnectedPlatform()
+        first = collector.flush(client=fake)
+        assert first.receipts["in_progress"] == 1
+        assert (spool.read_state(spool.connected_envs()[0]) or {})["deliver"] is True
+        assert not fake.receipts
+        later = datetime.now(UTC) + timedelta(hours=2)
+        assert sweep_stale_buffers(repo, now=later)
+        assert not buffer_path(repo, SID).exists()
+        report = collector.flush(client=fake)
+        assert report.receipts["created"] == 1
+        original = load_history(repo / ".openshard" / "runs.jsonl", coerce=False)[0]
+        assert original["capture"]["session_end_observed"] is False
+        assert any(r["kind"] == "session_end_not_observed" for r in original["capture"]["completeness"]["reasons"])
+        assert not any(e["event_type"] == "run.completed" for b in fake.batches for e in b["events"])
+        _hook(repo, "UserPromptSubmit", prompt="more work")
+        _hook(repo, "Stop")
+        entries = load_history(repo / ".openshard" / "runs.jsonl", coerce=False)
+        assert entries[0] == original
+        assert entries[1]["receipt_id"] != original["receipt_id"]
+        assert entries[1]["capture"]["resumed_from_receipt_id"] == original["receipt_id"]
+
+    def test_detached_flusher_retries_event_backoff(self, monkeypatch):
+        reports = iter([
+            collector.RemoteFlushReport(attached=True, pending=1, stopped="unavailable"),
+            collector.RemoteFlushReport(attached=True, pending=1, stopped="backoff"),
+            collector.RemoteFlushReport(attached=True, events_sent=1),
+        ])
+        monkeypatch.setattr(collector, "flush", lambda env: next(reports))
+        monkeypatch.setattr(collector.time, "sleep", lambda seconds: None)
+        assert collector.run_background_flusher(settle_seconds=0).events_sent == 1
+
+    def test_detached_flusher_retries_receipt_failure_without_pending_events(self, monkeypatch):
+        reports = iter([
+            collector.RemoteFlushReport(attached=True, receipts={"stopped": "paused: unavailable", "pending": 1}),
+            collector.RemoteFlushReport(attached=True, receipts={"created": 1, "pending": 0}),
+        ])
+        monkeypatch.setattr(collector, "flush", lambda env: next(reports))
+        monkeypatch.setattr(collector.time, "sleep", lambda seconds: None)
+        assert collector.run_background_flusher(settle_seconds=0).receipts["created"] == 1
+
+
+    def test_collector_does_not_keep_an_idle_session_live_with_heartbeats(self, home, repo, monkeypatch):
+        _connected_env(monkeypatch)
+        _work(repo)
+        fake = FakeConnectedPlatform()
+        collector.flush(client=fake)
+        scoped = spool.connected_envs()[0]
+        state = spool.read_state(scoped)
+        report = collector.flush(client=fake, heartbeat=True, now=state["activity_at"] + 16 * 60)
+        assert not report.heartbeat
+        assert len(fake.batches) == 1

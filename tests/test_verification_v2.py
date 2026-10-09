@@ -372,11 +372,14 @@ class TestBackwardCompatibility:
         _claude(repo, "UserPromptSubmit", prompt="t")
         _claude(repo, "PostToolUse", **_bash("pytest", tool_input={"run_in_background": True}))
         _claude(repo, "Stop")
-        # The idle sweep folds and drops the buffer (an *ended* session would
-        # open a new receipt instead); the next hook rebuilds it from the record.
+        # Older unsealed records remain rebuildable; a modern idle seal opens
+        # a new segment instead. Build the legacy shape explicitly below.
         from openshard.adapters.claude_hooks import sweep_stale_buffers
 
         assert sweep_stale_buffers(repo, max_age_seconds=0)
+        legacy = _runs(repo)[-1]
+        legacy["capture"]["completeness"]["reasons"] = []
+        path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
         _claude(repo, "UserPromptSubmit", prompt="again")
         _claude(repo, "PostToolUse", **_bash("pytest -q"))
         _claude(repo, "Stop")

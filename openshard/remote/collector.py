@@ -140,9 +140,13 @@ def record(
             env, capture_id, [e for e in events if isinstance(e, dict)],
             link=record if isinstance(record, dict) else None, repo_root=repo_root, file_events=file_events,
         )
+        if count or isinstance(entry, dict):
+            spool.update_state(env, capture_id, activity_at=time.time())
         if connected is not None:
             spool.update_state(env, capture_id, connected=connected.to_state())
-        if finalized:
+        # Keep asking until the existing sync eligibility gate seals the Receipt.
+        # Providers without SessionEnd still need the ordinary idle sweep/upload.
+        if finalized or isinstance(entry, dict):
             spool.update_state(env, capture_id, deliver=True)
         if count or finalized:
             notify(env)
@@ -346,7 +350,11 @@ def flush(
                     break
                 contacted = True
 
-            if report.stopped is None and not contacted and heartbeat:
+            activity_at = state.get("activity_at")
+            active = (activity_at is None and attachment is not None) or (
+                isinstance(activity_at, (int, float)) and current - activity_at < 15 * 60
+            )
+            if report.stopped is None and not contacted and heartbeat and active:
                 result = client.send_events(_batch(state, []))
                 if result.accepted:
                     report.heartbeat = True
@@ -378,7 +386,7 @@ def flush(
                         source=SOURCE_ENV,
                     )
                 report.receipts = _deliver(env, delivery_link, client, state)
-                settled = report.receipts is not None and not report.receipts.get("stopped") and not report.receipts.get("pending")
+                settled = report.receipts is not None and not report.receipts.get("stopped") and not report.receipts.get("pending") and not report.receipts.get("in_progress")
                 if settled and state.get("deliver"):
                     spool.update_state(env, capture_id, deliver=False)
             report.pending = spool.pending_count(env)
@@ -482,12 +490,23 @@ def notify(env: dict | os._Environ | None = None) -> None:
         return
 
 
+def _retryable_work(report: RemoteFlushReport) -> bool:
+    """Queued Events and Receipt delivery both survive transient failures."""
+    if report.stopped not in (None, "backoff", "unavailable", "busy"):
+        return False
+    receipts = report.receipts or {}
+    stopped = receipts.get("stopped")
+    if stopped and stopped != "paused: unavailable":
+        return False
+    return bool(report.pending or receipts.get("pending") or stopped == "paused: unavailable")
+
+
 def run_background_flusher(env: dict | os._Environ | None = None, *, settle_seconds: float = 2.0, max_seconds: float = 120.0) -> RemoteFlushReport:
     """The detached one-shot flusher: let a burst settle, then flush until drained (or stopped)."""
     deadline = time.time() + max_seconds
     time.sleep(max(0.0, settle_seconds))
     report = flush(env)
-    while report.pending and report.stopped is None and time.time() < deadline:
+    while _retryable_work(report) and time.time() < deadline:
         time.sleep(1.0)
         report = flush(env)
     return report
