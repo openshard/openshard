@@ -39,6 +39,18 @@ SHARD_HASH_FIELD = "content_hash"
 # ambiguity.
 SHARD_HASH_VERSION = "1"
 
+# Set by ``history.store.load_history`` on a *coerced* record: the verdict of
+# ``verify_shard_hash`` over the record exactly as it is stored on disk. Never
+# persisted; a value found in a stored record is discarded on read, so the only
+# writer is the loader. See :func:`integrity_as_stored`.
+INTEGRITY_AS_STORED_FIELD = "_integrity_as_stored"
+
+_INTEGRITY_VERDICTS = frozenset({"valid", "mismatch", "missing"})
+
+# Never part of the hash input: the record's own hash, and the loader's
+# read-time verdict (bookkeeping that is never written to disk).
+_EXCLUDED_FROM_HASH = frozenset({SHARD_HASH_FIELD, INTEGRITY_AS_STORED_FIELD})
+
 
 def _canonical_json(obj: object) -> str:
     """Serialize *obj* to canonical JSON: sorted keys, compact, stable.
@@ -60,10 +72,11 @@ def compute_shard_hash(entry: dict) -> str:
     """Return the canonical ``sha256:<hex>`` content hash of *entry*.
 
     The ``content_hash`` field itself is excluded from the input so stamping a
-    record does not change its own hash (no self-referential bug). Always
-    reflects the record's *current* content. Never raises.
+    record does not change its own hash (no self-referential bug), as is the
+    loader's read-time ``_integrity_as_stored`` marker. Always reflects the
+    record's *current* content. Never raises.
     """
-    payload = {k: v for k, v in entry.items() if k != SHARD_HASH_FIELD}
+    payload = {k: v for k, v in entry.items() if k not in _EXCLUDED_FROM_HASH}
     digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
@@ -75,6 +88,22 @@ def stored_shard_hash(entry: dict) -> str | None:
     """
     value = entry.get(SHARD_HASH_FIELD)
     return value if isinstance(value, str) and value else None
+
+
+def integrity_as_stored(entry: dict) -> str | None:
+    """The loader's verdict over the stored bytes (``"valid"`` / ``"mismatch"`` /
+    ``"missing"``), or ``None`` when *entry* carries none.
+
+    Integrity is a property of what is stored. A coerced record (blocked
+    fields stripped, defaults filled, metadata re-sanitised under *today's*
+    rules) can differ from the bytes its ``content_hash`` was stamped over
+    without anyone having edited the file, so recomputing the hash over the
+    coerced content reports ``mismatch`` for an intact record. The loader
+    verifies the parsed record before coercing it and carries that verdict
+    here; readers prefer it to a recompute over coerced content.
+    """
+    value = entry.get(INTEGRITY_AS_STORED_FIELD) if isinstance(entry, dict) else None
+    return value if isinstance(value, str) and value in _INTEGRITY_VERDICTS else None
 
 
 def verify_shard_hash(entry: dict) -> dict:

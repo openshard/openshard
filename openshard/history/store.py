@@ -61,7 +61,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from openshard.history.jsonl_store import amend_last_jsonl
-from openshard.history.shard_hash import SHARD_HASH_FIELD, compute_shard_hash, verify_shard_hash
+from openshard.history.shard_hash import (
+    INTEGRITY_AS_STORED_FIELD,
+    SHARD_HASH_FIELD,
+    compute_shard_hash,
+    verify_shard_hash,
+)
 from openshard.history.shard_schema import coerce_shard_entry
 
 AMENDMENTS_FIELD = "amendments"
@@ -91,6 +96,16 @@ def load_history(runs_path: Path, *, coerce: bool = True) -> list[dict]:
     stored. Neither mode gives a record a ``content_hash`` it did not carry on
     disk. Blank, malformed and non-object lines are skipped. A missing or
     unreadable file yields ``[]``. Never raises on content.
+
+    Integrity is verified over the record **as stored**, before coercion, and
+    a coerced record carries that verdict in ``_integrity_as_stored`` (see
+    ``shard_hash.integrity_as_stored``). Coercion applies today's rules
+    (blocked fields, metadata sanitising, defaults) to a record written under
+    yesterday's, so a recompute over the coerced content can disagree with the
+    stored hash although nobody edited the file; ``openshard last`` (which
+    reads as stored) and the hosted sync (which reads coerced) must report the
+    same verdict for the same bytes. The marker is reserved for this loader:
+    one found in a stored record is discarded in both modes.
     """
     runs_path = Path(runs_path)
     try:
@@ -104,7 +119,13 @@ def load_history(runs_path: Path, *, coerce: bool = True) -> list[dict]:
         parsed = _parse_record(line)
         if parsed is None:
             continue
-        records.append(coerce_shard_entry(parsed, stamp_hash=False) if coerce else parsed)
+        parsed.pop(INTEGRITY_AS_STORED_FIELD, None)
+        if coerce:
+            record = coerce_shard_entry(parsed, stamp_hash=False)
+            record[INTEGRITY_AS_STORED_FIELD] = verify_shard_hash(parsed)["status"]
+            records.append(record)
+        else:
+            records.append(parsed)
     return records
 
 

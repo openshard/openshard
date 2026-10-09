@@ -53,6 +53,17 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Integrity is verified over the record as stored, on every read path.** The hosted sync and
+  the Insights warehouse read history coerced (blocked fields stripped, metadata re-sanitised,
+  defaults filled under today's rules), then recomputed the content hash over that coerced copy.
+  A record written by an older Core whose stored content today's coercion changes therefore
+  synced as `Checksum mismatch (record edited after it was written)` while `openshard last`,
+  which reads the file as stored, said `Checksum matches` for the same bytes. `load_history`
+  now verifies the parsed record before coercing it and carries that verdict on the coerced
+  record (`_integrity_as_stored`, reserved for the loader, dropped if found in a file and never
+  part of the hash or any Receipt); `integrity_status` prefers it to a recompute. An edited
+  record still reads as a mismatch everywhere; a legacy record without a hash stays
+  `Not recorded`. Hosted Receipts already synced keep the verdict Core sent at the time.
 - **A Ctrl-C inside one OSN worker cancels the run from that worker's thread.** `run_workers`
   set the cancel flag only once the interrupt reached the main thread; on a loaded machine the
   pool thread had already started the next queued worker and its first model call by then. The
