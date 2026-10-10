@@ -135,3 +135,37 @@ gh() {{
     if fail_action == "upload":
         expected = expected[:2]
     assert tmp_path.joinpath("calls").read_text().splitlines() == expected
+
+
+@pytest.mark.skipif(not SHELL_REQUIRED and BASH is None, reason="requires workflow Bash")
+@pytest.mark.parametrize("event,requested,agent,expected", [
+    ("push", "true", "", "skipped false claude-opus-5-5 0 1"),
+    ("workflow_dispatch", "false", "", "skipped false claude-opus-5-5 1 1"),
+    ("workflow_dispatch", "true", "", "delivered true none 0 0"),
+    ("workflow_dispatch", "true", "Claude Code", "delivered false claude-opus-5-5 0 0"),
+])
+def test_unattributed_receipt_needs_explicit_dispatch_and_clears_usage(event, requested, agent, expected):
+    import shlex
+
+    workflow = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/openshard-cloud-receipts.yml").read_text())
+    script = next(s["run"] for s in workflow["jobs"]["capture"]["steps"] if s.get("name") == "Verify and create hosted Receipts")
+    block = re.search(r"^  unattributed=false.*?^    continue\n  fi$", script, re.S | re.M)
+    assert block is not None
+    assert 'agent: (if $agent == "" then null else $agent end),' in script
+    command = f'''set -euo pipefail
+GITHUB_EVENT_NAME={event}
+OPENSHARD_CAPTURE_UNATTRIBUTED={requested}
+GITHUB_STEP_SUMMARY=/dev/null
+sha={"a" * 40}
+agent={shlex.quote(agent)}
+model=claude-opus-5-5 provider=Anthropic surface=x cost=1 tokens_in=1 tokens_out=1 tokens_cache_read=1 tokens_cache_creation=1
+overall_failed=0 skipped=0 outcome=skipped
+for _ in 1; do
+{block.group(0)}
+  outcome=delivered
+done
+printf '%s %s %s %s %s' "$outcome" "$unattributed" "${{model:-none}}" "$overall_failed" "$skipped"
+'''
+    assert BASH is not None, "CI requires Git Bash; workflow shell checks must execute"
+    result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)
+    assert result.stdout.splitlines()[-1] == expected
