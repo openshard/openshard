@@ -46,7 +46,7 @@ echo "$checks"
 
 
 @pytest.mark.skipif(not SHELL_REQUIRED and (BASH is None or not shutil.which("jq")), reason="requires workflow Bash and jq")
-@pytest.mark.parametrize("case", ["created", "duplicate", "attached", "attached_duplicate", "attached_wrong_sha", "attached_empty", "existing", "wrong_id", "wrong_error", "unauthorized", "server_error", "malformed", "bad_success", "transport"])
+@pytest.mark.parametrize("case", ["created", "duplicate", "attached", "attached_duplicate", "attached_wrong_sha", "attached_empty", "session_not_corroborated", "session_wrong_sha", "existing", "wrong_id", "wrong_error", "unauthorized", "server_error", "malformed", "bad_success", "transport"])
 def test_delivery_retains_existing_receipt_and_rejects_other_errors(case):
     import hashlib
     import shlex
@@ -68,6 +68,13 @@ def test_delivery_retains_existing_receipt_and_rejects_other_errors(case):
             "attached": [] if case == "attached_empty" else [
                 {"receipt_id": "rcpt_existing", "outcome": "recorded", "state_applied": True}
             ],
+        }
+    elif case in ("session_not_corroborated", "session_wrong_sha"):
+        http = "200"
+        body = {
+            "outcome": "session_not_corroborated",
+            "head_sha": sha if case == "session_not_corroborated" else "b" * 40,
+            "receipt_id": None,
         }
     elif case in ("existing", "wrong_id", "wrong_error"):
         http, body = "409", conflict
@@ -109,6 +116,8 @@ printf '%s %s %s' "$result" "$overall_failed" "$verification_status"
     assert BASH is not None, "CI requires Git Bash; workflow shell checks must execute"
     result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)
     expected_exit = 0 if case in ("created", "duplicate", "attached", "attached_duplicate", "existing") else 1
+    if case == "session_not_corroborated":
+        expected_exit = 3
     assert result.stdout.splitlines()[-1] == f"{expected_exit} 1 failed"
 
 
@@ -137,14 +146,26 @@ gh() {{
     assert tmp_path.joinpath("calls").read_text().splitlines() == expected
 
 
+SESSION_TRAILER = "Fix it\n\nClaude-Session: https://claude.ai/code/session_01HSAXkLPtdu65CqEWgJgAUF\n"
+
+
 @pytest.mark.skipif(not SHELL_REQUIRED and BASH is None, reason="requires workflow Bash")
-@pytest.mark.parametrize("event,requested,agent,expected", [
-    ("push", "true", "", "skipped false claude-opus-5-5 0 1"),
-    ("workflow_dispatch", "false", "", "skipped false claude-opus-5-5 1 1"),
-    ("workflow_dispatch", "true", "", "delivered true none 0 0"),
-    ("workflow_dispatch", "true", "Claude Code", "delivered false claude-opus-5-5 0 0"),
+@pytest.mark.parametrize("event,requested,agent,message,expected", [
+    ("push", "true", "", "", "skipped false claude-opus-5-5 0 1 -"),
+    ("workflow_dispatch", "false", "", "", "skipped false claude-opus-5-5 1 1 -"),
+    ("workflow_dispatch", "true", "", "", "delivered true none 0 0 -"),
+    ("workflow_dispatch", "true", "Claude Code", "", "delivered false claude-opus-5-5 0 0 -"),
+    # A Claude-Session trailer is sent as a claim for the API to corroborate, with usage cleared.
+    ("push", "false", "", SESSION_TRAILER, "delivered false none 0 0 session_01HSAXkLPtdu65CqEWgJgAUF"),
+    # An explicit Openshard-Agent wins; the trailer is not consulted.
+    ("push", "false", "Claude Code", SESSION_TRAILER, "delivered false claude-opus-5-5 0 0 -"),
+    # Only the exact claude.ai session URL trailer counts.
+    ("push", "false", "", "Claude-Session: https://example.com/code/session_01HSAXkLPtdu65CqEWgJgAUF\n",
+     "skipped false claude-opus-5-5 0 1 -"),
+    ("push", "false", "", "Mentions Claude-Session: https://claude.ai/code/session_01HSAXkLPtdu65CqEWgJgAUF\n",
+     "skipped false claude-opus-5-5 0 1 -"),
 ])
-def test_unattributed_receipt_needs_explicit_dispatch_and_clears_usage(event, requested, agent, expected):
+def test_unattributed_receipt_needs_explicit_dispatch_and_clears_usage(event, requested, agent, message, expected):
     import shlex
 
     workflow = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/openshard-cloud-receipts.yml").read_text())
@@ -158,13 +179,42 @@ OPENSHARD_CAPTURE_UNATTRIBUTED={requested}
 GITHUB_STEP_SUMMARY=/dev/null
 sha={"a" * 40}
 agent={shlex.quote(agent)}
+message={shlex.quote(message)}
 model=claude-opus-5-5 provider=Anthropic surface=x cost=1 tokens_in=1 tokens_out=1 tokens_cache_read=1 tokens_cache_creation=1
 overall_failed=0 skipped=0 outcome=skipped
 for _ in 1; do
 {block.group(0)}
   outcome=delivered
 done
-printf '%s %s %s %s %s' "$outcome" "$unattributed" "${{model:-none}}" "$overall_failed" "$skipped"
+printf '%s %s %s %s %s %s' "$outcome" "$unattributed" "${{model:-none}}" "$overall_failed" "$skipped" "${{claude_session:--}}"
+'''
+    assert BASH is not None, "CI requires Git Bash; workflow shell checks must execute"
+    result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)
+    assert result.stdout.splitlines()[-1] == expected
+
+
+@pytest.mark.skipif(not SHELL_REQUIRED and (BASH is None or not shutil.which("jq")), reason="requires workflow Bash and jq")
+@pytest.mark.parametrize("results,budget,expected", [
+    ("3 0", 3, "0 2 2"),  # the session's Receipt arrived during the wait
+    ("3 3 3 3 3", 3, "3 0 4"),  # still not corroborated: bounded, then reported
+    ("3", 0, "3 0 1"),  # the run's wait budget was already spent on an earlier commit
+    ("1", 3, "1 3 1"),  # other failures are never retried here
+])
+def test_uncorroborated_session_waits_a_bounded_time_once_per_run(results, budget, expected, tmp_path):
+    workflow = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/openshard-cloud-receipts.yml").read_text())
+    script = next(s["run"] for s in workflow["jobs"]["capture"]["steps"] if s.get("name") == "Verify and create hosted Receipts")
+    loop = re.search(r"^  delivery_rc=0\n  while true; do\n.*?^  done$", script, re.S | re.M)
+    assert loop is not None
+    command = f'''set -euo pipefail
+session_wait_attempts={budget}
+OPENSHARD_SESSION_WAIT_SECONDS=0
+ACTIONS_ID_TOKEN_REQUEST_TOKEN=t ACTIONS_ID_TOKEN_REQUEST_URL=https://example.invalid/?x=1 OPENSHARD_OIDC_AUDIENCE=a
+results=({results})
+calls=0
+curl() {{ printf '{{"value":"oidc"}}'; }}
+deliver_receipt() {{ local rc=${{results[$calls]}}; calls=$((calls + 1)); return "$rc"; }}
+{loop.group(0)}
+printf '%s %s %s' "$delivery_rc" "$session_wait_attempts" "$calls"
 '''
     assert BASH is not None, "CI requires Git Bash; workflow shell checks must execute"
     result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)
