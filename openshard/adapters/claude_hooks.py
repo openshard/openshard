@@ -176,6 +176,7 @@ from typing import Any
 from openshard.adapters.agent_env import PROVIDER_SOURCE_AGENT_ENV, claude_agent_env
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
 from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
+from openshard.adapters.agent_env import cloud_session_or_none as _cloud_session_or_none
 from openshard.adapters.capture_agents import (
     AGENT_CLAUDE_CODE,
     AGENT_CODEX,
@@ -463,6 +464,9 @@ class HookPayload:
     # observes it and never enforces it.
     permission_mode: str | None = None
     agent_surface: str | None = None
+    # The claude.ai cloud session id (``session_`` form) from the hook
+    # environment's CLAUDE_CODE_REMOTE_SESSION_ID; see ``claude_agent_env``.
+    agent_cloud_session: str | None = None
 
 
 OUTCOME_PASSED = "passed"
@@ -708,6 +712,7 @@ def apply_agent_env(payload: HookPayload, agent_env: Mapping[str, str] | None) -
         return
     payload.agent_provider = _agent_provider_or_none(agent_env.get("provider"))
     payload.agent_surface = _agent_surface_or_none(agent_env.get("surface"))
+    payload.agent_cloud_session = _cloud_session_or_none(agent_env.get("cloud_session"))
 
 
 # ---------------------------------------------------------------------------
@@ -1478,6 +1483,7 @@ class ReducedHookPayload:
     effort_level: str | None = None
     permission_mode: str | None = None  # see HookPayload.permission_mode
     agent_surface: str | None = None
+    agent_cloud_session: str | None = None  # see HookPayload.agent_cloud_session
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {
@@ -1530,6 +1536,8 @@ class ReducedHookPayload:
             data["permission_mode"] = self.permission_mode
         if self.agent_surface is not None:
             data["agent_surface"] = self.agent_surface
+        if self.agent_cloud_session is not None:
+            data["agent_cloud_session"] = self.agent_cloud_session
         return data
 
     @classmethod
@@ -1596,6 +1604,7 @@ class ReducedHookPayload:
             effort_level=_effort_level(data.get("effort_level")),
             permission_mode=_permission_mode(data.get("permission_mode")),
             agent_surface=_agent_surface_or_none(data.get("agent_surface")),
+            agent_cloud_session=_cloud_session_or_none(data.get("agent_cloud_session")),
         )
 
 
@@ -1660,6 +1669,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         effort_level=_effort_level(payload.effort_level),
         permission_mode=_permission_mode(payload.permission_mode),
         agent_surface=_agent_surface_or_none(payload.agent_surface),
+        agent_cloud_session=_cloud_session_or_none(payload.agent_cloud_session),
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
@@ -2214,6 +2224,36 @@ def _find_persisted_entry(repo_root: Path, session_id: str, executor: str = EXEC
     return found
 
 
+CLOUD_SESSION_NAMESPACE = "claude.cloud_session"
+
+
+def record_cloud_session(entry: Mapping[str, Any]) -> str | None:
+    """The claude.ai cloud session id a record declares, or None."""
+    block = correlation_block(entry.get("correlation"))
+    for link in (block or {}).get("external_ids") or []:
+        if link.get("namespace") == CLOUD_SESSION_NAMESPACE:
+            return _cloud_session_or_none(link.get("id"))
+    return None
+
+
+def _stamp_cloud_session(entry: dict, buf: dict) -> None:
+    """Declare the hosted session this record was captured in.
+
+    A declared link, not attribution: it lets a commit carrying the same
+    session's ``Claude-Session`` trailer be matched to a Receipt that
+    OpenShard capture observed inside that session.
+    """
+    cloud_session = _cloud_session_or_none(buf.get("cloud_session_id"))
+    if cloud_session is None:
+        return
+    block = correlation_block(entry.get("correlation")) or {}
+    links = [link for link in block.get("external_ids") or [] if link.get("namespace") != CLOUD_SESSION_NAMESPACE]
+    links.insert(0, {"namespace": CLOUD_SESSION_NAMESPACE, "id": cloud_session})
+    merged = correlation_block({**block, "external_ids": links})
+    if merged is not None:
+        entry["correlation"] = merged
+
+
 def _entry_ended(entry: dict) -> bool:
     capture = entry.get("capture")
     if not isinstance(capture, dict):
@@ -2248,6 +2288,11 @@ def _resumed_segment(
     previous = persisted.get("receipt_id")
     if isinstance(previous, str) and previous:
         buf["resumed_from_receipt_id"] = previous
+    cloud_session = record_cloud_session(persisted)
+    if cloud_session:
+        # The next turn of the same hosted session: SessionStart, the only
+        # hook that reads the environment, does not fire again.
+        buf["cloud_session_id"] = cloud_session
     raw_capture = persisted.get("capture")
     capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
     buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
@@ -3612,6 +3657,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     _stamp_task_context(entry, buf)
     if correlation_block(buf.get("correlation")) is not None:
         entry["correlation"] = correlation_block(buf["correlation"])
+    _stamp_cloud_session(entry, buf)
     if buf.get("correlation_conflicts"):
         entry["capture"]["correlation_conflicts"] = _stored_count(buf["correlation_conflicts"])
     _stamp_git_outcome(entry, buf)
@@ -3907,6 +3953,9 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         buf["provider_source"] = PROVIDER_SOURCE_AGENT_ENV
     if payload.agent_surface and not buf.get("surface"):
         buf["surface"] = payload.agent_surface
+    if payload.agent_cloud_session and not buf.get("cloud_session_id"):
+        # First observation wins: one cloud session per hosted VM.
+        buf["cloud_session_id"] = payload.agent_cloud_session
     if payload.agent == AGENT_CLAUDE_CODE and payload.effort_level:
         buf["effort_level"] = payload.effort_level
         levels = buf.setdefault("effort_levels_seen", [])

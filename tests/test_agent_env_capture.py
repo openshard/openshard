@@ -67,6 +67,57 @@ class TestDerivation:
         assert format_agent_env({}) is None
 
 
+CLOUD_ENV = {"CLAUDE_CODE_REMOTE": "true", "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_01HSAXkLPtdu65CqEWgJgAUF"}
+CLOUD_SESSION = "session_01HSAXkLPtdu65CqEWgJgAUF"
+
+
+class TestCloudSession:
+    @pytest.mark.parametrize(("env", "expected"), [
+        (CLOUD_ENV, CLOUD_SESSION),
+        # Only inside a documented cloud session, never from a stray variable.
+        ({"CLAUDE_CODE_REMOTE_SESSION_ID": "cse_01HSAXkLPtdu65CqEWgJgAUF"}, None),
+        ({**CLOUD_ENV, "CLAUDE_CODE_REMOTE": "false"}, None),
+        ({**CLOUD_ENV, "CLAUDE_CODE_REMOTE_SESSION_ID": "session_01HSAXkLPtdu65CqEWgJgAUF"}, None),
+        ({**CLOUD_ENV, "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_short"}, None),
+        ({**CLOUD_ENV, "CLAUDE_CODE_REMOTE_SESSION_ID": "cse_01HSAX/../x"}, None),
+    ])
+    def test_derived_only_from_the_documented_cloud_environment(self, env, expected):
+        assert claude_agent_env(env).get("cloud_session") == expected
+
+    def test_header_round_trip(self):
+        value = format_agent_env({"provider": "anthropic", "cloud_session": CLOUD_SESSION})
+        assert value == f"provider=anthropic;cloud_session={CLOUD_SESSION}"
+        assert parse_agent_env(value) == {"provider": "anthropic", "cloud_session": CLOUD_SESSION}
+        assert parse_agent_env("cloud_session=cse_01HSAXkLPtdu65CqEWgJgAUF") == {}
+
+    def test_receipt_declares_the_cloud_session_and_resumed_turns_keep_it(self, repo: Path):
+        env = {"CLAUDE_PROJECT_DIR": str(repo), **CLOUD_ENV}
+        base = {"session_id": SID, "cwd": str(repo)}
+        handle_claude_hook({**base, "hook_event_name": "SessionStart", "source": "startup"}, env=env)
+        handle_claude_hook({**base, "hook_event_name": "UserPromptSubmit", "prompt": "First turn"}, env=env)
+        handle_claude_hook({**base, "hook_event_name": "SessionEnd", "reason": "other"}, env=env)
+        # A later turn arrives only through HTTP hooks, which carry no environment.
+        handle_claude_hook({**base, "hook_event_name": "UserPromptSubmit", "prompt": "Second turn"},
+                           env={"CLAUDE_PROJECT_DIR": str(repo)})
+        handle_claude_hook({**base, "hook_event_name": "SessionEnd", "reason": "other"},
+                           env={"CLAUDE_PROJECT_DIR": str(repo)})
+        first, second = _lines(repo)
+        assert second["capture"]["resumed_from_receipt_id"] == first["receipt_id"]
+        link = {"namespace": ch.CLOUD_SESSION_NAMESPACE, "id": CLOUD_SESSION}
+        for entry in (first, second):
+            assert entry["correlation"]["external_ids"] == [link]
+            assert entry["correlation"]["evidence"] == "declared"
+            projected = receipt_to_dict(build_shard_receipt(entry), extended=True)
+            assert projected["correlation"]["external_ids"] == [link]
+        assert "cse_" not in json.dumps([first, second])
+
+    def test_local_sessions_declare_no_cloud_session(self, repo: Path):
+        for doc in _docs(repo):
+            handle_claude_hook(doc, env={"CLAUDE_PROJECT_DIR": str(repo)})
+        (entry,) = _lines(repo)
+        assert "correlation" not in entry
+
+
 class TestInProcessCapture:
     def test_bedrock_session_records_provider_surface_and_source(self, repo: Path):
         env = {"CLAUDE_PROJECT_DIR": str(repo), "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_ENTRYPOINT": "cli"}
