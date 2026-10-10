@@ -133,7 +133,8 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
     # (provider/surface come from these), and the session-end pull-request
     # lookup must never call a real ``gh``; tests that need it opt back in.
     for var in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-                "ANTHROPIC_BASE_URL", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CONFIG_DIR"):
+                "ANTHROPIC_BASE_URL", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CONFIG_DIR",
+                "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_REMOTE_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "off")
     yield

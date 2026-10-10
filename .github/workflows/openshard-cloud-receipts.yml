@@ -158,6 +158,11 @@ jobs:
               return 0
             fi
             if [[ "$http_status" == 200 ]] && \
+              jq -e --arg sha "$sha" '.outcome == "session_not_corroborated" and .head_sha == $sha and .receipt_id == null' <<<"$response" >/dev/null; then
+              echo "No OpenShard-captured Receipt declares the Claude cloud session named by $sha yet."
+              return 3
+            fi
+            if [[ "$http_status" == 200 ]] && \
               jq -e --arg sha "$sha" '.outcome == "no_bound_receipt" and .head_sha == $sha' <<<"$response" >/dev/null; then
               delivery_outcome=no_bound_receipt
               echo "No captured Receipt is bound to $sha; its CI verdict was not recorded."
@@ -176,6 +181,7 @@ jobs:
           overall_failed=0
           delivered=0
           skipped=0
+          session_wait_attempts=3
           {
             echo "## Cloud Receipt delivery"
             echo "| Commit | Outcome |"
@@ -232,6 +238,7 @@ jobs:
 
             [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
             unattributed=false
+            claude_session=""
             attach_only=false
             if [[ -z "$agent" && "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "${OPENSHARD_CAPTURE_UNATTRIBUTED:-false}" == "true" ]]; then
               # An explicit retrospective request: record the commit and CI
@@ -239,8 +246,19 @@ jobs:
               unattributed=true
               model="" provider="" surface="" cost="" tokens_in="" tokens_out="" tokens_cache_read="" tokens_cache_creation=""
               echo "::notice::Creating an unattributed CI/commit Receipt for $sha; agent, model, tokens and cost stay unknown."
+            elif [[ -z "$agent" ]]; then
+              # Claude Code adds this trailer to commits made in its cloud
+              # sessions. It is a claim, not attribution: the API attributes
+              # the commit only when an OpenShard-captured Receipt from this
+              # repository declares the same cloud session. Usage never comes
+              # from trailers here.
+              claude_session=$(printf '%s\n' "$message" | sed -n 's|^Claude-Session:[[:space:]]*https://claude\.ai/code/\(session_[A-Za-z0-9]\{8,128\}\)[[:space:]]*$|\1|p' | tail -1)
+              if [[ -n "$claude_session" ]]; then
+                model="" provider="" surface="" cost="" tokens_in="" tokens_out="" tokens_cache_read="" tokens_cache_creation=""
+                echo "::notice::$sha names Claude cloud session $claude_session; asking OpenShard to corroborate it with a captured Receipt."
+              fi
             fi
-            if [[ -z "$agent" && "$unattributed" != true && "$GITHUB_EVENT_NAME" == "push" && "$sha" == "${GITHUB_SHA:-}" ]]; then
+            if [[ -z "$agent" && "$unattributed" != true && -z "$claude_session" && "$GITHUB_EVENT_NAME" == "push" && "$sha" == "${GITHUB_SHA:-}" ]]; then
               # No agent metadata, but an observed session (Claude Code cloud
               # hooks) may already hold this commit's Receipt: the verdict goes
               # only to a Receipt bound to it, and nothing is created otherwise.
@@ -248,7 +266,7 @@ jobs:
               model="" provider="" surface="" cost="" tokens_in="" tokens_out="" tokens_cache_read="" tokens_cache_creation=""
               echo "::notice::No agent metadata on $sha; its CI verdict goes only to a captured Receipt bound to it."
             fi
-            if [[ -z "$agent" && "$unattributed" != true && "$attach_only" != true ]]; then
+            if [[ -z "$agent" && "$unattributed" != true && "$attach_only" != true && -z "$claude_session" ]]; then
               echo "::warning::No Receipt created for $sha: missing Openshard-Agent evidence."
               echo "| $sha | Skipped: missing agent evidence |" >> "$GITHUB_STEP_SUMMARY"
               skipped=$((skipped + 1))
@@ -313,7 +331,7 @@ jobs:
             files_truncated=false
             [[ "$file_count" -gt 50 ]] && files_truncated=true
 
-            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --argjson attach_only "$attach_only"               '{
+            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --argjson attach_only "$attach_only"               --arg claude_session "$claude_session"               '{
                 head_sha: $head_sha,
                 before_sha: (if $before_sha == "" then null else $before_sha end),
                 created_at: $created_at,
@@ -344,14 +362,29 @@ jobs:
                 files_truncated: $files_truncated,
                 diff_added: $diff_added,
                 diff_removed: $diff_removed
-              } + (if $attach_only then {attach_only: true} else {} end)')
+              } + (if $attach_only then {attach_only: true} else {} end) + (if $claude_session == "" then {} else {claude_session_id: $claude_session} end)')
 
-            # Mint immediately before delivery: verifying several commits can outlive a token.
-            oidc_response=$(curl -fsSL             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENSHARD_OIDC_AUDIENCE}")
-            oidc_token=$(jq -r '.value' <<<"$oidc_response")
-            [[ -n "$oidc_token" && "$oidc_token" != "null" ]] || exit 1
+            # A cloud session's Receipt is sealed when its turn ends, which can
+            # be shortly after the push. Wait a bounded time, once per run.
+            delivery_rc=0
+            while true; do
+              # Mint immediately before delivery: verifying several commits can outlive a token.
+              oidc_response=$(curl -fsSL             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPENSHARD_OIDC_AUDIENCE}")
+              oidc_token=$(jq -r '.value' <<<"$oidc_response")
+              [[ -n "$oidc_token" && "$oidc_token" != "null" ]] || exit 1
+              delivery_rc=0
+              deliver_receipt || delivery_rc=$?
+              if [[ "$delivery_rc" -ne 3 || "$session_wait_attempts" -le 0 ]]; then break; fi
+              session_wait_attempts=$((session_wait_attempts - 1))
+              sleep "${OPENSHARD_SESSION_WAIT_SECONDS:-60}"
+            done
 
-            if ! deliver_receipt; then
+            if [[ "$delivery_rc" -eq 3 ]]; then
+              echo "::warning::No Receipt created for $sha: Claude cloud session $claude_session was not observed by OpenShard capture in this repository. Enable Claude cloud capture, then rerun this workflow."
+              echo "| $sha | Skipped: Claude-Session $claude_session not observed by OpenShard capture |" >> "$GITHUB_STEP_SUMMARY"
+              skipped=$((skipped + 1))
+              if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then overall_failed=1; fi
+            elif [[ "$delivery_rc" -ne 0 ]]; then
               echo "| $sha | Delivery failed |" >> "$GITHUB_STEP_SUMMARY"
               if jq -e --arg sha "$sha" 'index($sha) != null' <<<"$required_shas" >/dev/null; then
                 overall_failed=1
@@ -365,6 +398,8 @@ jobs:
               elif [[ "$unattributed" == true ]]; then
                 delivered=$((delivered + 1))
                 echo "| $sha | Unattributed CI/commit Receipt acknowledged |" >> "$GITHUB_STEP_SUMMARY"
+              elif [[ -n "$claude_session" ]]; then
+                echo "| $sha | Claude cloud session corroborated by OpenShard capture; API acknowledged |" >> "$GITHUB_STEP_SUMMARY"
               else
                 delivered=$((delivered + 1))
                 echo "| $sha | API acknowledged or verification attached |" >> "$GITHUB_STEP_SUMMARY"
