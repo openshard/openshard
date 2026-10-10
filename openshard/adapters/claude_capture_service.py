@@ -101,11 +101,13 @@ from typing import Any
 
 from openshard.adapters import capture_auth as auth
 from openshard.adapters import claude_capture_client as client
+from openshard.adapters import claude_workspace
 from openshard.adapters.agent_env import parse_agent_env
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE, profile_for
 from openshard.adapters.claude_hooks import (
     EVENT_MODEL_INVOCATION,
     EVENT_SESSION_START,
+    EVENT_USER_PROMPT_SUBMIT,
     HookPayload,
     ReducedHookPayload,
     StatusPayload,
@@ -298,6 +300,7 @@ class CaptureRecorder:
         self._locks_guard = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = {}
         self._root_cache: dict[tuple[str | None, str | None, str], Path | None] = {}
+        self._workspace = claude_workspace.WorkspaceRouter()
         # Sessions already known to this service (see _opens_session).
         self._known_sessions: set[str] = set()
         self._pending: queue.Queue[tuple[str, str] | None] = queue.Queue()
@@ -516,6 +519,14 @@ class CaptureRecorder:
         if payload.session_id is None:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
+        workspace = self._workspace_for(project_dir, payload.agent)
+        if workspace is not None:
+            if authorize is not None and not authorize(workspace):
+                self._bump("rejected")
+                return "rejected", "unauthenticated"
+            return self._record_workspace_hook(
+                workspace, payload, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env,
+            )
         root = self.resolve_root(project_dir, payload.cwd, payload.agent)
         if root is None:
             self._bump("ignored")
@@ -523,8 +534,47 @@ class CaptureRecorder:
         if authorize is not None and not authorize(root):
             self._bump("rejected")
             return "rejected", "unauthenticated"
+        return self._record_resolved(root, payload, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env)
+
+    def _workspace_for(self, project_dir: str | None, agent: str) -> Path | None:
+        """The opted-in multi-repository workspace *project_dir* names, if routing applies (see claude_workspace)."""
+        if not project_dir or agent != AGENT_CLAUDE_CODE or not claude_workspace.workspace_enabled():
+            return None
+        try:
+            directory = Path(project_dir).resolve()
+        except OSError:
+            return None
+        return directory if claude_workspace.is_workspace(directory) else None
+
+    def _record_workspace_hook(
+        self, workspace: Path, payload: Any, *, t0: float, correlation: dict | None,
+        task_id: str | None, agent_env: dict[str, str] | None,
+    ) -> tuple[str, str]:
+        key = queue_key(str(payload.session_id), payload.agent)
         if isinstance(payload, StatusPayload):
-            key = queue_key(payload.session_id, payload.agent)
+            owner = self._workspace.usage_owner(workspace, key)
+            if owner is None:
+                self._bump("ignored")
+                return "ignored", "workspace status outside a repository turn"
+            return self._record_resolved(owner, payload, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env)
+        deliveries = self._workspace.route(workspace, key, payload, _now())
+        if not deliveries:
+            if payload.event in (EVENT_SESSION_START, EVENT_USER_PROMPT_SUBMIT):
+                # Replayed, with its observation time, into each checkout the turn touches.
+                self._bump("queued", payload.event)
+                return "queued", "held until the turn touches a repository"
+            self._bump("ignored")
+            return "ignored", "workspace event outside every repository checkout"
+        for repo, routed, at in deliveries:
+            self._record_resolved(repo, routed, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env, at=at)
+        return "queued", payload.event
+
+    def _record_resolved(
+        self, root: Path, payload: Any, *, t0: float, correlation: dict | None,
+        task_id: str | None, agent_env: dict[str, str] | None, at: str | None = None,
+    ) -> tuple[str, str]:
+        if isinstance(payload, StatusPayload):
+            key = queue_key(str(payload.session_id), payload.agent)
             line = {"id": self._next_id(), "kind": "status", "at": _now(), "data": payload.to_dict()}
             self._queue_line(root, key, line)
             self._bump("queued", "status")
@@ -548,8 +598,8 @@ class CaptureRecorder:
             # agent that has one, so this one-off git call is off the hot path.
             # An agent without a start hook (Antigravity) opens its session
             # with its first model invocation instead -- once per session.
-            reduced.baseline = _snapshot_baseline(root, _now())
-        line = {"id": self._next_id(), "kind": "hook", "at": _now(), "data": reduced.to_dict()}
+            reduced.baseline = _snapshot_baseline(root, at or _now())
+        line = {"id": self._next_id(), "kind": "hook", "at": at or _now(), "data": reduced.to_dict()}
         self._queue_line(root, key, line)
         self._bump("queued", payload.event)
         self._note_agent_received(reduced.agent, payload.event)
@@ -599,6 +649,12 @@ class CaptureRecorder:
         if payload is None or payload.session_id is None:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
+        workspace = self._workspace_for(project_dir, payload.agent)
+        if workspace is not None:
+            if authorize is not None and not authorize(workspace):
+                self._bump("rejected")
+                return "rejected", "unauthenticated"
+            return self._record_workspace_hook(workspace, payload, t0=t0, correlation=None, task_id=None, agent_env=None)
         root = self.resolve_root(project_dir, payload.cwd)
         if root is None:
             self._bump("ignored")

@@ -3755,7 +3755,11 @@ def _render_agent_result(result, *, verb: str) -> None:
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 @click.option("--defer-service", is_flag=True, default=False,
               help="Install hooks before a hosted agent launches; start the capture service on its first native hook.")
-def capture_install(agent: str, repo_path: Path | None, as_json: bool, defer_service: bool) -> None:
+@click.option("--workspace", "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+              help="claude only: a directory holding several checkouts (a multi-repository cloud session's start directory).")
+def capture_install(
+    agent: str, repo_path: Path | None, as_json: bool, defer_service: bool, workspace: Path | None,
+) -> None:
     """Configure passive capture without requiring the agent CLI on PATH.
 
     claude: merges OpenShard HTTP hooks and the startup watchdog into
@@ -3783,6 +3787,24 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool, defer_ser
     from openshard.adapters.claude_mcp_install import find_repo_root
     from openshard.adapters.claude_setup import ensure_capture_service
 
+    if workspace is not None:
+        if agent.lower() != "claude":
+            raise click.ClickException("--workspace is supported for claude only.")
+        from openshard.adapters.claude_capture_client import resolve_port
+        from openshard.adapters.claude_workspace import install_workspace
+
+        ws_service = {"state": "deferred", "port": resolve_port()} if defer_service else ensure_capture_service()
+        ws_port = ws_service.get("port")
+        outcome = install_workspace(workspace, port=ws_port if isinstance(ws_port, int) else None)
+        if as_json:
+            click.echo(json.dumps({**outcome, "capture_service": ws_service}, indent=2))
+        else:
+            click.echo(outcome["message"])
+            for name, status in (outcome.get("checkouts") or {}).items():
+                click.echo(f"  {name}: {status}")
+        if outcome["status"] == "error":
+            raise SystemExit(1)
+        return
     root = find_repo_root(repo_path)
     if root is None and agent.lower() != "hermes":
         raise click.ClickException("Not inside a git repository. Run this from within a repository.")
