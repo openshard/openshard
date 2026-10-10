@@ -846,6 +846,8 @@ TOKENS_SOURCE_TRANSCRIPT = "transcript"
 # status line). Provider-reported, never guessed; a status-line model wins.
 MODEL_SOURCE_TRANSCRIPT = "transcript"
 TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE = "transcript_unavailable"
+# Kept equal to claude_workspace.USAGE_ELSEWHERE_REASON (asserted in tests).
+USAGE_ELSEWHERE_REASON = "workspace_usage_attributed_to_other_repository"
 TOKENS_INCOMPLETE_FILES_CAPPED = "transcript_files_capped"
 # One message's usage: input, output, cache_read, cache_creation (total),
 # cache_creation 5m, cache_creation 1h, cache_creation with no TTL split.
@@ -3514,12 +3516,15 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # Session totals from the transcript (the API responses' own usage).
         tokens_current = dict(transcript_usage.get("totals") or {})
         tokens_source = TOKENS_SOURCE_TRANSCRIPT
+    elif buf.get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
+        tokens_current = None
+        tokens_not_recorded = USAGE_ELSEWHERE_REASON
     elif buf.get("tokens_scope") == "last_call":
         # Only the status line's last-call figures are known: never recorded
         # as session totals. Unknown, with the reason, beats an undercount.
         tokens_current = None
         tokens_not_recorded = TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE
-    cost_not_recorded: str | None = None
+    cost_not_recorded: str | None = USAGE_ELSEWHERE_REASON if tokens_not_recorded == USAGE_ELSEWHERE_REASON else None
     if estimated_cost is None and transcript_usage:
         # No cost the agent reported (headless ``claude -p`` has no status
         # line): price the usage per model at the official list rates, with
@@ -3927,6 +3932,10 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     if payload.transcript_path:
         # Transient: read at fold for token usage only (see _transcript_usage).
         buf["transcript_path"] = payload.transcript_path
+    if payload.attrs.get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
+        # A workspace turn's usage belongs to the checkout it touched first
+        # (see claude_workspace): this Receipt must not count it again.
+        buf["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
     if (payload.agent == AGENT_CODEX and buf.get("codex_usage_baseline_required")
             and not buf.get("codex_usage_baseline_attempted")):
         # Read cumulative counters before the resumed segment does any work.
@@ -4443,11 +4452,13 @@ def apply_reduced_hook(
                                    repo_root=repo_root, detail="duplicate event id")
             detail, should_fold, should_delete = _apply(payload, buf, repo_root, now=now)
             cloud_turn_closed = (
-                payload.agent == "cursor" and payload.event == EVENT_STOP
-                and os.environ.get("OPENSHARD_CONNECTED_SURFACE") == "cursor-cloud"
+                payload.event == EVENT_STOP
+                and (payload.agent, os.environ.get("OPENSHARD_CONNECTED_SURFACE")) in {
+                    ("cursor", "cursor-cloud"), ("claude_code", "claude-code-web"),
+                }
             )
             if cloud_turn_closed:
-                # Cursor cloud may reclaim its VM after Stop without SessionEnd.
+                # Hosted runtimes may reclaim their VM after Stop without SessionEnd.
                 # Seal this observed turn now, without manufacturing a session end.
                 losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
                 if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):

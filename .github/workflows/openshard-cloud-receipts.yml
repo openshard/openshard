@@ -128,6 +128,7 @@ jobs:
           # never overwrite it or turn a failed check into a passed Receipt.
           deliver_receipt() {
             local response_file http_status response expected_id
+            delivery_outcome=acknowledged
             [[ "${GITHUB_REPOSITORY_ID:-}" =~ ^[0-9]+$ ]] || return 1
             expected_id="rcpt_$(printf 'github-cloud:\0%s\0%s' "$GITHUB_REPOSITORY_ID" "$sha" | sha256sum | cut -c1-32)"
             response_file=$(mktemp) || return 1
@@ -160,6 +161,12 @@ jobs:
               jq -e --arg sha "$sha" '.outcome == "session_not_corroborated" and .head_sha == $sha and .receipt_id == null' <<<"$response" >/dev/null; then
               echo "No OpenShard-captured Receipt declares the Claude cloud session named by $sha yet."
               return 3
+            fi
+            if [[ "$http_status" == 200 ]] && \
+              jq -e --arg sha "$sha" '.outcome == "no_bound_receipt" and .head_sha == $sha' <<<"$response" >/dev/null; then
+              delivery_outcome=no_bound_receipt
+              echo "No captured Receipt is bound to $sha; its CI verdict was not recorded."
+              return 0
             fi
             if [[ "$http_status" == 409 ]] && \
               jq -e --arg id "$expected_id" --arg code receipt_conflict \
@@ -232,6 +239,7 @@ jobs:
             [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
             unattributed=false
             claude_session=""
+            attach_only=false
             if [[ -z "$agent" && "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "${OPENSHARD_CAPTURE_UNATTRIBUTED:-false}" == "true" ]]; then
               # An explicit retrospective request: record the commit and CI
               # verdict only. No agent or usage is inferred or declared.
@@ -250,7 +258,15 @@ jobs:
                 echo "::notice::$sha names Claude cloud session $claude_session; asking OpenShard to corroborate it with a captured Receipt."
               fi
             fi
-            if [[ -z "$agent" && "$unattributed" != true && -z "$claude_session" ]]; then
+            if [[ -z "$agent" && "$unattributed" != true && -z "$claude_session" && "$GITHUB_EVENT_NAME" == "push" && "$sha" == "${GITHUB_SHA:-}" ]]; then
+              # No agent metadata, but an observed session (Claude Code cloud
+              # hooks) may already hold this commit's Receipt: the verdict goes
+              # only to a Receipt bound to it, and nothing is created otherwise.
+              attach_only=true
+              model="" provider="" surface="" cost="" tokens_in="" tokens_out="" tokens_cache_read="" tokens_cache_creation=""
+              echo "::notice::No agent metadata on $sha; its CI verdict goes only to a captured Receipt bound to it."
+            fi
+            if [[ -z "$agent" && "$unattributed" != true && "$attach_only" != true && -z "$claude_session" ]]; then
               echo "::warning::No Receipt created for $sha: missing Openshard-Agent evidence."
               echo "| $sha | Skipped: missing agent evidence |" >> "$GITHUB_STEP_SUMMARY"
               skipped=$((skipped + 1))
@@ -305,13 +321,17 @@ jobs:
             verification_status="passed"
             if [[ $failed -ne 0 ]]; then
               verification_status="failed"
-              overall_failed=1
+              if [[ "$attach_only" == true ]]; then
+                echo "::warning::$sha failed verification; that result is delivered as CI evidence only."
+              else
+                overall_failed=1
+              fi
             fi
 
             files_truncated=false
             [[ "$file_count" -gt 50 ]] && files_truncated=true
 
-            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --arg claude_session "$claude_session"               '{
+            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --argjson attach_only "$attach_only"               --arg claude_session "$claude_session"               '{
                 head_sha: $head_sha,
                 before_sha: (if $before_sha == "" then null else $before_sha end),
                 created_at: $created_at,
@@ -342,7 +362,7 @@ jobs:
                 files_truncated: $files_truncated,
                 diff_added: $diff_added,
                 diff_removed: $diff_removed
-              } + (if $claude_session == "" then {} else {claude_session_id: $claude_session} end)')
+              } + (if $attach_only then {attach_only: true} else {} end) + (if $claude_session == "" then {} else {claude_session_id: $claude_session} end)')
 
             # A cloud session's Receipt is sealed when its turn ends, which can
             # be shortly after the push. Wait a bounded time, once per run.
@@ -372,12 +392,16 @@ jobs:
                 echo "::warning::Receipt backfill delivery for $sha failed."
               fi
             else
-              delivered=$((delivered + 1))
-              if [[ "$unattributed" == true ]]; then
+              if [[ "$delivery_outcome" == no_bound_receipt ]]; then
+                echo "| $sha | Skipped: no agent metadata and no captured session Receipt |" >> "$GITHUB_STEP_SUMMARY"
+                skipped=$((skipped + 1))
+              elif [[ "$unattributed" == true ]]; then
+                delivered=$((delivered + 1))
                 echo "| $sha | Unattributed CI/commit Receipt acknowledged |" >> "$GITHUB_STEP_SUMMARY"
               elif [[ -n "$claude_session" ]]; then
                 echo "| $sha | Claude cloud session corroborated by OpenShard capture; API acknowledged |" >> "$GITHUB_STEP_SUMMARY"
               else
+                delivered=$((delivered + 1))
                 echo "| $sha | API acknowledged or verification attached |" >> "$GITHUB_STEP_SUMMARY"
               fi
             fi

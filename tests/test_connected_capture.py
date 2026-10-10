@@ -524,7 +524,6 @@ class TestMissingSessionEnd:
 
         _connected_env(monkeypatch)
         _work(repo)
-        _hook(repo, "Stop")
         fake = FakeConnectedPlatform()
         first = collector.flush(client=fake)
         assert first.receipts["in_progress"] == 1
@@ -608,3 +607,26 @@ def test_delayed_usage_keeps_detached_delivery_retryable():
     assert collector._retryable_work(report)
     report.receipts = {"usage_pending": 0}
     assert not collector._retryable_work(report)
+
+
+def test_claude_cloud_stop_seals_partial_receipt_and_resume_preserves_bytes(home, repo, monkeypatch):
+    _proxy_env(monkeypatch)
+    _work(repo)
+    _hook(repo, "Stop")
+    fake = FakeConnectedPlatform()
+    assert collector.flush(client=fake).receipts["created"] == 1
+    history = repo / ".openshard" / "runs.jsonl"
+    original_bytes = history.read_bytes()
+    original = load_history(history, coerce=False)[0]
+    assert original["capture"]["session_end_observed"] is False
+    assert original["capture"]["task_status"] == "turn_completed"
+    assert any(r["kind"] == "session_end_not_observed" for r in original["capture"]["completeness"]["reasons"])
+    assert not any(e["event_type"] == "run.completed" for b in fake.batches for e in b["events"])
+    _hook(repo, "UserPromptSubmit", prompt="next cloud turn")
+    _hook(repo, "Stop")
+    assert collector.flush(client=fake).receipts["created"] == 1
+    assert history.read_bytes().startswith(original_bytes)
+    first, second = load_history(history, coerce=False)
+    assert first == original
+    assert second["receipt_id"] != first["receipt_id"]
+    assert second["capture"]["resumed_from_receipt_id"] == first["receipt_id"]

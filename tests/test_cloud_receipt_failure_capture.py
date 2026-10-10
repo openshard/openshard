@@ -46,7 +46,7 @@ echo "$checks"
 
 
 @pytest.mark.skipif(not SHELL_REQUIRED and (BASH is None or not shutil.which("jq")), reason="requires workflow Bash and jq")
-@pytest.mark.parametrize("case", ["created", "duplicate", "attached", "attached_duplicate", "attached_wrong_sha", "attached_empty", "session_not_corroborated", "session_wrong_sha", "existing", "wrong_id", "wrong_error", "unauthorized", "server_error", "malformed", "bad_success", "transport"])
+@pytest.mark.parametrize("case", ["created", "duplicate", "attached", "attached_duplicate", "attached_wrong_sha", "attached_empty", "no_bound", "no_bound_wrong_sha", "session_not_corroborated", "session_wrong_sha", "existing", "wrong_id", "wrong_error", "unauthorized", "server_error", "malformed", "bad_success", "transport"])
 def test_delivery_retains_existing_receipt_and_rejects_other_errors(case):
     import hashlib
     import shlex
@@ -69,6 +69,10 @@ def test_delivery_retains_existing_receipt_and_rejects_other_errors(case):
                 {"receipt_id": "rcpt_existing", "outcome": "recorded", "state_applied": True}
             ],
         }
+    elif case in ("no_bound", "no_bound_wrong_sha"):
+        http = "200"
+        body = {"outcome": "no_bound_receipt", "head_sha": sha if case == "no_bound" else "b" * 40,
+                "receipt_id": None, "attached": []}
     elif case in ("session_not_corroborated", "session_wrong_sha"):
         http = "200"
         body = {
@@ -115,7 +119,7 @@ printf '%s %s %s' "$result" "$overall_failed" "$verification_status"
 '''
     assert BASH is not None, "CI requires Git Bash; workflow shell checks must execute"
     result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)
-    expected_exit = 0 if case in ("created", "duplicate", "attached", "attached_duplicate", "existing") else 1
+    expected_exit = 0 if case in ("created", "duplicate", "attached", "attached_duplicate", "no_bound", "existing") else 1
     if case == "session_not_corroborated":
         expected_exit = 3
     assert result.stdout.splitlines()[-1] == f"{expected_exit} 1 failed"
@@ -150,22 +154,27 @@ SESSION_TRAILER = "Fix it\n\nClaude-Session: https://claude.ai/code/session_01HS
 
 
 @pytest.mark.skipif(not SHELL_REQUIRED and BASH is None, reason="requires workflow Bash")
-@pytest.mark.parametrize("event,requested,agent,message,expected", [
-    ("push", "true", "", "", "skipped false claude-opus-5-5 0 1 -"),
-    ("workflow_dispatch", "false", "", "", "skipped false claude-opus-5-5 1 1 -"),
-    ("workflow_dispatch", "true", "", "", "delivered true none 0 0 -"),
-    ("workflow_dispatch", "true", "Claude Code", "", "delivered false claude-opus-5-5 0 0 -"),
-    # A Claude-Session trailer is sent as a claim for the API to corroborate, with usage cleared.
-    ("push", "false", "", SESSION_TRAILER, "delivered false none 0 0 session_01HSAXkLPtdu65CqEWgJgAUF"),
+@pytest.mark.parametrize("event,requested,agent,head,message,expected", [
+    # An untagged commit that is not the head of the push is skipped.
+    ("push", "true", "", "b" * 40, "", "skipped false claude-opus-5-5 0 1 false -"),
+    # The untagged head of a push goes as attach-only CI evidence, usage cleared.
+    ("push", "false", "", "a" * 40, "", "delivered false none 0 0 true -"),
+    ("workflow_dispatch", "false", "", "a" * 40, "", "skipped false claude-opus-5-5 1 1 false -"),
+    ("workflow_dispatch", "true", "", "a" * 40, "", "delivered true none 0 0 false -"),
+    ("workflow_dispatch", "true", "Claude Code", "a" * 40, "", "delivered false claude-opus-5-5 0 0 false -"),
+    # A Claude-Session trailer is sent as a claim for the API to corroborate, with usage
+    # cleared, on any pushed commit; it replaces attach-only for that commit.
+    ("push", "false", "", "b" * 40, SESSION_TRAILER, "delivered false none 0 0 false session_01HSAXkLPtdu65CqEWgJgAUF"),
+    ("push", "false", "", "a" * 40, SESSION_TRAILER, "delivered false none 0 0 false session_01HSAXkLPtdu65CqEWgJgAUF"),
     # An explicit Openshard-Agent wins; the trailer is not consulted.
-    ("push", "false", "Claude Code", SESSION_TRAILER, "delivered false claude-opus-5-5 0 0 -"),
+    ("push", "false", "Claude Code", "a" * 40, SESSION_TRAILER, "delivered false claude-opus-5-5 0 0 false -"),
     # Only the exact claude.ai session URL trailer counts.
-    ("push", "false", "", "Claude-Session: https://example.com/code/session_01HSAXkLPtdu65CqEWgJgAUF\n",
-     "skipped false claude-opus-5-5 0 1 -"),
-    ("push", "false", "", "Mentions Claude-Session: https://claude.ai/code/session_01HSAXkLPtdu65CqEWgJgAUF\n",
-     "skipped false claude-opus-5-5 0 1 -"),
+    ("push", "false", "", "b" * 40, "Claude-Session: https://example.com/code/session_01HSAXkLPtdu65CqEWgJgAUF\n",
+     "skipped false claude-opus-5-5 0 1 false -"),
+    ("push", "false", "", "b" * 40, "Mentions Claude-Session: https://claude.ai/code/session_01HSAXkLPtdu65CqEWgJgAUF\n",
+     "skipped false claude-opus-5-5 0 1 false -"),
 ])
-def test_unattributed_receipt_needs_explicit_dispatch_and_clears_usage(event, requested, agent, message, expected):
+def test_unattributed_receipt_needs_explicit_dispatch_and_clears_usage(event, requested, agent, head, message, expected):
     import shlex
 
     workflow = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/openshard-cloud-receipts.yml").read_text())
@@ -173,8 +182,11 @@ def test_unattributed_receipt_needs_explicit_dispatch_and_clears_usage(event, re
     block = re.search(r"^  unattributed=false.*?^    continue\n  fi$", script, re.S | re.M)
     assert block is not None
     assert 'agent: (if $agent == "" then null else $agent end),' in script
+    assert "} + (if $attach_only then {attach_only: true} else {} end)" in script
+    assert '(if $claude_session == "" then {} else {claude_session_id: $claude_session} end)' in script
     command = f'''set -euo pipefail
 GITHUB_EVENT_NAME={event}
+GITHUB_SHA={head}
 OPENSHARD_CAPTURE_UNATTRIBUTED={requested}
 GITHUB_STEP_SUMMARY=/dev/null
 sha={"a" * 40}
@@ -186,7 +198,7 @@ for _ in 1; do
 {block.group(0)}
   outcome=delivered
 done
-printf '%s %s %s %s %s %s' "$outcome" "$unattributed" "${{model:-none}}" "$overall_failed" "$skipped" "${{claude_session:--}}"
+printf '%s %s %s %s %s %s %s' "$outcome" "$unattributed" "${{model:-none}}" "$overall_failed" "$skipped" "$attach_only" "${{claude_session:--}}"
 '''
     assert BASH is not None, "CI requires Git Bash; workflow shell checks must execute"
     result = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True)

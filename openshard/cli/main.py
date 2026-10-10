@@ -3714,13 +3714,13 @@ def capture_group() -> None:
 
 
 _AGENT_CHOICE = click.Choice(
-    ["codex", "opencode", "cursor", "antigravity", "hermes", "grok-build"], case_sensitive=False
+    ["claude", "codex", "opencode", "cursor", "antigravity", "hermes", "grok-build"], case_sensitive=False
 )
 
 
 def _agent_key(agent: str) -> str:
     """The internal agent key for a CLI choice (``grok-build`` -> ``grok_build``)."""
-    return agent.lower().replace("-", "_")
+    return "claude_code" if agent.lower() == "claude" else agent.lower().replace("-", "_")
 
 
 def _render_agent_result(result, *, verb: str) -> None:
@@ -3753,8 +3753,19 @@ def _render_agent_result(result, *, verb: str) -> None:
     help="Repository to configure (default: current directory).",
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
-def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
-    """Configure Codex hooks, the OpenCode plugin, Cursor, Antigravity or Hermes hooks (what `openshard setup` does).
+@click.option("--defer-service", is_flag=True, default=False,
+              help="Install hooks before a hosted agent launches; start the capture service on its first native hook.")
+@click.option("--workspace", "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
+              help="claude only: a directory holding several checkouts (a multi-repository cloud session's start directory).")
+def capture_install(
+    agent: str, repo_path: Path | None, as_json: bool, defer_service: bool, workspace: Path | None,
+) -> None:
+    """Configure passive capture without requiring the agent CLI on PATH.
+
+    claude: merges OpenShard HTTP hooks and the startup watchdog into
+    .claude/settings.local.json. It does not install Claude or its MCP server.
+    Use --defer-service in prelaunch scripts so the service inherits the
+    launched runtime's network proxy and credentials from its first hook.
 
     codex: merges `openshard hooks codex` into .codex/hooks.json (project-local;
     unrelated hooks preserved). opencode: writes the OpenShard plugin to
@@ -3776,15 +3787,41 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
     from openshard.adapters.claude_mcp_install import find_repo_root
     from openshard.adapters.claude_setup import ensure_capture_service
 
+    if workspace is not None:
+        if agent.lower() != "claude":
+            raise click.ClickException("--workspace is supported for claude only.")
+        from openshard.adapters.claude_capture_client import resolve_port
+        from openshard.adapters.claude_workspace import install_workspace
+
+        ws_service = {"state": "deferred", "port": resolve_port()} if defer_service else ensure_capture_service()
+        ws_port = ws_service.get("port")
+        outcome = install_workspace(workspace, port=ws_port if isinstance(ws_port, int) else None)
+        if as_json:
+            click.echo(json.dumps({**outcome, "capture_service": ws_service}, indent=2))
+        else:
+            click.echo(outcome["message"])
+            for name, status in (outcome.get("checkouts") or {}).items():
+                click.echo(f"  {name}: {status}")
+        if outcome["status"] == "error":
+            raise SystemExit(1)
+        return
     root = find_repo_root(repo_path)
     if root is None and agent.lower() != "hermes":
         raise click.ClickException("Not inside a git repository. Run this from within a repository.")
-    service = ensure_capture_service()
+    service: dict
+    if defer_service:
+        from openshard.adapters.claude_capture_client import resolve_port
+
+        service = {"state": "deferred", "port": resolve_port()}
+    else:
+        service = ensure_capture_service()
     result = install_agent(_agent_key(agent), repo_root=root, port=service.get("port") or None)
     if as_json:
         click.echo(json.dumps({**result.to_dict(), "capture_service": service}, indent=2))
     else:
         _render_agent_result(result, verb="install")
+        if defer_service:
+            click.echo("Capture service startup is deferred until the first native hook.")
     if result.status == "error":
         raise SystemExit(1)
 
@@ -3797,7 +3834,7 @@ def capture_install(agent: str, repo_path: Path | None, as_json: bool) -> None:
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool) -> None:
-    """Remove OpenShard's Codex, OpenCode, Cursor, Antigravity, Hermes or Grok Build capture integration.
+    """Remove OpenShard's Claude, Codex, OpenCode, Cursor, Antigravity, Hermes or Grok Build capture integration.
 
     Only OpenShard's own entries/files are removed; unrelated hooks, plugins
     and settings survive. Local history under .openshard/ is never deleted.
