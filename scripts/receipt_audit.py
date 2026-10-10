@@ -335,7 +335,10 @@ def facts(row: Mapping[str, Any]) -> dict:
     cost = receipt.get("cost_usd")
     has_cost = (isinstance(cost, int | float) and cost >= 0) or _known(usage.get("cost") if isinstance(usage.get("cost"), Mapping) else None, "usd")
     agent = _text(row.get("agent") or receipt.get("agent"))
-    agent_known = agent is not None and agent.lower() not in GENERIC_AGENT_LABELS
+    # "OpenShard" outside OpenShard-routed runs is Core's label for a run whose
+    # executor it could not establish (origin unknown), not an agent identity.
+    agent_known = agent is not None and agent.lower() not in GENERIC_AGENT_LABELS and not (
+        agent.lower() == "openshard" and row.get("origin") != "openshard_routed")
     state = (row.get("verification_current") or {}).get("state") if isinstance(row.get("verification_current"), Mapping) else None
     verification = (state or {}).get("effective_status") if isinstance(state, Mapping) else None
     verification = verification or row.get("verification_status") or receipt.get("verification_status")

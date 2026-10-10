@@ -80,6 +80,8 @@ class TestFacts:
                                 verification_current={"state": {"effective_status": "passed"}}))
         assert not fact["agent_known"] and fact["verification_complete"]
         assert not audit.facts(_row(agent="unknown", verification_status="not_run"))["verification_complete"]
+        assert not audit.facts(_row(agent="OpenShard", origin="unknown"))["agent_known"]
+        assert audit.facts(_row(agent="OpenShard", origin="openshard_routed"))["agent_known"]
 
 
 class TestRecovery:
