@@ -1,5 +1,8 @@
 """Codex, OpenCode, Cursor, Google Antigravity, Hermes Agent and Grok Build integration detection and setup (PR12).
 
+Claude also has an explicit capture-only install/uninstall path here for
+cloud prelaunch setup; automatic local onboarding remains in ``claude_setup``.
+
 The Codex/OpenCode counterpart of ``claude_setup``: read-only detection
 for ``openshard doctor`` / ``openshard setup --agent``, and the install
 orchestration ``openshard setup`` runs after the Claude Code step. No
@@ -32,7 +35,9 @@ from openshard.adapters.antigravity_hooks_install import (
     load_antigravity_hooks,
     uninstall_antigravity_hooks,
 )
+from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.adapters.claude_hooks import _is_forbidden_capture_root
+from openshard.adapters.claude_hooks_install import install_claude_hooks, uninstall_claude_hooks
 from openshard.adapters.codex_hooks_install import (
     HOOK_EVENTS as CODEX_HOOK_EVENTS,
 )
@@ -128,6 +133,7 @@ _CLI_NAMES: dict[str, tuple[str, ...]] = {
     AGENT_HERMES: ("hermes",),
 }
 _LABELS: dict[str, str] = {
+    AGENT_CLAUDE_CODE: "Claude Code",
     AGENT_CODEX: "Codex", AGENT_OPENCODE: "OpenCode", AGENT_CURSOR: "Cursor",
     AGENT_ANTIGRAVITY: "Google Antigravity", AGENT_GROK_BUILD: "Grok Build",
     AGENT_HERMES: "Hermes Agent",
@@ -297,6 +303,11 @@ def grok_build_capture_observed(repo_root: Path | None) -> bool | None:
 
 def detect_agent_cli(agent: str) -> tuple[bool, str | None]:
     """``(available, path)`` for the agent's CLI on PATH. Never raises."""
+    if agent == AGENT_CLAUDE_CODE:
+        from openshard.adapters.claude_mcp_install import detect_claude_cli
+
+        availability = detect_claude_cli()
+        return availability.available, availability.path
     names = _CLI_NAMES.get(agent)
     if not names:
         return False, None
@@ -682,9 +693,13 @@ def install_agent(agent: str, *, repo_root: Path | None, port: int | None = None
         return _install_hermes(repo_root, available, path)
     if repo_root is None:
         return AgentSetupResult(agent, available, path, "error", "a repository is required")
-    if agent == AGENT_CODEX:
+    steps: list[str]
+    if agent == AGENT_CLAUDE_CODE:
+        result = install_claude_hooks(repo_root=repo_root, port=port)
+        steps = ["Capture hooks are configured; this command does not install the Claude CLI or MCP server."]
+    elif agent == AGENT_CODEX:
         result = install_codex_hooks(repo_root=repo_root)
-        steps: list[str] = []
+        steps = []
         if result.status in ("installed", "updated"):
             steps.append(
                 "Codex reviews new hooks once before running them: open Codex in this repository "
@@ -770,7 +785,9 @@ def uninstall_agent(agent: str, *, repo_root: Path | None) -> AgentSetupResult:
         )
     if repo_root is None:
         return AgentSetupResult(agent, available, path, "error", "a repository is required")
-    if agent == AGENT_CODEX:
+    if agent == AGENT_CLAUDE_CODE:
+        result = uninstall_claude_hooks(repo_root=repo_root)
+    elif agent == AGENT_CODEX:
         result = uninstall_codex_hooks(repo_root=repo_root)
     elif agent == AGENT_OPENCODE:
         result = uninstall_opencode_plugin(repo_root=repo_root)
