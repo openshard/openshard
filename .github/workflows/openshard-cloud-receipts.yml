@@ -8,6 +8,11 @@ on:
         description: "Optional ancestor commit to verify and capture"
         required: false
         type: string
+      unattributed:
+        description: "Create a CI/commit-level Receipt with agent, model, tokens and cost unknown when the commit has no Openshard-Agent evidence"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -47,6 +52,7 @@ jobs:
           OPENSHARD_API_BASE: https://api.openshard.dev
           OPENSHARD_OIDC_AUDIENCE: openshard-cloud-capture
           OPENSHARD_CAPTURE_COMMIT_SHA: ${{ inputs.commit_sha }}
+          OPENSHARD_CAPTURE_UNATTRIBUTED: ${{ inputs.unattributed }}
         shell: bash
         run: |
           set -uo pipefail
@@ -161,6 +167,13 @@ jobs:
           }
 
           overall_failed=0
+          delivered=0
+          skipped=0
+          {
+            echo "## Cloud Receipt delivery"
+            echo "| Commit | Outcome |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
           while IFS= read -r sha; do
             echo "::group::Cloud Receipt $sha"
@@ -211,8 +224,19 @@ jobs:
             tokens_cache_creation=$(metadata_value "Openshard-Tokens-Cache-Creation")
 
             [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
-            if [[ -z "$agent" ]]; then
-              echo "::notice::Skipping $sha because neither the commit nor associated PR declares Openshard-Agent."
+            unattributed=false
+            if [[ -z "$agent" && "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "${OPENSHARD_CAPTURE_UNATTRIBUTED:-false}" == "true" ]]; then
+              # An explicit retrospective request: record the commit and CI
+              # verdict only. No agent or usage is inferred or declared.
+              unattributed=true
+              model="" provider="" surface="" cost="" tokens_in="" tokens_out="" tokens_cache_read="" tokens_cache_creation=""
+              echo "::notice::Creating an unattributed CI/commit Receipt for $sha; agent, model, tokens and cost stay unknown."
+            fi
+            if [[ -z "$agent" && "$unattributed" != true ]]; then
+              echo "::warning::No Receipt created for $sha: missing Openshard-Agent evidence."
+              echo "| $sha | Skipped: missing agent evidence |" >> "$GITHUB_STEP_SUMMARY"
+              skipped=$((skipped + 1))
+              if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then overall_failed=1; fi
               echo "::endgroup::"
               continue
             fi
@@ -276,7 +300,7 @@ jobs:
                 task_title: $task_title,
                 branch: $branch,
                 owner: (if $owner == "" then null else $owner end),
-                agent: $agent,
+                agent: (if $agent == "" then null else $agent end),
                 model: (if $model == "" then null else $model end),
                 provider: (if $provider == "" then null else $provider end),
                 surface: (if $surface == "" then null else $surface end),
@@ -308,13 +332,23 @@ jobs:
             [[ -n "$oidc_token" && "$oidc_token" != "null" ]] || exit 1
 
             if ! deliver_receipt; then
+              echo "| $sha | Delivery failed |" >> "$GITHUB_STEP_SUMMARY"
               if jq -e --arg sha "$sha" 'index($sha) != null' <<<"$required_shas" >/dev/null; then
-                exit 1
+                overall_failed=1
+              else
+                echo "::warning::Receipt backfill delivery for $sha failed."
               fi
-              echo "::warning::Receipt backfill delivery for $sha failed."
+            else
+              delivered=$((delivered + 1))
+              if [[ "$unattributed" == true ]]; then
+                echo "| $sha | Unattributed CI/commit Receipt acknowledged |" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "| $sha | API acknowledged or verification attached |" >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
 
             echo "::endgroup::"
           done < <(jq -r '.[]' <<<"$shas")
 
+          echo "Delivery acknowledgements: $delivered; skipped: $skipped. Green CI does not guarantee Receipt creation." >> "$GITHUB_STEP_SUMMARY"
           exit "$overall_failed"
