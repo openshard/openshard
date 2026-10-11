@@ -45,26 +45,11 @@ from openshard.history.event import SOURCE_OPENCODE_PLUGIN, events_from_entry
 from openshard.history.query import list_shards
 from openshard.history.shard import CAPTURE_PARTIAL, ORIGIN_EXTERNAL_OBSERVED
 from openshard.history.shard_contract import build_shard_receipt, render_compact_shard_receipt
+from tests.capture_fixtures import _git, _make_repo
 
 SID = "ses_8b1f2c3d4e5f60718293a4b5c6d7e8f9"
 SID2 = "ses_ffffffffffffffffffffffffffffffff"
 SECRET = "sk-ant-api03-SECRETSECRET12345678901234567890"
-
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
-        cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-
-
-def _make_repo(root: Path) -> Path:
-    root.mkdir(parents=True)
-    _git(root, "init", "-q")
-    (root / "README.md").write_text("hello\n", encoding="utf-8")
-    _git(root, "add", ".")
-    _git(root, "commit", "-q", "-m", "init")
-    return root
 
 
 @pytest.fixture

@@ -37,6 +37,7 @@ from openshard.history.event import SOURCE_CURSOR_HOOKS, events_from_entry
 from openshard.history.query import get_receipt, list_shards
 from openshard.history.shard import CAPTURE_PARTIAL, ORIGIN_EXTERNAL_OBSERVED
 from openshard.history.shard_contract import build_shard_receipt, render_compact_shard_receipt
+from tests.capture_fixtures import _make_repo
 
 SID = "6f1a2b3c-4d5e-4f60-8a71-b2c3d4e5f607"
 SID2 = "6f1a2b3c-4d5e-4f60-8a71-ffffffffffff"
@@ -44,22 +45,6 @@ SECRET = "sk-proj-SECRETSECRET12345678901234567890abcdef"
 TRANSCRIPT = "/home/user/.cursor/transcripts/2026/09/conversation-abc.jsonl"
 EMAIL = "developer@example.com"
 EDIT_TEXT = "def add(a, b):\n    return a + b  # RAW EDIT CONTENT"
-
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
-        cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-
-
-def _make_repo(root: Path) -> Path:
-    root.mkdir(parents=True)
-    _git(root, "init", "-q")
-    (root / "README.md").write_text("hello\n", encoding="utf-8")
-    _git(root, "add", ".")
-    _git(root, "commit", "-q", "-m", "init")
-    return root
 
 
 @pytest.fixture
