@@ -113,6 +113,27 @@ trust or use receipts, and the receipt path does not depend on them.
 | Telemetry | `telemetry/` | Privacy-safe counters (`docs/telemetry.md`); never receipt contents. |
 | Platform sync | `sync/`, `openshard sync` | Sends copies of the `history --json` projection to a hosted organisation, keyed by `receipt_id` (`docs/platform-sync.md`). The local record stays canonical. |
 
+## Dependency boundaries
+
+`tests/test_architecture_boundaries.py` enforces the dependency directions
+the receipt path relies on. It parses every module (function-level and
+`TYPE_CHECKING` imports included) and fails on a forbidden edge or a
+module-level import cycle.
+
+| Rule | Packages | May not import |
+|---|---|---|
+| Interfaces are leaves | everything except `cli/`, `tui/` | `cli/`, `tui/` |
+| Foundations are leaves | `util/`, `safety/`, `security/`, `analysis/` | anything outside that set |
+| Evidence core is independent | `history/` | interfaces, runtimes (`run/`, `osn/`, `native/`, `execution/`, `planning/`), `providers/`, capture, delivery, MCP, learning, insights, routing, evals |
+| Capture does not execute | `adapters/` | interfaces, runtimes, `providers/`, `scoring/`, `evals/` |
+| MCP is read-only | `mcp/` | interfaces, runtimes, `providers/`, capture, `remote/`, `connected/`, `evals/` |
+| Intelligence does not dispatch | `learning/`, `routing/`, `insights/`, `reflection/`, `policy/` | interfaces, `providers/`, `execution/`, `run/`, `native/` |
+| Delivery does not run agents | `sync/`, `remote/`, `connected/` | interfaces, runtimes, `providers/` |
+
+Edges that predate a rule are listed in `KNOWN_EXCEPTIONS` with the reason
+they exist. The list only shrinks: an exception that stops occurring fails
+the test until it is deleted, so a fixed boundary cannot regress.
+
 ## Where to read next
 
 * `docs/agent-capture.md` — per-agent capture, trust boundary and
