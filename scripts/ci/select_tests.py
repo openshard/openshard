@@ -100,8 +100,8 @@ WINDOWS_SMOKE_TEST_FILES: tuple[str, ...] = (
 # The invariant suite: evidence-critical guarantees that run on *every*
 # non-docs PR regardless of what changed. Receipt schema/hash and identity,
 # provenance, evidence filtering, history integrity, path/secret/shell
-# safety, sync envelope integrity, verification contracts. Keep this list
-# focused -- it is the floor, not the whole suite.
+# safety, sync envelope integrity, verification contracts, architecture
+# boundaries. Keep this list focused -- it is the floor, not the whole suite.
 INVARIANT_TEST_FILES: tuple[str, ...] = (
     "tests/test_shard_schema.py",
     "tests/test_shard_hash.py",
@@ -134,6 +134,7 @@ INVARIANT_TEST_FILES: tuple[str, ...] = (
     "tests/test_run_history.py",
     "tests/test_redteam_receipt_honesty.py",
     "tests/test_cursor_usage.py",
+    "tests/test_architecture_boundaries.py",
 )
 
 # Any change under these prefixes runs the full PR suite. These are the
