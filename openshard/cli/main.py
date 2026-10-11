@@ -1570,7 +1570,7 @@ def report():
         click.echo("No run history found. Run 'openshard run' to get started.")
         return
 
-    entries = []
+    entries: list[dict] = []
     for line in log_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -1592,7 +1592,7 @@ def report():
     total_tokens  = sum(e.get("total_tokens", 0) for e in entries)
     costs = [c for c in (run_cost_usd(e) for e in entries) if c is not None]
     total_cost    = sum(costs) if costs else None
-    avg_cost      = total_cost / len(costs) if costs else None
+    avg_cost      = sum(costs) / len(costs) if costs else None
 
     click.echo("\n[report]")
     click.echo(f"  total runs:             {total}")
