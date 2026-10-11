@@ -363,3 +363,25 @@ def test_append_jsonl_with_returns_the_record_and_repairs_a_missing_newline(tmp_
     written = append_jsonl_with(path, lambda lines: {"seen": len(lines)})
     assert written == {"seen": 1}
     assert [json.loads(ln) for ln in _read_lines(path)] == [{"a": 1}, {"seen": 1}]
+
+
+def test_append_jsonl_never_joins_a_torn_last_line(tmp_path: Path) -> None:
+    # A writer killed mid-line leaves no trailing newline. The next append used
+    # to land on that line, so neither record could be parsed and both were lost.
+    path = tmp_path / "runs.jsonl"
+    path.write_bytes(b'{"a": 1}\n{"torn": ')
+    append_jsonl(path, {"b": 2})
+    lines = _read_lines(path)
+    assert json.loads(lines[0]) == {"a": 1}
+    assert lines[1] == '{"torn": '
+    assert json.loads(lines[2]) == {"b": 2}
+
+
+@pytest.mark.parametrize("existing", [b"", b'{"a": 1}\n'])
+def test_append_jsonl_adds_no_blank_line_to_a_well_formed_file(tmp_path: Path, existing: bytes) -> None:
+    path = tmp_path / "runs.jsonl"
+    path.write_bytes(existing)
+    append_jsonl(path, {"b": 2})
+    assert [ln for ln in path.read_text(encoding="utf-8").splitlines()] == (
+        ['{"a": 1}'] if existing else []
+    ) + ['{"b": 2}']
