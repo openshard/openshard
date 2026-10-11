@@ -6,6 +6,16 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- **Guidance before a cloud task starts.** `openshard capture install claude|codex --learn`
+  installs the hosted prompt-learning hook (`openshard learn hook <agent> --hosted`) beside the
+  capture hooks, in the workspace and every checkout with `--workspace`. In a connected cloud
+  environment, which holds no organisation read key, the hook now authenticates with the
+  connection's own credential (the `proxy-injected` marker in Claude Cloud, a runtime-secret
+  `osc_` token elsewhere); the Platform answers only for repositories that connection has itself
+  captured, with bounded check history and supporting Receipt ids, never Receipts
+  (`docs/claude-cloud-prelaunch.md`, `docs/hosted-learning.md`). The Receipt records whether
+  context was emitted, not that the agent used it. Outside such an environment a capture-only
+  credential still reads nothing.
 - **Claude Code's permission mode on the Receipt.** Every Claude Code hook payload carries the
   permission regime the agent ran under (`default`, `acceptEdits`, `plan`, `bypassPermissions`,
   `dontAsk`); capture now records it under `capture.permission_mode` / `permission_modes_seen`

@@ -94,6 +94,26 @@ def _fetch(link: Any, repository: str, terms: list[str], *, transport: Any = Non
     return _checked(json.loads(body), repository)
 
 
+def _connected_link(env: Any) -> Any:
+    """The connected-capture credential as the hosted-context caller, when a cloud session holds only that.
+
+    A Claude Cloud or Cursor Cloud environment configured through Settings ->
+    Agents carries ``OPENSHARD_CONNECTED_*`` and either the proxy marker or a
+    runtime-secret ``osc_`` token, never an organisation read key. The
+    Platform lets that credential read bounded advisory context only for
+    repositories its own captures recorded, and nothing else; it answers 403
+    for anything more, which the caller treats as "no context". The ordinary
+    ``platform.json`` link is never built from here.
+    """
+    from openshard.connected.config import resolve_connection
+    from openshard.sync.config import PlatformLink
+
+    connection = resolve_connection(env)
+    if connection is None or connection.source == "platform_link":
+        return None
+    return PlatformLink(connection.endpoint, connection.organisation_id, connection.token, None, "connected")
+
+
 def retrieve(root: Path, task: str, *, env: Any = None, transport: Any = None) -> tuple[dict, dict]:
     """Bound network waiting, including imports/DNS, on a daemon worker. Never raises."""
     from openshard.history.repo_identity import capture_repo_identity
@@ -114,6 +134,8 @@ def retrieve(root: Path, task: str, *, env: Any = None, transport: Any = None) -
         if sync_disabled(env):
             return {}, record
         link = resolve_link(env)
+        if link is None:
+            link = _connected_link(env)
         repository = capture_repo_identity(root)
         terms = list(task_terms(task))[:16]
         if link is None or repository is None or len(terms) < 2:

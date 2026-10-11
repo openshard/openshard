@@ -3757,8 +3757,11 @@ def _render_agent_result(result, *, verb: str) -> None:
               help="Install hooks before a hosted agent launches; start the capture service on its first native hook.")
 @click.option("--workspace", "workspace", type=click.Path(exists=True, file_okay=False, path_type=Path), default=None,
               help="claude only: a directory holding several checkouts (a multi-repository cloud session's start directory).")
+@click.option("--learn", "learn", is_flag=True, default=False,
+              help="claude/codex: also install the hosted prompt-learning hook (`openshard learn hook <agent> --hosted`), "
+                   "so each prompt receives bounded verified check history for this repository before the agent starts.")
 def capture_install(
-    agent: str, repo_path: Path | None, as_json: bool, defer_service: bool, workspace: Path | None,
+    agent: str, repo_path: Path | None, as_json: bool, defer_service: bool, workspace: Path | None, learn: bool,
 ) -> None:
     """Configure passive capture without requiring the agent CLI on PATH.
 
@@ -3766,6 +3769,10 @@ def capture_install(
     .claude/settings.local.json. It does not install Claude or its MCP server.
     Use --defer-service in prelaunch scripts so the service inherits the
     launched runtime's network proxy and credentials from its first hook.
+    --learn adds the opt-in hosted learning hook beside the capture hooks (see
+    `openshard learn install --hosted`); in a connected cloud environment it
+    reads advisory check history with the connection's own credential, scoped
+    by the Platform to repositories that connection has captured.
 
     codex: merges `openshard hooks codex` into .codex/hooks.json (project-local;
     unrelated hooks preserved). opencode: writes the OpenShard plugin to
@@ -3787,21 +3794,30 @@ def capture_install(
     from openshard.adapters.claude_mcp_install import find_repo_root
     from openshard.adapters.claude_setup import ensure_capture_service
 
+    if learn and agent.lower() not in ("claude", "codex"):
+        raise click.ClickException("--learn is supported for claude and codex only.")
+
     if workspace is not None:
         if agent.lower() != "claude":
             raise click.ClickException("--workspace is supported for claude only.")
         from openshard.adapters.claude_capture_client import resolve_port
-        from openshard.adapters.claude_workspace import install_workspace
+        from openshard.adapters.claude_workspace import checkouts, install_workspace
 
         ws_service = {"state": "deferred", "port": resolve_port()} if defer_service else ensure_capture_service()
         ws_port = ws_service.get("port")
         outcome = install_workspace(workspace, port=ws_port if isinstance(ws_port, int) else None)
+        learning: dict | None = None
+        if learn and outcome["status"] != "error":
+            # Prompt hooks load from the directory the session starts in: the
+            # workspace for several repositories, a checkout for one.
+            learning = _install_hosted_learning("claude", [*checkouts(Path(workspace).resolve()), Path(workspace).resolve()])
         if as_json:
-            click.echo(json.dumps({**outcome, "capture_service": ws_service}, indent=2))
+            click.echo(json.dumps({**outcome, "capture_service": ws_service, **({"learning": learning} if learning else {})}, indent=2))
         else:
             click.echo(outcome["message"])
             for name, status in (outcome.get("checkouts") or {}).items():
                 click.echo(f"  {name}: {status}")
+            _render_hosted_learning(learning)
         if outcome["status"] == "error":
             raise SystemExit(1)
         return
@@ -3816,14 +3832,50 @@ def capture_install(
     else:
         service = ensure_capture_service()
     result = install_agent(_agent_key(agent), repo_root=root, port=service.get("port") or None)
+    learning = None
+    if learn and result.status != "error" and root is not None:
+        learning = _install_hosted_learning(agent.lower(), [root])
     if as_json:
-        click.echo(json.dumps({**result.to_dict(), "capture_service": service}, indent=2))
+        click.echo(json.dumps({**result.to_dict(), "capture_service": service, **({"learning": learning} if learning else {})}, indent=2))
     else:
         _render_agent_result(result, verb="install")
         if defer_service:
             click.echo("Capture service startup is deferred until the first native hook.")
+        _render_hosted_learning(learning)
     if result.status == "error":
         raise SystemExit(1)
+
+
+def _install_hosted_learning(agent: str, roots: list[Path]) -> dict:
+    """Add the hosted prompt-learning hook beside the capture hooks in each *roots* entry. Never raises."""
+    from openshard.learning.external_install import configure
+
+    installed: dict[str, str] = {}
+    warnings: list[str] = []
+    for directory in roots:
+        try:
+            outcome = configure(directory, agent, hosted=True)
+            installed[str(directory)] = outcome["change"]
+            if outcome.get("warning"):
+                warnings.append(f"{directory}: {outcome['warning']}")
+        except (ValueError, OSError) as exc:
+            installed[str(directory)] = "error"
+            warnings.append(f"{directory}: {exc}")
+    return {
+        "hook": f"openshard learn hook {agent} --hosted",
+        "installed": installed,
+        "warnings": warnings,
+        "note": "Advisory context only. A connected cloud credential reads check history solely for repositories it has captured; the agent's own choices are never changed by Openshard.",
+    }
+
+
+def _render_hosted_learning(learning: dict | None) -> None:
+    if not learning:
+        return
+    changes = ", ".join(f"{Path(path).name or path}: {change}" for path, change in learning["installed"].items())
+    click.echo(f"Hosted prompt learning ({learning['hook']}): {changes}")
+    for warning in learning["warnings"]:
+        click.echo(f"  warning: {warning}", err=True)
 
 
 @capture_group.command("uninstall")
