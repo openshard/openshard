@@ -49,7 +49,7 @@ VALID_CAPTURE_DEPTHS = frozenset({CAPTURE_FULL, CAPTURE_PARTIAL, CAPTURE_UNKNOWN
 # openshard/adapters/claude_hooks.py and openshard/adapters/capture_agents.py).
 # The label names the *agent that did the work* — never the model provider:
 # an OpenCode session observed through the plugin stays "OpenCode" whatever
-# provider/model it used (PR12), and is distinct from ``executor ==
+# provider/model it used, and is distinct from ``executor ==
 # "opencode"`` below, which is OpenShard *routing* work to OpenCode itself.
 _EXTERNAL_AGENT_LABELS: dict[str, str] = {
     "claude_code_import": "Claude Code (external)",

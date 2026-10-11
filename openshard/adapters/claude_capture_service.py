@@ -1,4 +1,4 @@
-"""Warm local capture service for Claude Code hooks (PR9.5: near-zero blocking capture).
+"""Warm local capture service for Claude Code hooks: near-zero blocking capture.
 
 Why a service
 -------------
@@ -128,7 +128,7 @@ from openshard.history.correlation import correlation_block, parse_correlation
 from openshard.history.task_identity import is_task_id
 from openshard.util.process import pid_alive
 
-# PR12: receiver path -> agent key. One service, one queue format, one
+# Receiver path -> agent key. One service, one queue format, one
 # fold; only the translator run on the blocking path differs.
 _HOOK_PATH_AGENTS: dict[str, str] = {path: agent for agent, path in client.AGENT_HOOK_PATHS.items()}
 
@@ -169,7 +169,7 @@ def queue_key(session_id: str, agent: str = AGENT_CLAUDE_CODE) -> str:
     Mirrors ``claude_hooks.buffer_path``: session ids are minted by the
     agents, so two agents can hand the service the same id, and their
     queues (replay order, rotation, crash recovery) must never couple.
-    Claude Code keeps the pre-PR12 name so leftover queues survive an
+    Claude Code keeps its original (agent-less) name so leftover queues survive an
     upgrade. Replay never parses a session id back out of the stem -- the
     queued lines carry their own ``session_id`` and ``agent``.
     """
@@ -500,7 +500,7 @@ class CaptureRecorder:
         for bad input; an I/O failure propagates so the HTTP layer can
         answer 500 (Claude Code then reports a non-blocking hook error
         rather than OpenShard silently acknowledging evidence it did not
-        persist). *agent* picks the translator (PR12); a translator may
+        persist). *agent* picks the translator; a translator may
         yield a usage observation (``StatusPayload``), which is queued
         exactly like a status ping. *authorize* (v0.4.4) is consulted with
         the resolved repository root before anything is written; a refusal

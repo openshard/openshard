@@ -1,4 +1,4 @@
-"""Canonical Event — the smallest safe, first-class Event contract (Migration 3).
+"""Canonical Event — the smallest safe, first-class Event contract.
 
 An Event describes one observed fact/action/state transition. It belongs
 primarily to a Run/Attempt and, where known, its parent Shard — it is not a
@@ -8,17 +8,17 @@ An Event is never persisted to its own JSONL file or store — there is still
 only ``runs.jsonl``. Two ways an Event reaches a caller now coexist, and are
 never conflated:
 
-* Legacy projection (Migration 3): most producers only ever leave behind
+* Legacy projection: most producers only ever leave behind
   loosely-typed traces (``run_timeline``, ``review_checks``,
   ``policy_decisions``, native step/checkpoint/session/interaction records,
   or an adapter entry with no Events of its own). This module derives
   Events from those traces at *read* time, on every call — nothing is
   cached or written back. This closed the "v1.3 concern" left open at
   ``shard_schema.TIMELINE_EVENT_FIELDS``.
-* Embedded canonical Events (Migration 5, extended by Migration 6): a
+* Embedded canonical Events: a
   producer that knows how to build its own Events at *observation* time —
   the Claude Code import/wrap adapters (``adapters/claude_code_import.py``,
-  ``adapters/wrap_exec.py``) and, since Migration 6, the OpenShard Native
+  ``adapters/wrap_exec.py``) and the OpenShard Native
   (OSN) run pipeline itself (``run/_pipeline_helpers.py::_build_native_events``,
   called from ``_log_run``) — calls ``make_event`` directly while the facts
   are still live, and stores the result as a plain ``events: list[dict]``
@@ -224,11 +224,11 @@ SOURCE_REVIEW_CHECKS = "review_checks"
 SOURCE_POLICY_DECISIONS = "policy_decisions"
 SOURCE_CLAUDE_CODE_IMPORT = "claude_code_import"
 SOURCE_CLAUDE_CODE_WRAP = "claude_code_wrap"
-# Demo v1 PR5: Events built at observation time by the Claude Code hook
+# Events built at observation time by the Claude Code hook
 # adapter (``adapters/claude_hooks.py``) from official Claude Code hook
 # payloads. Same embedded-Events convention as import/wrap.
 SOURCE_CLAUDE_CODE_HOOKS = "claude_code_hooks"
-# PR12: the same observation-time Events, built by the shared hook adapter
+# The same observation-time Events, built by the shared hook adapter
 # from Codex hook payloads (``adapters/codex_hooks.py``) and from the
 # OpenShard OpenCode plugin (``adapters/opencode_plugin.py``).
 SOURCE_CODEX_HOOKS = "codex_hooks"
@@ -946,9 +946,9 @@ def build_event_from_adapter_entry(
     """Project one external-adapter run entry (Claude Code import/wrap) into a
     canonical Event. Returns None for any entry that is not adapter-sourced.
 
-    Legacy-projection path only (Migration 3) -- ``events_from_entry`` calls
+    Legacy-projection path only -- ``events_from_entry`` calls
     this solely for adapter entries with no ``"events"`` key of their own.
-    Since Migration 5, ``adapters/claude_code_import.py`` and
+    ``adapters/claude_code_import.py`` and
     ``adapters/wrap_exec.py`` build their own Events at observation time and
     embed them directly on the entry; this function exists purely for
     entries written before that (or by any future adapter that hasn't
@@ -1038,7 +1038,7 @@ def events_from_entry(entry: object) -> list[Event]:
     Presence of the ``"events"`` key (not whether its value is a non-empty
     list) decides the path: a key that is *absent* falls through to legacy
     projection (below); a key that is *present* means this entry's producer
-    already built its own canonical Events at observation time (Migration 5)
+    already built its own canonical Events at observation time
     and owns them exclusively -- ``_embedded_events_from_entry`` is used and
     nothing else in this function runs, so the same underlying fact is never
     derived twice.
@@ -1146,7 +1146,7 @@ def events_for_run(run_id: str, *, entry: dict | None = None) -> list[Event]:
     _owns_embedded_events = isinstance(entry, dict) and "events" in entry
     if entry is not None:
         events.extend(events_from_entry(entry))
-    # A producer that already embeds its own Events (Migration 5/6) owns the
+    # A producer that already embeds its own Events owns the
     # facts native_steps/checkpoints would otherwise be projected from --
     # extending with those legacy projectors here would double-count them.
     if not _owns_embedded_events:

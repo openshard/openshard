@@ -1,4 +1,4 @@
-"""Zero-friction onboarding for Claude Code (PR8): detect, configure, report.
+"""Zero-friction onboarding for Claude Code: detect, configure, report.
 
 This module is the orchestration layer behind ``openshard setup`` and the
 Claude Code section of ``openshard doctor``. It does not implement any new
@@ -93,10 +93,10 @@ class ClaudeIntegrationStatus:
     hook_events_missing: list[str]
     hooks_settings_error: str | None
     statusline_state: str  # "openshard" | "custom" | "absent"
-    # PR9.5: the warm capture service the HTTP hooks talk to.
+    # The warm capture service the HTTP hooks talk to.
     capture_service: dict = field(default_factory=dict)  # service_status() snapshot
     hooks_port: int | None = None  # port the installed HTTP hooks target
-    hooks_need_upgrade: bool = False  # pre-PR9.5 command-form hooks still installed
+    hooks_need_upgrade: bool = False  # command-form hooks from before the capture service still installed
     # v0.4.4: "ok" | "missing" | "stale" | "no_token" | "n/a" (no HTTP hooks installed)
     hooks_auth_state: str = "n/a"
     capture_port_mismatch: bool = False  # hooks target a port the service is not on
@@ -268,9 +268,9 @@ class SetupResult:
     statusline: ClaudeHooksInstallResult | None
     readiness: str  # "ready" | "ready_partial" | "not_ready"
     next_steps: list[str] = field(default_factory=list)
-    # PR9.5: {"state": running|started|disabled|unavailable, "port": int|None}
+    # Capture service: {"state": running|started|disabled|unavailable, "port": int|None}
     capture_service: dict | None = None
-    # PR12: Codex / OpenCode capture integrations, keyed by agent
+    # Codex / OpenCode capture integrations, keyed by agent
     # ("codex", "opencode"); each configured only when its CLI is installed.
     agents: dict = field(default_factory=dict)
 
@@ -329,7 +329,7 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
     """Configure capture for every supported agent installed on this machine.
 
     Claude Code (MCP + hooks + status line, exactly as `mcp install claude`
-    does), then Codex hooks and the OpenCode plugin (PR12) for whichever of
+    does), then Codex hooks and the OpenCode plugin for whichever of
     those CLIs is on PATH. Orchestrates the existing installers -- no
     duplicate installation logic lives here. Every step is idempotent, so
     calling this repeatedly (as ``openshard setup`` run twice will) never

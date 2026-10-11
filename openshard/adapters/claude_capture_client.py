@@ -1,4 +1,4 @@
-"""Thin client for the local Claude Code capture service (PR9.5).
+"""Thin client for the local Claude Code capture service.
 
 This module is what the two *command-form* Claude Code entrypoints run
 (``openshard hooks claude`` for ``SessionStart``, and the ``statusLine``
@@ -27,7 +27,7 @@ Environment knobs (all optional, none required for normal use):
 * ``OPENSHARD_HOME`` -- where the state file / log live (default
   ``~/.openshard``). Tests point this at a temp dir.
 * ``OPENSHARD_CAPTURE_DISABLE=1`` -- never contact or start the service;
-  handle everything in-process exactly as before PR9.5. This is a full
+  handle everything in-process, as before the capture service existed. This is a full
   kill switch: no socket is opened at all.
 * ``OPENSHARD_CAPTURE_NO_SPAWN=1`` -- contact the service if it is
   running, but never start one (tests; CI).
@@ -84,7 +84,7 @@ BACKOFF_FILENAME = "claude-capture.backoff.json"
 SERVICE_NAME = "openshard-claude-capture"
 HOOK_PATH = "/hooks/claude"
 STATUS_PATH = "/status/claude"
-# PR12: the same service, one receiver path per agent. The path is the only
+# The same service, one receiver path per agent. The path is the only
 # thing that tells the service which translator to run.
 CODEX_HOOK_PATH = "/hooks/codex"
 OPENCODE_HOOK_PATH = "/hooks/opencode"
