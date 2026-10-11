@@ -131,19 +131,9 @@ KNOWN_EXCEPTIONS: dict[tuple[str, str, str], str] = {
     ): "RunPipeline renders its own progress and summary through cli.run_output.",
     (
         "evidence-core-is-independent",
-        "openshard.history.shard_contract",
-        "openshard.run.timeline",
-    ): "Receipt rendering normalises the run timeline with a helper that lives in run/.",
-    (
-        "evidence-core-is-independent",
         "openshard.history.jsonl_store",
         "openshard.learning.worker",
     ): "Appending to runs.jsonl schedules a learning refresh (best-effort, lazy import).",
-    (
-        "evidence-core-is-independent",
-        "openshard.history.run_cost",
-        "openshard.providers.base",
-    ): "Run cost reads the UsageStats dataclass defined beside the provider clients.",
     (
         "delivery-does-not-run-agents",
         "openshard.sync.policies",

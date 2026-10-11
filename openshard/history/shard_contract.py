@@ -25,6 +25,7 @@ from openshard.history.shard import (
 from openshard.history.shard_hash import integrity_as_stored, verify_shard_hash
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
+from openshard.history.timeline import normalize_timeline
 from openshard.history.usage_evidence import effective_usage, usage_line
 from openshard.history.verification import (
     REASON_OUTCOME_NOT_OBSERVED,
@@ -51,7 +52,6 @@ from openshard.models.pricing import (
     estimate_usage_cost,
     single_pricing_model,
 )
-from openshard.run.timeline import normalize_timeline
 
 _PROFILE_TO_STRATEGY: dict[str, str] = {
     "native_light": "Single",
