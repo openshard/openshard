@@ -65,6 +65,9 @@ ignore = [
 [tool.mypy]
 python_version = "3.11"
 strict = false
+# Bodies of unannotated functions are checked too; the CLI modules were the
+# last holdouts. Ratchet: do not turn this off to make a change pass.
+check_untyped_defs = true
 ignore_missing_imports = true
 exclude = ["tests/", "openshard/run/pipeline\\.py"]
 

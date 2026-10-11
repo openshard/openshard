@@ -14,6 +14,7 @@ import shlex
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -823,11 +824,11 @@ def osn_run(task, verify_cmd, model, escalate, provider, context_files, max_atte
             receipt.roles[skipped_role] = RoleRun.skipped(skipped_role, skip_reason, skip_choice).to_record()
     # Every model call of the run, in order: the planner's (attempt 0), then each
     # attempt's executor calls followed by any review of that attempt.
-    all_usage = sorted(
+    ordered_usage = sorted(
         enumerate([*prior_usage, *role_usage, *action_provider.usage]),
         key=lambda iu: (iu[1].attempt, {"planner": 0, "executor": 1}.get(iu[1].role, 2), iu[0]),
     )
-    all_usage = [u for _, u in all_usage]
+    all_usage = [u for _, u in ordered_usage]
 
     from openshard.learning.record import build_learning_record
 
@@ -1467,17 +1468,18 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
     from openshard.routing.engine import route
     from openshard.sync.policies import enforce_models_allowed
 
-    catalog_knows = None
+    catalog_knows: Callable[[str], bool] | None = None
     try:
         from openshard.models.catalog import load_catalog
 
         _catalog = load_catalog(refresh="never")
 
-        def catalog_knows(model_id: str) -> bool:  # noqa: E306
+        def _catalog_knows(model_id: str) -> bool:  # noqa: E306
             try:
                 return _catalog.resolve(model_id) is not None
             except Exception:
                 return False
+        catalog_knows = _catalog_knows
     except Exception:
         catalog_knows = None
     planner_choice = osn_roles.select_role_model(
@@ -1502,6 +1504,7 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
     )
     planner_hook = None
     if want_planner and planner_choice.model:
+        planner_model_id: str = planner_choice.model
         explorer_model = None
         if explore:
             # Exploration workers: a fast control-plane model when routing offers one,
@@ -1512,7 +1515,7 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
             )
             explorer_model = (
                 explorer_choice.model if explorer_choice.source != osn_roles.SOURCE_EXECUTOR_REUSED
-                else planner_choice.model
+                else planner_model_id
             )
             try:
                 enforce_models_allowed([m for m in (explorer_model,) if m and m != executor_model], model_policy)
@@ -1521,7 +1524,7 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
 
         def planner_hook(sandbox, repo_files):  # noqa: E306
             plan, role, usage = osn_roles.run_planner_turns(
-                provider_obj, planner_choice.model, task=task, repo_root=repo_root, sandbox=sandbox,
+                provider_obj, planner_model_id, task=task, repo_root=repo_root, sandbox=sandbox,
                 repo_files=repo_files, choice=planner_choice, provider_name=provider_name, budget=budget,
                 learning_context=learning.prompt_text if learning is not None else None,
                 context_files=list(context_files), progress=progress, explorer_model=explorer_model,
@@ -1537,6 +1540,7 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
     )
     verifier_hook = None
     if want_verifier and verifier_choice.model:
+        verifier_model_id: str = verifier_choice.model
         check_name = argv[0].replace("\\", "/").rsplit("/", 1)[-1] if argv else ""
 
         def verifier_hook(sandbox, changed, result, attempt):  # noqa: E306
@@ -1550,7 +1554,7 @@ def _resolve_roles(*, loop_mode, roles_mode, planner_model, verifier_model, task
                 "failed_tests": list(result.failed_tests), "command": check_name,
             }
             review, usage, err = osn_roles.run_verifier_call(
-                provider_obj, verifier_choice.model, task=task, plan=getattr(action_provider, "plan", None),
+                provider_obj, verifier_model_id, task=task, plan=getattr(action_provider, "plan", None),
                 diff_text=diff_text, verification=verification, changed_files=list(changed), attempt=attempt,
                 budget=budget, instructions=project_instructions.text if project_instructions else None,
             )
@@ -1789,11 +1793,12 @@ def osn_apply(run_id, commit_result, assume_yes, as_json):
         raise click.ClickException(
             f"Organisation policy could not be refreshed ({exc}); refusing to apply under unknown permissions."
         ) from None
-    files = list(cp.verified_files or {})
+    verified_files = cp.verified_files or {}
+    files = list(verified_files)
     staging = Path(tempfile.mkdtemp(prefix="osn-apply-")) / "work"
     staging.mkdir()
     try:
-        ckpt.restore_changed(repo_root, run_id, {rel: cp.verified_files[rel] for rel in files}, staging)
+        ckpt.restore_changed(repo_root, run_id, {rel: verified_files[rel] for rel in files}, staging)
     except FileNotFoundError as exc:
         raise click.ClickException(f"Refusing to apply '{run_id}': {exc}.") from None
     entry = next((e for e in load_runs(repo_root) if cp.receipt_id and stored_receipt_id(e) == cp.receipt_id), None)
@@ -1879,17 +1884,18 @@ def _resolve_workers(*, loop_mode, topology_request, max_workers, planner_enable
 
     task_category = route(task).category
     repo_file_count = _count_repo_files(repo_root)
-    catalog_knows = None
+    catalog_knows: Callable[[str], bool] | None = None
     try:
         from openshard.models.catalog import load_catalog
 
         _catalog = load_catalog(refresh="never")
 
-        def catalog_knows(model_id: str) -> bool:  # noqa: E306
+        def _catalog_knows(model_id: str) -> bool:  # noqa: E306
             try:
                 return _catalog.resolve(model_id) is not None
             except Exception:
                 return False
+        catalog_knows = _catalog_knows
     except Exception:
         catalog_knows = None
 
