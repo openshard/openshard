@@ -43,3 +43,25 @@ def test_ensure_service_with_no_spawn_never_reports_a_foreign_service(monkeypatc
     # Whatever is listening on the real default port on this machine, the
     # answer here depends only on the isolated port (nothing listens there).
     assert client.ensure_service(env) == (None, "unavailable")
+
+
+def test_no_code_path_can_reach_the_developers_real_home():
+    # Code handed its own env mapping (the hook entrypoints in tests use
+    # ``env={"CLAUDE_PROJECT_DIR": ...}``) falls back to ``~/.openshard``. That
+    # must be the run's throw-away home, never the real one with its Platform link.
+    from pathlib import Path
+
+    from openshard.sync.config import config_path, resolve_link
+    from openshard.util.home import openshard_home
+    from tests.conftest import ISOLATED_USER_HOME, REAL_USER_HOME
+
+    assert Path.home() == Path(ISOLATED_USER_HOME)
+    assert Path(openshard_home({})).is_relative_to(ISOLATED_USER_HOME)
+    assert not Path(config_path({})).is_relative_to(Path(REAL_USER_HOME) / ".openshard")
+    assert resolve_link({}) is None
+
+
+def test_no_live_capture_credentials_reach_the_suite():
+    from tests.conftest import _LIVE_CREDENTIAL_ENV
+
+    assert not [name for name in _LIVE_CREDENTIAL_ENV if name in os.environ]
