@@ -48,13 +48,19 @@ def workspace_enabled(env: dict | os._Environ | None = None) -> bool:
 
 
 def is_workspace(directory: Path) -> bool:
-    """True when *directory* is an opted-in workspace and not itself inside a repository."""
-    from openshard.adapters.claude_mcp_install import find_repo_root
+    """True when *directory* is an opted-in workspace and not itself a git checkout.
 
+    An ancestor repository (a home directory kept as a dotfiles checkout) does
+    not disqualify it.
+    """
     try:
-        return (directory / WORKSPACE_MARKER).is_file() and find_repo_root(directory) is None
+        return (directory / WORKSPACE_MARKER).is_file() and not _is_checkout(directory)
     except OSError:
         return False
+
+
+def _is_checkout(directory: Path) -> bool:
+    return (directory / ".git").exists()
 
 
 def checkouts(workspace: Path) -> list[Path]:
@@ -64,7 +70,7 @@ def checkouts(workspace: Path) -> list[Path]:
         for child in sorted(workspace.iterdir()):
             if len(found) >= _MAX_CHECKOUTS:
                 break
-            if child.is_dir() and not child.is_symlink() and (child / ".git").exists():
+            if child.is_dir() and not child.is_symlink() and _is_checkout(child):
                 found.append(child.resolve())
     except OSError:
         return found
@@ -212,10 +218,9 @@ def install_workspace(workspace: Path, *, port: int | None = None) -> dict[str, 
     *workspace*. Never raises; problems are reported in the result.
     """
     from openshard.adapters.claude_hooks_install import install_claude_hooks
-    from openshard.adapters.claude_mcp_install import find_repo_root
 
     workspace = workspace.resolve()
-    if find_repo_root(workspace) is not None:
+    if _is_checkout(workspace):
         return {"status": "error", "message": "The workspace is itself inside a git repository; install per repository instead."}
     repos = checkouts(workspace)
     if not repos:

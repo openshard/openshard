@@ -124,6 +124,31 @@ def test_install_refuses_a_directory_inside_a_repository(workspace):
     assert ws.install_workspace(workspace / "core", port=47999)["status"] == "error"
 
 
+def test_install_accepts_a_workspace_under_a_parent_repository(tmp_path, monkeypatch):
+    # A home directory kept as a dotfiles checkout must not block a workspace beneath it.
+    monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path / "openshard-home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    home = _make_repo(tmp_path / "home")
+    work = home / "work"
+    work.mkdir()
+    for name in ("core", "platform"):
+        _make_repo(work / name)
+    outcome = ws.install_workspace(work, port=47999)
+    assert outcome["status"] == "installed"
+    assert set(outcome["checkouts"]) == {"core", "platform"}
+    assert ws.is_workspace(work.resolve())
+
+
+def test_install_refuses_a_directory_that_is_itself_a_checkout(workspace):
+    checkout = workspace / "core"
+    _make_repo(checkout / "inner")  # a child checkout, so only the checkout rule can refuse
+    outcome = ws.install_workspace(checkout, port=47999)
+    assert outcome["status"] == "error"
+    assert outcome["message"] == "The workspace is itself inside a git repository; install per repository instead."
+    ws.write_marker(checkout, [])
+    assert not ws.is_workspace(checkout.resolve())
+
+
 def test_usage_reason_constants_agree():
     assert ch.USAGE_ELSEWHERE_REASON == ws.USAGE_ELSEWHERE_REASON
 
