@@ -93,6 +93,32 @@ def test_missing_read_link_and_disabled_sync_never_fetch(linked, monkeypatch):
     assert hosted.retrieve(linked, "Fix responsive layout", env={"OPENSHARD_PLATFORM_SYNC": "off"})[0] == {}
 
 
+def test_connected_cloud_credential_is_used_when_no_read_link_exists(linked, monkeypatch):
+    """A cloud session holds only the connected-capture credential (or its proxy marker)."""
+    from openshard.sync import config
+
+    monkeypatch.setattr(config, "resolve_link", lambda env: None)
+    seen = []
+    monkeypatch.setattr(hosted, "_fetch", lambda link, repo, terms, **kw: seen.append(link) or hosted._checked(packet(), REPOSITORY))
+    env = {
+        "OPENSHARD_CONNECTED_ENDPOINT": "https://api.openshard.example",
+        "OPENSHARD_CONNECTED_ORG_ID": LINK.organisation_id,
+        "OPENSHARD_CONNECTED_TOKEN": "proxy-injected",
+        "OPENSHARD_CONNECTED_SURFACE": "claude-code-web",
+    }
+    response, record = hosted.retrieve(linked, "Fix responsive layout", env=env)
+    assert response["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert record["used"] is True and record["snapshot"]["source"] == "hosted_context"
+    assert len(seen) == 1
+    assert (seen[0].endpoint, seen[0].organisation_id, seen[0].api_key) == (env["OPENSHARD_CONNECTED_ENDPOINT"], LINK.organisation_id, "proxy-injected")
+    # A runtime-secret osc_ token travels the same way; a connection disabled by the user does not.
+    env["OPENSHARD_CONNECTED_TOKEN"] = "osc_" + "k" * 40
+    assert hosted.retrieve(linked, "Fix responsive layout", env=env)[0] != {}
+    assert seen[-1].api_key == env["OPENSHARD_CONNECTED_TOKEN"]
+    assert hosted.retrieve(linked, "Fix responsive layout", env={**env, "OPENSHARD_CONNECTED_CAPTURE": "off"})[0] == {}
+    assert len(seen) == 2
+
+
 def test_missing_canonical_repo_never_fetch(linked, monkeypatch):
     from openshard.history import repo_identity
 

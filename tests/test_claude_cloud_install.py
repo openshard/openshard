@@ -51,6 +51,40 @@ def test_deferred_claude_install_needs_no_cli_and_preserves_settings(tmp_path, m
         assert history.read_bytes() == b'{"historical":true}\n'
 
 
+def _prompt_hooks(settings: dict) -> list[str]:
+    """Learning hooks on UserPromptSubmit; the capture watchdog that shares the event is not one."""
+    return [h["command"] for g in settings.get("hooks", {}).get("UserPromptSubmit", []) for h in g["hooks"]
+            if h.get("type") == "command" and "learn" in h["command"]]
+
+
+def test_learn_flag_adds_the_hosted_prompt_hook_beside_capture(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path / "learn repo")
+    monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path / "home"))
+    runner = CliRunner()
+    command = ["capture", "install", "claude", "--repo-path", str(repo), "--defer-service", "--learn", "--json"]
+    with patch("openshard.adapters.claude_mcp_install.shutil.which", return_value=None), patch(
+        "openshard.adapters.claude_setup.ensure_capture_service", side_effect=AssertionError("prelaunch service started")
+    ):
+        result = runner.invoke(cli, command, catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["learning"]["hook"] == "openshard learn hook claude --hosted"
+        assert list(payload["learning"]["installed"].values()) == ["installed"]
+        settings = json.loads((repo / SETTINGS_RELPATH).read_text(encoding="utf-8"))
+        assert set(HOOK_EVENTS) <= set(installed_events(settings))
+        assert _prompt_hooks(settings) == ["openshard learn hook claude --hosted"]
+        # Idempotent: a second run changes nothing and installs the hook once.
+        result = runner.invoke(cli, command, catch_exceptions=False)
+        assert json.loads(result.output)["learning"]["installed"] == {str(repo): "unchanged"}
+        assert _prompt_hooks(json.loads((repo / SETTINGS_RELPATH).read_text(encoding="utf-8"))) == ["openshard learn hook claude --hosted"]
+        # Without --learn the capture install never adds a prompt hook, and uninstall leaves learning alone.
+        plain = _make_repo(tmp_path / "plain repo")
+        runner.invoke(cli, ["capture", "install", "claude", "--repo-path", str(plain), "--defer-service", "--json"], catch_exceptions=False)
+        assert _prompt_hooks(json.loads((plain / SETTINGS_RELPATH).read_text(encoding="utf-8"))) == []
+    result = CliRunner().invoke(cli, ["capture", "install", "cursor", "--repo-path", str(repo), "--defer-service", "--learn"], catch_exceptions=False)
+    assert result.exit_code != 0 and "claude and codex only" in result.output
+
+
 def test_normal_claude_install_uses_existing_service_startup(tmp_path, monkeypatch):
     repo = _make_repo(tmp_path / "normal repo")
     monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path / "home"))

@@ -23,3 +23,17 @@ This configures every checkout directly under the directory (for sessions that s
 - the turn's transcript usage is counted once, on the first checkout it touched; the others record `workspace_usage_attributed_to_other_repository` instead of tokens and cost.
 
 Agent identity comes from Claude Code's own hooks reaching the capture service with the workspace capability, not from commit trailers. A pushed commit without `Openshard-Agent` metadata still receives its GitHub CI verdict when such a Receipt recorded that exact commit (`attach_only`); otherwise nothing is recorded for it.
+
+## Guidance before the task starts
+
+Add `--learn` to either install line to also install the hosted prompt-learning hook (`openshard learn hook claude --hosted`, see `docs/hosted-learning.md`) in the workspace and in every checkout:
+
+```bash
+openshard capture install claude --defer-service --learn --workspace /home/user
+```
+
+On each `UserPromptSubmit` the hook asks the Platform for bounded, verified check history for this repository and similar task terms, and hands it to Claude as advisory context. A cloud environment holds no organisation read key: the hook uses the connection's own credential (the proxy marker in Claude Cloud, a runtime secret in Cursor), and the Platform answers only for repositories that connection has itself captured, with check names, pass/fail counts and supporting Receipt ids, never Receipts. The Receipt records whether context was emitted (`learning.context_delivery`); it never records that the agent used it. Missing access, a 403, a timeout or empty history emit nothing and never delay the prompt.
+
+## Who the Receipt names
+
+The hosted Receipt keeps Core's `owner` exactly as recorded (only an explicit `openshard config set-owner`, which a cloud environment does not have). Beside it, the dashboard shows the Openshard account that created the connection under Settings -> Agents as "connected by": a sign-in-verified identity, but the credential's owner, not proof of who launched the task, because anyone using the environment presents the same credential and the host does not say who pressed start.

@@ -121,6 +121,27 @@ def test_install_writes_workspace_and_checkout_hooks(workspace):
     assert not (workspace / "core" / ".openshard" / "workspace.json").exists()
 
 
+def test_install_with_learn_adds_the_hosted_prompt_hook_to_workspace_and_checkouts(workspace):
+    from click.testing import CliRunner
+
+    from openshard.cli.main import cli
+
+    result = CliRunner().invoke(
+        cli, ["capture", "install", "claude", "--defer-service", "--learn", "--workspace", str(workspace), "--json"], catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "installed"
+    assert payload["learning"]["hook"] == "openshard learn hook claude --hosted"
+    assert set(payload["learning"]["installed"].values()) == {"installed"}
+    for directory in (workspace, workspace / "core", workspace / "platform"):
+        settings = json.loads((directory / ".claude" / "settings.local.json").read_text())
+        commands = [h["command"] for g in settings["hooks"]["UserPromptSubmit"] for h in g["hooks"] if h.get("type") == "command"]
+        assert commands.count("openshard learn hook claude --hosted") == 1
+        assert "openshard hooks claude-watchdog" in commands  # capture's own prompt hook is kept beside it
+        assert "Stop" in settings["hooks"]
+
+
 def test_install_refuses_a_directory_inside_a_repository(workspace):
     assert ws.install_workspace(workspace / "core", port=47999)["status"] == "error"
 

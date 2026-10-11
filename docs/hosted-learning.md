@@ -8,7 +8,9 @@ openshard learn install claude --hosted
 openshard learn install codex --hosted
 ```
 
-Review and enable native hooks in the agent. Capture installation remains separate. Without --hosted, the hook continues using its bounded local snapshot. Reinstalling changes only Openshard's own learning hook; uninstall removes either mode. Do not place organisation read keys in repository files or share them with unrelated agents. Capture-only credentials cannot read history.
+Review and enable native hooks in the agent. Capture installation remains separate. Without --hosted, the hook continues using its bounded local snapshot. Reinstalling changes only Openshard's own learning hook; uninstall removes either mode. Do not place organisation read keys in repository files or share them with unrelated agents.
+
+In a connected cloud environment (`OPENSHARD_CONNECTED_*` set through Settings -> Agents) no read key exists, and `openshard capture install claude|codex --learn` installs the same hook. It then authenticates with the connection's own credential: the `proxy-injected` marker in Claude Cloud, or the runtime-secret `osc_` token. The Platform lets that credential read this endpoint only for repositories the connection has itself captured (403 otherwise), and still never a Receipt, a listing or another organisation. A plain capture-only credential outside such an environment cannot read history.
 
 On UserPromptSubmit the hook sends the canonical Git origin identity and up to 16 privacy-filtered task terms to the existing linked organisation endpoint. It does not send the raw prompt or transcript. HTTP redirects are refused, responses are capped at 64 KiB, and network waiting including imports/DNS is limited to 900 ms. Missing access, malformed or stale context, timeout and empty history emit no advice and do not stop the task.
 
