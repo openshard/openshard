@@ -449,19 +449,37 @@ def amend_last_jsonl(
         return None
 
 
+def _last_line_unterminated(path: Path) -> bool:
+    """True when *path* is non-empty and does not end with a newline. Reads one byte."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                return False
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except FileNotFoundError:
+        return False
+
+
 @_learning_update
 def append_jsonl(path: Path, record: dict) -> None:
     """Append one record to *path* as a single locked, fsync'd JSON line.
 
     Serialization happens before the lock is acquired and before the file is
     opened, so a non-serializable record raises with nothing written and no
-    lock taken.
+    lock taken. A last line left without its newline (a writer killed
+    mid-write) is ended first, so the new record never joins it and is lost
+    with it.
     """
     path = Path(path)
     line = json.dumps(record) + "\n"  # serialize BEFORE locking / opening
     path.parent.mkdir(parents=True, exist_ok=True)
     with _file_lock(_lock_path_for(path)):
+        torn = _last_line_unterminated(path)
         with path.open("a", encoding="utf-8") as fh:
+            if torn:
+                fh.write("\n")
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
