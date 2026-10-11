@@ -159,9 +159,27 @@ class TestFastPathAvoidsHeavyImports:
         assert "HTTPX=False" in result.stdout
         assert "CLI_MAIN=False" in result.stdout
 
-    def test_non_fast_path_command_does_import_full_cli(self):
+    def test_version_does_not_import_the_full_cli_and_matches_click(self):
         probe = (
             "import sys; sys.argv=['openshard','--version']\n"
+            "from openshard.cli.entrypoint import main\n"
+            "main()\n"
+            "print('CLI_MAIN=' + str('openshard.cli.main' in sys.modules))\n"
+        )
+        result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        fast_line, flag = result.stdout.splitlines()
+        assert flag == "CLI_MAIN=False"
+
+        from click.testing import CliRunner
+
+        from openshard.cli.main import cli
+
+        assert fast_line + "\n" == CliRunner().invoke(cli, ["--version"]).output
+
+    def test_non_fast_path_command_does_import_full_cli(self):
+        probe = (
+            "import sys; sys.argv=['openshard','--help']\n"
             "from openshard.cli.entrypoint import main\n"
             "try:\n"
             "    main()\n"
