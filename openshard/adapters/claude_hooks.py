@@ -1377,11 +1377,9 @@ def sanitize_task_excerpt(prompt: str | None) -> str | None:
 
 def _scrubbed_command(command: str) -> str:
     """*command* (first 1,000 chars) secret-scrubbed, redacted and whitespace-collapsed."""
-    from openshard.security.redaction import redact_sensitive_text
-    from openshard.security.secret_scan import scrub_text_for_secrets
+    from openshard.security.redaction import scrub_sensitive_text
 
-    scrubbed, _ = scrub_text_for_secrets(command[:1_000], source_label="<hook-command>")
-    scrubbed, _kinds = redact_sensitive_text(scrubbed)
+    scrubbed = scrub_sensitive_text(command[:1_000], source_label="<hook-command>")
     return " ".join(scrubbed.split())
 
 

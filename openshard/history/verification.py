@@ -225,9 +225,9 @@ def _safe_text(value: object, cap: int) -> str | None:
         return None
     try:
         from openshard.safety.sanitize import sanitize_text
-        from openshard.security.secret_scan import scrub_text_for_secrets
+        from openshard.security.redaction import scrub_sensitive_text
 
-        scrubbed, _ = scrub_text_for_secrets(value[:2_000], source_label="<verification>")
+        scrubbed = scrub_sensitive_text(value[:2_000], source_label="<verification>")
         return sanitize_text(" ".join(scrubbed.split()), cap) or None
     except Exception:
         return None

@@ -79,9 +79,9 @@ def scrub_free_text(text: object, cap: int, repo_root: Path | None) -> str | Non
     """Secret-scrubbed, path-masked, whitespace-collapsed, capped text, or None."""
     if not isinstance(text, str) or not text.strip():
         return None
-    from openshard.security.secret_scan import scrub_text_for_secrets
+    from openshard.security.redaction import scrub_sensitive_text
 
-    scrubbed, _ = scrub_text_for_secrets(text[: cap * 8], source_label="<historical-import>")
+    scrubbed = scrub_sensitive_text(text[: cap * 8], source_label="<historical-import>")
     masked = _mask_paths(scrubbed, repo_root)
     printable = "".join(ch if ch.isprintable() else " " for ch in masked)
     collapsed = " ".join(printable.split())

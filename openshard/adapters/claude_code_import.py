@@ -186,13 +186,11 @@ def _sanitize_task(
     Shared with the Claude Code hook adapter, which passes its own
     placeholder and a tighter cap.
     """
-    from openshard.security.redaction import redact_sensitive_text
-    from openshard.security.secret_scan import scrub_text_for_secrets
+    from openshard.security.redaction import scrub_sensitive_text
 
     if not isinstance(task, str) or not task.strip():
         return placeholder
-    scrubbed, _ = scrub_text_for_secrets(task[:cap], source_label="<task>")
-    scrubbed, _kinds = redact_sensitive_text(scrubbed)
+    scrubbed = scrub_sensitive_text(task[:cap], source_label="<task>")
     printable = "".join(ch if ch.isprintable() else " " for ch in scrubbed)
     return " ".join(printable.split())[:cap] or placeholder
 
