@@ -48,6 +48,7 @@ from openshard.history.shard_contract import (
     render_compact_shard_receipt,
     render_full_shard_receipt,
 )
+from tests.capture_fixtures import _make_repo
 
 SID = "0b6c1f7e-2a4d-4c8e-9f10-a1b2c3d4e5f6"
 SID2 = "0b6c1f7e-2a4d-4c8e-9f10-ffffffffffff"
@@ -57,22 +58,6 @@ ARTIFACTS = "/home/user/.gemini/antigravity/brain/conv/artifacts"
 FILE_BODY = "def add(a, b):\n    return a + b  # RAW FILE CONTENT"
 GEMINI = "gemini-3.1-pro"
 CLAUDE = "claude-sonnet-4-6"
-
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
-        cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-
-
-def _make_repo(root: Path) -> Path:
-    root.mkdir(parents=True)
-    _git(root, "init", "-q")
-    (root / "README.md").write_text("hello\n", encoding="utf-8")
-    _git(root, "add", ".")
-    _git(root, "commit", "-q", "-m", "init")
-    return root
 
 
 @pytest.fixture

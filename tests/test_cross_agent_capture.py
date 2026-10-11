@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -39,27 +38,12 @@ from openshard.history.event import (
 )
 from openshard.history.query import get_receipt, list_shards, relevant_context, search_history
 from openshard.history.shard import ORIGIN_EXTERNAL_OBSERVED
+from tests.capture_fixtures import _make_repo
 
 CLAUDE_SID = "11111111-1111-4111-8111-111111111111"
 CODEX_SID = "22222222-2222-4222-8222-222222222222"
 OPENCODE_SID = "ses_33333333333333333333333333333333"
 SHARED_SID = "44444444-4444-4444-8444-444444444444"
-
-
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
-        cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-
-
-def _make_repo(root: Path) -> Path:
-    root.mkdir(parents=True)
-    _git(root, "init", "-q")
-    (root / "README.md").write_text("hello\n", encoding="utf-8")
-    _git(root, "add", ".")
-    _git(root, "commit", "-q", "-m", "init")
-    return root
 
 
 @pytest.fixture
