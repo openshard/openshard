@@ -23,7 +23,14 @@ python -m pytest
 ```
 
 That is exactly what CI runs after merge (Linux and Windows, Python 3.11
-and 3.12). Pull requests get a faster gate that selects tests from the
+and 3.12). Use the virtual environment rather than the system interpreter's
+`pip`: the pr13 benchmark tests (`tests/test_pr13_benchmark.py`,
+`tests/test_pr13_scenarios_2to7.py`) launch the `openshard` console script
+they find beside the running interpreter, because that is how the Claude
+Code hooks and MCP server are started. A system install that puts the
+script in `/usr/local/bin` while `python` is `/usr/bin/python` makes 16 of
+them abort with `openshard_cli_missing`; nothing else in the suite is
+affected. Pull requests get a faster gate that selects tests from the
 changed files and always runs the evidence invariants; see
 [docs/ci.md](docs/ci.md) for the tiers and how to preview what your change
 will run (`python scripts/ci/select_tests.py explain <paths>`).
