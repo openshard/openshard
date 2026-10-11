@@ -58,7 +58,7 @@ own to pull in an unrelated Shard. Ordering is score descending with
 recency only as a tie-break, so a strong old match is never buried by a
 weak recent one. No embeddings, fuzzy matching, or model calls anywhere.
 
-Recovery observations (PR11)
+Recovery observations
 -----------------------------
 Once a Shard has already qualified as a match above, ``RelevantMatch.recovery``
 additionally describes the Shard's *latest evidence-backed recovered state*,
@@ -598,7 +598,7 @@ _MAX_CONTEXT_FILES = 8
 _MAX_CONTEXT_FINDINGS = 5
 _MAX_CONTEXT_ATTEMPTS = 5
 
-# Recovery observations (PR11) -- kept small for the same "explainable, not a
+# Recovery observations -- kept small for the same "explainable, not a
 # dump" reason as the caps above. The window is the number of most-recent
 # attempts a recovery derivation may examine at all: the same bound the
 # per-attempt history already uses, so a Shard with a very long retry
@@ -796,7 +796,7 @@ def _resolution_signal(group: _ShardGroup) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Recovery observations (PR11)
+# Recovery observations
 # ---------------------------------------------------------------------------
 
 
@@ -1098,7 +1098,7 @@ class RelevantMatch:
     files: list[str] = field(default_factory=list)
     findings: list[ShardFinding] = field(default_factory=list)
     attempts: list[RelevantAttempt] = field(default_factory=list)
-    # PR11: observed failure -> later-pass chronology within this same Shard,
+    # Recovery observation: observed failure -> later-pass chronology within this same Shard,
     # when one exists. None is the common case -- most matches never had a
     # recorded failure at all.
     recovery: RecoveryObservation | None = None

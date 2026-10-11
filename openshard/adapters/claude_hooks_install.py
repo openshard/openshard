@@ -1,8 +1,8 @@
-"""Claude Code hook installation for OpenShard auto-capture (Demo v1 PR5, PR9.5).
+"""Claude Code hook installation for OpenShard auto-capture.
 
 Writes the hook configuration that delivers Claude Code's lifecycle hooks
-to OpenShard into the repository's ``.claude/settings.local.json``. Since
-PR9.5 every hook that can be an HTTP hook is one (``UserPromptSubmit``,
+to OpenShard into the repository's ``.claude/settings.local.json``. Every
+hook that can be an HTTP hook is one (``UserPromptSubmit``,
 ``PostToolUse``, ``PostToolUseFailure``, ``Stop``, ``SessionEnd`` POST
 their payload to the local capture service,
 ``adapters/claude_capture_service.py``); ``SessionStart`` remains the
@@ -15,7 +15,7 @@ Claude Code's documented hook mechanism is the ``hooks`` block of its
 settings files; there is no ``claude hooks add`` CLI (the ``/hooks`` menu
 is read-only). Of the documented locations, ``.claude/settings.local.json``
 is the project-local, not-shared one -- the same "this user, this
-repository" scope PR4 chose for the MCP server with ``claude mcp add
+repository" scope the MCP install uses for the MCP server with ``claude mcp add
 --scope local``. Project scope (``.claude/settings.json``) would commit the
 hooks for every teammate; user scope would fire them in every repository
 on the machine. The command written contains no machine-specific path: the
@@ -79,7 +79,7 @@ class HookSpec:
     event: str
     matcher: str | None
     timeout: int
-    # PR9.5: every hook that can be an HTTP hook is one -- Claude Code POSTs
+    # Every hook that can be an HTTP hook is one -- Claude Code POSTs
     # the payload straight to the warm local capture service (see
     # adapters/claude_capture_service.py), so no Python process is spawned
     # and the blocking cost is a loopback round trip. Only ``SessionStart``
@@ -321,13 +321,13 @@ def merge_openshard_hooks(
     ``"unchanged"``. The input is never mutated. Raises ``ValueError`` when
     the existing ``hooks`` structure is not the documented shape (so the
     caller can refuse to write rather than clobber the file). An older
-    command-form entry (pre-PR9.5) or an HTTP entry for a different port is
+    command-form entry (from before the capture service) or an HTTP entry for a different port is
     reported as ``"updated"`` and replaced in place.
 
     The ``hooks`` block shape (event -> matcher groups -> hook entries) is
     shared by Claude Code and Codex, so the Codex installer
     (``codex_hooks_install``) reuses this merge with its own *specs*,
-    *build_entry* and *is_ours* (PR12); the defaults are Claude Code's.
+    *build_entry* and *is_ours*; the defaults are Claude Code's.
     """
     build = build_entry or _entry_builder(capability)
     ours_fn = is_ours or is_openshard_hook
@@ -534,7 +534,7 @@ def ensure_local_settings_ignored(
     local ``.git/info/exclude`` (documented git, never committed) when git
     does not already ignore it. Returns a warning string when that could
     not be confirmed; never raises. The Codex/OpenCode installers pass
-    their own *rel* for the files they created (PR12).
+    their own *rel* for the files they created.
     """
     rel = rel or SETTINGS_RELPATH.as_posix()
     try:

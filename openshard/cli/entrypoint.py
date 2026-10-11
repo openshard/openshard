@@ -1,4 +1,4 @@
-"""Console-script entrypoint for the ``openshard`` command (PR7).
+"""Console-script entrypoint for the ``openshard`` command.
 
 Split out of :mod:`openshard.cli.main` so the two latency-sensitive Claude
 Code capture commands -- ``openshard hooks claude`` and ``openshard hooks
@@ -17,7 +17,7 @@ import cost fully visible to the user on every turn.
 
 This module recognizes the exact, fixed argv shapes those two commands use
 and dispatches straight to :mod:`openshard.adapters.claude_capture_client`
-(PR9.5: which forwards to the warm capture service, falling back to
+(which forwards to the warm capture service, falling back to
 :mod:`openshard.adapters.claude_hooks` in-process only when no service can
 be reached), importing nothing else. Anything that is not an exact match -- including
 ``--help``, unknown flags, or any other subcommand -- falls straight
@@ -162,7 +162,7 @@ def _try_fast_path(argv: list[str]) -> bool:
         return True
 
     if sub == "codex":
-        # PR12: Codex only has command hooks, so every Codex event pays a
+        # Codex only has command hooks, so every Codex event pays a
         # process start; keeping it on the fast path is what keeps that
         # start small.
         parsed = _parse_hooks_codex_argv(rest)
