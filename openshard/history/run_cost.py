@@ -24,7 +24,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from openshard.providers.base import UsageStats
+from openshard.history.usage import UsageStats
 
 # The escalation chain is short; bound what a record may carry.
 MAX_RETRY_ATTEMPTS = 5
