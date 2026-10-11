@@ -254,6 +254,13 @@ def _try_fast_path(argv: list[str]) -> bool:
 
 def main() -> None:
     _harden_stdio_encoding()
+    if sys.argv[1:] == ["--version"]:
+        # Same text as Click's version_option on the full CLI, without
+        # importing it (installers, `doctor` scripts and agents ask often).
+        from openshard import __version__
+
+        sys.stdout.write(f"openshard, version {__version__}\n")
+        return
     if _try_fast_path(sys.argv[1:]):
         return
     from openshard.cli.main import cli
