@@ -32,7 +32,7 @@ import json
 import os
 import threading
 from dataclasses import dataclass, field, replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 WORKSPACE_MARKER = Path(".openshard") / "workspace.json"
@@ -101,14 +101,17 @@ def checkout_for(workspace: Path, payload: Any) -> Path | None:
     raw_paths += [raw for raw, _kind in (payload.file_paths or []) if isinstance(raw, str) and raw]
     candidates: list[Path] = []
     for raw in raw_paths:
-        p = PurePosixPath(raw)
+        p = Path(raw)  # native: a Windows hook reports ``C:\\...`` paths
         if not p.is_absolute():
             if cwd is None:
                 continue
-            p = PurePosixPath(cwd) / p
-        candidates.append(Path(os.path.normpath(str(p))))
+            p = Path(cwd) / p
+        candidates.append(p)
     if cwd is not None:
-        candidates.append(Path(os.path.normpath(cwd)))
+        candidates.append(Path(cwd))
+    # Checkouts are resolved, so resolve candidates too: symlinked workspaces
+    # and Windows short (8.3) names must still name the same checkout.
+    candidates = [Path(os.path.realpath(c)) for c in candidates]
     for candidate in candidates:
         for repo in repos:
             if _within(candidate, repo):

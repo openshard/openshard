@@ -250,3 +250,17 @@ def test_status_line_usage_goes_only_to_the_turn_owner(workspace):
     assert receipt["estimated_cost"] == pytest.approx(0.25)
     assert not (workspace / ".openshard" / "claude_sessions").exists()
     assert _receipts(workspace / "platform") == []
+
+
+def test_routing_resolves_path_aliases_like_the_checkouts(workspace, tmp_path):
+    from types import SimpleNamespace
+
+    alias = tmp_path / "alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    core = (workspace / "core").resolve()
+    via_alias = SimpleNamespace(cwd=str(alias), file_path=str(alias / "core" / "a.py"), file_paths=[])
+    assert ws.checkout_for(workspace.resolve(), via_alias) == core
+    relative = SimpleNamespace(cwd=str(alias / "core"), file_path="a.py", file_paths=[])
+    assert ws.checkout_for(workspace.resolve(), relative) == core
+    outside = SimpleNamespace(cwd=str(alias), file_path=str(tmp_path / "elsewhere.py"), file_paths=[])
+    assert ws.checkout_for(workspace.resolve(), outside) is None
