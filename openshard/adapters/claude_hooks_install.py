@@ -685,6 +685,15 @@ def install_claude_hooks(
         ignore_warning = ensure_local_settings_ignored(root)
         if ignore_warning:
             warnings.append(ignore_warning)
+        if (root / ".git").exists():
+            # The hooks will write Receipts, session queues and locks under
+            # <root>/.openshard/ from the first event; the agent's own
+            # `git add .` must never commit them (or fail on a queue file
+            # renamed mid-add). `openshard setup` already does this; the
+            # capture-install and workspace paths reached here without it.
+            history_warning = ensure_history_state_ignored(root, note="added by openshard capture install")
+            if history_warning:
+                warnings.append(history_warning)
         return ClaudeHooksInstallResult(
             status=status, settings_path=settings_path, events=changes, message=message, warnings=warnings,
         )

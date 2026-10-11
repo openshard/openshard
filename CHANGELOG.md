@@ -53,6 +53,15 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **`openshard capture install claude` keeps `.openshard/` out of the agent's git.** The hooks
+  installer (the documented cloud prelaunch step, also used per checkout by `--workspace`) wrote
+  the `.claude/settings.local.json` exclude but not the `.openshard/*` one that `openshard setup`
+  writes, so a session's own `git add .` committed its Receipts, session queues and lock files
+  into the repository, or failed with `fatal: unable to stat '.openshard/claude_sessions/...'`
+  when a queue file was renamed mid-add (seen in the Platform's Core-to-Platform cloud flow test).
+  Every checkout the installer configures now git-ignores `.openshard/*` locally in
+  `.git/info/exclude`, with the shareable `.openshard/config.yml` re-included; nothing of the
+  user's is changed.
 - **Observation never holds `.git/index.lock` against the agent.** The capture fold's
   `git status` (baseline snapshot) and the wrap adapter's `git diff` refreshed the index when
   stat data was stale, taking `index.lock` for a moment; an agent's own `git commit` racing that
