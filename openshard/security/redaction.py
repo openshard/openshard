@@ -58,9 +58,25 @@ def redact_sensitive_text(text: str) -> tuple[str, list[str]]:
     return out, kinds
 
 
+def scrub_sensitive_text(text: str, *, source_label: str) -> str:
+    """The scrub every stored free-text string goes through.
+
+    Secret-like values first (``scrub_text_for_secrets``), then the e-mail,
+    JWT and private-key forms above. Use this instead of calling either step
+    alone, so live capture, historical import and verification text cannot
+    drift apart. *source_label* names the caller in secret-scan findings.
+    """
+    from openshard.security.secret_scan import scrub_text_for_secrets
+
+    scrubbed, _ = scrub_text_for_secrets(text, source_label=source_label)
+    redacted, _kinds = redact_sensitive_text(scrubbed)
+    return redacted
+
+
 __all__ = [
     "PLACEHOLDER_EMAIL",
     "PLACEHOLDER_JWT",
     "PLACEHOLDER_PRIVATE_KEY",
     "redact_sensitive_text",
+    "scrub_sensitive_text",
 ]
