@@ -603,6 +603,34 @@ class TestFlush:
         report = client.flush(repo, env=env)
         assert report.scanned == 1 and report.without_receipt_id == 1 and report.sent == 0
 
+    def test_a_record_that_cannot_be_built_does_not_block_later_receipts(
+        self, repo, env, link, recording, monkeypatch
+    ):
+        # One malformed historical record used to abort the whole flush with
+        # stopped="error", so every later Receipt in history never synced.
+        for n in range(3):
+            _session(repo, _sid(n + 1))
+        broken = _entries(repo)[0]["receipt_id"]
+        real_build = client.build_envelope
+
+        def build(entry, index, **kwargs):
+            if entry.get("receipt_id") == broken:
+                raise KeyError("malformed")
+            return real_build(entry, index, **kwargs)
+
+        monkeypatch.setattr(client, "build_envelope", build)
+        report = client.flush(repo, env=env)
+        assert report.stopped is None
+        assert (report.sent, report.created, report.pending) == (2, 2, 1)
+        assert report.unbuildable == 1
+        assert report.unbuildable_receipts == [{"receipt_id": broken, "error": "KeyError"}]
+        assert broken not in outbox.load_outbox(repo)  # still pending, not terminal
+
+        monkeypatch.setattr(client, "build_envelope", real_build)  # a fixed Core
+        retry = client.flush(repo, env=env)
+        assert (retry.sent, retry.unbuildable, retry.pending) == (1, 0, 0)
+        assert recording.envelopes[-1]["receipt"]["receipt_id"] == broken
+
     def test_limit_bounds_one_run(self, repo, env, link, recording):
         for n in range(3):
             _session(repo, _sid(n + 1))

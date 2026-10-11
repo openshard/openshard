@@ -215,6 +215,9 @@ def _close_idle_sessions(root: Path, now: datetime | None) -> None:
         pass
 
 
+_MAX_REPORTED_UNBUILDABLE = 20
+
+
 @dataclass
 class FlushReport:
     """What one ``flush`` did. ``stopped`` names why it ended early, if it did."""
@@ -241,6 +244,15 @@ class FlushReport:
     usage_recorded: int = 0
     usage_not_accepted: int = 0
     usage_unsupported: bool = False
+    # Records this Core could not turn into an envelope. They stay pending (no
+    # outbox state), so a fixed Core sends them; the flush moves on to the rest.
+    unbuildable: int = 0
+    unbuildable_receipts: list[dict[str, str]] = field(default_factory=list)
+
+    def note_unbuildable(self, receipt_id: str | None, exc: BaseException) -> None:
+        self.unbuildable += 1
+        if len(self.unbuildable_receipts) < _MAX_REPORTED_UNBUILDABLE:
+            self.unbuildable_receipts.append({"receipt_id": receipt_id or "", "error": type(exc).__name__})
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -306,8 +318,12 @@ def flush(
         stamp = now.timestamp() if now is not None else None
         advanced_osn = _advanced_osn_enabled()
         for candidate in found.candidates[: max(0, int(limit))]:
-            envelope = build_envelope(candidate.entry, candidate.index, core_version=version,
-                                      multi_agent=advanced_osn)
+            try:
+                envelope = build_envelope(candidate.entry, candidate.index, core_version=version,
+                                          multi_agent=advanced_osn)
+            except Exception as exc:  # one malformed record must not block every later Receipt
+                report.note_unbuildable(candidate.receipt_id, exc)
+                continue
             result = sender.send(envelope)
             report.sent += 1
             previous = records.get(candidate.receipt_id)
@@ -404,7 +420,11 @@ def _flush_evidence(
         current_hash = stored_shard_hash(entry)
         if isinstance(synced_hash, str) and current_hash is not None and current_hash != synced_hash:
             continue  # changed locally since sync: the hosted Receipt is a different one
-        envelope = build_evidence_envelope(entry, index, attestations, core_version=version)
+        try:
+            envelope = build_evidence_envelope(entry, index, attestations, core_version=version)
+        except Exception as exc:  # same as receipts: skip it, keep it pending, carry on
+            report.note_unbuildable(rid, exc)
+            continue
         if envelope is None:
             continue
         digest = evidence_hash(envelope)
