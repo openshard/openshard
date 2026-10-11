@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -58,3 +59,17 @@ def test_normal_claude_install_uses_existing_service_startup(tmp_path, monkeypat
         assert result.exit_code == 0, result.output
         start.assert_called_once_with()
         assert json.loads(result.output)["capture_service"]["port"] == 32123
+
+def test_capture_install_keeps_capture_state_out_of_git(tmp_path, monkeypatch):
+    """`openshard capture install claude` is the documented cloud prelaunch step; the
+    session's `git add .` must not commit `.openshard/` (Receipts, queues, locks)."""
+    repo = _make_repo(tmp_path / "cloud repo")
+    monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path / "home"))
+    with patch("openshard.adapters.claude_setup.ensure_capture_service", return_value={"state": "running", "port": 32123}):
+        result = CliRunner().invoke(cli, ["capture", "install", "claude", "--repo-path", str(repo), "--json"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert subprocess.run(["git", "check-ignore", "-q", ".openshard/runs.jsonl"], cwd=repo).returncode == 0
+    assert subprocess.run(["git", "check-ignore", "-q", ".openshard/config.yml"], cwd=repo).returncode == 1
+    exclude = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert ".openshard/*" in exclude and ".claude/settings.local.json" in exclude
+    assert not (repo / ".gitignore").exists()

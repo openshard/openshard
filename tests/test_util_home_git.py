@@ -67,6 +67,34 @@ class TestRunGit:
         ):
             assert run_git(tmp_path, ["status"], timeout=1) is None
 
+    def test_never_takes_optional_locks(self, tmp_path: Path):
+        """``--no-optional-locks`` precedes every observational git command."""
+        seen: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            seen.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with patch("openshard.util.git.subprocess.run", side_effect=fake_run):
+            run_git(tmp_path, ["status", "--porcelain=v1", "-z"])
+        assert seen == [["git", "--no-optional-locks", "status", "--porcelain=v1", "-z"]]
+
+    def test_status_leaves_the_index_untouched(self, tmp_path: Path):
+        """A stale stat entry would make plain ``git status`` rewrite the index
+        through ``.git/index.lock``; an agent's ``git commit`` racing that write
+        fails. Observation must not write."""
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        target = tmp_path / "a.txt"
+        target.write_text("hello\n", encoding="utf-8")
+        subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True)
+        index = tmp_path / ".git" / "index"
+        os.utime(target, ns=(target.stat().st_atime_ns + 2_000_000_000, target.stat().st_mtime_ns + 2_000_000_000))
+        before = (index.stat().st_mtime_ns, index.read_bytes())
+        out = run_git(tmp_path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        assert out is not None and "a.txt" in out
+        assert (index.stat().st_mtime_ns, index.read_bytes()) == before
+        assert not (tmp_path / ".git" / "index.lock").exists()
+
     def test_stdin_is_forwarded(self, tmp_path: Path):
         subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
         (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")

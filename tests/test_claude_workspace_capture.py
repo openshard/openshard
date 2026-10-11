@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 import urllib.request
 from datetime import UTC, datetime
@@ -289,3 +290,18 @@ def test_routing_resolves_path_aliases_like_the_checkouts(workspace, tmp_path):
     assert ws.checkout_for(workspace.resolve(), relative) == core
     outside = SimpleNamespace(cwd=str(alias), file_path=str(tmp_path / "elsewhere.py"), file_paths=[])
     assert ws.checkout_for(workspace.resolve(), outside) is None
+
+def test_install_keeps_capture_state_out_of_every_checkout(workspace):
+    """An agent's `git add .` in a checkout must never commit Receipts, session
+    queues or locks: each checkout git-ignores `.openshard/` (locally, in
+    `.git/info/exclude`), with the shareable `config.yml` re-included."""
+    assert ws.install_workspace(workspace, port=47999)["status"] == "installed"
+    def ignored(repo: Path, rel: str) -> bool:
+        return subprocess.run(["git", "check-ignore", "-q", rel], cwd=repo).returncode == 0
+
+    for name in ("core", "platform"):
+        repo = workspace / name
+        assert ignored(repo, ".openshard/runs.jsonl")
+        assert ignored(repo, ".openshard/claude_sessions/x.queue.1.jsonl")
+        assert not ignored(repo, ".openshard/config.yml")
+        assert not (repo / ".gitignore").exists()  # local rule only; nothing of the user's is changed
