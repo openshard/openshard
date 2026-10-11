@@ -57,7 +57,9 @@ def _parse_git_changed_files(repo_path: Path) -> tuple[list[dict], str]:
     """
     try:
         result = subprocess.run(
-            ["git", "diff", "HEAD", "--name-status"],
+            # --no-optional-locks: never refresh the index through index.lock
+            # under the agent whose run is being observed (see util/git.py).
+            ["git", "--no-optional-locks", "diff", "HEAD", "--name-status"],
             cwd=repo_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

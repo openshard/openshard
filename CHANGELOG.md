@@ -53,6 +53,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Observation never holds `.git/index.lock` against the agent.** The capture fold's
+  `git status` (baseline snapshot) and the wrap adapter's `git diff` refreshed the index when
+  stat data was stale, taking `index.lock` for a moment; an agent's own `git commit` racing that
+  refresh failed with `Unable to create '.git/index.lock': File exists` (seen intermittently in
+  the Platform's Core-to-Platform cloud flow test). Every observational git call now runs with
+  `--no-optional-locks`, which skips the optional index refresh and changes no output.
 - **Integrity is verified over the record as stored, on every read path.** The hosted sync and
   the Insights warehouse read history coerced (blocked fields stripped, metadata re-sanitised,
   defaults filled under today's rules), then recomputed the content hash over that coerced copy.

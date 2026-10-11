@@ -13,6 +13,11 @@ from pathlib import Path
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
+# Global git options for every observational call. ``--no-optional-locks``
+# (git >= 2.15) stops ``status`` / ``diff`` from writing a refreshed index,
+# so OpenShard never holds ``.git/index.lock`` against the agent it observes.
+GIT_OBSERVE_FLAGS: tuple[str, ...] = ("--no-optional-locks",)
+
 # These git calls can run from OpenShard's background capture-service worker
 # (adapters/claude_capture_service.py), a process that may itself have no
 # console (e.g. spawned with CREATE_NO_WINDOW). Without this flag, such a
@@ -43,10 +48,17 @@ def run_git(
     any other OS error. Output is decoded as UTF-8 with undecodable bytes
     replaced, so an odd file name can never turn into an exception. Never
     raises.
+
+    Runs with ``--no-optional-locks``: ``git status`` and ``git diff``
+    otherwise refresh the index through ``.git/index.lock`` when stat data
+    is stale, and an agent's own ``git commit`` racing that refresh fails
+    with "Unable to create index.lock: File exists". Observation must never
+    make the agent's git fail. Commands that need the lock (``add``) still
+    take it; only the optional refresh is skipped.
     """
     try:
         result = subprocess.run(
-            ["git", *args],
+            ["git", *GIT_OBSERVE_FLAGS, *args],
             cwd=str(root),
             input=stdin,
             stdout=subprocess.PIPE,
