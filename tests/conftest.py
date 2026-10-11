@@ -1,11 +1,64 @@
 """Shared pytest fixtures for the OpenShard test suite."""
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import socket
+import tempfile
 from unittest.mock import patch
 
 import pytest
+
+# Credentials that would let a test reach a real Platform organisation, a
+# connected cloud capture or a remote capture. No test may inherit them.
+_LIVE_CREDENTIAL_ENV = (
+    "OPENSHARD_PLATFORM_ENDPOINT",
+    "OPENSHARD_PLATFORM_ORG_ID",
+    "OPENSHARD_PLATFORM_API_KEY",
+    "OPENSHARD_CONNECTED_ENDPOINT",
+    "OPENSHARD_CONNECTED_ORG_ID",
+    "OPENSHARD_CONNECTED_TOKEN",
+    "OPENSHARD_CONNECTED_CREDENTIAL_MODE",
+    "OPENSHARD_CONNECTED_SURFACE",
+    "OPENSHARD_REMOTE_CAPTURE_URL",
+    "OPENSHARD_REMOTE_TOKEN",
+)
+
+def _isolate_user_home() -> tuple[str, str]:
+    """Point every home-directory variable at a throw-away directory, for the whole run.
+
+    ``OPENSHARD_HOME`` is isolated per test further down, but code that is
+    handed its own ``env`` mapping (``handle_claude_hook(doc, env={...})``)
+    and every subprocess started with a fresh environment fall back to
+    ``~/.openshard`` -- the developer's real capture token, model cache and
+    Platform link (``platform.json``), which holds a live organisation key.
+    Changing the variables here, at import and before any ``openshard``
+    module loads, covers in-process code, module-level caches and every
+    subprocess, since they inherit ``os.environ``.
+
+    Done once per run: xdist workers, and a second import of this module
+    under another name, inherit the isolated home through the environment.
+    Returns ``(real home, isolated home)``.
+    """
+    if os.environ.get("OPENSHARD_TEST_ISOLATED_HOME"):
+        return os.environ["OPENSHARD_TEST_REAL_HOME"], os.environ["OPENSHARD_TEST_ISOLATED_HOME"]
+    real = os.path.expanduser("~")
+    home = tempfile.mkdtemp(prefix="openshard-test-home-")
+    atexit.register(shutil.rmtree, home, ignore_errors=True)
+    os.environ["OPENSHARD_TEST_REAL_HOME"] = real
+    os.environ["OPENSHARD_TEST_ISOLATED_HOME"] = home
+    os.environ["HOME"] = home
+    os.environ["USERPROFILE"] = home  # what ``expanduser`` reads on Windows
+    drive, rest = os.path.splitdrive(home)
+    if drive:
+        os.environ["HOMEDRIVE"], os.environ["HOMEPATH"] = drive, rest
+    for name in _LIVE_CREDENTIAL_ENV:
+        os.environ.pop(name, None)
+    return real, home
+
+
+REAL_USER_HOME, ISOLATED_USER_HOME = _isolate_user_home()
 
 # Capture-service fixtures (``repo``, ``capture_env``, ``service``) shared by
 # the capture, hook and v0.4.4 test modules.
