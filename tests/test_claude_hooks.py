@@ -693,6 +693,22 @@ class TestEvidence:
         assert bash["metadata"]["command_kind"] == "test"
         assert bash["target"] == "python"
 
+    def test_powershell_tool_is_recorded_as_a_command(self, repo: Path):
+        # Claude Code's Windows shell tool has the same hook contract as Bash.
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _run(repo, "PostToolUse", tool_name="PowerShell",
+             tool_input={"command": "python -m pytest -q"}, tool_response={})
+        _run(repo, "PostToolUseFailure", tool_name="PowerShell",
+             tool_input={"command": "git status"}, error="Exit code 1")
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        ok, failed = _events(entry, EVENT_TOOL_INVOKED)
+        assert ok["action"].startswith("PowerShell:") and ok["status"] == STATUS_PASSED
+        assert ok["metadata"]["command_kind"] == "test"
+        assert failed["status"] == STATUS_FAILED and failed["metadata"]["exit_code"] == 1
+        assert entry["capture"]["tool_call_count"] == 2
+        assert entry["capture"]["command_failure_count"] == 1
+
     def test_tool_failure_is_failed_without_error_text(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")
         _run(repo, "PostToolUseFailure", tool_name="Bash",
