@@ -18,7 +18,7 @@ _MAX_METADATA_KEYS = 10
 # Secret-like token patterns.  A match means the whole string is dropped —
 # never emitted — so partial secrets cannot leak.
 SECRET_PATTERNS = (
-    re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),                    # OpenAI-style keys
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{8,}"),   # OpenAI-style keys (not "risk-assessment")
     re.compile(r"AKIA[0-9A-Z]{8,}"),                          # AWS access key id
     re.compile(r"(?i)\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*\S+"),
     re.compile(r"(?i)\bbearer\s+\S+"),                        # bearer tokens

@@ -20,6 +20,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Receipts the Platform refused can sync after a fix, and ordinary tasks are not refused.** A task
+  excerpt kept absolute local paths from the first prompt (`C:\Users\<name>\...`); they are now
+  shortened to `.../<name>`. The OpenAI key pattern matched `sk-` inside words (`risk-assessment`,
+  `<task-notification>`), so such text was treated as a secret; it now needs a word boundary (the
+  Platform needs the same change). A rejected Receipt was never retried; the outbox now records the
+  Core version that built the refused payload (`rejected_by`) and a later version retries it once.
 - **Long and interrupted sessions keep every event and say what happened.** A hook-captured
   Receipt kept its first 200 Events and dropped the rest, including the session's final work; Events
   past the bounded window now move to an append-only local event log

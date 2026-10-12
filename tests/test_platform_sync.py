@@ -485,6 +485,26 @@ class TestFlush:
         paths = [d["path"] for p in doc["problems"] for d in (p["error"].get("details") or [])]
         assert paths == ["receipt.files[0].path"]
 
+    def test_a_rejection_is_retried_once_by_a_newer_core(self, repo, env, link, monkeypatch):
+        # Seen live: Receipts refused while Core and the Platform contract were
+        # out of step stayed refused for good, even after the cause was fixed.
+        _session(repo, _sid(1))
+        rt = transport.RecordingPlatformTransport([SendResult("rejected", 400, "invalid_payload")])
+        assert client.flush(repo, env=env, transport=rt).rejected == 1
+        (record,) = outbox.load_outbox(repo).values()
+        assert record["rejected_by"] == outbox.core_version()
+        assert client.flush(repo, env=env, transport=rt).sent == 0  # same Core: final
+
+        monkeypatch.setattr(outbox, "core_version", lambda: "9.9.9")
+        accepted = transport.RecordingPlatformTransport()
+        assert client.flush(repo, env=env, transport=accepted).created == 1
+        assert next(iter(outbox.load_outbox(repo).values()))["state"] == "synced"
+
+        _session(repo, _sid(2))
+        refused_again = transport.RecordingPlatformTransport([SendResult("rejected", 400, "invalid_payload")])
+        client.flush(repo, env=env, transport=refused_again)
+        assert client.flush(repo, env=env, transport=refused_again).sent == 0  # once per version
+
     def test_unavailable_stops_the_flush_and_backs_off(self, repo, env, link):
         _session(repo, _sid(1))
         _session(repo, _sid(2))
