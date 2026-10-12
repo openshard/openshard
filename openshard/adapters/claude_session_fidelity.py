@@ -68,7 +68,8 @@ def make_room(buf: dict, cap: int) -> bool:
 
 def event_log_path(history_dir: Path, buf: dict) -> Path:
     """``<repo>/.openshard/event_log/<receipt id>.jsonl`` (the session id before a record exists)."""
-    record = buf.get("record") if isinstance(buf.get("record"), dict) else {}
+    raw = buf.get("record")
+    record: dict = raw if isinstance(raw, dict) else {}
     name = record.get("receipt_id") or buf.get("session_id") or "session"
     return history_dir / EVENT_LOG_DIRNAME / f"{name}.jsonl"
 
