@@ -156,13 +156,13 @@ class _Turn:
 class WorkspaceRouter:
     """In-memory per-session turn state for workspace sessions. Thread-safe."""
 
-    def __init__(self, owner_dir: Path | None = None) -> None:
+    def __init__(self, state_path: Path | None = None) -> None:
         self._lock = threading.Lock()
         self._sessions: dict[tuple[str, str], _Turn] = {}
-        # Where a project session's usage owner outlives a service restart: the
-        # capture service's own state directory, never a repository (a project
-        # that recorded nothing must hold no capture state). None: memory only.
-        self._owner_dir = owner_dir
+        # Where a project session's usage owner outlives a service restart: beside
+        # the capture service's state file, never in a repository (a project that
+        # recorded nothing must hold no capture state). No state file: memory only.
+        self._owner_dir = state_path.with_name("claude-usage-owners") if state_path is not None else None
 
     def _turn(self, workspace: Path, key: str) -> _Turn:
         marker = (str(workspace), key)
