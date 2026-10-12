@@ -30,6 +30,7 @@ from tests.capture_fixtures import (
     _payload,
     _post,
     _session_dir,
+    _status_payload,
     _wait_for,
 )
 
@@ -77,7 +78,7 @@ def _open_session(port: int, repo: Path) -> None:
 
 
 class TestServiceResolvesTheProject:
-    def test_http_hook_from_a_linked_worktree_is_recorded_under_the_project(self, service, capture_env, repo, tmp_path):
+    def test_http_hook_from_a_linked_worktree_is_accepted_and_recorded_in_the_worktree(self, service, capture_env, repo, tmp_path):
         worktree = _linked_worktree(repo, tmp_path)
         assert resolve_repo_root(HookPayload(event="PostToolUse", session_id=SID, cwd=str(worktree)), {}) == worktree
         _open_session(service.port, repo)
@@ -88,12 +89,13 @@ class TestServiceResolvesTheProject:
             _capability(capture_env, repo),
         )
 
+        # The project's capability authorises the session; the event is recorded where it happened.
         assert status == 200
         assert service.server.recorder.wait_idle(10)
-        assert _wait_for(lambda: _tool_calls(repo) == 1)
-        assert _no_evidence(worktree)
+        assert _wait_for(lambda: _tool_calls(worktree) == 1)
+        assert _tool_calls(repo) in (None, 0)
 
-    def test_http_hook_from_another_checkout_follows_the_session_root(self, service, capture_env, repo, tmp_path):
+    def test_http_hook_from_another_checkout_is_accepted_and_recorded_there(self, service, capture_env, repo, tmp_path):
         other = _make_repo(tmp_path / "other")
         _open_session(service.port, repo)
 
@@ -105,8 +107,8 @@ class TestServiceResolvesTheProject:
 
         assert status == 200
         assert service.server.recorder.wait_idle(10)
-        assert _wait_for(lambda: _tool_calls(repo) == 1)
-        assert _no_evidence(other)
+        assert _wait_for(lambda: _tool_calls(other) == 1)
+        assert _tool_calls(repo) in (None, 0)
 
     def test_a_restarted_service_finds_the_project_among_recent_repositories(self, capture_env, repo, tmp_path):
         # No session was opened on this instance; the project is only known from the state file.
@@ -123,9 +125,28 @@ class TestServiceResolvesTheProject:
             project_dir=None, authorize=authorize,
         )
 
+        # Authorised through the project; recorded in the checkout the event touched.
         assert action == "queued"
-        assert list(_session_dir(repo).glob("*.queue*.jsonl"))
-        assert _no_evidence(other)
+        assert list(_session_dir(other).glob("*.queue*.jsonl"))
+        assert _no_evidence(repo)
+
+    def test_a_status_ping_teaches_a_restarted_service_the_session_project(self, capture_env, repo, tmp_path):
+        """After a restart nothing links the session to its project until a command hook (the status line) says so."""
+        other = _make_repo(tmp_path / "other")
+        token = auth.ensure_token(capture_env)
+        capability = auth.repo_capability(token, repo, "claude_code")
+        recorder = svc.CaptureRecorder(instance_id="t2", state={})
+
+        def authorize(root: Path) -> bool:
+            return auth.verify_presented(capability, token, root, "claude_code") is not None
+
+        tool_event = json.loads(_payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "ls"}, tool_response={}))
+        assert recorder.record_hook(tool_event, project_dir=None, authorize=authorize) == ("rejected", "unauthenticated")
+        # The status line arrives with CLAUDE_PROJECT_DIR and the token.
+        ping = json.loads(_status_payload(repo))
+        assert recorder.record_status(ping, project_dir=str(repo), authorize=lambda root: True)[0] == "queued"
+        assert recorder.record_hook(tool_event, project_dir=None, authorize=authorize) == ("queued", "PostToolUse")
+        assert list(_session_dir(other).glob("*.queue*.jsonl"))
 
     def test_a_capability_for_an_unrelated_repository_is_still_refused(self, service, capture_env, repo, tmp_path):
         other = _make_repo(tmp_path / "other")

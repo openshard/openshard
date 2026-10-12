@@ -7,6 +7,7 @@ scan). This module is that one call site.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -169,3 +170,72 @@ def commits_in_window(
     if out is None:
         return None
     return [line.strip() for line in out.splitlines() if _is_sha_like(line.strip())]
+
+
+def main_checkout_of(root: Path) -> Path | None:
+    """The main checkout *root* is a linked ``git worktree`` of, else None. Never raises.
+
+    A linked worktree's ``--git-common-dir`` is the main checkout's ``.git``;
+    a main checkout (or a directory that is not a git checkout) yields None.
+    """
+    try:
+        out = run_git(root, ["rev-parse", "--git-common-dir"])
+        if not out or not out.strip():
+            return None
+        common = Path(out.strip())
+        common = (common if common.is_absolute() else root / common).resolve()
+        if common.name == ".git" and common.parent != root.resolve():
+            return common.parent
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return None
+
+
+def checkout_facts(root: Path) -> dict:
+    """What kind of checkout a Receipt's git evidence was observed in. Never raises.
+
+    ``kind`` is ``linked_worktree`` when *root* is a ``git worktree`` of
+    another checkout, ``main_checkout`` for the checkout that owns the git
+    dir, or ``not_git``. ``name`` is a linked worktree's directory basename
+    (never its absolute path), which tells worktrees of one repository
+    apart; a main checkout is identified by its repository already and
+    carries no name. A session that works in several checkouts produces one
+    Receipt per checkout, all with the same ``capture.session_id``; this
+    block says which one each is.
+    """
+    try:
+        inside = run_git(root, ["rev-parse", "--is-inside-work-tree"])
+        if inside is None or inside.strip() != "true":
+            return {"kind": "not_git", "name": None}
+        if main_checkout_of(root) is not None:
+            return {"kind": "linked_worktree", "name": root.name}
+    except (OSError, RuntimeError, ValueError):
+        return {"kind": "not_git", "name": None}
+    return {"kind": "main_checkout", "name": None}
+
+
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def head_at(root: Path, when: str) -> str | None:
+    """HEAD of *root* just before *when* (an ISO 8601 UTC stamp), from its reflog; None when git cannot say. Never raises.
+
+    ``HEAD@{<time>}`` is the reflog's answer, which reaches back to the
+    checkout's first entry: a worktree created after *when* answers with
+    its initial HEAD, which is the right anchor for work done in it. The
+    lookup is one second before *when*: reflog stamps have one-second
+    precision, and the command that opened a checkout may have committed
+    within the same second as the session start it replays.
+    """
+    if not isinstance(when, str) or not when.strip():
+        return None
+    try:
+        from datetime import UTC, datetime, timedelta
+
+        moment = datetime.fromisoformat(when.strip().replace("Z", "+00:00")).astimezone(UTC) - timedelta(seconds=1)
+        spec = moment.strftime("%Y-%m-%d %H:%M:%S +0000")
+    except (ValueError, TypeError):
+        return None
+    out = run_git(root, ["rev-parse", "--verify", "--quiet", f"HEAD@{{{spec}}}"])
+    sha = (out or "").strip()
+    return sha if _SHA_RE.fullmatch(sha) else None
