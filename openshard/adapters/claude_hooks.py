@@ -187,8 +187,6 @@ from openshard.adapters.capture_agents import (
     profile_for,
 )
 from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-exported for callers and tests)
-    _TRANSCRIPT_MAX_FILES,
-    _TRANSCRIPT_RECENT_IDS,
     _count,
     _new_transcript_state,
     _parse_utc,
@@ -215,7 +213,7 @@ from openshard.history.task_identity import (
     stored_task_id,
 )
 from openshard.history.task_title import derive_task_title
-from openshard.util.git import run_git
+from openshard.util.git import checkout_facts, run_git
 
 # Claude Code identity constants -- kept as module names for existing
 # callers/tests; the values are the Claude profile's (adapters/capture_agents.py).
@@ -1519,6 +1517,7 @@ def _new_buffer(
         "schema_version": BUFFER_SCHEMA_VERSION,
         "agent": profile.key,
         "session_id": session_id,
+        "checkout": checkout_facts(repo_root),
         "started_at": now,
         "last_activity_at": now,
         "start_source": None,
@@ -3371,11 +3370,11 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         "attempt_number": record["attempt_number"],
         "capture": {
             "source": profile.capture_source,
-            # PR12: explicit agent identity, never inferred from the model.
-            "agent": profile.key,
+            "agent": profile.key,  # explicit agent identity, never inferred from the model
             "agent_vendor": profile.vendor,
             "provider": provider_current,
             "session_id": buf.get("session_id"),
+            "checkout": buf.get("checkout"),
             "status": "ended" if ended else "in_progress",
             "session_end_observed": bool(ended),
             "session_end_reason": (ended or {}).get("reason"),

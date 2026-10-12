@@ -25,6 +25,17 @@ Workspace routing is used only where hosted turns are sealed at ``Stop``
 (``OPENSHARD_CONNECTED_SURFACE=claude-code-web``): a buffer then never spans a
 turn it did not observe. Nothing here invents an event, a repository, an agent
 or usage; prompts stay in memory and are never written by this module.
+
+The same router serves an ordinary project session (``route`` with a
+*checkout* and ``home_is_checkout=True``): the project root is itself a
+checkout, so ``SessionStart`` and each prompt are recorded there (or in the
+checkout the session's shell is in) as they arrive *and* held for replay into
+every other checkout the turn touches -- a linked worktree under ``C:\\tmp``,
+or another repository's checkout -- so each checkout's Receipt carries the
+session's start and task while its file changes, branch and commits are
+observed where the work happened. ``Stop``/``SessionEnd`` close every checkout
+the turn touched; a turn's usage is counted once, on the first checkout it
+touched, exactly as for a workspace.
 """
 from __future__ import annotations
 
@@ -131,6 +142,7 @@ class _Turn:
     prompt: tuple[Any, str] | None = None
     touched: list[Path] = field(default_factory=list)  # first entry owns the turn's usage
     opened: set[Path] = field(default_factory=set)  # checkouts this session's start was replayed into
+    last_owner: Path | None = None  # owner of the turn Stop just closed (a SessionEnd after it has no turn)
 
 
 class WorkspaceRouter:
@@ -149,8 +161,20 @@ class WorkspaceRouter:
             turn = self._sessions[marker] = _Turn()
         return turn
 
-    def route(self, workspace: Path, key: str, payload: Any, at: str) -> list[tuple[Path, Any, str]]:
-        """``(checkout, payload, at)`` deliveries for one workspace event, in order.
+    def route(
+        self, workspace: Path, key: str, payload: Any, at: str, *,
+        checkout: Path | None = None, home_is_checkout: bool = False,
+    ) -> list[tuple[Path, Any, str]]:
+        """``(checkout, payload, at)`` deliveries for one event, in order.
+
+        *workspace* keys the session's turn state: the workspace parent, or
+        the project root of an ordinary session. *checkout* is the checkout
+        the event touched when the caller already knows it (a project
+        session resolves it from the payload's ``cwd`` and file paths);
+        otherwise it is looked up among the workspace's checkouts. With
+        *home_is_checkout* the preamble events (``SessionStart``, the turn's
+        prompt) are delivered to *checkout* at once as well as held for
+        replay, because the project root records them itself.
 
         Replayed preamble events keep their original *at*. A payload going to
         a checkout that does not own the turn's usage loses its transcript
@@ -166,34 +190,48 @@ class WorkspaceRouter:
         with self._lock:
             turn = self._turn(workspace, key)
             event = payload.event
-            if event == EVENT_SESSION_START:
-                turn.session_start, turn.prompt, turn.touched, turn.opened = (payload, at), None, [], set()
-                return []
-            if event == EVENT_USER_PROMPT_SUBMIT:
-                turn.prompt, turn.touched = (payload, at), []
-                return []
+            if event in (EVENT_SESSION_START, EVENT_USER_PROMPT_SUBMIT):
+                if event == EVENT_SESSION_START:
+                    turn.session_start, turn.prompt, turn.touched, turn.opened = (payload, at), None, [], set()
+                else:
+                    turn.prompt, turn.touched = (payload, at), []
+                if not home_is_checkout or checkout is None:
+                    return []
+                return self._deliver(turn, checkout, payload, at)
             if event in (EVENT_STOP, EVENT_SESSION_END):
-                out = [(repo, self._for(turn, repo, payload), at) for repo in turn.touched]
+                targets = list(turn.touched)
+                if event == EVENT_SESSION_END:
+                    # The session ends in every checkout it was opened in, not
+                    # only in the ones the last turn touched.
+                    targets += [repo for repo in turn.opened if repo not in targets]
+                out = [(repo, self._for(turn, repo, payload), at) for repo in targets]
+                if turn.touched:
+                    turn.last_owner = turn.touched[0]
                 turn.touched = []
                 if event == EVENT_SESSION_END:
                     self._sessions.pop((str(workspace), key), None)
                 return out
-            repo = checkout_for(workspace, payload)
+            repo = checkout if checkout is not None else checkout_for(workspace, payload)
             if repo is None:
                 return []
-            out = []
-            if repo not in turn.touched:
-                turn.touched.append(repo)
-                held = [turn.prompt]
-                if repo not in turn.opened:
-                    # A session starts once per checkout; later turns resume it.
-                    turn.opened.add(repo)
-                    held.insert(0, turn.session_start)
-                for item in held:
-                    if item is not None:
-                        out.append((repo, self._for(turn, repo, item[0]), item[1]))
-            out.append((repo, self._for(turn, repo, payload), at))
-            return out
+            return self._deliver(turn, repo, payload, at)
+
+    @staticmethod
+    def _deliver(turn: _Turn, repo: Path, payload: Any, at: str) -> list[tuple[Path, Any, str]]:
+        """*payload* for *repo*, preceded by the held start/prompt the first time this turn touches it."""
+        out = []
+        if repo not in turn.touched:
+            turn.touched.append(repo)
+            held = [turn.prompt]
+            if repo not in turn.opened:
+                # A session starts once per checkout; later turns resume it.
+                turn.opened.add(repo)
+                held.insert(0, turn.session_start)
+            for item in held:
+                if item is not None and item[0] is not payload:
+                    out.append((repo, WorkspaceRouter._for(turn, repo, item[0]), item[1]))
+        out.append((repo, WorkspaceRouter._for(turn, repo, payload), at))
+        return out
 
     def usage_owner(self, workspace: Path, key: str) -> Path | None:
         """The checkout that owns the current turn's usage, if the turn touched one."""
@@ -203,7 +241,8 @@ class WorkspaceRouter:
 
     @staticmethod
     def _for(turn: _Turn, repo: Path, payload: Any) -> Any:
-        if turn.touched and turn.touched[0] == repo:
+        owner = turn.touched[0] if turn.touched else turn.last_owner
+        if owner is None or owner == repo:
             return payload
         attrs = dict(payload.attrs or {})
         attrs["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
