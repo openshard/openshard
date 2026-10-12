@@ -20,6 +20,14 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **A session's tokens and cost are counted once across its checkouts.** A session that moved
+  between its project and a worktree kept one Receipt per checkout, but each turn's usage went to
+  the checkout that turn touched first. A checkout that owned a later turn then read the transcript
+  from its own position, through turns another checkout had already counted, and its status-line
+  cost window overlapped the others. One live session's Receipts summed to 129% of its transcript.
+  The first checkout a turn touches now owns the session's tokens and cost for its whole life; every
+  other checkout's Receipt records `workspace_usage_attributed_to_other_repository` and never reads
+  the transcript. Workspace sessions, which seal a Receipt per turn, keep per-turn ownership.
 - **Only commands that run a check are recorded as checks, with an outcome that is their own.**
   Captured commands were classified by searching the whole command line for a tool name, so
   `git commit -m "ran ruff"`, `grep -n pytest` and heredoc edit scripts became tests or lint
