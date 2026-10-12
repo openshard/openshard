@@ -67,6 +67,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -193,17 +194,26 @@ def remembered_repos(previous: dict, env: dict | os._Environ | None = None) -> l
     return [r for r in raw or [] if isinstance(r, str)]
 
 
+_REPLACE_LOCK = threading.Lock()
+
+
 def replace_with_retry(tmp: Path, path: Path, attempts: int = 5) -> None:
-    """``os.replace``, retried: Windows refuses it while another process has *path* open."""
-    for attempt in range(attempts):
-        try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:
-            if attempt == attempts - 1:
-                tmp.unlink(missing_ok=True)
-                raise
-            time.sleep(0.02 * (attempt + 1))
+    """``os.replace``, one at a time in this process, retried while another process has *path* open.
+
+    Windows refuses a replace onto a file that another replace or a reader
+    holds; within the service the lock removes the first case entirely, and
+    the bounded retry covers a reader in another process.
+    """
+    with _REPLACE_LOCK:
+        for attempt in range(attempts):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == attempts - 1:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                time.sleep(0.02 * (attempt + 1))
 
 
 def log_path(env: dict | os._Environ | None = None) -> str:
