@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from openshard.adapters import claude_hooks as ch
+from openshard.adapters import claude_transcript_usage as ctu
 from openshard.adapters.claude_hooks import (
     EXECUTOR,
     HookOutcome,
@@ -1818,7 +1819,7 @@ class TestModelTokenCostCapture:
         assert _runs_lines(repo)[0]["completion_tokens"] == 16
 
     def test_a_message_split_across_two_reads_counts_once_even_after_eviction(self, repo: Path, monkeypatch):
-        monkeypatch.setattr(ch, "_TRANSCRIPT_RECENT_IDS", 1)
+        monkeypatch.setattr(ctu, "_TRANSCRIPT_RECENT_IDS", 1)
         transcript = _transcript(repo, [_assistant_line("m1", output_tokens=4)])  # m1's first line
         _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
         _run(repo, "Stop", transcript_path=str(transcript))
@@ -1878,7 +1879,7 @@ class TestModelTokenCostCapture:
 
     def test_capped_subagent_transcripts_mark_tokens_incomplete_and_leave_cost_unknown(self, repo: Path,
                                                                                          monkeypatch):
-        monkeypatch.setattr(ch, "_TRANSCRIPT_MAX_FILES", 2)
+        monkeypatch.setattr(ctu, "_TRANSCRIPT_MAX_FILES", 2)
         transcript = _transcript(repo, [_assistant_line("main", output_tokens=10)])
         sub = transcript.with_suffix("") / "subagents"
         sub.mkdir(parents=True)

@@ -4,6 +4,20 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Added
+
+- `openshard import claude-transcript <transcript>` reconstructs a Receipt from a
+  Claude Code session transcript whose hook events were lost. Tool calls (with
+  the transcript's timestamps, working directories and failure flags), prompt
+  and turn counts and the provider's token usage come from the transcript;
+  git state, cost and verification are left unknown rather than invented; the
+  first prompt is kept only as the hook path's scrubbed excerpt, commands go
+  through the same summariser, and paths outside the repository are dropped.
+  Everything is labelled reconstructed (`import_method`, `capture.source`,
+  Event evidence `imported_transcript`, completeness reasons). The default is
+  a dry run; `--write` records it, with a receipt id derived from the session
+  so a repeat is a no-op, and never over a session that already has a Receipt.
+
 ### Fixed
 
 - **A commit made before the capture service replays the session's first hook is still the
@@ -30,6 +44,20 @@ All notable changes to OpenShard are documented here.
   advertises this as `features: ["capability_root_fallback"]`, and the watchdog
   forwards the event through the command path whenever the running service
   lacks it, so an older service no longer drops those events either.
+
+- A Claude Code session that works in another checkout -- a linked `git worktree`
+  under `C:	mp`, or another repository's checkout -- now gets one Receipt per
+  checkout it touched, each observing its own branch, HEAD, commits and file
+  changes, instead of every event landing in the project root's Receipt with the
+  project's git facts. The session's start and the turn's prompt are replayed
+  into a checkout the first time the session touches it, so each Receipt keeps
+  the task and start; a turn's usage and status-line cost are counted once, on
+  the checkout that owned the turn, and the others record why they have none.
+  `SessionEnd` closes every checkout the session opened. `capture.checkout`
+  says which checkout a Receipt describes (`main_checkout` or
+  `linked_worktree`, with the directory name). A tool event outside every
+  repository stays with the project. The same routing now serves a local
+  multi-repository workspace, not only hosted cloud sessions.
 
 ## 0.4.15 - 2026-10-12
 
