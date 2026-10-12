@@ -6,6 +6,15 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **A commit made before the capture service replays the session's first hook is still the
+  session's.** The service anchored the working-tree baseline when `SessionStart` (or the first
+  model invocation) was received, but read the repository's start HEAD only when the queue was
+  replayed into the staging buffer. An agent that committed in that window, which a multi-repository
+  workspace session or a fold backlog widens, had its commit fall outside the session's
+  `start..end` range and its files read as pre-existing. The queued session-opening line now carries
+  `start_head`, taken beside the baseline, and the buffer uses it; queue lines without it (older
+  services) behave as before.
+
 - Claude Code capture no longer loses every tool event once a session leaves its
   project root. Claude Code interpolates `$CLAUDE_PROJECT_DIR` in HTTP hook
   headers to an empty string (the variable exists only in command-hook

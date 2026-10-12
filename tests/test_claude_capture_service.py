@@ -257,6 +257,23 @@ class TestBlockingPath:
         assert _lines(repo)[0]["task"] == "Fix the login bug"
         assert not queue_file.exists()
 
+    def test_session_start_queues_the_head_at_arrival(self, service, repo):
+        service.server.recorder.pause_processing()
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, check=True, stdout=subprocess.PIPE, text=True,
+        ).stdout.strip()
+        assert _post(service.port, _payload("SessionStart", repo, source="startup"), project_dir=str(repo))
+        assert _post(service.port, _payload("UserPromptSubmit", repo, prompt="task"), project_dir=str(repo))
+        queue_file = _session_dir(repo) / f"{SID}{svc.QUEUE_SUFFIX}"
+        lines = [json.loads(ln) for ln in queue_file.read_text(encoding="utf-8").splitlines()]
+        assert [ln["data"]["event"] for ln in lines] == ["SessionStart", "UserPromptSubmit"]
+        assert lines[0]["data"]["start_head"] == head  # anchored when received, beside the baseline
+        assert "baseline" in lines[0]["data"]
+        assert "start_head" not in lines[1]["data"]
+        service.server.recorder.resume_processing()
+        assert _wait_for(lambda: len(_lines(repo)) == 1)
+        assert _lines(repo)[0]["task"] == "task"
+
     def test_blocking_path_stays_within_budget(self, service, repo):
         # A regression guard for the whole point of the service: the part
         # Claude Code waits on must be a few milliseconds even while the

@@ -112,6 +112,7 @@ from openshard.adapters.claude_hooks import (
     ReducedHookPayload,
     StatusPayload,
     _snapshot_baseline,
+    _snapshot_start_head,
     apply_agent_env,
     apply_capture_loss,
     apply_reduced_hook,
@@ -681,6 +682,7 @@ class CaptureRecorder:
             # An agent without a start hook (Antigravity) opens its session
             # with its first model invocation instead -- once per session.
             reduced.baseline = _snapshot_baseline(root, at or _now())
+            reduced.start_head = _snapshot_start_head(root)
         line = {"id": self._next_id(), "kind": "hook", "at": at or _now(), "data": reduced.to_dict()}
         self._queue_line(root, key, line)
         self._bump("queued", payload.event)

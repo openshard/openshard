@@ -2175,6 +2175,69 @@ class TestStatusLineFastPath:
         assert entry["estimated_cost"] == pytest.approx(0.09)  # last-observed value still reaches the fold
 
 
+class TestStartHeadAtArrival:
+    """The capture service records HEAD when the session-opening hook arrives
+    (beside the working-tree baseline), so a commit the agent makes before the
+    queue replay catches up is still inside the session's ``start..end`` range
+    instead of being read as pre-existing work."""
+
+    @staticmethod
+    def _head(repo: Path) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, check=True, stdout=subprocess.PIPE, text=True,
+        ).stdout.strip()
+
+    @staticmethod
+    def _commit_before_replay(repo: Path) -> None:
+        (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+        _git(repo, "add", "new.py")
+        _git(repo, "commit", "-q", "-m", "work")
+
+    def test_reduced_payload_round_trips_the_arrival_head(self):
+        sha = "a" * 40
+        data = ch.ReducedHookPayload(event="SessionStart", session_id=SID, source="startup", start_head=sha).to_dict()
+        assert data["start_head"] == sha
+        assert ch.ReducedHookPayload.from_dict(data).start_head == sha
+        # Older queue lines have no key; a malformed value is dropped, never guessed.
+        del data["start_head"]
+        assert ch.ReducedHookPayload.from_dict(data).start_head is None
+        assert "start_head" not in ch.ReducedHookPayload(event="Stop", session_id=SID).to_dict()
+        assert ch.ReducedHookPayload.from_dict({**data, "start_head": "not a sha"}).start_head is None
+
+    def test_commit_before_the_queue_replays_is_still_the_sessions(self, repo: Path):
+        head0 = self._head(repo)
+        start = ch.ReducedHookPayload(event="SessionStart", session_id=SID, source="startup", start_head=head0)
+        self._commit_before_replay(repo)  # the agent is faster than the replay
+        assert ch.apply_reduced_hook(start, repo).action != "error"
+        ch.apply_reduced_hook(ch.ReducedHookPayload(event="UserPromptSubmit", session_id=SID, task_excerpt="task"), repo)
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["git_head_commit_hash"] == head0
+        assert [f["path"] for f in entry["files_detail"]] == ["new.py"]
+
+    def test_without_an_arrival_head_the_fold_reads_head_at_replay(self, repo: Path):
+        """The gap the arrival HEAD closes; a queue written by an older service still behaves this way."""
+        start = ch.ReducedHookPayload(event="SessionStart", session_id=SID, source="startup")
+        self._commit_before_replay(repo)
+        assert ch.apply_reduced_hook(start, repo).action != "error"
+        ch.apply_reduced_hook(ch.ReducedHookPayload(event="UserPromptSubmit", session_id=SID, task_excerpt="task"), repo)
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["git_head_commit_hash"] == self._head(repo)
+        assert entry["files_detail"] == []
+
+    def test_resumed_segment_takes_the_arrival_head_too(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="first task")
+        _run(repo, "SessionEnd", reason="other")
+        head1 = self._head(repo)
+        self._commit_before_replay(repo)
+        resumed = ch.ReducedHookPayload(event="SessionStart", session_id=SID, source="resume", start_head=head1)
+        assert ch.apply_reduced_hook(resumed, repo).action != "error"
+        buf = ch._read_buffer(buffer_path(repo.resolve(), SID))
+        assert buf["start_source"] == "resume"
+        assert buf["git_head_commit_hash"] == head1
+
+
 class TestRepoIdentityCaching:
     """Requirement 3/6: `git config --get remote.origin.url` is not re-run per fold."""
 
