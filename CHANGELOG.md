@@ -20,6 +20,11 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **A restarted capture service still accepts a session working outside its project.** A clean
+  stop removed the service's state file, and with it the list of projects it had captured for.
+  The restarted service could not place an HTTP hook from a linked worktree or another checkout,
+  refused it with 401 and lost the event until a command hook taught it the project again. The
+  list is now also kept in `claude-capture-repos.json`, which a stop leaves in place.
 - **Claude Code's PowerShell tool calls are captured.** The installed hook matcher named only
   `Bash` among shell tools, so on Windows, where Claude Code runs commands through its
   `PowerShell` tool, every command, its outcome and any check it ran were missing from the
