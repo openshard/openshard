@@ -7,6 +7,7 @@ scan). This module is that one call site.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -211,3 +212,20 @@ def checkout_facts(root: Path) -> dict:
     except (OSError, RuntimeError, ValueError):
         return {"kind": "not_git", "name": None}
     return {"kind": "main_checkout", "name": None}
+
+
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def head_at(root: Path, when: str) -> str | None:
+    """HEAD of *root* as of *when* (an ISO 8601 stamp), from its reflog; None when git cannot say. Never raises.
+
+    ``HEAD@{<time>}`` is the reflog's answer, which reaches back to the
+    checkout's first entry: a worktree created after *when* answers with
+    its initial HEAD, which is the right anchor for work done in it.
+    """
+    if not isinstance(when, str) or not when.strip():
+        return None
+    out = run_git(root, ["rev-parse", "--verify", "--quiet", f"HEAD@{{{when.strip()}}}"])
+    sha = (out or "").strip()
+    return sha if _SHA_RE.fullmatch(sha) else None

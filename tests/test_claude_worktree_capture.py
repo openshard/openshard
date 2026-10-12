@@ -376,6 +376,32 @@ def test_events_outside_every_repository_stay_with_the_project(repos, tmp_path):
     assert not (scratch / ".openshard").exists()
 
 
+def test_a_command_that_changes_directory_is_attributed_where_it_ran(repos):
+    """``cd <worktree> && git commit`` from the project's shell acts in the worktree: its commit belongs there."""
+    platform, wt = repos["platform"], repos["wt"]
+    service = _Service({**os.environ})
+    try:
+        claude = _Claude(platform, service.port)
+        claude.start()
+        claude.send("UserPromptSubmit", prompt="Commit in the worktree without leaving the project")
+        (wt / "fix.py").write_text("FIXED = True\n", encoding="utf-8")
+        sha = _commit(wt, "Fixed it in the worktree")
+        posix_wt = "/" + str(wt).replace(":", "", 1).replace("\\", "/") if os.name == "nt" else str(wt)
+        claude.run(f"cd {posix_wt} && git add -A && git commit -m 'Fixed it in the worktree'", cwd=platform,
+                   stdout=f"[wt-branch {sha[:7]}] Fixed it in the worktree")
+        claude.send("Stop")
+        claude.send("SessionEnd", reason="other")
+        assert _wait_for(lambda: _ended(wt) and _ended(platform))
+    finally:
+        service.stop()
+    (worktree_receipt,) = _receipts(wt)
+    (project_receipt,) = _receipts(platform)
+    assert worktree_receipt["capture"]["tool_call_count"] == 1
+    assert sha in worktree_receipt["session_commits"]["shas"]
+    assert project_receipt["capture"]["tool_call_count"] == 0
+    assert sha not in project_receipt["session_commits"]["shas"]
+
+
 def test_the_worktree_receipt_is_not_written_into_the_project(repos):
     """The original defect: the worktree edit used to land in the project's Receipt with the project's git facts."""
     platform, wt = repos["platform"], repos["wt"]

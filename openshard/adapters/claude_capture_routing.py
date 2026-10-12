@@ -20,6 +20,8 @@ work, not pre-existing changes.
 """
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,38 @@ from openshard.adapters.claude_mcp_install import find_repo_root
 from openshard.util.git import main_checkout_of
 
 _CACHE_MAX = 512
+# A shell command that starts by changing directory names where it really ran:
+# ``cd /c/tmp/wt && git commit`` acts in ``wt`` whatever the hook's ``cwd`` says
+# (Claude Code reports the shell's persistent directory, not the chain's).
+_LEADING_CD = re.compile(r"""^\s*cd\s+(?P<q>["']?)(?P<path>[^"'&;|
+]+?)(?P=q)\s*(?:&&|;)""")
+_MSYS_DRIVE = re.compile(r"^/([A-Za-z])/(.*)$")
+
+
+def command_directory_hint(command: object, cwd: str | None) -> str | None:
+    """The directory a ``cd <dir> && ...`` command acts in, as a usable path, else None. Never raises."""
+    if not isinstance(command, str):
+        return None
+    match = _LEADING_CD.match(command)
+    if match is None:
+        return None
+    raw = match.group("path").strip()
+    if not raw or raw.startswith("-"):
+        return None
+    if raw == "~" or raw.startswith("~/"):
+        raw = str(Path.home()) + raw[1:]
+    drive = _MSYS_DRIVE.match(raw)
+    if drive is not None and os.name == "nt":
+        raw = f"{drive.group(1).upper()}:/{drive.group(2)}"
+    try:
+        path = Path(raw)
+        if not path.is_absolute():
+            if not cwd:
+                return None
+            path = Path(cwd) / path
+        return str(path)
+    except (OSError, ValueError):
+        return None
 
 
 def event_file_paths(payload: Any) -> list[str]:
@@ -70,8 +104,10 @@ class CheckoutResolver:
     def checkout_of(self, payload: Any, home: Path) -> Path:
         """The checkout a Claude event touched: its file paths' or ``cwd``'s repository, else *home*.
 
-        The nearest enclosing ``.git`` wins (a linked worktree has one), as
-        for the hook path's own root resolution; a path outside every
+        A command that begins with ``cd <dir> &&`` acts in that directory
+        and is attributed there (see ``command_directory_hint``). The
+        nearest enclosing ``.git`` wins (a linked worktree has one), as for
+        the hook path's own root resolution; a path outside every
         repository, or one that would resolve to the user's home directory,
         stays with the project. Cached per path.
         """
@@ -82,6 +118,9 @@ class CheckoutResolver:
             raw_paths.append(file_path)
         raw_paths += [raw for raw, _kind in (getattr(payload, "file_paths", None) or []) if isinstance(raw, str) and raw]
         candidates: list[str] = []
+        hint = command_directory_hint(getattr(payload, "command", None), cwd)
+        if hint is not None:
+            candidates.append(hint)
         for raw in raw_paths:
             try:
                 candidate = Path(raw)

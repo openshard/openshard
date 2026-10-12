@@ -132,6 +132,7 @@ from openshard.adapters.claude_hooks import (
 from openshard.history.capture_completeness import REASON_CORRUPT_QUEUED_EVENT
 from openshard.history.correlation import correlation_block, parse_correlation
 from openshard.history.task_identity import is_task_id
+from openshard.util.git import head_at
 from openshard.util.process import pid_alive
 
 # Receiver path -> agent key. One service, one queue format, one
@@ -653,7 +654,10 @@ class CaptureRecorder:
             # An agent without a start hook (Antigravity) opens its session
             # with its first model invocation instead -- once per session.
             reduced.baseline = _snapshot_baseline(root, at or _now())
-            reduced.start_head = _snapshot_start_head(root)
+            # A replayed start (*at* in the past) anchors at the HEAD the
+            # checkout had then: the opening tool event may already have
+            # committed, and that commit is the session's work.
+            reduced.start_head = (head_at(root, at) if at else None) or _snapshot_start_head(root)
             if baseline_exclude:
                 # The session is opened in this checkout by a tool event that
                 # already wrote these files (PostToolUse fires after the
