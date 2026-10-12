@@ -562,7 +562,7 @@ class TestFlush:
         receipt = recording.envelopes[-1]["receipt"]
         completeness = receipt["capture_completeness"]
         assert completeness["status"] == "incomplete"
-        assert [r["kind"] for r in completeness["reasons"]] == ["session_end_not_observed"]
+        assert [r["kind"] for r in completeness["reasons"]] == ["session_end_not_observed", "session_idle_sealed"]
         assert not list((repo / ".openshard").rglob(f"antigravity.{_sid(7)}.json"))  # buffer swept
         # Nothing left to fold later: the synced copy matches the local record.
         again = client.flush(repo, env=env, now=later + timedelta(hours=3))

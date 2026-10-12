@@ -65,7 +65,10 @@ REASON_GIT_OUTCOME_UNAVAILABLE = "git_outcome_unavailable"
 # Historical Ingestion v1: source records the parser could not read
 # (malformed, oversized or of an unknown type), counted, never guessed at.
 REASON_UNPARSED_SOURCE_RECORDS = "unparsed_source_records"
+# A buffer idle for an hour was sealed without a session end (the session may have continued).
+REASON_SESSION_IDLE_SEALED = "session_idle_sealed"
 VALID_REASONS = frozenset({
+    REASON_SESSION_IDLE_SEALED,
     REASON_CORRUPT_QUEUED_EVENT, REASON_DROPPED_HOOK_EVENTS,
     REASON_SESSION_END_NOT_OBSERVED, REASON_INTEGRATION_LIMITATION,
     REASON_UNPARSED_SOURCE_RECORDS, REASON_GIT_OUTCOME_UNAVAILABLE,
@@ -91,6 +94,8 @@ def reason_detail(kind: str, count: int) -> str:
         return "the integration cannot deliver some evidence"
     if kind == REASON_GIT_OUTCOME_UNAVAILABLE:
         return "end-of-session git state (commits, pull request) could not be read"
+    if kind == REASON_SESSION_IDLE_SEALED:
+        return "sealed after an hour without activity; no session end was observed"
     if kind == REASON_UNPARSED_SOURCE_RECORDS:
         return f"{count} source {_plural(count, 'record', 'records')} could not be parsed"
     return kind

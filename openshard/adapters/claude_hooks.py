@@ -166,13 +166,13 @@ import json
 import os
 import re
 import sys
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from openshard.adapters import claude_session_fidelity as fidelity
 from openshard.adapters.agent_env import PROVIDER_SOURCE_AGENT_ENV, claude_agent_env
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
 from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
@@ -186,6 +186,13 @@ from openshard.adapters.capture_agents import (
     is_known_agent,
     profile_for,
 )
+from openshard.adapters.claude_hook_checks import (
+    MAX_BUFFERED_CHECKS,
+    MAX_CHECK_KEYS,
+    hook_verification,
+    record_checks,
+)
+from openshard.adapters.claude_session_fidelity import sweep_stale_buffers  # noqa: F401  (re-exported)
 from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-exported for callers and tests)
     _count,
     _new_transcript_state,
@@ -196,6 +203,7 @@ from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-expo
     _valid_transcript_path,
     read_transcript_usage,
 )
+from openshard.adapters.claude_workspace import note_usage_owner
 from openshard.history.capture_completeness import (
     REASON_GIT_OUTCOME_UNAVAILABLE,
     REASON_SESSION_END_NOT_OBSERVED,
@@ -214,6 +222,12 @@ from openshard.history.task_identity import (
 )
 from openshard.history.task_title import derive_task_title
 from openshard.util.git import checkout_facts, run_git
+from openshard.verification.check_command import CHECK_KINDS as CHECK_COMMAND_KINDS
+from openshard.verification.check_command import (
+    check_command_items,
+    classify_check_command,
+    queued_check_commands,
+)
 
 # Claude Code identity constants -- kept as module names for existing
 # callers/tests; the values are the Claude profile's (adapters/capture_agents.py).
@@ -345,9 +359,7 @@ _TOOL_FOLD_INTERVAL_SECONDS = 30
 # by the next SessionStart in the repo, so a crashed/killed session's staged
 # evidence still reaches runs.jsonl. Deliberately generous: an idle-but-live
 # session is only ever snapshotted, never marked ended.
-_STALE_BUFFER_SECONDS = 60 * 60
 _HOOK_SWEEP_DEADLINE_SECONDS = 2.0  # overall budget of the sweep a session-opening hook runs
-_MAX_STALE_SWEEP = 20
 
 # Requirement: hook processing must never hang Claude Code on lock
 # contention (a stuck/contended sidecar lock, e.g. antivirus scanning the
@@ -359,21 +371,10 @@ _MAX_STALE_SWEEP = 20
 # used for the (rarer, already-async) stale-buffer sweep, which gets a
 # somewhat longer allowance since it is not gating a single hook's turn.
 _LOCK_TIMEOUT_SECONDS = 3.0
-_SWEEP_LOCK_TIMEOUT_SECONDS = 5.0
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 _FIRST_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")
-_TEST_COMMAND_RE = re.compile(
-    r"(?:^|[\s;&|(])(?:pytest|py\.test|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test|go\s+test|"
-    r"cargo\s+test|jest|vitest|mocha|unittest|make\s+test|rspec|dotnet\s+test|mvn\s+test|"
-    r"gradle\w*\s+test|tox|nox)(?:\s|$)",
-    re.IGNORECASE,
-)
-_LINT_COMMAND_RE = re.compile(
-    r"(?:^|[\s;&|(])(?:ruff|mypy|flake8|pylint|eslint|tsc|prettier|black|isort|gofmt|"
-    r"golangci-lint|cargo\s+(?:clippy|fmt)|terraform\s+(?:fmt|validate)|tflint)(?:\s|$)",
-    re.IGNORECASE,
-)
+
 
 
 def _now() -> str:
@@ -1159,7 +1160,8 @@ def summarize_command(command: str | None, label: str = "Bash") -> tuple[str, st
     scrubbed text still looks unsafe to ``sanitize_text`` (secret-like run,
     absolute path) the whole command text is replaced by a neutral label so
     nothing risky is stored. ``command_kind`` is a deterministic
-    classification (``test`` / ``lint`` / ``other``) used as metadata only --
+    classification (a ``verification/check_command`` kind or ``other``: the
+    last check the command runs as a program) used as metadata only --
     never as a verification result. *label* is the tool's own name
     (``Bash`` for Claude Code/Codex, ``bash`` for OpenCode).
     """
@@ -1174,7 +1176,7 @@ def _summarize_command(command: str | None, label: str) -> tuple[str, str | None
     if not isinstance(command, str) or not command.strip():
         return f"{label} command", None, "other", None
 
-    kind = "test" if _TEST_COMMAND_RE.search(command) else ("lint" if _LINT_COMMAND_RE.search(command) else "other")
+    kind = classify_check_command(command).kind
     collapsed = _scrubbed_command(command)
     safe = sanitize_text(collapsed, _COMMAND_CAP)
     first = collapsed.split(" ", 1)[0] if collapsed else ""
@@ -1233,6 +1235,8 @@ class ReducedHookPayload:
     command_outcome: str | None = None  # see HookPayload.command_outcome
     command_exit_code: int | None = None
     command_key: str | None = None  # see _command_key(): same check command -> same key
+    # verification/check_command.queued_check_commands; None on older queue lines.
+    check_commands: list[dict] | None = None
     git_write: bool = False  # the command can create commits (see _GIT_WRITE_RE); corroborates them
     correlation: dict | None = None
     task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
@@ -1279,6 +1283,8 @@ class ReducedHookPayload:
             data["command_exit_code"] = self.command_exit_code
         if self.command_key is not None:
             data["command_key"] = self.command_key
+        if self.check_commands is not None:
+            data["check_commands"] = [dict(c) for c in self.check_commands]
         if self.git_write:
             data["git_write"] = True
         # Only when declared, so queue lines of an undeclared session keep their shape.
@@ -1357,6 +1363,7 @@ class ReducedHookPayload:
             command_outcome=_command_outcome_or_none(data.get("command_outcome")),
             command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
             command_key=_command_key_or_none(data.get("command_key")),
+            check_commands=queued_check_commands(data.get("check_commands")),
             git_write=data.get("git_write") is True,
             correlation=correlation_block(data.get("correlation")),
             task_id=stored_task_id(data),
@@ -1372,8 +1379,17 @@ class ReducedHookPayload:
 _COMMAND_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
+def _check_name(label: str, segment: str | None, kind: str) -> str:
+    """A check's stored name: its own scrubbed simple command (word by word), else a neutral label."""
+    from openshard.safety.sanitize import sanitize_words
+
+    safe = sanitize_words(_scrubbed_command(segment), _COMMAND_CAP) if segment else None
+    return f"{label}: {safe}" if safe else f"{label} {kind} command (redacted)"
+
+
 def _command_key_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and _COMMAND_KEY_RE.match(value) else None
+
 
 
 def _valid_baseline(raw: object) -> dict | None:
@@ -1432,7 +1448,9 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         agent_surface=_agent_surface_or_none(payload.agent_surface),
         agent_cloud_session=_cloud_session_or_none(payload.agent_cloud_session),
     )
-    if payload.event == EVENT_USER_PROMPT_SUBMIT:
+    if payload.event == EVENT_USER_PROMPT_SUBMIT and fidelity.prompt_source(payload.prompt):
+        reduced.attrs = {**reduced.attrs, "prompt_source": fidelity.PROMPT_SOURCE_AGENT_NOTIFICATION}
+    elif payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
     elif payload.event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         tool = payload.tool_name or "unknown"
@@ -1454,8 +1472,9 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         elif kind == TOOL_KIND_COMMAND:
             action, target, ckind, key = _summarize_command(payload.command, tool)
             reduced.command_action, reduced.command_target, reduced.command_kind = action, target, ckind
-            if ckind in ("test", "lint"):
+            if ckind in CHECK_COMMAND_KINDS:
                 reduced.command_key = key  # only check-shaped commands need one (see _record_check)
+                reduced.check_commands = check_command_items(payload.command, lambda seg, k: _check_name(tool, seg, k))
             reduced.command_outcome = _command_outcome_or_none(payload.command_outcome)
             reduced.command_exit_code = _exit_code_or_none(payload.command_exit_code)
             reduced.command_safety = classify_command_text(payload.command)
@@ -1628,7 +1647,7 @@ def _append_event(
     """
     from openshard.history.event import make_event
 
-    if len(buf["events"]) >= _MAX_BUFFERED_EVENTS:
+    if len(buf["events"]) >= _MAX_BUFFERED_EVENTS and not fidelity.make_room(buf, _MAX_BUFFERED_EVENTS):
         buf["dropped_events"] = int(buf.get("dropped_events") or 0) + 1
         return
     record = buf.get("record") or {}
@@ -1661,8 +1680,30 @@ def _read_buffer(path: Path) -> dict | None:
     return data
 
 
+def _apply_prompt(buf: dict, payload: ReducedHookPayload, repo_root: Path, now: str) -> tuple[str, bool, bool]:
+    """A ``UserPromptSubmit``: a user prompt, or a notification the harness delivered as one."""
+    if payload.attrs.get("prompt_source") == fidelity.PROMPT_SOURCE_AGENT_NOTIFICATION:
+        _append_event(buf, event_type="session.activity", action="agent notification delivered", status="unknown",
+                      evidence="directly_observed", occurred_at=now,
+                      metadata={"hook": payload.event, "notification_index": fidelity.note_agent_notification(buf)})
+        return "agent notification buffered", False, False
+    buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
+    buf["first_prompt_at"] = buf.get("first_prompt_at") or now
+    buf["task"] = buf.get("task") or payload.task_excerpt
+    _append_event(buf, event_type="session.activity", action="user prompt submitted", status="unknown",
+                  evidence="directly_observed", occurred_at=now,
+                  metadata={"hook": payload.event, "prompt_index": buf["prompt_count"]})
+    # First prompt = the session has real work: create the record now so
+    # even a session interrupted before any Stop leaves a trace.
+    created = buf.get("record") is None
+    if created:
+        _ensure_record(buf, repo_root)
+    return ("first prompt: record created" if created else "prompt buffered"), created, False
+
+
 def _write_buffer(path: Path, buf: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    fidelity.flush_event_archive(path.parent.parent, buf)
     tmp = path.with_name(path.name + ".tmp")
     blob = json.dumps(buf)
     with tmp.open("w", encoding="utf-8") as fh:
@@ -1743,7 +1784,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "turn_count": int(capture.get("turn_count") or 0),
         "hook_files": hook_files,
         "events": hook_events[:_MAX_BUFFERED_EVENTS],
-        "dropped_events": int(capture.get("hook_events_dropped") or 0),
+        **fidelity.rebuilt_counters(capture),
         "git_file_event_ids": git_ids,
         "record": {
             "run_id": entry.get("run_id"),
@@ -1904,7 +1945,7 @@ def _stored_checks(entry: dict) -> dict:
         | ({"exit_code": c["exit_code"]} if isinstance(c.get("exit_code"), int) else {})
         for c in (block.get("checks") or [])
         if isinstance(c, dict) and isinstance(c.get("name"), str)
-    ][:_MAX_BUFFERED_CHECKS]
+    ][:MAX_BUFFERED_CHECKS]
     total = block.get("checks_attempted")
     total = total if isinstance(total, int) and not isinstance(total, bool) and total >= 0 else len(checks)
     if checks and isinstance(block.get("started_at"), str):
@@ -2570,7 +2611,6 @@ def _hook_file_events(buf: dict) -> list[dict]:
     return events
 
 
-_MAX_BUFFERED_CHECKS = 20
 
 
 def _command_status(payload: ReducedHookPayload, failed_event: bool) -> str:
@@ -2597,169 +2637,14 @@ def _command_status(payload: ReducedHookPayload, failed_event: bool) -> str:
     return outcome if outcome in (OUTCOME_PASSED, OUTCOME_FAILED) else "unknown"
 
 
-_MAX_CHECK_KEYS = 100  # distinct check commands whose latest outcome is tracked
-
-
-def _record_check(
-    buf: dict, name: str, kind: str, *, status: str, at: str, exit_code: int | None = None,
-    key: str | None = None,
-) -> None:
-    """Remember one hook-observed check command with the outcome its hook reported
-    (``unknown`` when the hook reported none).
-
-    Every run counts (``checks_total``, ``checks_passed_runs`` /
-    ``checks_failed_runs``), and the *latest* outcome per command
-    (``check_latest``, keyed by ``command_key``) is what the verification
-    status is computed from -- a check that failed and then passed on a
-    re-run is passed; the earlier failed run stays listed and counted.
-    """
-    buf["checks_total"] = int(buf.get("checks_total") or 0) + 1
-    if status in ("passed", "failed"):
-        counter = f"checks_{status}_runs"
-        buf[counter] = int(buf.get(counter) or 0) + 1
-    latest = buf.get("check_latest")
-    if not isinstance(latest, dict):
-        latest = buf["check_latest"] = {}
-    slot = key or f"name:{name}"
-    if slot in latest or len(latest) < _MAX_CHECK_KEYS:
-        latest.pop(slot, None)  # re-insert: most recently run last
-        latest[slot] = status
-    else:
-        buf["check_latest_overflow"] = True
-    checks = buf.get("checks")
-    if not isinstance(checks, list):
-        checks = buf["checks"] = []
-    if len(checks) < _MAX_BUFFERED_CHECKS:
-        item: dict[str, Any] = {"name": name, "kind": kind, "status": status, "at": at}
-        if exit_code is not None:
-            item["exit_code"] = exit_code
-        checks.append(item)
-
-
-def _hook_verification(buf: dict) -> dict:
-    """The record's ``verification`` block (history/verification.py) for a hook session.
-
-    OpenShard receives the hook events itself, so a check-shaped command's
-    invocation is ``directly_observed`` -- but its exit code never is. So an
-    observed check is ``unknown`` with ``outcome_not_observed`` (never
-    ``passed``); a tool failure the agent's hook reported is ``failed`` and
-    ``agent_reported`` (the agent's own signal); and "no check command seen"
-    is ``not_run`` only while no capture evidence is known lost -- otherwise
-    ``unknown``. See history/verification.py ``hook_verification_source``.
-    """
-    from openshard.history.verification import (
-        MODE_HOOK_TOOL_EVENT,
-        REASON_CAPTURE_LOSS,
-        REASON_CHECKS_TRUNCATED,
-        REASON_OUTCOME_NOT_OBSERVED,
-        SOURCE_DIRECTLY_OBSERVED,
-        STATUS_FAILED,
-        STATUS_PARTIAL,
-        STATUS_PASSED,
-        STATUS_UNKNOWN,
-        build_verification,
-        hook_verification_source,
-    )
-
-    checks = [c for c in (buf.get("checks") or []) if isinstance(c, dict)]
-    total = max(int(buf.get("checks_total") or 0), len(checks))
-    lost = bool(_all_losses(buf))
-    incomplete: list[str] = [REASON_CAPTURE_LOSS] if lost else []
-    if total == 0 and bool(buf.get("check_command_seen")):
-        # Older buffer (rebuilt from a pre-v1 record): a check was seen but
-        # its details were never kept.
-        return build_verification(
-            source=SOURCE_DIRECTLY_OBSERVED, observation_mode=MODE_HOOK_TOOL_EVENT, status=STATUS_UNKNOWN,
-            reason="Check command(s) observed through agent hooks; outcome not observed.",
-            incomplete_reasons=[REASON_OUTCOME_NOT_OBSERVED, REASON_CAPTURE_LOSS],
-        )
-    if total == 0:
-        if lost:
-            return build_verification(
-                source=SOURCE_DIRECTLY_OBSERVED, observation_mode=MODE_HOOK_TOOL_EVENT, status=STATUS_UNKNOWN,
-                reason="No check command observed, but some capture events were lost.",
-                incomplete_reasons=incomplete,
-            )
-        return build_verification(
-            source=SOURCE_DIRECTLY_OBSERVED, observation_mode=MODE_HOOK_TOOL_EVENT, checks_attempted=0,
-            reason="No check command observed in the agent's tool events.",
-        )
-    stamps = [c["at"] for c in checks if isinstance(c.get("at"), str)]
-    truncated = total > len(checks)
-    if truncated:
-        incomplete.append(REASON_CHECKS_TRUNCATED)
-    latest = buf.get("check_latest") if isinstance(buf.get("check_latest"), dict) else None
-    superseded = 0
-    if latest:
-        # The status follows each command's *latest* reported outcome, so a
-        # red-then-green loop ends green. ``checks_attempted`` counts every
-        # run; ``checks_passed`` / ``checks_failed`` count commands by their
-        # latest outcome (a passed status with a failed count is inconsistent
-        # by contract). Earlier failed runs stay in ``checks`` and the reason.
-        outcomes = list(latest.values())
-        latest_failed = outcomes.count("failed")
-        latest_passed = outcomes.count("passed")
-        passed, failed = latest_passed, latest_failed
-        unknown = len(outcomes) - latest_failed - latest_passed + (1 if buf.get("check_latest_overflow") else 0)
-        superseded = _stored_count(buf.get("checks_failed_runs")) if not latest_failed else 0
-    else:
-        # A buffer rebuilt from an older record: outcomes per run only.
-        failed = sum(1 for c in checks if c.get("status") == "failed")
-        passed = sum(1 for c in checks if c.get("status") == "passed")
-        latest_failed, latest_passed = failed, passed
-        # Checks past the buffer bound have no recorded outcome, so they count as unknown.
-        unknown = total - passed - failed
-    if latest_failed:
-        status = STATUS_FAILED
-    elif latest_passed and not unknown:
-        status = STATUS_PASSED
-    elif latest_passed:
-        status = STATUS_PARTIAL
-    else:
-        status = STATUS_UNKNOWN
-    if unknown:
-        incomplete.append(REASON_OUTCOME_NOT_OBSERVED)
-    if latest_failed:
-        reason = "The agent's hook reported a check command as failed; OpenShard did not run it."
-    elif superseded and latest_passed and not unknown:
-        reason = (f"The agent's hook reported {superseded} failed check run(s) that passed on a later re-run; "
-                  "OpenShard did not run them.")
-    elif latest_passed and not unknown:
-        reason = "The agent's hook reported the check command outcome(s); OpenShard did not run them."
-    elif latest_passed:
-        reason = "The agent's hook reported some check outcomes; the rest were not observed."
-    else:
-        reason = "Check command(s) observed through agent hooks; outcome not observed."
-    return build_verification(
-        source=hook_verification_source(status, outcome_reported=bool(passed or failed)),
-        observation_mode=MODE_HOOK_TOOL_EVENT,
-        checks=[
-            {"name": c.get("name"), "kind": c.get("kind"), "status": c.get("status"), "exit_code": c.get("exit_code")}
-            for c in checks
-        ],
-        status=status,
-        checks_attempted=total,
-        checks_passed=passed,
-        checks_failed=failed,
-        checks_skipped=0,
-        started_at=min(stamps) if stamps else None,
-        exit_code=_single_exit_code(checks) if total == 1 else None,
-        reason=reason,
-        incomplete_reasons=incomplete,
-    )
-
-
-def _single_exit_code(checks: list[dict]) -> int | None:
-    code = checks[0].get("exit_code") if checks else None
-    return code if isinstance(code, int) and not isinstance(code, bool) else None
-
-
 def _all_losses(buf: dict) -> list[dict]:
     """Every loss reason for *buf*: recorded losses plus the buffer's own drop counter."""
     losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
     dropped = int(buf.get("dropped_events") or 0)
     if dropped > 0:
         losses.append(make_reason("dropped_hook_events", dropped))
+    if buf.get("idle_sealed_at"):
+        losses.append(make_reason(fidelity.REASON_SESSION_IDLE_SEALED))
     return losses
 
 
@@ -3217,7 +3102,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if idle_count and turn_count == 0:
         # Idle boundaries were seen but no completed turn was ever confirmed.
         _task_status_text += f"; {idle_count} idle boundary(ies) observed, turn completion not confirmed"
-    end_text = f" Session ended (reason={ended.get('reason') or 'unknown'})." if ended else ""
+    end_text = (f" Session ended (reason={ended.get('reason') or 'unknown'})." if ended else "") + fidelity.summary_suffix(buf)
     # First sentence kept short: the receipt's Result line shows the first
     # complete sentence (see shard_contract._result_display).
     _attr_text = (
@@ -3292,7 +3177,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     tokens_provenance: str | None = None
     tokens_source: str | None = None
     tokens_not_recorded: str | None = None
-    if transcript_usage:
+    if transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
         # Session totals from the transcript (the API responses' own usage).
         tokens_current = dict(transcript_usage.get("totals") or {})
         tokens_source = TOKENS_SOURCE_TRANSCRIPT
@@ -3305,7 +3190,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         tokens_current = None
         tokens_not_recorded = TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE
     cost_not_recorded: str | None = USAGE_ELSEWHERE_REASON if tokens_not_recorded == USAGE_ELSEWHERE_REASON else None
-    if estimated_cost is None and transcript_usage:
+    if estimated_cost is None and transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
         # No cost the agent reported (headless ``claude -p`` has no status
         # line): price the usage per model at the official list rates, with
         # 1-hour cache writes at their own rate. Any model without a rate,
@@ -3351,7 +3236,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # Structured evidence (history/verification.py): what was seen, who
         # reported it and what is known missing. The two booleans above stay
         # for older readers.
-        "verification": _hook_verification(buf),
+        "verification": hook_verification(buf, lost=bool(_all_losses(buf))),
         # Counts cover this session's changes only: agent-reported and
         # git-observed. Pre-existing / other-session changes are excluded
         # from the counts and listed after them in files_detail with their
@@ -3375,7 +3260,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "provider": provider_current,
             "session_id": buf.get("session_id"),
             "checkout": buf.get("checkout"),
-            "status": "ended" if ended else "in_progress",
+            **fidelity.capture_status(buf, ended),
             "session_end_observed": bool(ended),
             "session_end_reason": (ended or {}).get("reason"),
             "start_source": buf.get("start_source"),
@@ -3448,7 +3333,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if isinstance(check_latest, dict) and check_latest:
         # Latest outcome per check command (keys are hashes, never command
         # text), so a buffer rebuilt from this record keeps the same status.
-        entry["capture"]["check_latest"] = dict(list(check_latest.items())[-_MAX_CHECK_KEYS:])
+        entry["capture"]["check_latest"] = dict(list(check_latest.items())[-MAX_CHECK_KEYS:])
         entry["capture"]["check_runs"] = {
             "passed": _stored_count(buf.get("checks_passed_runs")),
             "failed": _stored_count(buf.get("checks_failed_runs")),
@@ -3556,6 +3441,7 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
     """
     from openshard.history.jsonl_store import upsert_jsonl_with
 
+    fidelity.flush_event_archive(repo_root / ".openshard", buf)  # the record counts only what the log holds
     if finalize:
         stored = buf.get("git_outcome") if isinstance(buf.get("git_outcome"), dict) else None
         git_outcome = _merge_git_outcome(_session_git_outcome(buf, repo_root, previous=stored), stored)
@@ -3588,77 +3474,6 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
     )
     buf["last_fold_at"] = _now()
     return entry, outcome
-
-
-def sweep_stale_buffers(
-    repo_root: Path, *, max_age_seconds: float = _STALE_BUFFER_SECONDS, now: datetime | None = None,
-    deadline_seconds: float | None = None,
-) -> list[str]:
-    """Fold and remove staging buffers of sessions idle for *max_age_seconds*.
-
-    Called (outside the caller's own session lock) on SessionStart, and by
-    Platform sync before it picks what to send (sync/client.py). A stale
-    buffer is sealed into runs.jsonl as a partial segment --
-    ``capture.session_end_observed`` stays False and no ``run.completed``
-    Event is fabricated -- then removed; a later hook for that session
-    opens a new Receipt segment. Returns the session ids
-    folded. Never raises.
-    """
-    folded: list[str] = []
-    started = time.monotonic()
-    try:
-        directory = sessions_dir(repo_root)
-        if not directory.is_dir():
-            return folded
-        from openshard.history.jsonl_store import history_file_lock
-
-        candidates = sorted(p for p in directory.glob("*.json") if p.is_file())
-        for path in candidates[: _MAX_STALE_SWEEP * 4]:
-            if len(folded) >= _MAX_STALE_SWEEP:
-                break
-            if deadline_seconds is not None and time.monotonic() - started >= deadline_seconds:
-                break  # the rest are swept by the next sweep
-            peek = _read_buffer(path)
-            if peek is None:
-                continue
-            age = _seconds_since(peek.get("last_activity_at"), now)
-            if age is None or age < max_age_seconds:
-                continue
-            sid = str(peek.get("session_id") or path.stem)
-            if not _SESSION_ID_RE.match(sid):
-                continue
-            try:
-                with history_file_lock(path, timeout=_SWEEP_LOCK_TIMEOUT_SECONDS):
-                    buf = _read_buffer(path)
-                    if buf is None:
-                        continue
-                    age = _seconds_since(buf.get("last_activity_at"), now)
-                    if age is None or age < max_age_seconds:
-                        continue
-                    if _has_activity(buf):
-                        # Swept without a SessionEnd: say so on the record
-                        # instead of leaving it looking normally finished.
-                        losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
-                        if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
-                            losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
-                        buf["capture_losses"] = losses
-                        swept_entry, _ = _fold(buf, repo_root, finalize=True)
-                        # The idle boundary seals a partial Receipt, not a session end.
-                        # Reuse the existing remote spool and delivery path.
-                        remote_events = _remote_capture_new_events(buf)
-                        if remote_events is not None:
-                            _remote_capture_record(
-                                repo_root, remote_events, buf.get("record") or {}, swept_entry,
-                                finalized=True,
-                            )
-                        _schedule_post_session_verify(repo_root, swept_entry)
-                    path.unlink()
-                folded.append(sid)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return folded
 
 
 def _has_activity(buf: dict) -> bool:
@@ -3709,13 +3524,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
             buf["correlation"] = declared
         elif bound != declared:
             buf["correlation_conflicts"] = _stored_count(buf.get("correlation_conflicts")) + 1
-    if payload.transcript_path:
-        # Transient: read at fold for token usage only (see _transcript_usage).
-        buf["transcript_path"] = payload.transcript_path
-    if payload.attrs.get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
-        # A workspace turn's usage belongs to the checkout it touched first
-        # (see claude_workspace): this Receipt must not count it again.
-        buf["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
+    note_usage_owner(buf, payload)
     if (payload.agent == AGENT_CODEX and buf.get("codex_usage_baseline_required")
             and not buf.get("codex_usage_baseline_attempted")):
         # Read cumulative counters before the resumed segment does any work.
@@ -3848,23 +3657,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         return f"permission denied for {tool}; buffered", False, False
 
     if event == EVENT_USER_PROMPT_SUBMIT:
-        buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
-        if not buf.get("first_prompt_at"):
-            buf["first_prompt_at"] = now
-        if not buf.get("task"):
-            buf["task"] = payload.task_excerpt
-        _append_event(
-            buf, event_type="session.activity", action="user prompt submitted",
-            status="unknown", evidence="directly_observed",
-            metadata={"hook": event, "prompt_index": buf["prompt_count"]},
-            occurred_at=now,
-        )
-        # First prompt = the session has real work: create the record now so
-        # even a session interrupted before any Stop leaves a trace.
-        created = buf.get("record") is None
-        if created:
-            _ensure_record(buf, repo_root)
-        return ("first prompt: record created" if created else "prompt buffered"), created, False
+        return _apply_prompt(buf, payload, repo_root, now)
 
     if event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         failed = event == EVENT_POST_TOOL_USE_FAILURE
@@ -3938,17 +3731,13 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
                 # activity evidence even when it arrived through the success
                 # hook (Cursor/Grok/Hermes report exit codes on postToolUse).
                 buf["command_failure_count"] = int(buf.get("command_failure_count") or 0) + 1
-            if payload.command_kind in ("test", "lint"):
+            if payload.command_kind in CHECK_COMMAND_KINDS:
                 # A check-shaped command was directly observed running --
                 # enough to say "attempted" honestly. Its outcome is only what
-                # the agent's hook reported (agent_reported); OpenShard never
-                # reads tool stdout, so verification_passed stays None; see
-                # build_hook_entry.
+                # the agent's hook reported (agent_reported), and only when the
+                # command's exit status is the check's own; see _record_checks.
                 buf["check_command_seen"] = True
-                _record_check(
-                    buf, action, payload.command_kind, status=outcome, at=now,
-                    exit_code=payload.command_exit_code, key=payload.command_key,
-                )
+                record_checks(buf, payload, action, outcome, now)
         _append_event(
             buf, event_type="tool.invoked", action=action, target=target,
             target_is_path=(kind in (TOOL_KIND_FILE, TOOL_KIND_READ)),

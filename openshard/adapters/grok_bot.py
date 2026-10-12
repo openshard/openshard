@@ -78,6 +78,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from openshard.adapters.otlp_logs import LogRecord
+from openshard.verification.check_command import CHECK_KINDS as CHECK_COMMAND_KINDS
 
 SURFACE_GROK_BOT = "grok_bot"
 
@@ -528,7 +529,7 @@ def _apply_observation(obs: Observation, state: dict, events: list[dict], record
         if f.get("target") == "user_machine":
             counts["shell_on_user_machine"] += 1
         action, _target, command_kind = summarize_command(f.get("command"), label="Shell")
-        if command_kind in ("test", "lint"):
+        if command_kind in CHECK_COMMAND_KINDS:
             state["checks_total"] = int(state.get("checks_total") or 0) + 1
             if len(state["checks"]) < _MAX_CHECKS:
                 state["checks"].append({

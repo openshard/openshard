@@ -26,6 +26,44 @@ All notable changes to OpenShard are documented here.
   `<task-notification>`), so such text was treated as a secret; it now needs a word boundary (the
   Platform needs the same change). A rejected Receipt was never retried; the outbox now records the
   Core version that built the refused payload (`rejected_by`) and a later version retries it once.
+- **Long and interrupted sessions keep every event and say what happened.** A hook-captured
+  Receipt kept its first 200 Events and dropped the rest, including the session's final work; Events
+  past the bounded window now move to an append-only local event log
+  (`.openshard/event_log/<receipt id>.jsonl`, named on the Receipt with a count) and only a failed log
+  write is a capture loss. A background-task notification or sub-agent report that Claude Code
+  delivers as a queued prompt is counted as an agent notification, never as a prompt or the task. A
+  Receipt sealed by the idle sweep reads `idle` with a `session_idle_sealed` completeness reason
+  instead of "in progress"; later work continues in a new segment that names it. The sweep moved to
+  `adapters/claude_session_fidelity.py`.
+- **A session's tokens and cost are counted once across its checkouts.** A session that moved
+  between its project and a worktree kept one Receipt per checkout, but each turn's usage went to
+  the checkout that turn touched first. A checkout that owned a later turn then read the transcript
+  from its own position, through turns another checkout had already counted, and its status-line
+  cost window overlapped the others. One live session's Receipts summed to 129% of its transcript.
+  The first checkout a turn touches now owns the session's tokens and cost for its whole life; every
+  other checkout's Receipt records `workspace_usage_attributed_to_other_repository` and never reads
+  the transcript. Workspace sessions, which seal a Receipt per turn, keep per-turn ownership.
+- **Only commands that run a check are recorded as checks, with an outcome that is their own.**
+  Captured commands were classified by searching the whole command line for a tool name, so
+  `git commit -m "ran ruff"`, `grep -n pytest` and heredoc edit scripts became tests or lint
+  checks, and a failed commit became a failed lint check. A command is now a check only when one
+  of its simple commands runs a test, lint, type-check or build program (`verification/check_command.py`),
+  each check is named by its own command (`python -m pytest -q`, not the whole line or
+  "Bash command (redacted)"), and a command line can record several checks. The agent's reported
+  outcome counts for a check only when the shell returned that check's exit status:
+  `pytest | tail` and `pytest; echo done` leave the check unknown, and a failed
+  `pytest && git commit` is not a failed test. The reason is recorded in the verification
+  block's `incomplete_reasons`. Check recording moved to `adapters/claude_hook_checks.py`.
+- **A restarted capture service still accepts a session working outside its project.** A clean
+  stop removed the service's state file, and with it the list of projects it had captured for.
+  The restarted service could not place an HTTP hook from a linked worktree or another checkout,
+  refused it with 401 and lost the event until a command hook taught it the project again. The
+  list is now also kept in `claude-capture-repos.json`, which a stop leaves in place.
+- **Claude Code's PowerShell tool calls are captured.** The installed hook matcher named only
+  `Bash` among shell tools, so on Windows, where Claude Code runs commands through its
+  `PowerShell` tool, every command, its outcome and any check it ran were missing from the
+  Receipt. The matcher now names `PowerShell`; the next session start rewrites an older
+  configuration in place. Transcript reconstruction counts `PowerShell` calls as commands too.
 
 - **A commit made before the capture service replays the session's first hook is still the
   session's.** The service anchored the working-tree baseline when `SessionStart` (or the first

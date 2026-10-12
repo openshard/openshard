@@ -143,14 +143,26 @@ class _Turn:
     touched: list[Path] = field(default_factory=list)  # first entry owns the turn's usage
     opened: set[Path] = field(default_factory=set)  # checkouts this session's start was replayed into
     last_owner: Path | None = None  # owner of the turn Stop just closed (a SessionEnd after it has no turn)
+    # A project session keeps one Receipt per checkout for its whole life, so
+    # its usage has one owner for its whole life: the first checkout a turn
+    # touched (not one that only saw the replayed session start).
+    # (A workspace session seals a Receipt per turn, so each turn's first
+    # checkout owns that turn.) Per-turn owners on long-lived Receipts counted
+    # usage twice: a checkout owning a later turn read the transcript from its
+    # own cursor, through the turns other checkouts had already counted.
+    session_owner: Path | None = None
 
 
 class WorkspaceRouter:
     """In-memory per-session turn state for workspace sessions. Thread-safe."""
 
-    def __init__(self) -> None:
+    def __init__(self, state_path: Path | None = None) -> None:
         self._lock = threading.Lock()
         self._sessions: dict[tuple[str, str], _Turn] = {}
+        # Where a project session's usage owner outlives a service restart: beside
+        # the capture service's state file, never in a repository (a project that
+        # recorded nothing must hold no capture state). No state file: memory only.
+        self._owner_dir = state_path.with_name("claude-usage-owners") if state_path is not None else None
 
     def _turn(self, workspace: Path, key: str) -> _Turn:
         marker = (str(workspace), key)
@@ -158,8 +170,14 @@ class WorkspaceRouter:
         if turn is None:
             if len(self._sessions) >= _MAX_SESSIONS:
                 self._sessions.pop(next(iter(self._sessions)))
-            turn = self._sessions[marker] = _Turn()
+            # A restarted service has no memory of the session: keep the owner it chose before.
+            turn = self._sessions[marker] = _Turn(session_owner=_read_owner(self._owner_dir, workspace, key))
         return turn
+
+    def _own(self, turn: _Turn, workspace: Path, key: str, repo: Path) -> None:
+        if turn.session_owner is None:
+            turn.session_owner = repo
+            _write_owner(self._owner_dir, workspace, key, repo)
 
     def route(
         self, workspace: Path, key: str, payload: Any, at: str, *,
@@ -197,6 +215,8 @@ class WorkspaceRouter:
                     turn.prompt, turn.touched = (payload, at), []
                 if not home_is_checkout or checkout is None:
                     return []
+                if event == EVENT_USER_PROMPT_SUBMIT:
+                    self._own(turn, workspace, key, checkout)  # where the session's first turn began
                 return self._deliver(turn, checkout, payload, at)
             if event in (EVENT_STOP, EVENT_SESSION_END):
                 targets = list(turn.touched)
@@ -204,16 +224,24 @@ class WorkspaceRouter:
                     # The session ends in every checkout it was opened in, not
                     # only in the ones the last turn touched.
                     targets += [repo for repo in turn.opened if repo not in targets]
+                    # The usage owner was opened in this session even when a restarted
+                    # service no longer remembers it: it must see the end and fold its usage.
+                    if turn.session_owner is not None and turn.session_owner not in targets:
+                        targets.append(turn.session_owner)
                 out = [(repo, self._for(turn, repo, payload), at) for repo in targets]
                 if turn.touched:
                     turn.last_owner = turn.touched[0]
                 turn.touched = []
                 if event == EVENT_SESSION_END:
                     self._sessions.pop((str(workspace), key), None)
+                    if self._owner_dir is not None:
+                        _owner_path(self._owner_dir, workspace, key).unlink(missing_ok=True)
                 return out
             repo = checkout if checkout is not None else checkout_for(workspace, payload)
             if repo is None:
                 return []
+            if home_is_checkout:
+                self._own(turn, workspace, key, repo)
             return self._deliver(turn, repo, payload, at)
 
     @staticmethod
@@ -234,19 +262,65 @@ class WorkspaceRouter:
         return out
 
     def usage_owner(self, workspace: Path, key: str) -> Path | None:
-        """The checkout that owns the current turn's usage, if the turn touched one."""
+        """The checkout that owns the current usage: the session's owner, else the turn's first checkout."""
         with self._lock:
             turn = self._sessions.get((str(workspace), key))
-            return turn.touched[0] if turn and turn.touched else None
+            if turn is None:
+                return None
+            return turn.session_owner or (turn.touched[0] if turn.touched else None)
 
     @staticmethod
     def _for(turn: _Turn, repo: Path, payload: Any) -> Any:
-        owner = turn.touched[0] if turn.touched else turn.last_owner
+        owner = turn.session_owner or (turn.touched[0] if turn.touched else turn.last_owner)
         if owner is None or owner == repo:
             return payload
         attrs = dict(payload.attrs or {})
         attrs["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
-        return replace(payload, transcript_path=None, attrs=attrs)
+        return replace(payload, attrs=attrs)
+
+
+def _owner_path(owner_dir: Path, workspace: Path, key: str) -> Path:
+    import hashlib
+
+    project = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:16]
+    return owner_dir / f"{project}-{key}.usage-owner"
+
+
+def _read_owner(owner_dir: Path | None, workspace: Path, key: str) -> Path | None:
+    """The checkout a project session's usage was given to before a service restart."""
+    if owner_dir is None:
+        return None
+    try:
+        raw = _owner_path(owner_dir, workspace, key).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return Path(raw) if raw and (Path(raw) / ".git").exists() else None
+
+
+def _write_owner(owner_dir: Path | None, workspace: Path, key: str, repo: Path) -> None:
+    """Only project sessions keep one Receipt per checkout for life; a workspace marker is harmless."""
+    if owner_dir is None:
+        return
+    try:
+        path = _owner_path(owner_dir, workspace, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(repo), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def note_usage_owner(buf: dict, payload: Any) -> None:
+    """Mark a Receipt whose session usage another checkout's Receipt owns, for good.
+
+    Such a Receipt still reads the transcript for the model that ran, but
+    never counts or prices its tokens (claude_hooks.build_hook_entry), so a
+    later event carrying the path cannot make it count the same usage twice.
+    """
+    if (payload.attrs or {}).get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
+        buf["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
+    if payload.transcript_path:
+        # Transient: read at fold for usage and model identity (claude_hooks._transcript_usage).
+        buf["transcript_path"] = payload.transcript_path
 
 
 def install_workspace(workspace: Path, *, port: int | None = None) -> dict[str, Any]:
