@@ -29,6 +29,7 @@ from tests.capture_fixtures import (
     _make_repo,
     _payload,
     _post,
+    _Service,
     _session_dir,
     _status_payload,
     _wait_for,
@@ -130,6 +131,32 @@ class TestServiceResolvesTheProject:
         assert list(_session_dir(other).glob("*.queue*.jsonl"))
         assert _no_evidence(repo)
 
+    def test_a_cleanly_stopped_service_still_recognises_its_projects_after_a_restart(self, capture_env, repo, tmp_path):
+        # Seen live: an agent restarted the service from a Core worktree while its
+        # session belonged to the Platform project. The stop removed the state file
+        # and its repository list, so the next HTTP hook from the worktree was
+        # refused with 401 and lost.
+        other = _make_repo(tmp_path / "other")
+        first = _Service(capture_env)
+        assert _post(first.port, _payload("SessionStart", repo, source="startup"), project_dir=str(repo))
+        assert first.server.recorder.wait_idle(10)
+        first.stop()
+        assert not Path(client.state_path(capture_env)).exists()
+
+        second = _Service(capture_env)
+        try:
+            status = _http_hook(
+                second.port,
+                _payload("PostToolUse", other, tool_name="Bash",
+                         tool_input={"command": "ls"}, tool_response={}),
+                _capability(capture_env, repo),
+            )
+            assert status == 200
+            assert second.server.recorder.wait_idle(10)
+            assert _wait_for(lambda: _tool_calls(other) == 1)
+        finally:
+            second.stop()
+
     def test_a_status_ping_teaches_a_restarted_service_the_session_project(self, capture_env, repo, tmp_path):
         """After a restart nothing links the session to its project until a command hook (the status line) says so."""
         other = _make_repo(tmp_path / "other")
@@ -175,3 +202,55 @@ class TestServiceResolvesTheProject:
         assert client._service_has_feature({"features": ["x"]}, client.CAPABILITY_ROOT_FALLBACK) is False
         assert client._service_has_feature({"version": "0.4.9"}, client.CAPABILITY_ROOT_FALLBACK) is False
         assert client._service_has_feature(None, client.CAPABILITY_ROOT_FALLBACK) is False
+
+
+def test_a_state_write_survives_a_briefly_locked_file(tmp_path, monkeypatch):
+    # Seen live on Windows: "could not update state file: PermissionError" while
+    # another process had the file open, so the project list was not saved.
+    target = tmp_path / "claude-capture.json"
+    real_replace = client.os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError("in use")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(client.os, "replace", flaky_replace)
+    svc._write_state(target, {"recent_repos": ["C:/repo"]})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"recent_repos": ["C:/repo"]}
+
+    monkeypatch.setattr(client.os, "replace", lambda src, dst: (_ for _ in ()).throw(PermissionError("in use")))
+    try:
+        svc._write_state(target, {"recent_repos": []})
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("a file that stays locked must still be reported")
+    assert not list(tmp_path.glob("*.tmp"))  # no stray temporary file is left behind
+
+
+def test_concurrent_state_writes_do_not_collide(tmp_path):
+    # Seen live: "could not update state file: FileNotFoundError" when two request
+    # threads shared one temporary file name and one replaced it first.
+    import threading
+
+    target = tmp_path / "claude-capture.json"
+    errors: list[BaseException] = []
+
+    def write(n: int) -> None:
+        try:
+            for i in range(20):
+                svc._write_state(target, {"recent_repos": [f"C:/repo{n}-{i}"]})
+        except BaseException as exc:  # noqa: BLE001 - collected for the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert json.loads(target.read_text(encoding="utf-8"))["recent_repos"]
+    assert not list(tmp_path.glob("*.tmp"))

@@ -47,14 +47,14 @@ BROAD_EXCEPT_CEILING = 5
 # unit is under the ceiling.
 MODULE_LINE_BUDGETS = {
     "openshard/cli/main.py": 8454,
-    "openshard/adapters/claude_hooks.py": 4701,
+    "openshard/adapters/claude_hooks.py": 4556,
     "openshard/native/context.py": 3742,
     "openshard/history/shard_contract.py": 1807,
     "openshard/run/pipeline.py": 2827,
     "openshard/cli/run_output.py": 2580,
     "openshard/cli/osn_cmd.py": 2388,
     "openshard/native/executor.py": 1683,
-    "openshard/adapters/claude_capture_service.py": 1642,
+    "openshard/adapters/claude_capture_service.py": 1637,
 }
 
 FUNCTION_LINE_BUDGETS = {
