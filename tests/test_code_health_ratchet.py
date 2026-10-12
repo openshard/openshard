@@ -54,7 +54,7 @@ MODULE_LINE_BUDGETS = {
     "openshard/cli/run_output.py": 2580,
     "openshard/cli/osn_cmd.py": 2388,
     "openshard/native/executor.py": 1683,
-    "openshard/adapters/claude_capture_service.py": 1642,
+    "openshard/adapters/claude_capture_service.py": 1637,
 }
 
 FUNCTION_LINE_BUDGETS = {
