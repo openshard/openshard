@@ -169,3 +169,45 @@ def commits_in_window(
     if out is None:
         return None
     return [line.strip() for line in out.splitlines() if _is_sha_like(line.strip())]
+
+
+def main_checkout_of(root: Path) -> Path | None:
+    """The main checkout *root* is a linked ``git worktree`` of, else None. Never raises.
+
+    A linked worktree's ``--git-common-dir`` is the main checkout's ``.git``;
+    a main checkout (or a directory that is not a git checkout) yields None.
+    """
+    try:
+        out = run_git(root, ["rev-parse", "--git-common-dir"])
+        if not out or not out.strip():
+            return None
+        common = Path(out.strip())
+        common = (common if common.is_absolute() else root / common).resolve()
+        if common.name == ".git" and common.parent != root.resolve():
+            return common.parent
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return None
+
+
+def checkout_facts(root: Path) -> dict:
+    """What kind of checkout a Receipt's git evidence was observed in. Never raises.
+
+    ``kind`` is ``linked_worktree`` when *root* is a ``git worktree`` of
+    another checkout, ``main_checkout`` for the checkout that owns the git
+    dir, or ``not_git``. ``name`` is a linked worktree's directory basename
+    (never its absolute path), which tells worktrees of one repository
+    apart; a main checkout is identified by its repository already and
+    carries no name. A session that works in several checkouts produces one
+    Receipt per checkout, all with the same ``capture.session_id``; this
+    block says which one each is.
+    """
+    try:
+        inside = run_git(root, ["rev-parse", "--is-inside-work-tree"])
+        if inside is None or inside.strip() != "true":
+            return {"kind": "not_git", "name": None}
+        if main_checkout_of(root) is not None:
+            return {"kind": "linked_worktree", "name": root.name}
+    except (OSError, RuntimeError, ValueError):
+        return {"kind": "not_git", "name": None}
+    return {"kind": "main_checkout", "name": None}

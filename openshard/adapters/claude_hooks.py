@@ -187,8 +187,6 @@ from openshard.adapters.capture_agents import (
     profile_for,
 )
 from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-exported for callers and tests)
-    _TRANSCRIPT_MAX_FILES,
-    _TRANSCRIPT_RECENT_IDS,
     _count,
     _new_transcript_state,
     _parse_utc,
@@ -215,7 +213,7 @@ from openshard.history.task_identity import (
     stored_task_id,
 )
 from openshard.history.task_title import derive_task_title
-from openshard.util.git import run_git
+from openshard.util.git import checkout_facts, run_git
 
 # Claude Code identity constants -- kept as module names for existing
 # callers/tests; the values are the Claude profile's (adapters/capture_agents.py).
@@ -2317,30 +2315,6 @@ def _snapshot_start_head(repo_root: Path) -> str | None:
     return _sha_or_none(run_git(repo_root, ["rev-parse", "HEAD"]))
 
 
-def checkout_facts(repo_root: Path) -> dict:
-    """What kind of checkout the Receipt's git evidence was observed in. Never raises.
-
-    ``kind`` is ``linked_worktree`` when *repo_root* is a ``git worktree`` of
-    another checkout (its common git dir lives elsewhere), ``main_checkout``
-    for the checkout that owns the git dir, or ``not_git``. ``name`` is a
-    linked worktree's directory basename (never its absolute path), which
-    tells worktrees of one repository apart; a main checkout is identified
-    by its repository already and carries no name. A session that works in
-    several checkouts produces one Receipt per checkout, all with the same
-    ``capture.session_id``; this block says which one each is.
-    """
-    kind = "not_git"
-    try:
-        out = run_git(repo_root, ["rev-parse", "--git-common-dir"])
-        if out and out.strip():
-            common = Path(out.strip())
-            common = (common if common.is_absolute() else repo_root / common).resolve()
-            kind = "linked_worktree" if common.parent != repo_root.resolve() else "main_checkout"
-    except Exception:
-        kind = "not_git"
-    return {"kind": kind, "name": repo_root.name if kind == "linked_worktree" else None}
-
-
 def _snapshot_baseline(repo_root: Path, now: str) -> dict:
     """Working-tree changes already present when the session was first observed.
 
@@ -3396,8 +3370,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         "attempt_number": record["attempt_number"],
         "capture": {
             "source": profile.capture_source,
-            # PR12: explicit agent identity, never inferred from the model.
-            "agent": profile.key,
+            "agent": profile.key,  # explicit agent identity, never inferred from the model
             "agent_vendor": profile.vendor,
             "provider": provider_current,
             "session_id": buf.get("session_id"),

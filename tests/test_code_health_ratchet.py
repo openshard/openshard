@@ -146,7 +146,7 @@ BROAD_EXCEPT_BUDGETS = {
     "openshard/cli/main.py": 16,
     "openshard/history/event.py": 15,
     "openshard/sync/client.py": 13,
-    "openshard/adapters/claude_capture_service.py": 13,
+    "openshard/adapters/claude_capture_service.py": 11,
     "openshard/adapters/claude_hooks_install.py": 10,
     "openshard/scoring/filter.py": 8,
     "openshard/cli/osn_cmd.py": 7,
