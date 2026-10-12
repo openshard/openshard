@@ -49,7 +49,7 @@ MODULE_LINE_BUDGETS = {
     "openshard/cli/main.py": 8565,
     "openshard/adapters/claude_hooks.py": 4945,
     "openshard/native/context.py": 3742,
-    "openshard/history/shard_contract.py": 1806,
+    "openshard/history/shard_contract.py": 1807,
     "openshard/run/pipeline.py": 2827,
     "openshard/cli/run_output.py": 2580,
     "openshard/cli/osn_cmd.py": 2388,

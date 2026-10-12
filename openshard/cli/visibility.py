@@ -23,6 +23,7 @@ from datetime import datetime
 from openshard.history.locate import HistoryLocation
 from openshard.history.proof_signals import verification_status_from_receipt
 from openshard.history.query import HistoryPage, RecentShard, RelevantContext, RelevantMatch
+from openshard.history.receipt_render import _format_token_count
 from openshard.history.shard import (
     CAPTURE_FULL,
     CAPTURE_PARTIAL,
@@ -34,7 +35,6 @@ from openshard.history.shard_contract import (
     _EM,
     _UNICODE_OK,
     ShardReceipt,
-    _format_token_count,
     agent_reported_suffix,
 )
 from openshard.history.stats import HistoryStats

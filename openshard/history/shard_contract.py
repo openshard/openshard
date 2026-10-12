@@ -5,6 +5,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
+from typing import Any
 
 from openshard.history.capture_completeness import (
     derive_capture_completeness,
@@ -1798,7 +1799,7 @@ _RENDER_EXPORTS = frozenset({
 })
 
 
-def __getattr__(name: str) -> object:
+def __getattr__(name: str) -> Any:
     if name in _RENDER_EXPORTS:
         from openshard.history import receipt_render
 
