@@ -668,6 +668,10 @@ def _from_review_checks(review: list) -> VerificationEvidence:
     return ev
 
 
+# verification/check_command.CHECK_KINDS: the kinds a captured command can run as a check.
+_CHECK_COMMAND_KINDS = frozenset({"test", "lint", "typecheck", "build"})
+
+
 def _hook_check_events(entry: dict) -> list[dict]:
     events = entry.get("events")
     if not isinstance(events, list):
@@ -678,7 +682,7 @@ def _hook_check_events(entry: dict) -> list[dict]:
             continue
         raw_meta = ev.get("metadata")
         meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
-        if meta.get("command_kind") in ("test", "lint"):
+        if meta.get("command_kind") in _CHECK_COMMAND_KINDS:
             out.append(ev)
     return out
 
@@ -713,7 +717,7 @@ def _from_hook_record(entry: dict, capture: dict, attempted: bool) -> Verificati
             meta: dict = item.get("metadata") or {}
             name = _safe_text(item.get("action"), MAX_NAME) or "check command"
             status = CHECK_FAILED if item.get("status") == "failed" else CHECK_UNKNOWN
-            kind = "test" if meta.get("command_kind") == "test" else "lint"
+            kind = meta["command_kind"]
             ev.checks.append(VerificationCheck(name=name, status=status, kind=kind))
         stamps = [s for s in (_stamp(e.get("occurred_at")) for e in check_events) if s]
         ev.started_at = min(stamps) if stamps else None

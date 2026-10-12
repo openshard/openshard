@@ -20,6 +20,18 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Only commands that run a check are recorded as checks, with an outcome that is their own.**
+  Captured commands were classified by searching the whole command line for a tool name, so
+  `git commit -m "ran ruff"`, `grep -n pytest` and heredoc edit scripts became tests or lint
+  checks, and a failed commit became a failed lint check. A command is now a check only when one
+  of its simple commands runs a test, lint, type-check or build program (`verification/check_command.py`),
+  each check is named by its own command (`python -m pytest -q`, not the whole line or
+  "Bash command (redacted)"), and a command line can record several checks. The agent's reported
+  outcome counts for a check only when the shell returned that check's exit status:
+  `pytest | tail` and `pytest; echo done` leave the check unknown, and a failed
+  `pytest && git commit` is not a failed test. The reason is recorded in the verification
+  block's `incomplete_reasons`. Check recording moved to `adapters/claude_hook_checks.py`.
+
 - **A commit made before the capture service replays the session's first hook is still the
   session's.** The service anchored the working-tree baseline when `SessionStart` (or the first
   model invocation) was received, but read the repository's start HEAD only when the queue was
