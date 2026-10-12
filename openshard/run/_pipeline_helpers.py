@@ -23,6 +23,8 @@ from openshard.execution.generator import ChangedFile, ExecutionGenerator, Execu
 from openshard.history.jsonl_store import append_jsonl
 from openshard.history.shard_schema import SHARD_SCHEMA_VERSION, coerce_shard_entry
 from openshard.history.task_title import derive_task_title
+from openshard.history.usage import COST_SOURCE_LIST_RATE, COST_SOURCE_PROVIDER
+from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE
 from openshard.providers.openrouter import MODEL_PRICING, compute_cost
 from openshard.routing.form_factor_policy import ExecutionFormFactorDecision
 from openshard.routing.profiles import ProfileDecision
@@ -572,6 +574,19 @@ def _log_run(
         entry["completion_tokens"] = usage.completion_tokens
         entry["total_tokens"] = usage.total_tokens
         entry["estimated_cost"] = usage.estimated_cost
+        # Providers fill 0/0 when a response carries no usage, so only a
+        # non-zero count is the provider's report; anything else stays unknown.
+        if usage.total_tokens > 0:
+            entry["tokens_provenance"] = COST_SOURCE_PROVIDER
+            if usage.cache_read_tokens is not None:
+                entry["cache_read_tokens"] = usage.cache_read_tokens
+        _cost_sources = {usage.cost_source} if usage.estimated_cost is not None else {None}
+        if retry_triggered:
+            _cost_sources.add(getattr(retry_usage, "cost_source", None) if retry_usage is not None else None)
+        if _cost_sources == {COST_SOURCE_PROVIDER}:
+            entry["cost_provenance"] = COST_SOURCE_PROVIDER
+        elif None not in _cost_sources and _cost_sources <= {COST_SOURCE_PROVIDER, COST_SOURCE_LIST_RATE}:
+            entry["cost_provenance"] = COST_PROVENANCE_OFFICIAL_RATE
     if retry_usage is not None:
         entry["retry_prompt_tokens"] = retry_usage.prompt_tokens
         entry["retry_completion_tokens"] = retry_usage.completion_tokens

@@ -26,6 +26,7 @@ from openshard.history.shard_hash import integrity_as_stored, verify_shard_hash
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
 from openshard.history.timeline import normalize_timeline
+from openshard.history.usage import COST_SOURCE_PROVIDER
 from openshard.history.usage_evidence import effective_usage, usage_line
 from openshard.history.verification import (
     REASON_OUTCOME_NOT_OBSERVED,
@@ -1181,6 +1182,10 @@ def build_shard_receipt(
 
     if cost_raw is None:
         cost_display = "Not recorded"
+    elif cost_provenance == COST_SOURCE_PROVIDER:
+        # The provider's own per-call figure (OpenRouter ``usage.cost``): the
+        # amount it charged, so not an estimate (``cost_is_estimate`` agrees).
+        cost_display = f"${cost_raw:.4f}"
     elif cost_provenance:
         # Provider/agent-reported figures (Claude Code's own status-line cost,
         # OpenTelemetry cost metrics, ...) are all documented as approximate,

@@ -22,6 +22,7 @@ from openshard.history.query import RecoveryObservation, RelevantAttempt, Releva
 from openshard.history.receipt_evidence import policy_decisions_block
 from openshard.history.shard import Shard
 from openshard.history.shard_contract import ShardFinding, ShardReceipt
+from openshard.history.usage import COST_SOURCE_PROVIDER
 from openshard.history.verification import parse_verification_block
 
 MAX_FILES = 50
@@ -109,8 +110,9 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
     stable. ``extended=True`` (used by ``openshard history --json``) adds the
     provenance-labelled cost/token fields and the turn-completion status:
     ``model`` stays the display string (``"Not recorded"`` / ``"Unknown"``
-    when that is the truth), ``cost_is_estimate`` is always ``True`` whenever
-    a cost exists, and token fields are ``None`` unless a provider/agent
+    when that is the truth), ``cost_is_estimate`` is ``True`` whenever
+    a cost exists unless every call's figure was the provider's own
+    (``cost_provenance == "provider_reported"``), and token fields are ``None`` unless a provider/agent
     reported them (``tokens_provenance`` says who). The extended form also
     drops Note-severity findings -- that is where free-form ``agent_notes``
     land (see ``history.query``), and a recent-work listing has no need for
@@ -167,7 +169,9 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
             "task_completion": receipt.task_completion,
             "cost_usd": receipt.cost_raw,
             "cost_provenance": receipt.cost_provenance,
-            "cost_is_estimate": receipt.cost_raw is not None,
+            # Only the provider's own per-call figure is actual; agent-reported
+            # figures (documented as approximate) and list-rate arithmetic are estimates.
+            "cost_is_estimate": receipt.cost_raw is not None and receipt.cost_provenance != COST_SOURCE_PROVIDER,
             "tokens_input": receipt.tokens_input,
             "tokens_output": receipt.tokens_output,
             "tokens_cache_read": receipt.tokens_cache_read,

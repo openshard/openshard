@@ -58,7 +58,7 @@ HOOKS_FULL = {
     "schema_version": "1.2", "shard_id": "shard-hooks-1", "timestamp": T3, "run_id": T3 + "-abcd1234",
     "attempt_number": 1, "task": "refactor auth middleware", "executor": "claude_code_hooks",
     "import_source": "claude_code", "import_method": "hooks", "files_source": "git_diff_inferred",
-    "execution_model": "claude-sonnet-4-6", "estimated_cost": 0.42, "cost_provenance": "provider_reported",
+    "execution_model": "claude-sonnet-4-6", "estimated_cost": 0.42, "cost_provenance": "agent_reported",
     "prompt_tokens": 14000, "completion_tokens": 2500, "total_tokens": 16500,
     "cache_creation_tokens": 0, "cache_read_tokens": 30000, "tokens_provenance": "provider_reported",
     "duration_seconds": 95.0,
@@ -236,7 +236,7 @@ class TestHistory:
         assert list(rows) == ["shard-hooks-2", "shard-hooks-1", "shard-native-2"]
         full = rows["shard-hooks-1"]
         assert full["cost"] == "$0.42 est." and full["cost_is_estimate"] is True
-        assert full["cost_provenance"] == "provider_reported"
+        assert full["cost_provenance"] == "agent_reported"
         assert full["tokens_input"] == 14000 and full["tokens_provenance"] == "provider_reported"
         assert full["task_completion"] == "Turn completed (unverified)"
         unknown = rows["shard-hooks-2"]

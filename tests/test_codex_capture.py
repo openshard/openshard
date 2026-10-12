@@ -320,6 +320,8 @@ class TestCanonicalRecord:
         assert cap["model_source"] == "codex_hook"
         assert cap["session_id"] == SID and cap["session_end_observed"] is True
         assert cap["prompt_count"] == 1 and cap["tool_call_count"] == 3 and cap["turn_count"] == 1
+        # Codex has no tool-failure hook: the failure count is unknown, never an observed zero.
+        assert cap["tool_failure_count"] is None
         assert cap["task_status"] == "turn_completed"
         assert entry["task"].startswith("Add a calculator module")
         assert SECRET not in json.dumps(entry) and TRANSCRIPT not in json.dumps(entry)

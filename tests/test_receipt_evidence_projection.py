@@ -250,6 +250,19 @@ class TestSession:
         assert ev.session_block({"capture": {"started_at": "nope"}}) is None
         assert ev.session_block({"capture": "x"}) is None
 
+    def test_resumed_segment_links_its_earlier_receipt(self):
+        rid = "rcpt_" + "ab" * 16
+        d = ev.session_block({"capture": {**self.CAPTURE, "resumed_from_receipt_id": rid}})
+        assert d is not None and d["resumed_from_receipt_id"] == rid
+        bad = ev.session_block({"capture": {**self.CAPTURE, "resumed_from_receipt_id": "rcpt_not-an-id"}})
+        assert bad is not None and "resumed_from_receipt_id" not in bad
+        # Unrecorded stays absent, so an older Platform contract still accepts the block.
+        assert "resumed_from_receipt_id" not in (ev.session_block({"capture": self.CAPTURE}) or {})
+
+    def test_agents_without_a_failure_hook_report_unknown_failures(self):
+        d = ev.session_block({"capture": {**self.CAPTURE, "tool_failure_count": None}})
+        assert d is not None and d["tool_failure_count"] is None
+
 
 class TestRouting:
     def test_no_recorded_routing_is_null(self):
@@ -434,6 +447,23 @@ class TestModelStageMetrics:
     def test_observed_models_fallback_carries_no_metrics(self):
         d = _ext(_entry(capture={"models_seen": ["a/x", "b/y"]}))["model_stages"]
         assert len(d) == 2 and all(set(s) == {"stage", "model"} for s in d)
+
+    def test_model_switch_carries_each_models_transcript_tokens(self):
+        usage = {"claude-opus-5-5": {"input": 1200, "output": 300, "messages": 2},
+                 "claude-fable-5-1": {"input": 40, "output": 900, "messages": 1}}
+        d = _ext(_entry(capture={"models_seen": ["anthropic/claude-opus-5-5", "claude-fable-5-1"],
+                                 "usage_by_model": usage}))["model_stages"]
+        assert [(s["tokens_input"], s["tokens_output"]) for s in d] == [(1200, 300), (40, 900)]
+        # Cost per observed model is not recorded, so it is never sent.
+        assert all("cost_usd" not in s and "duration_seconds" not in s for s in d)
+
+    def test_model_switch_without_matching_or_complete_usage_stays_unknown(self):
+        usage = {"claude-opus-5-5": {"input": 1200, "output": 300}}
+        d = _ext(_entry(capture={"models_seen": ["claude-opus-5-5", "claude-fable-5-1"], "usage_by_model": usage}))
+        assert d["model_stages"][0]["tokens_input"] == 1200 and "tokens_input" not in d["model_stages"][1]
+        lower_bound = _ext(_entry(capture={"models_seen": ["claude-opus-5-5", "claude-fable-5-1"], "usage_by_model": usage,
+                                           "tokens_incomplete_reason": "transcript_files_capped"}))
+        assert all(set(s) == {"stage", "model"} for s in lower_bound["model_stages"])
 
 
 def test_projectors_never_raise_on_garbage():

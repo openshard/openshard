@@ -475,12 +475,12 @@ class TestReplayRetryNeverLosesEvidence:
         real_apply = svc.apply_reduced_hook
         calls = {"n": 0}
 
-        def flaky(reduced, root, *, dedup_id=None, at=None):
+        def flaky(reduced, root, *, dedup_id=None, at=None, at_precise=None):
             if reduced.event == "Stop" and calls["n"] == 0:
                 calls["n"] += 1
                 return ch.HookOutcome(event=reduced.event, action="error",
                                       session_id=reduced.session_id, detail="PermissionError")
-            return real_apply(reduced, root, dedup_id=dedup_id, at=at)
+            return real_apply(reduced, root, dedup_id=dedup_id, at=at, at_precise=at_precise)
 
         with patch.object(svc, "apply_reduced_hook", side_effect=flaky):
             assert _post(service.port, _payload("SessionStart", repo, source="startup"), project_dir=str(repo))
@@ -500,7 +500,7 @@ class TestReplayRetryNeverLosesEvidence:
         # on-disk state *during* the retry window rather than racing it.
         monkeypatch.setattr(svc, "_RETRY_BACKOFF_SECONDS", 5.0)
 
-        def always_fails(reduced, root, *, dedup_id=None, at=None):
+        def always_fails(reduced, root, *, dedup_id=None, at=None, at_precise=None):
             return ch.HookOutcome(event=reduced.event, action="error",
                                   session_id=reduced.session_id, detail="PermissionError")
 

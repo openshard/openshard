@@ -65,6 +65,9 @@ class AgentProfile:
     # estimate, not a figure the model provider reported. None = same as
     # ``usage_provenance``.
     cost_provenance: str | None = None
+    # False when the agent has no tool-failure event (Codex, OpenCode): its
+    # failure count is then unknown on the Receipt, never an observed zero.
+    observes_tool_failures: bool = True
 
 
 CLAUDE_CODE_PROFILE = AgentProfile(
@@ -116,6 +119,7 @@ CODEX_PROFILE = AgentProfile(
         "OpenShard does not run checks for this capture path: any check outcome here is the "
         "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
+    observes_tool_failures=False,
 )
 
 OPENCODE_PROFILE = AgentProfile(
@@ -140,6 +144,7 @@ OPENCODE_PROFILE = AgentProfile(
         "OpenShard does not run checks for this capture path: any check outcome here is the "
         "agent's own report (agent_reported) until `openshard verify` re-runs it."
     ),
+    observes_tool_failures=False,
 )
 
 CURSOR_PROFILE = AgentProfile(

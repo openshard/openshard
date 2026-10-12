@@ -370,6 +370,11 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _now_precise() -> str:
+    """Now, to the millisecond (transcript reply timestamps carry milliseconds)."""
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
 def _seconds_since(stamp: object, now: datetime | None = None) -> float | None:
     """Seconds elapsed since an OpenShard UTC timestamp string (until *now*,
     default the current time); None if unparsable."""
@@ -1152,7 +1157,7 @@ def _transcript_usage(buf: dict) -> dict | None:
     if raw is None:
         return cached
     try:
-        since = buf.get("started_at")
+        since = buf.get("transcript_since") or buf.get("started_at")
         state = buf.get("transcript_state")
         if not isinstance(state, dict) or state.get("since") != since or not isinstance(state.get("files"), dict):
             state = _new_transcript_state(since)
@@ -2266,7 +2271,7 @@ def _entry_ended(entry: dict) -> bool:
 
 def _resumed_segment(
     persisted: dict, repo_root: Path, session_id: str, first_hook: str, *, now: str | None,
-    agent: str, baseline: dict | None,
+    agent: str, baseline: dict | None, transcript_since: str | None = None,
 ) -> dict:
     """A fresh buffer for hooks arriving after this session's receipt already ended.
 
@@ -2281,6 +2286,12 @@ def _resumed_segment(
     """
     buf = _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline)
     buf["start_source"] = "resume"
+    # The transcript is shared with the ended segment, whose replies were all
+    # written before this hook arrived. ``started_at`` is whole seconds, so a
+    # window starting there would count the ended segment's replies from that
+    # same second again; the hook's millisecond arrival time does not.
+    if transcript_since:
+        buf["transcript_since"] = transcript_since
     if agent == AGENT_CODEX:
         buf["codex_usage_baseline_required"] = True
     previous = persisted.get("receipt_id")
@@ -2317,7 +2328,7 @@ def _late_hook_for_ended(persisted: dict, first_hook: str, now: str | None) -> b
 
 def _load_or_create_buffer(
     repo_root: Path, session_id: str, first_hook: str, *, now: str | None = None,
-    agent: str = AGENT_CLAUDE_CODE, baseline: dict | None = None,
+    agent: str = AGENT_CLAUDE_CODE, baseline: dict | None = None, observed_at: str | None = None,
 ) -> dict | None:
     """The session's buffer: live, rebuilt from a not-ended record, a resumed segment, or new.
 
@@ -2336,6 +2347,7 @@ def _load_or_create_buffer(
                 return None
             return _resumed_segment(
                 persisted, repo_root, session_id, first_hook, now=now, agent=agent, baseline=baseline,
+                transcript_since=observed_at,
             )
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
@@ -3602,7 +3614,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "prompt_count": prompt_count,
             "turn_count": turn_count,
             "tool_call_count": tool_calls,
-            "tool_failure_count": int(buf.get("tool_failure_count") or 0),
+            "tool_failure_count": int(buf.get("tool_failure_count") or 0) if profile.observes_tool_failures else None,
             # Activity failures: shell commands whose reported outcome was a
             # non-zero exit, whichever hook carried it. Distinct from
             # ``tool_failure_count`` (the agent's own tool-failure events) and
@@ -4419,6 +4431,7 @@ def apply_reduced_hook(
     *,
     dedup_id: str | None = None,
     at: str | None = None,
+    at_precise: str | None = None,
 ) -> HookOutcome:
     """Stage/fold one already-reduced hook for *repo_root*. Never raises.
 
@@ -4426,17 +4439,19 @@ def apply_reduced_hook(
     the capture service's queue replay. ``dedup_id`` makes a replay
     idempotent: an id already recorded in the session buffer is ignored
     (so a queue re-read after a crash never double-counts). ``at`` is the
-    observation time to record (default: now).
+    observation time to record (default: now); ``at_precise`` is the same
+    instant to the millisecond, when the caller recorded it.
     """
     try:
         now = at or _now()
+        observed_at = at_precise if at_precise else (None if at else _now_precise())
         from openshard.history.jsonl_store import history_file_lock
 
         path = buffer_path(repo_root, payload.session_id, payload.agent)
         with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
             loaded = _load_or_create_buffer(
                 repo_root, payload.session_id, payload.event, now=now, agent=payload.agent,
-                baseline=payload.baseline,
+                baseline=payload.baseline, observed_at=observed_at,
             )
             if loaded is None:
                 ended = _find_persisted_entry(repo_root, payload.session_id, profile_for(payload.agent).executor)

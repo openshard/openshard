@@ -1160,6 +1160,11 @@ def session_block(entry: dict) -> dict[str, Any] | None:
         "tool_call_count": _count(capture.get("tool_call_count")),
         "tool_failure_count": _count(capture.get("tool_failure_count")),
     }
+    # A resumed session's earlier segment, so one long task's Receipts stay linked.
+    # Additive: sent only when recorded, so older Platform contracts still accept the block.
+    resumed_from = capture.get("resumed_from_receipt_id")
+    if isinstance(resumed_from, str) and re.fullmatch(r"rcpt_[0-9a-f]{32}", resumed_from):
+        block["resumed_from_receipt_id"] = resumed_from
     return None if _all_none(block) else block
 
 
@@ -1231,10 +1236,14 @@ def retry_block(entry: dict) -> dict[str, Any] | None:
 
 
 def stage_metrics(entry: dict) -> list[dict[str, float | int | None]]:
-    """Per-stage duration/cost/token usage, parallel to ``model_stages`` built from ``stage_runs``."""
+    """Per-stage duration/cost/token usage, parallel to ``model_stages``.
+
+    Built from ``stage_runs``, or for a session observed across several models
+    (``Observed N`` stages) from the transcript's own per-model usage.
+    """
     runs = entry.get("stage_runs")
-    if not isinstance(runs, list):
-        return []
+    if not isinstance(runs, list) or not runs:
+        return _observed_model_metrics(entry)
     return [
         {
             "duration_seconds": _number(s.get("duration")),
@@ -1245,6 +1254,30 @@ def stage_metrics(entry: dict) -> list[dict[str, float | int | None]]:
         for s in runs
         if isinstance(s, dict) and "stage_type" in s and "model" in s
     ]
+
+
+def _observed_model_metrics(entry: dict) -> list[dict[str, float | int | None]]:
+    """Tokens per observed model, parallel to the ``Observed N`` stages (``capture.models_seen``).
+
+    Only from a complete transcript breakdown (a lower bound is not a
+    per-model figure), and only for a model whose transcript id matches the
+    one the hooks saw, bare or provider-prefixed. Anything else stays unknown.
+    """
+    capture = _dict(entry.get("capture"))
+    seen = [m for m in (capture.get("models_seen") or []) if isinstance(m, str) and m][:5]
+    by_model = _dict(capture.get("usage_by_model"))
+    if len(seen) < 2 or not by_model or capture.get("tokens_incomplete_reason") is not None:
+        return []
+    out: list[dict[str, float | int | None]] = []
+    for model in seen:
+        row = _dict(by_model.get(model) or by_model.get(model.rsplit("/", 1)[-1]))
+        out.append({
+            "duration_seconds": None,
+            "cost_usd": None,
+            "tokens_input": _count(row.get("input")),
+            "tokens_output": _count(row.get("output")),
+        })
+    return out
 
 
 _CLAUDE_PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "dontAsk")

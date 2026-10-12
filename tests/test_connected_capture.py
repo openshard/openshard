@@ -630,3 +630,39 @@ def test_claude_cloud_stop_seals_partial_receipt_and_resume_preserves_bytes(home
     assert first == original
     assert second["receipt_id"] != first["receipt_id"]
     assert second["capture"]["resumed_from_receipt_id"] == first["receipt_id"]
+
+
+def test_resumed_segment_does_not_recount_replies_from_the_same_second(home, repo, tmp_path, monkeypatch):
+    """The resumed segment's usage window starts at the hook's millisecond arrival, not the whole second."""
+    from openshard.adapters import claude_hooks
+
+    _proxy_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    transcript = tmp_path / "claude" / "projects" / "-repo" / f"{SID}.jsonl"
+    transcript.parent.mkdir(parents=True)
+
+    def reply(n: int, at: str, tokens: int) -> None:
+        usage = {"input_tokens": tokens, "output_tokens": tokens, "cache_read_input_tokens": 0,
+                 "cache_creation_input_tokens": 0}
+        line = {"type": "assistant", "sessionId": SID, "timestamp": at,
+                "message": {"id": f"msg_{n}", "model": "claude-opus-5-5", "role": "assistant", "usage": usage}}
+        with transcript.open("a") as fh:
+            fh.write(json.dumps(line) + "\n")
+
+    def hook(event: str, precise: str, **extra) -> None:
+        monkeypatch.setattr(claude_hooks, "_now", lambda: precise[:19] + "Z")
+        monkeypatch.setattr(claude_hooks, "_now_precise", lambda: precise)
+        _hook(repo, event, transcript_path=str(transcript), **extra)
+
+    hook("SessionStart", "2026-10-12T09:00:00.100Z", source="startup")
+    hook("UserPromptSubmit", "2026-10-12T09:00:00.200Z", prompt="first turn")
+    reply(1, "2026-10-12T09:00:05.300Z", 100)
+    hook("Stop", "2026-10-12T09:00:05.400Z")
+    # The next prompt arrives within the same second as the first turn's reply.
+    hook("UserPromptSubmit", "2026-10-12T09:00:05.900Z", prompt="second turn")
+    reply(2, "2026-10-12T09:00:05.950Z", 7)
+    hook("Stop", "2026-10-12T09:00:06.100Z")
+    first, second = load_history(repo / ".openshard" / "runs.jsonl", coerce=False)
+    assert second["capture"]["resumed_from_receipt_id"] == first["receipt_id"]
+    assert (first["prompt_tokens"], first["completion_tokens"]) == (100, 100)
+    assert (second["prompt_tokens"], second["completion_tokens"]) == (7, 7)

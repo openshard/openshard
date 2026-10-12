@@ -2194,6 +2194,11 @@
                       "type": "null"
                     }
                   ]
+                },
+                "resumed_from_receipt_id": {
+                  "description": "The earlier Receipt of the same agent session this segment resumed (Core 0.4.16+).",
+                  "type": "string",
+                  "pattern": "^rcpt_[0-9a-f]{32}$"
                 }
               },
               "additionalProperties": false

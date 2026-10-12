@@ -163,6 +163,10 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _now_precise() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
 def queue_key(session_id: str, agent: str = AGENT_CLAUDE_CODE) -> str:
     """Queue-file stem for one agent session: ``<sid>`` for Claude Code, ``<agent>.<sid>`` otherwise.
 
@@ -557,7 +561,8 @@ class CaptureRecorder:
                 self._bump("ignored")
                 return "ignored", "workspace status outside a repository turn"
             return self._record_resolved(owner, payload, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env)
-        deliveries = self._workspace.route(workspace, key, payload, _now())
+        # Routed with millisecond arrival times; recorded at whole seconds like every other stamp.
+        deliveries = self._workspace.route(workspace, key, payload, _now_precise())
         if not deliveries:
             if payload.event in (EVENT_SESSION_START, EVENT_USER_PROMPT_SUBMIT):
                 # Replayed, with its observation time, into each checkout the turn touches.
@@ -566,12 +571,14 @@ class CaptureRecorder:
             self._bump("ignored")
             return "ignored", "workspace event outside every repository checkout"
         for repo, routed, at in deliveries:
-            self._record_resolved(repo, routed, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env, at=at)
+            self._record_resolved(repo, routed, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env,
+                                  at=at[:19] + "Z", at_precise=at)
         return "queued", payload.event
 
     def _record_resolved(
         self, root: Path, payload: Any, *, t0: float, correlation: dict | None,
         task_id: str | None, agent_env: dict[str, str] | None, at: str | None = None,
+        at_precise: str | None = None,
     ) -> tuple[str, str]:
         if isinstance(payload, StatusPayload):
             key = queue_key(str(payload.session_id), payload.agent)
@@ -600,6 +607,10 @@ class CaptureRecorder:
             # with its first model invocation instead -- once per session.
             reduced.baseline = _snapshot_baseline(root, at or _now())
         line = {"id": self._next_id(), "kind": "hook", "at": at or _now(), "data": reduced.to_dict()}
+        # Arrival to the millisecond: a resumed segment's transcript window starts here.
+        precise = at_precise if at is not None else _now_precise()
+        if precise:
+            line["at_precise"] = precise
         self._queue_line(root, key, line)
         self._bump("queued", payload.event)
         self._note_agent_received(reduced.agent, payload.event)
@@ -899,7 +910,8 @@ class CaptureRecorder:
                     result.corrupt += 1
                     continue
                 result.session = (reduced.session_id, reduced.agent)
-                outcome = apply_reduced_hook(reduced, root, dedup_id=dedup_id, at=at)
+                at_precise = line.get("at_precise") if isinstance(line.get("at_precise"), str) else None
+                outcome = apply_reduced_hook(reduced, root, dedup_id=dedup_id, at=at, at_precise=at_precise)
                 if outcome.action == "error":
                     with self._stats_lock:
                         self.stats["replay_errors"] = int(self.stats.get("replay_errors") or 0) + 1

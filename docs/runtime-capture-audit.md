@@ -15,6 +15,16 @@ A commit's author/model label cannot replace runtime usage evidence.
 | Grok Build hooks | Not exposed by this adapter's hooks | Not exposed by this adapter's hooks | Not exposed by this adapter's hooks |
 | Hermes hooks | Provider/model in requests | Per-request usage reports | Not exposed by this adapter's hooks |
 
+Tool-failure counts need a failure event. Codex hooks have no `PostToolUseFailure` and the
+OpenCode plugin has no failure event, so their Receipts record the failure count as unknown
+(`null`), never as an observed zero. Native `openshard run` records keep provider-reported
+token counts only when the provider returned non-zero usage. Their cost is marked actual
+(`cost_is_estimate: false`) only when every call's figure was the provider's own charge.
+
+The per-integration field matrix (captured, lost, inferred, unavailable), the completeness
+score and its measured baseline are kept in the Platform repository at
+`docs/receipts/RECEIPT_COMPLETENESS.md`.
+
 Readable Claude and Codex historical logs also have ingestion parsers. Their
 availability on a local machine does not imply availability in ChatGPT Work,
 mobile Codex or another cloud session. Destroyed sessions cannot be recreated
