@@ -30,6 +30,11 @@ does not show.
 
 ## 3. Modules to split
 
+Superseded on 2026-10-12 by `CODE_HEALTH_BASELINE.md`, which re-measures these
+modules, names the seams per module and is enforced by
+`tests/test_code_health_ratchet.py`. The rows below are kept for the v0.4.4
+figures.
+
 | Module | Lines | Suggested seams |
 |---|---|---|
 | `cli/main.py` | **8515** [6541] | Command groups already exist logically: `receipts` (last/history/context/stats), `capture`, `mcp`, `setup/doctor`, `trust/proof`, `run/native`, `pr/reflect`. One Click group per file under `cli/commands/`; `main.py` keeps registration only. Start with `capture` + `doctor` (trust-critical, touched by v0.4.4). |
