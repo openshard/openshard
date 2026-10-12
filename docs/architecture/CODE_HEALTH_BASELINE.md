@@ -1,6 +1,6 @@
 # Code health baseline and refactoring plan
 
-Measured on `main` at `fd70787a` (the v0.4.15 commit) on 2026-10-12 with
+Originally measured on `main` at `fd70787a` (the v0.4.15 commit) on 2026-10-12 with
 `python scripts/code_health.py`, which uses only the standard library so every
 machine and CI agree. `tests/test_code_health_ratchet.py` embeds these numbers
 as budgets: a unit that grows past its budget fails, and a unit that shrinks
@@ -13,6 +13,10 @@ Companion documents: `POST_V044_CORE_CLEANUP.md` (duplication, stale markers
 and typing, re-measured 2026-10-11) and `tests/test_architecture_boundaries.py`
 (package dependency rules). This file owns module size, function size,
 complexity and broad exception handling.
+
+The capture service's size and broad-handler baselines were updated after the
+capture authentication fix in Core PR #528: 1,640 lines and 13 broad handlers.
+The rest of the original baseline is unchanged. New growth still fails the ratchet.
 
 ## Totals
 
@@ -204,7 +208,7 @@ that are already independent and can move into `native/context/` by family
 `context.py` re-exporting. Lower priority than the four modules above; ratchet
 only.
 
-### `adapters/claude_capture_service.py` (1,557)
+### `adapters/claude_capture_service.py` (1,640 after merged capture repair)
 
 `serve` (177 lines) is the HTTP loop plus flusher and idle-watch threads.
 Extracting the request handler and the idle watch into named classes would
