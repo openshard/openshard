@@ -6949,6 +6949,47 @@ def import_claude(
         click.echo("OpenShard did not control this run.")
 
 
+@import_group.command("claude-transcript")
+@click.argument("transcript", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--repo", "repo_path", default=None, type=click.Path(file_okay=False),
+    help="Repository the session worked in (default: current directory).",
+)
+@click.option("--write", is_flag=True, default=False, help="Write the reconstructed Receipt; the default is a dry run.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def import_claude_transcript(transcript: str, repo_path: str | None, write: bool, as_json: bool) -> None:
+    """Reconstruct a Receipt from a Claude Code transcript whose hook events were lost.
+
+    Everything in the result is labelled as reconstructed: tool calls, prompts
+    and token usage are the transcript's; git state, cost and verification
+    were not observed and are left unknown. Nothing is written without
+    --write, and nothing is ever written over a session that already has a
+    Receipt here. A written Receipt syncs like any other local Receipt.
+    """
+    from openshard.adapters.claude_transcript_import import import_transcript
+
+    cwd = Path(repo_path) if repo_path else Path.cwd()
+    report = import_transcript(Path(transcript), repo_path=cwd, write=write)
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    if report.status == "not_a_transcript":
+        raise click.ClickException(f"{transcript} is not a Claude Code session transcript.")
+    if report.status == "already_recorded":
+        click.echo(f"Session {report.session_id} already has a Receipt here: {', '.join(report.existing)}. Nothing written.")
+        return
+    capture = (report.entry or {}).get("capture") or {}
+    click.echo(f"{'Wrote' if write else 'Would write'} reconstructed Receipt {report.receipt_id} for session {report.session_id}.")
+    click.echo(
+        f"  tool calls: {capture.get('tool_call_count')}  prompts: {capture.get('prompt_count')}  "
+        f"turns: {capture.get('turn_count')}  models: {', '.join(capture.get('models_seen') or []) or 'unknown'}"
+    )
+    click.echo(f"  tokens: {(report.entry or {}).get('total_tokens', 'not recorded')}  cost: not recorded  git state: not observed")
+    click.echo(f"  completeness: partial ({', '.join((capture.get('completeness') or {}).get('reasons') or [])})")
+    if not write:
+        click.echo("Dry run: re-run with --write to record it. Reconstructed evidence stays labelled as such.")
+
+
 @cli.group("wrap")
 def wrap_group() -> None:
     """Wrap an external AI coding command and record a Shard receipt automatically."""

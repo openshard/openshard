@@ -31,6 +31,22 @@ All notable changes to OpenShard are documented here.
   forwards the event through the command path whenever the running service
   lacks it, so an older service no longer drops those events either.
 
+## Unreleased
+
+### Added
+
+- `openshard import claude-transcript <transcript>` reconstructs a Receipt from a
+  Claude Code session transcript whose hook events were lost. Tool calls (with
+  the transcript's timestamps, working directories and failure flags), prompt
+  and turn counts and the provider's token usage come from the transcript;
+  git state, cost and verification are left unknown rather than invented; the
+  first prompt is kept only as the hook path's scrubbed excerpt, commands go
+  through the same summariser, and paths outside the repository are dropped.
+  Everything is labelled reconstructed (`import_method`, `capture.source`,
+  Event evidence `imported_transcript`, completeness reasons). The default is
+  a dry run; `--write` records it, with a receipt id derived from the session
+  so a repeat is a no-op, and never over a session that already has a Receipt.
+
 ## 0.4.15 - 2026-10-12
 
 <!-- release-title: Openshard v0.4.15 - Cloud Capture Readiness -->
