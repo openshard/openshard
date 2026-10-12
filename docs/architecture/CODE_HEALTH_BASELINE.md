@@ -14,8 +14,9 @@ and typing, re-measured 2026-10-11) and `tests/test_architecture_boundaries.py`
 (package dependency rules). This file owns module size, function size,
 complexity and broad exception handling.
 
-The capture service's size and broad-handler baselines were updated after the
-capture authentication fix in Core PR #528: 1,640 lines and 13 broad handlers.
+The capture modules' size baselines include Core PR #528 (worktree capture repair)
+and PR #527 (queued start-HEAD attribution): 1,642 lines for the service,
+4,945 lines for the hook adapter, and 13 broad handlers in the service.
 The rest of the original baseline is unchanged. New growth still fails the ratchet.
 
 ## Totals
@@ -86,7 +87,7 @@ Regression tests: `tests/test_cli_*.py` (per command), `tests/test_cli_entrypoin
 for the fast path, `tests/test_first_run_ux.py` for `doctor`. Each extraction
 is one PR that moves one group and its tests' imports; no behaviour change.
 
-### `adapters/claude_hooks.py` (4,918 lines; 18 importers, 35 test modules)
+### `adapters/claude_hooks.py` (4,945 after the capture fixes)
 
 What is wrong: the module's own section headers show seven concerns in one
 file: payload parsing, status-line parsing, transcript usage, repository
@@ -208,7 +209,7 @@ that are already independent and can move into `native/context/` by family
 `context.py` re-exporting. Lower priority than the four modules above; ratchet
 only.
 
-### `adapters/claude_capture_service.py` (1,640 after merged capture repair)
+### `adapters/claude_capture_service.py` (1,642 after the capture fixes)
 
 `serve` (177 lines) is the HTTP loop plus flusher and idle-watch threads.
 Extracting the request handler and the idle watch into named classes would
