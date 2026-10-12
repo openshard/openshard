@@ -20,6 +20,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Claude Code's PowerShell tool calls are captured.** The installed hook matcher named only
+  `Bash` among shell tools, so on Windows, where Claude Code runs commands through its
+  `PowerShell` tool, every command, its outcome and any check it ran were missing from the
+  Receipt. The matcher now names `PowerShell`; the next session start rewrites an older
+  configuration in place. Transcript reconstruction counts `PowerShell` calls as commands too.
+
 - **A commit made before the capture service replays the session's first hook is still the
   session's.** The service anchored the working-tree baseline when `SessionStart` (or the first
   model invocation) was received, but read the repository's start HEAD only when the queue was

@@ -67,7 +67,10 @@ _GIT_TIMEOUT_SECONDS = 5.0
 
 # Tools whose PostToolUse / PostToolUseFailure payloads the adapter records:
 # file edits (tool_input.file_path) and shell commands (tool_input.command).
-TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash"
+# Must name every tool in claude_hooks.FILE_TOOLS | COMMAND_TOOLS (asserted in
+# tests): Claude Code's Windows shell tool is ``PowerShell``, and a tool left
+# out here never reaches the adapter at all.
+TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell"
 
 TRANSPORT_COMMAND = "command"
 TRANSPORT_HTTP = "http"
