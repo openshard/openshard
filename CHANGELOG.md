@@ -4,6 +4,20 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Added
+
+- `openshard import claude-transcript <transcript>` reconstructs a Receipt from a
+  Claude Code session transcript whose hook events were lost. Tool calls (with
+  the transcript's timestamps, working directories and failure flags), prompt
+  and turn counts and the provider's token usage come from the transcript;
+  git state, cost and verification are left unknown rather than invented; the
+  first prompt is kept only as the hook path's scrubbed excerpt, commands go
+  through the same summariser, and paths outside the repository are dropped.
+  Everything is labelled reconstructed (`import_method`, `capture.source`,
+  Event evidence `imported_transcript`, completeness reasons). The default is
+  a dry run; `--write` records it, with a receipt id derived from the session
+  so a repeat is a no-op, and never over a session that already has a Receipt.
+
 ### Fixed
 
 - **A commit made before the capture service replays the session's first hook is still the
@@ -30,10 +44,6 @@ All notable changes to OpenShard are documented here.
   advertises this as `features: ["capability_root_fallback"]`, and the watchdog
   forwards the event through the command path whenever the running service
   lacks it, so an older service no longer drops those events either.
-
-## Unreleased
-
-### Fixed
 
 - A Claude Code session that works in another checkout -- a linked `git worktree`
   under `C:	mp`, or another repository's checkout -- now gets one Receipt per
