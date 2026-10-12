@@ -726,6 +726,13 @@ class CaptureRecorder:
                 self._bump("rejected")
                 return "rejected", "unauthenticated"
         if payload.agent == AGENT_CLAUDE_CODE:
+            if project_dir:
+                # The status line is a command hook: it carries the project
+                # directory and the token, so it re-teaches a restarted
+                # service which project this session belongs to before the
+                # next HTTP hook (which carries neither) needs the fallback.
+                self._routing.remember(key, root)
+                self._note_repo(root)
             # Usage belongs to the checkout that owns the current turn (the
             # first one it touched), never to a checkout the turn did not visit.
             owner = self._workspace.usage_owner(root, key)

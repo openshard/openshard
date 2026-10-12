@@ -30,6 +30,7 @@ from tests.capture_fixtures import (
     _payload,
     _post,
     _session_dir,
+    _status_payload,
     _wait_for,
 )
 
@@ -128,6 +129,24 @@ class TestServiceResolvesTheProject:
         assert action == "queued"
         assert list(_session_dir(other).glob("*.queue*.jsonl"))
         assert _no_evidence(repo)
+
+    def test_a_status_ping_teaches_a_restarted_service_the_session_project(self, capture_env, repo, tmp_path):
+        """After a restart nothing links the session to its project until a command hook (the status line) says so."""
+        other = _make_repo(tmp_path / "other")
+        token = auth.ensure_token(capture_env)
+        capability = auth.repo_capability(token, repo, "claude_code")
+        recorder = svc.CaptureRecorder(instance_id="t2", state={})
+
+        def authorize(root: Path) -> bool:
+            return auth.verify_presented(capability, token, root, "claude_code") is not None
+
+        tool_event = json.loads(_payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "ls"}, tool_response={}))
+        assert recorder.record_hook(tool_event, project_dir=None, authorize=authorize) == ("rejected", "unauthenticated")
+        # The status line arrives with CLAUDE_PROJECT_DIR and the token.
+        ping = json.loads(_status_payload(repo))
+        assert recorder.record_status(ping, project_dir=str(repo), authorize=lambda root: True)[0] == "queued"
+        assert recorder.record_hook(tool_event, project_dir=None, authorize=authorize) == ("queued", "PostToolUse")
+        assert list(_session_dir(other).glob("*.queue*.jsonl"))
 
     def test_a_capability_for_an_unrelated_repository_is_still_refused(self, service, capture_env, repo, tmp_path):
         other = _make_repo(tmp_path / "other")
