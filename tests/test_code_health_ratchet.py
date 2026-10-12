@@ -139,7 +139,7 @@ COMPLEXITY_BUDGETS = {
 }
 
 BROAD_EXCEPT_BUDGETS = {
-    "openshard/adapters/claude_hooks.py": 28,
+    "openshard/adapters/claude_hooks.py": 26,
     "openshard/run/pipeline.py": 27,
     "openshard/adapters/claude_capture_client.py": 19,
     "openshard/run/_pipeline_helpers.py": 17,

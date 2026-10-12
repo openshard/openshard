@@ -1092,8 +1092,19 @@ class TestRobustness:
         entry = _runs_lines(repo)[0]
         # Staged hook events are capped; git file events (max 20) are added on top.
         assert len(entry["events"]) <= ch._MAX_BUFFERED_EVENTS + 20
-        assert entry["capture"]["hook_events_dropped"] > 0
         assert entry["capture"]["tool_call_count"] == ch._MAX_BUFFERED_EVENTS + 25
+        # Nothing past the cap is lost: the oldest events after the opening
+        # window move to the local event log, and the newest stay on the record.
+        capture = entry["capture"]
+        assert capture["hook_events_dropped"] == 0
+        assert "dropped_hook_events" not in [r["kind"] for r in capture["completeness"]["reasons"]]
+        log = repo / capture["event_log"]
+        archived = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        assert len(archived) == capture["hook_events_archived"] > 0
+        kept = [e for e in entry["events"] if e["event_type"] == "tool.invoked"]
+        assert len(kept) + len([e for e in archived if e["event_type"] == "tool.invoked"]) == ch._MAX_BUFFERED_EVENTS + 25
+        assert entry["events"][0]["event_type"] == "session.started"  # the opening window is kept
+        assert len({e["event_id"] for e in archived} & {e["event_id"] for e in entry["events"]}) == 0
 
     def test_corrupt_buffer_is_replaced_not_fatal(self, repo: Path):
         _run(repo, "SessionStart", source="startup")
@@ -1128,6 +1139,55 @@ class TestRobustness:
         assert len(lines) == 1
         assert lines[0]["capture"]["session_end_observed"] is False
         assert any(e["event_id"] == "recovered-evt" for e in lines[0]["events"])
+
+    def test_an_idle_sealed_receipt_says_so_and_resumed_work_is_not_idle(self, repo: Path):
+        # Seen live: a checkout left for an hour read "in progress (no turn completed yet)".
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ls"}, tool_response={})
+        path = buffer_path(repo.resolve(), SID)
+        buf = json.loads(path.read_text(encoding="utf-8"))
+        buf["last_activity_at"] = "2000-01-01T00:00:00Z"
+        path.write_text(json.dumps(buf), encoding="utf-8")
+        assert sweep_stale_buffers(repo.resolve()) == [SID]
+        sealed = _runs_lines(repo)[0]
+        assert sealed["capture"]["status"] == "idle"
+        assert sealed["capture"]["idle_sealed_at"]
+        kinds = [r["kind"] for r in sealed["capture"]["completeness"]["reasons"]]
+        assert kinds == ["session_end_not_observed", "session_idle_sealed"]
+        assert "Sealed after 60 min without activity" in sealed["summary"]
+        # The session comes back: the sealed Receipt stays sealed, and the work
+        # continues in a new segment that names it and is not idle.
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ls"}, tool_response={})
+        _run(repo, "Stop")
+        first, resumed = _runs_lines(repo)
+        assert first["receipt_id"] == sealed["receipt_id"] and first["capture"]["status"] == "idle"
+        assert resumed["capture"]["resumed_from_receipt_id"] == sealed["receipt_id"]
+        assert resumed["capture"]["status"] == "in_progress"
+        assert "idle_sealed_at" not in resumed["capture"]
+        assert "session_idle_sealed" not in [r["kind"] for r in resumed["capture"]["completeness"]["reasons"]]
+
+    def test_harness_notifications_are_not_prompts(self, repo: Path):
+        # Seen live: a sub-agent's report arrived as UserPromptSubmit and counted as a second prompt.
+        _run(repo, "UserPromptSubmit", prompt="Fix the parser")
+        _run(repo, "UserPromptSubmit", prompt="<task-notification>\n<task-id>b4zork0k9</task-id>\n</task-notification>")
+        _run(repo, "UserPromptSubmit", prompt='<agent-message from="af615c336031ce29a">\n[Subagent hand-back] report')
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        capture = entry["capture"]
+        assert capture["prompt_count"] == 1
+        assert capture["agent_notification_count"] == 2
+        assert entry["task"].startswith("Fix the parser")
+        assert "2 agent notification(s) delivered (not counted as prompts)" in entry["summary"]
+        assert "b4zork0k9" not in json.dumps(entry) and "Subagent hand-back" not in json.dumps(entry)
+        actions = [e["action"] for e in entry["events"] if e["event_type"] == "session.activity"]
+        assert actions.count("agent notification delivered") == 2
+
+    def test_a_notification_first_never_becomes_the_task(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="<task-notification><task-id>x</task-id></task-notification>")
+        _run(repo, "UserPromptSubmit", prompt="The real request")
+        _run(repo, "Stop")
+        entry = _runs_lines(repo)[0]
+        assert entry["task"] == "The real request" and entry["capture"]["prompt_count"] == 1
 
     def test_sweep_leaves_fresh_and_ended_buffers_alone(self, repo: Path):
         _run(repo, "SessionStart", source="startup")

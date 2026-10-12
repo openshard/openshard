@@ -20,6 +20,15 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Long and interrupted sessions keep every event and say what happened.** A hook-captured
+  Receipt kept its first 200 Events and dropped the rest, including the session's final work; Events
+  past the bounded window now move to an append-only local event log
+  (`.openshard/event_log/<receipt id>.jsonl`, named on the Receipt with a count) and only a failed log
+  write is a capture loss. A background-task notification or sub-agent report that Claude Code
+  delivers as a queued prompt is counted as an agent notification, never as a prompt or the task. A
+  Receipt sealed by the idle sweep reads `idle` with a `session_idle_sealed` completeness reason
+  instead of "in progress"; later work continues in a new segment that names it. The sweep moved to
+  `adapters/claude_session_fidelity.py`.
 - **A session's tokens and cost are counted once across its checkouts.** A session that moved
   between its project and a worktree kept one Receipt per checkout, but each turn's usage went to
   the checkout that turn touched first. A checkout that owned a later turn then read the transcript

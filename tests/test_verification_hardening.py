@@ -308,7 +308,7 @@ class TestSessionFinalisation:
         assert CliRunner().invoke(cli, ["verify", "--dry-run", "--json"]).exit_code == 0
         assert not path.exists()
         reasons = _runs(repo)[-1]["capture"]["completeness"]["reasons"]
-        assert [r["kind"] for r in reasons] == ["session_end_not_observed"]
+        assert [r["kind"] for r in reasons] == ["session_end_not_observed", "session_idle_sealed"]
 
 
 # ---------------------------------------------------------------------------

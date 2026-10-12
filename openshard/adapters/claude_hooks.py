@@ -166,13 +166,13 @@ import json
 import os
 import re
 import sys
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from openshard.adapters import claude_session_fidelity as fidelity
 from openshard.adapters.agent_env import PROVIDER_SOURCE_AGENT_ENV, claude_agent_env
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
 from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
@@ -192,6 +192,7 @@ from openshard.adapters.claude_hook_checks import (
     hook_verification,
     record_checks,
 )
+from openshard.adapters.claude_session_fidelity import sweep_stale_buffers  # noqa: F401  (re-exported)
 from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-exported for callers and tests)
     _count,
     _new_transcript_state,
@@ -358,9 +359,7 @@ _TOOL_FOLD_INTERVAL_SECONDS = 30
 # by the next SessionStart in the repo, so a crashed/killed session's staged
 # evidence still reaches runs.jsonl. Deliberately generous: an idle-but-live
 # session is only ever snapshotted, never marked ended.
-_STALE_BUFFER_SECONDS = 60 * 60
 _HOOK_SWEEP_DEADLINE_SECONDS = 2.0  # overall budget of the sweep a session-opening hook runs
-_MAX_STALE_SWEEP = 20
 
 # Requirement: hook processing must never hang Claude Code on lock
 # contention (a stuck/contended sidecar lock, e.g. antivirus scanning the
@@ -372,7 +371,6 @@ _MAX_STALE_SWEEP = 20
 # used for the (rarer, already-async) stale-buffer sweep, which gets a
 # somewhat longer allowance since it is not gating a single hook's turn.
 _LOCK_TIMEOUT_SECONDS = 3.0
-_SWEEP_LOCK_TIMEOUT_SECONDS = 5.0
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 _FIRST_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")
@@ -1450,7 +1448,9 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         agent_surface=_agent_surface_or_none(payload.agent_surface),
         agent_cloud_session=_cloud_session_or_none(payload.agent_cloud_session),
     )
-    if payload.event == EVENT_USER_PROMPT_SUBMIT:
+    if payload.event == EVENT_USER_PROMPT_SUBMIT and fidelity.prompt_source(payload.prompt):
+        reduced.attrs = {**reduced.attrs, "prompt_source": fidelity.PROMPT_SOURCE_AGENT_NOTIFICATION}
+    elif payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
     elif payload.event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         tool = payload.tool_name or "unknown"
@@ -1647,7 +1647,7 @@ def _append_event(
     """
     from openshard.history.event import make_event
 
-    if len(buf["events"]) >= _MAX_BUFFERED_EVENTS:
+    if len(buf["events"]) >= _MAX_BUFFERED_EVENTS and not fidelity.make_room(buf, _MAX_BUFFERED_EVENTS):
         buf["dropped_events"] = int(buf.get("dropped_events") or 0) + 1
         return
     record = buf.get("record") or {}
@@ -1680,8 +1680,30 @@ def _read_buffer(path: Path) -> dict | None:
     return data
 
 
+def _apply_prompt(buf: dict, payload: ReducedHookPayload, repo_root: Path, now: str) -> tuple[str, bool, bool]:
+    """A ``UserPromptSubmit``: a user prompt, or a notification the harness delivered as one."""
+    if payload.attrs.get("prompt_source") == fidelity.PROMPT_SOURCE_AGENT_NOTIFICATION:
+        _append_event(buf, event_type="session.activity", action="agent notification delivered", status="unknown",
+                      evidence="directly_observed", occurred_at=now,
+                      metadata={"hook": payload.event, "notification_index": fidelity.note_agent_notification(buf)})
+        return "agent notification buffered", False, False
+    buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
+    buf["first_prompt_at"] = buf.get("first_prompt_at") or now
+    buf["task"] = buf.get("task") or payload.task_excerpt
+    _append_event(buf, event_type="session.activity", action="user prompt submitted", status="unknown",
+                  evidence="directly_observed", occurred_at=now,
+                  metadata={"hook": payload.event, "prompt_index": buf["prompt_count"]})
+    # First prompt = the session has real work: create the record now so
+    # even a session interrupted before any Stop leaves a trace.
+    created = buf.get("record") is None
+    if created:
+        _ensure_record(buf, repo_root)
+    return ("first prompt: record created" if created else "prompt buffered"), created, False
+
+
 def _write_buffer(path: Path, buf: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    fidelity.flush_event_archive(path.parent.parent, buf)
     tmp = path.with_name(path.name + ".tmp")
     blob = json.dumps(buf)
     with tmp.open("w", encoding="utf-8") as fh:
@@ -1762,7 +1784,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "turn_count": int(capture.get("turn_count") or 0),
         "hook_files": hook_files,
         "events": hook_events[:_MAX_BUFFERED_EVENTS],
-        "dropped_events": int(capture.get("hook_events_dropped") or 0),
+        **fidelity.rebuilt_counters(capture),
         "git_file_event_ids": git_ids,
         "record": {
             "run_id": entry.get("run_id"),
@@ -2621,6 +2643,8 @@ def _all_losses(buf: dict) -> list[dict]:
     dropped = int(buf.get("dropped_events") or 0)
     if dropped > 0:
         losses.append(make_reason("dropped_hook_events", dropped))
+    if buf.get("idle_sealed_at"):
+        losses.append(make_reason(fidelity.REASON_SESSION_IDLE_SEALED))
     return losses
 
 
@@ -3078,7 +3102,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if idle_count and turn_count == 0:
         # Idle boundaries were seen but no completed turn was ever confirmed.
         _task_status_text += f"; {idle_count} idle boundary(ies) observed, turn completion not confirmed"
-    end_text = f" Session ended (reason={ended.get('reason') or 'unknown'})." if ended else ""
+    end_text = (f" Session ended (reason={ended.get('reason') or 'unknown'})." if ended else "") + fidelity.summary_suffix(buf)
     # First sentence kept short: the receipt's Result line shows the first
     # complete sentence (see shard_contract._result_display).
     _attr_text = (
@@ -3236,7 +3260,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "provider": provider_current,
             "session_id": buf.get("session_id"),
             "checkout": buf.get("checkout"),
-            "status": "ended" if ended else "in_progress",
+            **fidelity.capture_status(buf, ended),
             "session_end_observed": bool(ended),
             "session_end_reason": (ended or {}).get("reason"),
             "start_source": buf.get("start_source"),
@@ -3417,6 +3441,7 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
     """
     from openshard.history.jsonl_store import upsert_jsonl_with
 
+    fidelity.flush_event_archive(repo_root / ".openshard", buf)  # the record counts only what the log holds
     if finalize:
         stored = buf.get("git_outcome") if isinstance(buf.get("git_outcome"), dict) else None
         git_outcome = _merge_git_outcome(_session_git_outcome(buf, repo_root, previous=stored), stored)
@@ -3449,77 +3474,6 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
     )
     buf["last_fold_at"] = _now()
     return entry, outcome
-
-
-def sweep_stale_buffers(
-    repo_root: Path, *, max_age_seconds: float = _STALE_BUFFER_SECONDS, now: datetime | None = None,
-    deadline_seconds: float | None = None,
-) -> list[str]:
-    """Fold and remove staging buffers of sessions idle for *max_age_seconds*.
-
-    Called (outside the caller's own session lock) on SessionStart, and by
-    Platform sync before it picks what to send (sync/client.py). A stale
-    buffer is sealed into runs.jsonl as a partial segment --
-    ``capture.session_end_observed`` stays False and no ``run.completed``
-    Event is fabricated -- then removed; a later hook for that session
-    opens a new Receipt segment. Returns the session ids
-    folded. Never raises.
-    """
-    folded: list[str] = []
-    started = time.monotonic()
-    try:
-        directory = sessions_dir(repo_root)
-        if not directory.is_dir():
-            return folded
-        from openshard.history.jsonl_store import history_file_lock
-
-        candidates = sorted(p for p in directory.glob("*.json") if p.is_file())
-        for path in candidates[: _MAX_STALE_SWEEP * 4]:
-            if len(folded) >= _MAX_STALE_SWEEP:
-                break
-            if deadline_seconds is not None and time.monotonic() - started >= deadline_seconds:
-                break  # the rest are swept by the next sweep
-            peek = _read_buffer(path)
-            if peek is None:
-                continue
-            age = _seconds_since(peek.get("last_activity_at"), now)
-            if age is None or age < max_age_seconds:
-                continue
-            sid = str(peek.get("session_id") or path.stem)
-            if not _SESSION_ID_RE.match(sid):
-                continue
-            try:
-                with history_file_lock(path, timeout=_SWEEP_LOCK_TIMEOUT_SECONDS):
-                    buf = _read_buffer(path)
-                    if buf is None:
-                        continue
-                    age = _seconds_since(buf.get("last_activity_at"), now)
-                    if age is None or age < max_age_seconds:
-                        continue
-                    if _has_activity(buf):
-                        # Swept without a SessionEnd: say so on the record
-                        # instead of leaving it looking normally finished.
-                        losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
-                        if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
-                            losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
-                        buf["capture_losses"] = losses
-                        swept_entry, _ = _fold(buf, repo_root, finalize=True)
-                        # The idle boundary seals a partial Receipt, not a session end.
-                        # Reuse the existing remote spool and delivery path.
-                        remote_events = _remote_capture_new_events(buf)
-                        if remote_events is not None:
-                            _remote_capture_record(
-                                repo_root, remote_events, buf.get("record") or {}, swept_entry,
-                                finalized=True,
-                            )
-                        _schedule_post_session_verify(repo_root, swept_entry)
-                    path.unlink()
-                folded.append(sid)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return folded
 
 
 def _has_activity(buf: dict) -> bool:
@@ -3703,23 +3657,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         return f"permission denied for {tool}; buffered", False, False
 
     if event == EVENT_USER_PROMPT_SUBMIT:
-        buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
-        if not buf.get("first_prompt_at"):
-            buf["first_prompt_at"] = now
-        if not buf.get("task"):
-            buf["task"] = payload.task_excerpt
-        _append_event(
-            buf, event_type="session.activity", action="user prompt submitted",
-            status="unknown", evidence="directly_observed",
-            metadata={"hook": event, "prompt_index": buf["prompt_count"]},
-            occurred_at=now,
-        )
-        # First prompt = the session has real work: create the record now so
-        # even a session interrupted before any Stop leaves a trace.
-        created = buf.get("record") is None
-        if created:
-            _ensure_record(buf, repo_root)
-        return ("first prompt: record created" if created else "prompt buffered"), created, False
+        return _apply_prompt(buf, payload, repo_root, now)
 
     if event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         failed = event == EVENT_POST_TOOL_USE_FAILURE
