@@ -214,6 +214,55 @@ def test_work_in_a_linked_worktree_is_attributed_to_the_worktree(repos):
         assert receipt["executor"] == "claude_code_hooks"
 
 
+def test_usage_is_counted_once_when_turns_move_between_checkouts(repos):
+    """Seen live: a session's four Receipts summed to 129% of its transcript's tokens.
+
+    A checkout that owned a later turn read the transcript from its own
+    cursor, through turns the other checkout had already counted. The
+    session's first checkout now owns all of its usage and cost.
+    """
+    platform, wt = repos["platform"], repos["wt"]
+    service = _Service({**os.environ})
+    try:
+        claude = _Claude(platform, service.port)
+        claude.start()
+        claude.status(cost=0.0)
+        claude.send("UserPromptSubmit", prompt="Plan in the project")
+        claude.reply(input_tokens=100, output_tokens=10)
+        claude.edit(platform / "notes.md", "plan\n")
+        claude.status(cost=0.10)
+        claude.send("Stop")
+        time.sleep(1.1)
+        # Turn 2 happens only in the worktree, which the per-turn rule made its owner.
+        claude.send("UserPromptSubmit", prompt="Work in the worktree", cwd=wt)
+        claude.reply(input_tokens=1000, output_tokens=100)
+        claude.edit(wt / "parser.py", "PARSED = True\n", cwd=wt)
+        claude.status(cost=0.60, cwd=wt)
+        claude.send("Stop", cwd=wt)
+        time.sleep(1.1)
+        # Turn 3 is back in the project: it must not re-read turn 2's usage.
+        claude.send("UserPromptSubmit", prompt="Finish in the project")
+        claude.reply(input_tokens=10, output_tokens=1)
+        claude.edit(platform / "notes.md", "done\n")
+        claude.status(cost=0.65)
+        claude.send("Stop")
+        claude.send("SessionEnd", reason="other")
+        assert _wait_for(lambda: _ended(platform) and _ended(wt))
+    finally:
+        service.stop()
+
+    (project_receipt,) = _receipts(platform)
+    (worktree_receipt,) = _receipts(wt)
+    assert project_receipt["prompt_tokens"] == 1110 and project_receipt["completion_tokens"] == 111
+    assert project_receipt["estimated_cost"] == pytest.approx(0.65)
+    assert "prompt_tokens" not in worktree_receipt and "estimated_cost" not in worktree_receipt
+    # Seen in acceptance: the worktree Receipt still names the model that ran (transcript), just not its usage.
+    assert worktree_receipt["execution_model"] == "claude-opus-5-5"
+    assert worktree_receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
+    assert worktree_receipt["capture"]["cost_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
+    assert _changed(worktree_receipt) == {"parser.py"}
+
+
 def test_a_worktree_of_another_repository_is_recorded_as_that_repository(repos):
     platform, core_wt = repos["platform"], repos["core_wt"]
     service = _Service({**os.environ})
@@ -302,6 +351,42 @@ def test_a_service_restart_mid_session_keeps_recording_into_the_worktree(repos):
     assert worktree_receipt["task"] == "Survive a restart"
     assert worktree_receipt["capture"]["tool_call_count"] == 2
     assert worktree_receipt["capture"]["session_end_observed"] is True
+
+
+def test_a_restarted_service_keeps_the_session_usage_on_the_same_receipt(repos):
+    platform, wt = repos["platform"], repos["wt"]
+    env = {**os.environ}
+    service = _Service(env)
+    try:
+        claude = _Claude(platform, service.port)
+        claude.start()
+        claude.send("UserPromptSubmit", prompt="Plan in the project")
+        claude.reply(input_tokens=100, output_tokens=10)
+        claude.edit(platform / "notes.md", "plan" + chr(10))
+        claude.send("Stop")
+        assert service.server.recorder.wait_idle(20)
+    finally:
+        service.stop()
+    time.sleep(1.1)
+    # The replacement service forgot the session; the next turn starts in the worktree.
+    service = _Service(env, port=service.port)
+    try:
+        claude.port = service.port
+        claude.send("UserPromptSubmit", prompt="Continue in the worktree", cwd=wt)
+        claude.reply(input_tokens=1000, output_tokens=100)
+        claude.edit(wt / "parser.py", "PARSED = True" + chr(10), cwd=wt)
+        claude.send("Stop", cwd=wt)
+        claude.send("SessionEnd", cwd=wt, reason="other")
+        assert _wait_for(lambda: _ended(platform) and _ended(wt))
+    finally:
+        service.stop()
+    (project_receipt,) = _receipts(platform)
+    (worktree_receipt,) = _receipts(wt)
+    assert project_receipt["prompt_tokens"] == 1100 and project_receipt["completion_tokens"] == 110
+    assert "prompt_tokens" not in worktree_receipt
+    assert worktree_receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
+    # The owner is kept in the service's state, never in a repository, and is gone after the session ends.
+    assert not list(platform.rglob("*.usage-owner")) and not list(wt.rglob("*.usage-owner"))
 
 
 def test_delayed_queue_processing_folds_the_same_receipts(repos):

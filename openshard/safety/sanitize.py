@@ -18,7 +18,7 @@ _MAX_METADATA_KEYS = 10
 # Secret-like token patterns.  A match means the whole string is dropped —
 # never emitted — so partial secrets cannot leak.
 SECRET_PATTERNS = (
-    re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),                    # OpenAI-style keys
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{8,}"),   # OpenAI-style keys (not "risk-assessment")
     re.compile(r"AKIA[0-9A-Z]{8,}"),                          # AWS access key id
     re.compile(r"(?i)\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*\S+"),
     re.compile(r"(?i)\bbearer\s+\S+"),                        # bearer tokens
@@ -88,6 +88,32 @@ def sanitize_path(s: object, limit: int) -> str | None:
     if any(pat.search(cleaned) for pat in SECRET_PATTERNS[:-1]):
         return None
     return cleaned[:limit]
+
+
+_PATH_WORD_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+
+
+def sanitize_words(s: object, limit: int) -> str | None:
+    """Sanitise a short command-like text word by word (a check name).
+
+    ``sanitize_text`` drops the whole value when any part looks unsafe, and its
+    generic opaque-run heuristic fires on a long repo-relative test path, so a
+    harmless ``npx vitest run packages/contracts/test/receipt-sync.test.ts``
+    lost its name. Here a repo-relative path word goes through
+    ``sanitize_path``, any other unsafe word becomes ``<redacted>``, and None
+    is returned only when no word survives.
+    """
+    if not isinstance(s, str):
+        return None
+    words = []
+    for word in s.split():
+        if "/" in word and not is_absolute_path(word) and _PATH_WORD_RE.match(word):
+            words.append(sanitize_path(word, limit) or "<redacted>")
+        else:
+            words.append(sanitize_text(word, limit) or "<redacted>")
+    if not words or all(w == "<redacted>" for w in words):
+        return None
+    return " ".join(words)[:limit]
 
 
 def sanitize_metadata(metadata: object) -> dict:

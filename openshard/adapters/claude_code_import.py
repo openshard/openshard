@@ -19,6 +19,7 @@ Design constraints:
 
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -190,9 +191,28 @@ def _sanitize_task(
 
     if not isinstance(task, str) or not task.strip():
         return placeholder
-    scrubbed = scrub_sensitive_text(task[:cap], source_label="<task>")
+    scrubbed = shorten_local_paths(scrub_sensitive_text(task[:cap], source_label="<task>"))
     printable = "".join(ch if ch.isprintable() else " " for ch in scrubbed)
     return " ".join(printable.split())[:cap] or placeholder
+
+
+# An absolute local path inside free text: ``C:\Users\me\repo\a.py``,
+# ``/home/me/repo/a.py``, ``~/repo/a.py``. It names the machine's user and
+# layout, which a Receipt never carries (and the Platform refuses).
+_LOCAL_PATH_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|(?<![\w.~/:<-])~?/(?=[^\s/]))[^\s\"'<>|*?]*"
+)
+
+
+def shorten_local_paths(text: str) -> str:
+    """Replace each absolute local path in *text* with ``.../<last part>`` (its name, not its location)."""
+
+    def short(match: re.Match[str]) -> str:
+        parts = [p for p in re.split(r"[\\/]+", match.group(0).rstrip("\\/.,;:)")) if p]
+        tail = parts[-1] if parts and not parts[-1].endswith(":") else ""
+        return f".../{tail}" if tail else "..."
+
+    return _LOCAL_PATH_RE.sub(short, text)
 
 
 def _sanitize_model(model: str | None) -> str:
