@@ -112,6 +112,7 @@ from openshard.adapters.claude_hooks import (
     ReducedHookPayload,
     StatusPayload,
     _snapshot_baseline,
+    _snapshot_start_head,
     apply_agent_env,
     apply_capture_loss,
     apply_reduced_hook,
@@ -303,6 +304,10 @@ class CaptureRecorder:
         self._workspace = claude_workspace.WorkspaceRouter()
         # Sessions already known to this service (see _opens_session).
         self._known_sessions: set[str] = set()
+        # Session queue key -> the repository root it records under, and the
+        # main checkout a linked worktree belongs to (see _capability_root).
+        self._session_roots: dict[str, Path] = {}
+        self._main_checkout_cache: dict[str, Path | None] = {}
         self._pending: queue.Queue[tuple[str, str] | None] = queue.Queue()
         self._stop = threading.Event()
         self._worker = threading.Thread(target=self._worker_loop, name="openshard-capture-worker", daemon=True)
@@ -532,9 +537,86 @@ class CaptureRecorder:
             self._bump("ignored")
             return "ignored", "could not resolve repository directory"
         if authorize is not None and not authorize(root):
-            self._bump("rejected")
-            return "rejected", "unauthenticated"
+            # Only a request that named no project directory had its root
+            # guessed from cwd; a request that named one is judged on it.
+            root = self._capability_root(root, payload, authorize) if not project_dir else None
+            if root is None:
+                self._bump("rejected")
+                return "rejected", "unauthenticated"
         return self._record_resolved(root, payload, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env)
+
+    def _capability_root(self, cwd_root: Path, payload: Any, authorize: Callable[[Path], bool]) -> Path | None:
+        """The project a credential refused for *cwd_root* was issued for, when the service can tell.
+
+        Claude Code's HTTP hooks never carry the project directory: the
+        ``$CLAUDE_PROJECT_DIR`` reference in the configured header is
+        interpolated to an empty string, because that variable exists only
+        in command-hook environments. The service therefore resolves the
+        root from the payload's ``cwd`` alone, and once a session leaves its
+        project root -- a linked worktree, or another checkout -- that root
+        is a different repository and the capability minted for the project
+        (the one whose ``.claude/settings.local.json`` fired the hook) no
+        longer verifies. The event still belongs to that project, exactly
+        as the command path records it (``CLAUDE_PROJECT_DIR`` first), so
+        the same credential is checked against the roots the project can
+        be: the one this session was opened under (``SessionStart`` is a
+        command hook, so it arrives with the project directory), the main
+        checkout when *cwd_root* is a linked worktree, then the repositories
+        this service has recently recorded. Only a root the credential
+        verifies for is returned; a capability for an unrelated repository
+        is still refused, a request that explicitly named another project
+        directory is refused as before, and the token never reaches this
+        path.
+        """
+        candidates: list[Path] = []
+        session_id = getattr(payload, "session_id", None)
+        agent = getattr(payload, "agent", AGENT_CLAUDE_CODE)
+        if session_id is not None:
+            known = self._session_roots.get(queue_key(str(session_id), agent))
+            if known is not None:
+                candidates.append(known)
+        main = self._main_checkout(cwd_root)
+        if main is not None:
+            candidates.append(main)
+        candidates.extend(self.known_repos())
+        seen = {str(cwd_root)}
+        for candidate in candidates:
+            if str(candidate) in seen:
+                continue
+            seen.add(str(candidate))
+            try:
+                if authorize(candidate):
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    def _main_checkout(self, root: Path) -> Path | None:
+        """The main checkout *root* is a linked worktree of, else None. Cached per root."""
+        key = str(root)
+        if key in self._main_checkout_cache:
+            return self._main_checkout_cache[key]
+        found: Path | None = None
+        try:
+            from openshard.util.git import run_git
+
+            out = run_git(root, ["rev-parse", "--git-common-dir"])
+            if out and out.strip():
+                common = Path(out.strip())
+                common = (common if common.is_absolute() else root / common).resolve()
+                if common.name == ".git" and common.parent != root.resolve():
+                    found = common.parent
+        except Exception:
+            found = None
+        if len(self._main_checkout_cache) >= _ROOT_CACHE_MAX:
+            self._main_checkout_cache.clear()
+        self._main_checkout_cache[key] = found
+        return found
+
+    def _remember_session_root(self, key: str, root: Path) -> None:
+        if len(self._session_roots) >= _ROOT_CACHE_MAX * 4:
+            self._session_roots.clear()
+        self._session_roots[key] = root
 
     def _workspace_for(self, project_dir: str | None, agent: str) -> Path | None:
         """The opted-in multi-repository workspace *project_dir* names, if routing applies (see claude_workspace)."""
@@ -590,6 +672,7 @@ class CaptureRecorder:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
         key = queue_key(reduced.session_id, reduced.agent)
+        self._remember_session_root(key, root)
         opens_session = self._opens_session(root, key, payload.event)
         if opens_session:
             # v0.4.4: anchor change attribution at the moment the session was
@@ -599,6 +682,7 @@ class CaptureRecorder:
             # An agent without a start hook (Antigravity) opens its session
             # with its first model invocation instead -- once per session.
             reduced.baseline = _snapshot_baseline(root, at or _now())
+            reduced.start_head = _snapshot_start_head(root)
         line = {"id": self._next_id(), "kind": "hook", "at": at or _now(), "data": reduced.to_dict()}
         self._queue_line(root, key, line)
         self._bump("queued", payload.event)
@@ -1024,6 +1108,7 @@ class CaptureServer(ThreadingHTTPServer):
             "pid": os.getpid(),
             "port": self.port,
             "version": _version(),
+            "features": list(client.SERVICE_FEATURES),
             "started_at": self.started_at,
             "uptime_seconds": round(time.monotonic() - self.started_monotonic, 1),
             "pending": self.recorder.pending,

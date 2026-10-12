@@ -1,10 +1,24 @@
 name: PR Hygiene
 
+# Enforces the pull request conventions of this repository, not just the
+# presence of headings:
+#   * a short plain-English title (no conventional-commit prefix, tag, emoji
+#     or trailing punctuation);
+#   * the four template sections, in order, each with real content, and no
+#     other sections;
+#   * a short description (no generated-by footers or watermarks);
+#   * the PR assigned to the maintainer (assignment failures fail the check);
+#   * repository merge settings that keep squash merges with the PR title
+#     only and delete the merged branch.
+# Runs from the base branch (pull_request_target), so the rules apply to
+# every PR as soon as they land on main.
+
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize, ready_for_review, assigned, unassigned]
 
 permissions:
+  contents: read
   issues: write
   pull-requests: read
 
@@ -19,32 +33,126 @@ jobs:
         with:
           script: |
             const pr = context.payload.pull_request;
-            const requiredHeadings = [
-              "## What changed",
-              "## Why",
-              "## Verification",
-              "## Still open",
-            ];
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const MAINTAINER = "MichaelObasa";
+            const TITLE_MAX = 72;
+            const BODY_MAX_LINES = 60;
+            const failures = [];
 
-            if (!pr.assignees.some((assignee) => assignee.login === "MichaelObasa")) {
+            // Assignment: assign, then verify. A failed assignment fails the check.
+            let assignees = (pr.assignees ?? []).map((a) => a.login);
+            if (!assignees.includes(MAINTAINER)) {
               try {
                 await github.rest.issues.addAssignees({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  assignees: ["MichaelObasa"],
+                  owner, repo, issue_number: pr.number, assignees: [MAINTAINER],
                 });
               } catch (error) {
-                core.warning(`Could not auto-assign MichaelObasa: ${error.message}`);
+                failures.push(`Could not assign ${MAINTAINER}: ${error.message}`);
+              }
+              const fresh = await github.rest.issues.get({ owner, repo, issue_number: pr.number });
+              assignees = (fresh.data.assignees ?? []).map((a) => a.login);
+              if (!assignees.includes(MAINTAINER)) {
+                failures.push(`PR must be assigned to ${MAINTAINER}.`);
               }
             }
 
-            const body = pr.body ?? "";
-            const missing = requiredHeadings.filter((heading) => !body.includes(heading));
-            if (missing.length > 0) {
-              core.setFailed(`PR body is missing: ${missing.join(", ")}`);
+            // Title: one short plain-English sentence.
+            const title = (pr.title ?? "").trim();
+            if (title.length === 0 || title.length > TITLE_MAX) {
+              failures.push(`Title must be 1-${TITLE_MAX} characters (it is ${title.length}).`);
+            }
+            if (/^(feat|fix|chore|docs|refactor|test|tests|ci|build|perf|style|revert|release)(\([^)]*\))?!?:/i.test(title)) {
+              failures.push("Title must not use a conventional-commit prefix; write a plain sentence.");
+            }
+            if (/^\[|^(wip|draft)\b/i.test(title)) {
+              failures.push("Title must not carry tags such as [WIP] or Draft.");
+            }
+            if (/[.!:;]$/.test(title)) {
+              failures.push("Title must not end with punctuation.");
+            }
+            if (/[^\x20-\x7E -ɏ]/.test(title)) {
+              failures.push("Title must not contain emoji or symbols.");
             }
 
-            if (pr.title.trim().length === 0 || pr.title.length > 100) {
-              core.setFailed("PR title must be plain English and 1-100 characters.");
+            // Watermarks and generated-by footers, in the title or the body.
+            const body = (pr.body ?? "").replace(/\r\n/g, "\n");
+            const watermarks = [
+              [/generated (with|by)\b/i, "a 'Generated with/by' footer"],
+              [/co-authored-by:/i, "a Co-Authored-By trailer"],
+              [/\u{1F916}/u, "a robot emoji watermark"],
+              [/claude\.com\/claude-code/i, "a Claude Code link footer"],
+            ];
+            for (const [pattern, label] of watermarks) {
+              if (pattern.test(title) || pattern.test(body)) {
+                failures.push(`Remove ${label} from the title and body.`);
+              }
+            }
+
+            // Body: the four template sections, in order, each with content, nothing else.
+            const headings = ["## What changed", "## Why", "## Verification", "## Still open"];
+            const placeholders = new Set([
+              "-",
+              "- [ ] Relevant tests/checks passed.",
+              "- [ ] Required CI is green.",
+            ]);
+            const found = [];
+            const sections = new Map();
+            let current = null;
+            for (const line of body.split("\n")) {
+              const heading = /^##\s+(.*?)\s*$/.exec(line);
+              if (heading) {
+                current = `## ${heading[1]}`;
+                found.push(current);
+                sections.set(current, []);
+                continue;
+              }
+              if (current !== null) {
+                sections.get(current).push(line);
+              }
+            }
+            const missing = headings.filter((h) => !found.includes(h));
+            if (missing.length > 0) {
+              failures.push(`Body is missing: ${missing.join(", ")}.`);
+            }
+            const present = found.filter((h) => headings.includes(h));
+            const expected = headings.filter((h) => found.includes(h));
+            if (present.join("|") !== expected.join("|")) {
+              failures.push(`Sections must appear in the template order: ${headings.join(", ")}.`);
+            }
+            const extra = found.filter((h) => !headings.includes(h));
+            if (extra.length > 0) {
+              failures.push(`Body has sections outside the template: ${extra.join(", ")}.`);
+            }
+            for (const heading of headings) {
+              const lines = sections.get(heading) ?? [];
+              const content = lines.map((l) => l.trim()).filter((l) => l.length > 0 && !placeholders.has(l));
+              if (sections.has(heading) && content.length === 0) {
+                failures.push(`Section "${heading}" has no content; fill it in or write "- None."`);
+              }
+            }
+            const bodyLines = body.split("\n").filter((l) => l.trim().length > 0).length;
+            if (bodyLines > BODY_MAX_LINES) {
+              failures.push(`Description must stay short: at most ${BODY_MAX_LINES} non-empty lines (it has ${bodyLines}).`);
+            }
+
+            // Merge settings: squash only, PR title as the commit message, branch deleted.
+            const settings = (await github.rest.repos.get({ owner, repo })).data;
+            if (settings.allow_squash_merge === undefined) {
+              core.warning("Merge settings are not visible to this token; skipping that check.");
+            } else {
+              if (!settings.allow_squash_merge) failures.push("Repository must allow squash merging.");
+              if (settings.allow_merge_commit || settings.allow_rebase_merge) {
+                failures.push("Repository must allow squash merging only (disable merge commits and rebase merging).");
+              }
+              if (!settings.delete_branch_on_merge) failures.push("Repository must delete the head branch after merging.");
+              if (settings.squash_merge_commit_title !== "PR_TITLE" || settings.squash_merge_commit_message !== "BLANK") {
+                failures.push("Squash commits must carry the PR title only (title: PR_TITLE, message: BLANK).");
+              }
+            }
+
+            if (failures.length > 0) {
+              core.setFailed(failures.map((f) => `- ${f}`).join("\n"));
+            } else {
+              core.info("PR title, description, assignment and merge settings follow the conventions.");
             }

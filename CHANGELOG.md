@@ -2,6 +2,35 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **A commit made before the capture service replays the session's first hook is still the
+  session's.** The service anchored the working-tree baseline when `SessionStart` (or the first
+  model invocation) was received, but read the repository's start HEAD only when the queue was
+  replayed into the staging buffer. An agent that committed in that window, which a multi-repository
+  workspace session or a fold backlog widens, had its commit fall outside the session's
+  `start..end` range and its files read as pre-existing. The queued session-opening line now carries
+  `start_head`, taken beside the baseline, and the buffer uses it; queue lines without it (older
+  services) behave as before.
+
+- Claude Code capture no longer loses every tool event once a session leaves its
+  project root. Claude Code interpolates `$CLAUDE_PROJECT_DIR` in HTTP hook
+  headers to an empty string (the variable exists only in command-hook
+  environments), so the capture service resolved the repository from the
+  payload's `cwd` alone; from a linked worktree or another checkout that root
+  differed from the project the capability was minted for, every HTTP hook was
+  refused with 401, and the async watchdog -- which resolves the root from
+  `CLAUDE_PROJECT_DIR` -- judged the HTTP path healthy and forwarded nothing.
+  The service now checks a refused capability against the project it can
+  belong to (the session's root, a worktree's main checkout, recently recorded
+  repositories) and records under that project, as the command path already
+  did; a capability for an unrelated repository is still refused. `/health`
+  advertises this as `features: ["capability_root_fallback"]`, and the watchdog
+  forwards the event through the command path whenever the running service
+  lacks it, so an older service no longer drops those events either.
+
 ## 0.4.15 - 2026-10-12
 
 <!-- release-title: Openshard v0.4.15 - Cloud Capture Readiness -->
