@@ -46,7 +46,7 @@ BROAD_EXCEPT_CEILING = 5
 # Shrink the numbers; delete an entry once its
 # unit is under the ceiling.
 MODULE_LINE_BUDGETS = {
-    "openshard/cli/main.py": 8567,
+    "openshard/cli/main.py": 8456,
     "openshard/adapters/claude_hooks.py": 4945,
     "openshard/native/context.py": 3742,
     "openshard/history/shard_contract.py": 3096,
@@ -143,7 +143,7 @@ BROAD_EXCEPT_BUDGETS = {
     "openshard/run/pipeline.py": 27,
     "openshard/adapters/claude_capture_client.py": 19,
     "openshard/run/_pipeline_helpers.py": 17,
-    "openshard/cli/main.py": 16,
+    "openshard/cli/main.py": 15,
     "openshard/history/event.py": 15,
     "openshard/sync/client.py": 13,
     "openshard/adapters/claude_capture_service.py": 13,

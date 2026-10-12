@@ -102,112 +102,23 @@ def _add_unique(items: list[str], value: object, cap: int = 32) -> None:
 
 def read_transcript(path: Path, *, repo_path: Path) -> TranscriptFacts | None:
     """Facts of one Claude Code transcript, reduced for storage. None when the file is not a transcript. Never raises."""
-    from openshard.adapters.claude_hooks import (
-        _to_repo_relative,
-        read_transcript_usage,
-        summarize_command,
-    )
+    from openshard.adapters.claude_hooks import read_transcript_usage
 
     try:
         raw = Path(path).read_bytes()
     except OSError:
         return None
     facts = TranscriptFacts(path=Path(path), session_id="", sha256=hashlib.sha256(raw).hexdigest())
-    seen_tool_ids: set[str] = set()
-    seen_turns: set[str] = set()
-    results: dict[str, bool] = {}
+    reader = _Reader(facts, repo_path)
     for line in raw.splitlines():
         if not line.strip():
             continue
-        if len(line) > _MAX_LINE_BYTES:
+        record = _parse_record(line)
+        if record is None:
             facts.unreadable_lines += 1
             continue
-        try:
-            record = json.loads(line.decode("utf-8", "replace"))
-        except ValueError:
-            facts.unreadable_lines += 1
-            continue
-        if not isinstance(record, dict):
-            facts.unreadable_lines += 1
-            continue
-        kind = record.get("type")
-        if kind not in ("user", "assistant"):
-            continue
-        facts.records += 1
-        sid = record.get("sessionId")
-        if isinstance(sid, str) and sid and not facts.session_id:
-            facts.session_id = sid
-        stamp = record.get("timestamp")
-        if isinstance(stamp, str) and stamp:
-            if facts.started_at is None or stamp < facts.started_at:
-                facts.started_at = stamp
-            if facts.last_activity_at is None or stamp > facts.last_activity_at:
-                facts.last_activity_at = stamp
-        _add_unique(facts.cwds, record.get("cwd"))
-        _add_unique(facts.branches_reported, record.get("gitBranch"))
-        if facts.claude_code_version is None and isinstance(record.get("version"), str):
-            facts.claude_code_version = record["version"][:32]
-        message = record.get("message")
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-        sidechain = bool(record.get("isSidechain"))
-        if kind == "user":
-            if sidechain or record.get("isMeta"):
-                continue
-            if isinstance(content, str):
-                facts.prompt_count += 1
-                if facts.first_prompt is None:
-                    facts.first_prompt = content
-            elif isinstance(content, list):
-                texts = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
-                tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
-                for block in tool_results:
-                    tool_use_id = block.get("tool_use_id")
-                    if isinstance(tool_use_id, str):
-                        results[tool_use_id] = bool(block.get("is_error"))
-                if texts and not tool_results:
-                    facts.prompt_count += 1
-                    if facts.first_prompt is None:
-                        facts.first_prompt = str(texts[0].get("text") or "")
-            continue
-        # assistant
-        _add_unique(facts.models, message.get("model"))
-        message_id = message.get("id")
-        if message.get("stop_reason") == "end_turn" and isinstance(message_id, str) and message_id not in seen_turns:
-            seen_turns.add(message_id)
-            facts.turn_count += 1
-        if not isinstance(content, list):
-            continue
-        cwd = record.get("cwd") if isinstance(record.get("cwd"), str) else None
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
-                continue
-            tool_use_id = block.get("id")
-            name = block.get("name")
-            if not isinstance(tool_use_id, str) or not isinstance(name, str) or tool_use_id in seen_tool_ids:
-                continue
-            seen_tool_ids.add(tool_use_id)
-            if len(facts.tool_uses) >= _MAX_TOOL_USES:
-                facts.tool_uses_truncated = True
-                continue
-            tool_input: dict = block["input"] if isinstance(block.get("input"), dict) else {}
-            action, target, command_kind = name[:64], None, None
-            if name in _COMMAND_TOOLS:
-                command = tool_input.get("command")
-                action, _program, command_kind = summarize_command(command if isinstance(command, str) else None, name)
-            elif name in _FILE_TOOLS:
-                raw_path = tool_input.get("file_path") or tool_input.get("notebook_path")
-                target = _to_repo_relative(raw_path if isinstance(raw_path, str) else None, repo_path)
-                action = f"{name} {target}" if target else f"{name} (path outside the repository)"
-            facts.tool_uses.append(ToolUse(
-                at=stamp if isinstance(stamp, str) else (facts.last_activity_at or ""),
-                tool_use_id=tool_use_id, name=name[:64], cwd=cwd, action=action[:_SUMMARY_CAP],
-                target=target, command_kind=command_kind, sidechain=sidechain,
-            ))
-    for use in facts.tool_uses:
-        if use.tool_use_id in results:
-            use.failed = results[use.tool_use_id]
+        reader.note(record)
+    reader.finish()
     if not facts.session_id or not facts.records:
         return None
     try:
@@ -215,6 +126,132 @@ def read_transcript(path: Path, *, repo_path: Path) -> TranscriptFacts | None:
     except Exception:
         facts.usage = None
     return facts
+
+
+def _parse_record(line: bytes) -> dict | None:
+    if len(line) > _MAX_LINE_BYTES:
+        return None
+    try:
+        record = json.loads(line.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+class _Reader:
+    """Folds transcript records into ``TranscriptFacts``; tool results are matched to tool uses at the end."""
+
+    def __init__(self, facts: TranscriptFacts, repo_path: Path) -> None:
+        self.facts = facts
+        self.repo_path = repo_path
+        self.seen_tool_ids: set[str] = set()
+        self.seen_turns: set[str] = set()
+        self.results: dict[str, bool] = {}
+
+    def note(self, record: dict) -> None:
+        kind = record.get("type")
+        if kind not in ("user", "assistant"):
+            return
+        facts = self.facts
+        facts.records += 1
+        sid = record.get("sessionId")
+        if isinstance(sid, str) and sid and not facts.session_id:
+            facts.session_id = sid
+        stamp = record.get("timestamp") if isinstance(record.get("timestamp"), str) else None
+        self._note_time(stamp)
+        _add_unique(facts.cwds, record.get("cwd"))
+        _add_unique(facts.branches_reported, record.get("gitBranch"))
+        if facts.claude_code_version is None and isinstance(record.get("version"), str):
+            facts.claude_code_version = record["version"][:32]
+        message = record.get("message")
+        if not isinstance(message, dict):
+            return
+        if kind == "user":
+            if not record.get("isSidechain") and not record.get("isMeta"):
+                self._note_user(message.get("content"))
+        else:
+            self._note_assistant(record, message, stamp)
+
+    def _note_time(self, stamp: str | None) -> None:
+        if not stamp:
+            return
+        facts = self.facts
+        if facts.started_at is None or stamp < facts.started_at:
+            facts.started_at = stamp
+        if facts.last_activity_at is None or stamp > facts.last_activity_at:
+            facts.last_activity_at = stamp
+
+    def _note_user(self, content: object) -> None:
+        if isinstance(content, str):
+            self._note_prompt(content)
+            return
+        if not isinstance(content, list):
+            return
+        blocks = [b for b in content if isinstance(b, dict)]
+        tool_results = [b for b in blocks if b.get("type") == "tool_result"]
+        for block in tool_results:
+            tool_use_id = block.get("tool_use_id")
+            if isinstance(tool_use_id, str):
+                self.results[tool_use_id] = bool(block.get("is_error"))
+        texts = [b for b in blocks if b.get("type") == "text"]
+        if texts and not tool_results:
+            self._note_prompt(str(texts[0].get("text") or ""))
+
+    def _note_prompt(self, text: str) -> None:
+        self.facts.prompt_count += 1
+        if self.facts.first_prompt is None:
+            self.facts.first_prompt = text
+
+    def _note_assistant(self, record: dict, message: dict, stamp: str | None) -> None:
+        facts = self.facts
+        _add_unique(facts.models, message.get("model"))
+        message_id = message.get("id")
+        if message.get("stop_reason") == "end_turn" and isinstance(message_id, str) and message_id not in self.seen_turns:
+            self.seen_turns.add(message_id)
+            facts.turn_count += 1
+        content = message.get("content")
+        if not isinstance(content, list):
+            return
+        cwd = record.get("cwd") if isinstance(record.get("cwd"), str) else None
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                self._note_tool_use(block, cwd, stamp, bool(record.get("isSidechain")))
+
+    def _note_tool_use(self, block: dict, cwd: str | None, stamp: str | None, sidechain: bool) -> None:
+        facts = self.facts
+        tool_use_id, name = block.get("id"), block.get("name")
+        if not isinstance(tool_use_id, str) or not isinstance(name, str) or tool_use_id in self.seen_tool_ids:
+            return
+        self.seen_tool_ids.add(tool_use_id)
+        if len(facts.tool_uses) >= _MAX_TOOL_USES:
+            facts.tool_uses_truncated = True
+            return
+        tool_input: dict = block["input"] if isinstance(block.get("input"), dict) else {}
+        action, target, command_kind = _describe_tool_use(name, tool_input, self.repo_path)
+        facts.tool_uses.append(ToolUse(
+            at=stamp or facts.last_activity_at or "", tool_use_id=tool_use_id, name=name[:64], cwd=cwd,
+            action=action[:_SUMMARY_CAP], target=target, command_kind=command_kind, sidechain=sidechain,
+        ))
+
+    def finish(self) -> None:
+        for use in self.facts.tool_uses:
+            if use.tool_use_id in self.results:
+                use.failed = self.results[use.tool_use_id]
+
+
+def _describe_tool_use(name: str, tool_input: dict, repo_path: Path) -> tuple[str, str | None, str | None]:
+    """``(action, repository-relative target, command kind)`` for one tool use, through the hook path's reducers."""
+    from openshard.adapters.claude_hooks import _to_repo_relative, summarize_command
+
+    if name in _COMMAND_TOOLS:
+        command = tool_input.get("command")
+        action, _program, command_kind = summarize_command(command if isinstance(command, str) else None, name)
+        return action, None, command_kind
+    if name in _FILE_TOOLS:
+        raw_path = tool_input.get("file_path") or tool_input.get("notebook_path")
+        target = _to_repo_relative(raw_path if isinstance(raw_path, str) else None, repo_path)
+        return (f"{name} {target}" if target else f"{name} (path outside the repository)"), target, None
+    return name[:64], None, None
 
 
 def _checkout_names(cwds: list[str]) -> list[str]:
