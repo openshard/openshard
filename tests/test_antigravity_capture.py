@@ -453,7 +453,7 @@ class TestCanonicalRecord:
         entry = _lines(repo)[0]
         completeness = derive_capture_completeness(entry)
         assert completeness["status"] == "incomplete"
-        assert [r["kind"] for r in completeness["reasons"]] == ["session_end_not_observed"]
+        assert [r["kind"] for r in completeness["reasons"]] == ["session_end_not_observed", "session_idle_sealed"]
 
     def test_export_compatible_record(self, repo):
         # The record is the same coerced shape every exporter/sync path reads.
