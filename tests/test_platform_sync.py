@@ -49,6 +49,8 @@ CONTRACT_RECEIPT_KEYS = frozenset({
     # P1 additive optional keys (null when the record carries nothing):
     "policy_decisions", "permissions", "approval_detail", "sandbox_detail", "execution_loop", "base_commit",
     "content_hash", "session", "routing", "retry", "provider", "surface", "commit", "pr_url",
+    # Why usage is absent (e.g. another Receipt of the session holds it):
+    "tokens_not_recorded_reason", "cost_not_recorded_reason",
     # OSN control evidence (optional; null for records that predate it):
     "agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot", "organisation_policy",
 })

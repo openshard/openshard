@@ -20,6 +20,11 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Synced Receipts of one session can be linked, and say where their usage is.** The sync
+  receipt's `session` block carries `session_key` (`ses_` + 32 hex of sha256 of the agent and
+  session id; the session id itself still never syncs), and `tokens_not_recorded_reason` /
+  `cost_not_recorded_reason` carry Core's reason code, e.g. that another Receipt of the session
+  holds the usage. Requires a Platform that accepts these keys (openshard/platform#164).
 - **Receipts the Platform refused can sync after a fix, and ordinary tasks are not refused.** A task
   excerpt kept absolute local paths from the first prompt (`C:\Users\<name>\...`); they are now
   shortened to `.../<name>`. The OpenAI key pattern matched `sk-` inside words (`risk-assessment`,

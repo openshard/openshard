@@ -239,6 +239,10 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
         # the model) and the raw launch surface. None when not recorded.
         "provider": evidence.get("provider"),
         "surface": evidence.get("surface"),
+        # Why tokens / cost are absent, as Core's reason code: e.g. another
+        # Receipt of the same session holds them. None when not recorded.
+        "tokens_not_recorded_reason": evidence.get("tokens_not_recorded_reason"),
+        "cost_not_recorded_reason": evidence.get("cost_not_recorded_reason"),
         # The commit the session created and ended on, and its PR -- only when
         # git (and the hosting provider, for the PR) observed them. Never the
         # base commit, never a HEAD that merely moved.
