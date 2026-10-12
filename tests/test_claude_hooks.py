@@ -196,6 +196,35 @@ def _runs_lines(repo: Path) -> list[dict]:
     return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
+def _io_floor(directory: Path, samples: int = 10) -> float:
+    """Median seconds for the raw file I/O a status ping performs on *directory*.
+
+    Mirrors ``apply_status_payload``: touch a sidecar lock file, write a small
+    JSON blob to a temp file with fsync, rename it into place and read it
+    back. No OpenShard code runs, so this is the machine's floor for that
+    work and the only honest unit for a latency budget on a shared runner.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    probe = directory / "io-floor.json"
+    tmp = probe.with_name(probe.name + ".tmp")
+    lock = directory / "io-floor.lock"
+    blob = json.dumps({"probe": "x" * 2048})
+    timings = []
+    for _ in range(samples):
+        t0 = time.perf_counter()  # monotonic() is 15.6ms-grained on Windows before 3.13
+        with lock.open("a+"):
+            pass
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(blob)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, probe)
+        probe.read_text(encoding="utf-8")
+        timings.append(time.perf_counter() - t0)
+    timings.sort()
+    return timings[len(timings) // 2]
+
+
 def _raw(repo: Path) -> str:
     path = repo / ".openshard" / "runs.jsonl"
     return path.read_text(encoding="utf-8") if path.exists() else ""
@@ -2106,20 +2135,33 @@ class TestStatusLineFastPath:
         """Requirement 2: a coarse, generously-bounded regression tripwire.
 
         Not a claim about absolute performance (see docs/capture-performance.md
-        for real numbers) -- just wide enough (a few x the ~25-35ms typically
-        observed for this in-process call on the dev machine) to catch a
-        regression back to doing real fold work here (previously ~150-700ms)
-        without being flaky on a loaded CI runner.
+        for real numbers). It exists to catch a regression back to doing real
+        fold work on the status line: git subprocesses plus a ``runs.jsonl``
+        rewrite, previously ~150-700ms on a developer machine.
+
+        The budget is relative to the machine. The status path is one small
+        JSON read-modify-write under a sidecar file lock, so it is allowed a
+        fixed multiple of what that raw I/O costs *here* (about 4x on a
+        developer laptop, measured; a fold is about 60x). A shared CI runner
+        with a slow, scanned disk raises the floor and the status ping
+        together, which is what made a fixed 150ms budget fail on the Windows
+        release runner at 219ms with nothing regressed. The absolute minimum
+        keeps the budget from collapsing on a very fast disk.
         """
         _run(repo, "UserPromptSubmit", prompt="task")
+        floor = _io_floor(repo / ".openshard")
         samples = []
         for i in range(10):
-            t0 = time.monotonic()
+            t0 = time.perf_counter()
             _status(repo, tokens_input=1000 + i, cost_total=0.01 * i)
-            samples.append(time.monotonic() - t0)
+            samples.append(time.perf_counter() - t0)
         samples.sort()
         median = samples[len(samples) // 2]
-        assert median < 0.15, f"status-line steady-state median {median * 1000:.1f}ms exceeded budget"
+        budget = max(0.15, 12 * floor)
+        assert median < budget, (
+            f"status-line steady-state median {median * 1000:.1f}ms exceeded budget "
+            f"{budget * 1000:.1f}ms (raw file I/O floor {floor * 1000:.1f}ms)"
+        )
 
     def test_repeated_status_pings_do_not_grow_runs_jsonl_until_real_fold(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")  # first prompt already folds once
