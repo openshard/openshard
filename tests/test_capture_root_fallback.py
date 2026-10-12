@@ -229,3 +229,28 @@ def test_a_state_write_survives_a_briefly_locked_file(tmp_path, monkeypatch):
     else:
         raise AssertionError("a file that stays locked must still be reported")
     assert not list(tmp_path.glob("*.tmp"))  # no stray temporary file is left behind
+
+
+def test_concurrent_state_writes_do_not_collide(tmp_path):
+    # Seen live: "could not update state file: FileNotFoundError" when two request
+    # threads shared one temporary file name and one replaced it first.
+    import threading
+
+    target = tmp_path / "claude-capture.json"
+    errors: list[BaseException] = []
+
+    def write(n: int) -> None:
+        try:
+            for i in range(20):
+                svc._write_state(target, {"recent_repos": [f"C:/repo{n}-{i}"]})
+        except BaseException as exc:  # noqa: BLE001 - collected for the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert json.loads(target.read_text(encoding="utf-8"))["recent_repos"]
+    assert not list(tmp_path.glob("*.tmp"))
