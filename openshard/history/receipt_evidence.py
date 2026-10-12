@@ -1143,11 +1143,41 @@ def content_hash_value(entry: dict) -> str | None:
     return value if isinstance(value, str) and _CONTENT_HASH_RE.match(value) else None
 
 
+_CHECKOUT_KINDS = frozenset({"main_checkout", "linked_worktree", "not_git"})
+
+
+def checkout_block(value: Any) -> dict[str, str | None] | None:
+    """Only a safe checkout kind and basename cross the hosted sync boundary.
+
+    No absolute path, directory hierarchy, secret-shaped name or untrusted
+    checkout metadata is sent to Platform. A malformed name becomes unknown;
+    a malformed kind drops the block entirely.
+    """
+    raw = _dict(value)
+    kind = raw.get("kind")
+    if not isinstance(kind, str) or kind not in _CHECKOUT_KINDS:
+        return None
+    name = raw.get("name")
+    if (
+        not isinstance(name, str)
+        or not name.strip()
+        or len(name) > 255
+        or name in (".", "..")
+        or any(c in name for c in ("/", "\\", "\x00"))
+        or any(ord(c) < 32 for c in name)
+    ):
+        name = None
+    else:
+        name = _text(name, 255)
+    return {"kind": kind, "name": name}
+
+
 def session_block(entry: dict) -> dict[str, Any] | None:
     capture = _dict(entry.get("capture"))
     if not capture:
         return None
     block = {
+        "checkout": checkout_block(capture.get("checkout")),
         "started_at": _stamp(capture.get("started_at")),
         "first_prompt_at": _stamp(capture.get("first_prompt_at")),
         "last_turn_completed_at": _stamp(capture.get("last_turn_completed_at")),
