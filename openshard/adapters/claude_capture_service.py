@@ -216,7 +216,7 @@ def _write_state(path: Path, state: dict) -> None:
         json.dump(state, fh, indent=2)
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    client.replace_with_retry(tmp, path)
     try:
         os.chmod(path, 0o600)
     except OSError:

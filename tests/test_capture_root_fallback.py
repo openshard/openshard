@@ -202,3 +202,30 @@ class TestServiceResolvesTheProject:
         assert client._service_has_feature({"features": ["x"]}, client.CAPABILITY_ROOT_FALLBACK) is False
         assert client._service_has_feature({"version": "0.4.9"}, client.CAPABILITY_ROOT_FALLBACK) is False
         assert client._service_has_feature(None, client.CAPABILITY_ROOT_FALLBACK) is False
+
+
+def test_a_state_write_survives_a_briefly_locked_file(tmp_path, monkeypatch):
+    # Seen live on Windows: "could not update state file: PermissionError" while
+    # another process had the file open, so the project list was not saved.
+    target = tmp_path / "claude-capture.json"
+    real_replace = client.os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError("in use")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(client.os, "replace", flaky_replace)
+    svc._write_state(target, {"recent_repos": ["C:/repo"]})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"recent_repos": ["C:/repo"]}
+
+    monkeypatch.setattr(client.os, "replace", lambda src, dst: (_ for _ in ()).throw(PermissionError("in use")))
+    try:
+        svc._write_state(target, {"recent_repos": []})
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("a file that stays locked must still be reported")
+    assert not list(tmp_path.glob("*.tmp"))  # no stray temporary file is left behind

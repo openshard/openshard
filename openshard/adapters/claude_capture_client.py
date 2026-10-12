@@ -68,6 +68,7 @@ import os
 import socket
 import sys
 import time
+from pathlib import Path
 
 from openshard.adapters import capture_auth as _auth
 from openshard.adapters.agent_env import claude_agent_env, format_agent_env
@@ -190,6 +191,19 @@ def remembered_repos(previous: dict, env: dict | os._Environ | None = None) -> l
         return []
     raw = data.get("recent_repos") if isinstance(data, dict) else None
     return [r for r in raw or [] if isinstance(r, str)]
+
+
+def replace_with_retry(tmp: Path, path: Path, attempts: int = 5) -> None:
+    """``os.replace``, retried: Windows refuses it while another process has *path* open."""
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.02 * (attempt + 1))
 
 
 def log_path(env: dict | os._Environ | None = None) -> str:
