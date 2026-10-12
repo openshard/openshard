@@ -143,6 +143,14 @@ class _Turn:
     touched: list[Path] = field(default_factory=list)  # first entry owns the turn's usage
     opened: set[Path] = field(default_factory=set)  # checkouts this session's start was replayed into
     last_owner: Path | None = None  # owner of the turn Stop just closed (a SessionEnd after it has no turn)
+    # A project session keeps one Receipt per checkout for its whole life, so
+    # its usage has one owner for its whole life: the first checkout a turn
+    # touched (not one that only saw the replayed session start).
+    # (A workspace session seals a Receipt per turn, so each turn's first
+    # checkout owns that turn.) Per-turn owners on long-lived Receipts counted
+    # usage twice: a checkout owning a later turn read the transcript from its
+    # own cursor, through the turns other checkouts had already counted.
+    session_owner: Path | None = None
 
 
 class WorkspaceRouter:
@@ -197,6 +205,8 @@ class WorkspaceRouter:
                     turn.prompt, turn.touched = (payload, at), []
                 if not home_is_checkout or checkout is None:
                     return []
+                if event == EVENT_USER_PROMPT_SUBMIT and turn.session_owner is None:
+                    turn.session_owner = checkout  # where the session's first turn began
                 return self._deliver(turn, checkout, payload, at)
             if event in (EVENT_STOP, EVENT_SESSION_END):
                 targets = list(turn.touched)
@@ -214,6 +224,8 @@ class WorkspaceRouter:
             repo = checkout if checkout is not None else checkout_for(workspace, payload)
             if repo is None:
                 return []
+            if home_is_checkout and turn.session_owner is None:
+                turn.session_owner = repo
             return self._deliver(turn, repo, payload, at)
 
     @staticmethod
@@ -234,19 +246,36 @@ class WorkspaceRouter:
         return out
 
     def usage_owner(self, workspace: Path, key: str) -> Path | None:
-        """The checkout that owns the current turn's usage, if the turn touched one."""
+        """The checkout that owns the current usage: the session's owner, else the turn's first checkout."""
         with self._lock:
             turn = self._sessions.get((str(workspace), key))
-            return turn.touched[0] if turn and turn.touched else None
+            if turn is None:
+                return None
+            return turn.session_owner or (turn.touched[0] if turn.touched else None)
 
     @staticmethod
     def _for(turn: _Turn, repo: Path, payload: Any) -> Any:
-        owner = turn.touched[0] if turn.touched else turn.last_owner
+        owner = turn.session_owner or (turn.touched[0] if turn.touched else turn.last_owner)
         if owner is None or owner == repo:
             return payload
         attrs = dict(payload.attrs or {})
         attrs["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
         return replace(payload, transcript_path=None, attrs=attrs)
+
+
+def note_usage_owner(buf: dict, payload: Any) -> None:
+    """Keep the transcript locator only on the Receipt that owns the session's usage.
+
+    Once a payload says the usage belongs to another checkout's Receipt, this
+    Receipt never reads the transcript again: a later event carrying the path
+    must not make it count the same usage twice.
+    """
+    if (payload.attrs or {}).get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
+        buf["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
+        buf.pop("transcript_path", None)
+    if payload.transcript_path and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
+        # Transient: read at fold for token usage only (claude_hooks._transcript_usage).
+        buf["transcript_path"] = payload.transcript_path
 
 
 def install_workspace(workspace: Path, *, port: int | None = None) -> dict[str, Any]:

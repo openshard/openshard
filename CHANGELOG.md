@@ -20,6 +20,15 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **A session's tokens and cost are counted once across its checkouts.** A session that moved
+  between its project and a worktree kept one Receipt per checkout, but each turn's usage went to
+  the checkout that turn touched first. A checkout that owned a later turn then read the transcript
+  from its own position, through turns another checkout had already counted, and its status-line
+  cost window overlapped the others. One live session's Receipts summed to 129% of its transcript.
+  The first checkout a turn touches now owns the session's tokens and cost for its whole life; every
+  other checkout's Receipt records `workspace_usage_attributed_to_other_repository` and never reads
+  the transcript. Workspace sessions, which seal a Receipt per turn, keep per-turn ownership.
+
 - **A commit made before the capture service replays the session's first hook is still the
   session's.** The service anchored the working-tree baseline when `SessionStart` (or the first
   model invocation) was received, but read the repository's start HEAD only when the queue was

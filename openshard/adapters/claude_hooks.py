@@ -196,6 +196,7 @@ from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-expo
     _valid_transcript_path,
     read_transcript_usage,
 )
+from openshard.adapters.claude_workspace import note_usage_owner
 from openshard.history.capture_completeness import (
     REASON_GIT_OUTCOME_UNAVAILABLE,
     REASON_SESSION_END_NOT_OBSERVED,
@@ -865,6 +866,8 @@ def _transcript_usage(buf: dict) -> dict | None:
     fail-closed and cached by file size/mtime. The transcript content and
     locator never reach ``runs.jsonl``.
     """
+    if buf.get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
+        return None  # another checkout's Receipt owns this session's usage
     cached = buf.get("transcript_usage") if isinstance(buf.get("transcript_usage"), dict) else None
     agent_raw = buf.get("agent")
     agent = agent_raw if isinstance(agent_raw, str) else AGENT_CLAUDE_CODE
@@ -3709,13 +3712,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
             buf["correlation"] = declared
         elif bound != declared:
             buf["correlation_conflicts"] = _stored_count(buf.get("correlation_conflicts")) + 1
-    if payload.transcript_path:
-        # Transient: read at fold for token usage only (see _transcript_usage).
-        buf["transcript_path"] = payload.transcript_path
-    if payload.attrs.get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
-        # A workspace turn's usage belongs to the checkout it touched first
-        # (see claude_workspace): this Receipt must not count it again.
-        buf["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
+    note_usage_owner(buf, payload)
     if (payload.agent == AGENT_CODEX and buf.get("codex_usage_baseline_required")
             and not buf.get("codex_usage_baseline_attempted")):
         # Read cumulative counters before the resumed segment does any work.
