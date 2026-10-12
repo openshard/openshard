@@ -536,7 +536,9 @@ class CaptureRecorder:
             self._bump("ignored")
             return "ignored", "could not resolve repository directory"
         if authorize is not None and not authorize(root):
-            root = self._capability_root(root, payload, authorize)
+            # Only a request that named no project directory had its root
+            # guessed from cwd; a request that named one is judged on it.
+            root = self._capability_root(root, payload, authorize) if not project_dir else None
             if root is None:
                 self._bump("rejected")
                 return "rejected", "unauthenticated"
@@ -561,7 +563,9 @@ class CaptureRecorder:
         checkout when *cwd_root* is a linked worktree, then the repositories
         this service has recently recorded. Only a root the credential
         verifies for is returned; a capability for an unrelated repository
-        is still refused, and the token never reaches this path.
+        is still refused, a request that explicitly named another project
+        directory is refused as before, and the token never reaches this
+        path.
         """
         candidates: list[Path] = []
         session_id = getattr(payload, "session_id", None)
