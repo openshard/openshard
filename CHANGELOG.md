@@ -20,6 +20,13 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Receipts the Platform refused can sync after a fix, and ordinary tasks are not refused.** A task
+  excerpt kept absolute local paths from the first prompt (`C:\Users\<name>\...`); they are now
+  shortened to `.../<name>`. The OpenAI key pattern matched `sk-` inside words (`risk-assessment`,
+  `<task-notification>`), so such text was treated as a secret; it now needs a word boundary (the
+  Platform needs the same change). A rejected Receipt was never retried; the outbox now records the
+  Core version that built the refused payload (`rejected_by`) and a later version retries it once.
+
 - **A commit made before the capture service replays the session's first hook is still the
   session's.** The service anchored the working-tree baseline when `SessionStart` (or the first
   model invocation) was received, but read the repository's start HEAD only when the queue was
