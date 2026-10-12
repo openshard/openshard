@@ -256,6 +256,8 @@ def test_usage_is_counted_once_when_turns_move_between_checkouts(repos):
     assert project_receipt["prompt_tokens"] == 1110 and project_receipt["completion_tokens"] == 111
     assert project_receipt["estimated_cost"] == pytest.approx(0.65)
     assert "prompt_tokens" not in worktree_receipt and "estimated_cost" not in worktree_receipt
+    # Seen in acceptance: the worktree Receipt still names the model that ran (transcript), just not its usage.
+    assert worktree_receipt["execution_model"] == "claude-opus-5-5"
     assert worktree_receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
     assert worktree_receipt["capture"]["cost_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
     assert _changed(worktree_receipt) == {"parser.py"}

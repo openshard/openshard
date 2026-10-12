@@ -272,7 +272,7 @@ class WorkspaceRouter:
             return payload
         attrs = dict(payload.attrs or {})
         attrs["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
-        return replace(payload, transcript_path=None, attrs=attrs)
+        return replace(payload, attrs=attrs)
 
 
 _OWNER_SUFFIX = ".usage-owner"
@@ -302,17 +302,16 @@ def _write_owner(workspace: Path, key: str, repo: Path) -> None:
 
 
 def note_usage_owner(buf: dict, payload: Any) -> None:
-    """Keep the transcript locator only on the Receipt that owns the session's usage.
+    """Mark a Receipt whose session usage another checkout's Receipt owns, for good.
 
-    Once a payload says the usage belongs to another checkout's Receipt, this
-    Receipt never reads the transcript again: a later event carrying the path
-    must not make it count the same usage twice.
+    Such a Receipt still reads the transcript for the model that ran, but
+    never counts or prices its tokens (claude_hooks.build_hook_entry), so a
+    later event carrying the path cannot make it count the same usage twice.
     """
     if (payload.attrs or {}).get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
         buf["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
-        buf.pop("transcript_path", None)
-    if payload.transcript_path and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
-        # Transient: read at fold for token usage only (claude_hooks._transcript_usage).
+    if payload.transcript_path:
+        # Transient: read at fold for usage and model identity (claude_hooks._transcript_usage).
         buf["transcript_path"] = payload.transcript_path
 
 

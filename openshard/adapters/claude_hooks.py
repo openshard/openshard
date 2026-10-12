@@ -866,8 +866,6 @@ def _transcript_usage(buf: dict) -> dict | None:
     fail-closed and cached by file size/mtime. The transcript content and
     locator never reach ``runs.jsonl``.
     """
-    if buf.get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
-        return None  # another checkout's Receipt owns this session's usage
     cached = buf.get("transcript_usage") if isinstance(buf.get("transcript_usage"), dict) else None
     agent_raw = buf.get("agent")
     agent = agent_raw if isinstance(agent_raw, str) else AGENT_CLAUDE_CODE
@@ -3295,7 +3293,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     tokens_provenance: str | None = None
     tokens_source: str | None = None
     tokens_not_recorded: str | None = None
-    if transcript_usage:
+    if transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
         # Session totals from the transcript (the API responses' own usage).
         tokens_current = dict(transcript_usage.get("totals") or {})
         tokens_source = TOKENS_SOURCE_TRANSCRIPT
@@ -3308,7 +3306,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         tokens_current = None
         tokens_not_recorded = TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE
     cost_not_recorded: str | None = USAGE_ELSEWHERE_REASON if tokens_not_recorded == USAGE_ELSEWHERE_REASON else None
-    if estimated_cost is None and transcript_usage:
+    if estimated_cost is None and transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
         # No cost the agent reported (headless ``claude -p`` has no status
         # line): price the usage per model at the official list rates, with
         # 1-hour cache writes at their own rate. Any model without a rate,
