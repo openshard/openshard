@@ -219,6 +219,16 @@ class VerificationEvidence:
 # ---------------------------------------------------------------------------
 
 
+def _check_name_text(value: str) -> str | None:
+    try:
+        from openshard.safety.sanitize import sanitize_words
+        from openshard.security.redaction import scrub_sensitive_text
+
+        return sanitize_words(" ".join(scrub_sensitive_text(value[:2_000], source_label="<verification>").split()), MAX_NAME)
+    except Exception:
+        return None
+
+
 def _safe_text(value: object, cap: int) -> str | None:
     """Secret-scrubbed, whitespace-collapsed, bounded text; None when empty or unsafe."""
     if not isinstance(value, str) or not value.strip():
@@ -280,10 +290,12 @@ def _fill_counts(ev: VerificationEvidence) -> None:
 def _parse_check(raw: object) -> VerificationCheck | None:
     if not isinstance(raw, dict):
         return None
-    name = _safe_text(raw.get("name"), MAX_NAME)
     status = raw.get("status")
-    if name is None or status not in CHECK_STATUSES:
+    if not isinstance(raw.get("name"), str) or not raw["name"].strip() or status not in CHECK_STATUSES:
         return None
+    # A name that is partly unsafe is scrubbed word by word; the check itself
+    # is never dropped for its name (its outcome still counts).
+    name = _check_name_text(raw["name"]) or "check (name redacted)"
     kind = raw.get("kind") if raw.get("kind") in CHECK_KINDS else "other"
     return VerificationCheck(name=name, status=str(status), kind=str(kind), exit_code=_int_or_none(raw.get("exit_code")))
 

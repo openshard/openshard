@@ -1381,10 +1381,10 @@ _COMMAND_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
 
 
 def _check_name(label: str, segment: str | None, kind: str) -> str:
-    """A check's stored name: its own scrubbed simple command, else a neutral label."""
-    from openshard.safety.sanitize import sanitize_text
+    """A check's stored name: its own scrubbed simple command (word by word), else a neutral label."""
+    from openshard.safety.sanitize import sanitize_words
 
-    safe = sanitize_text(_scrubbed_command(segment), _COMMAND_CAP) if segment else None
+    safe = sanitize_words(_scrubbed_command(segment), _COMMAND_CAP) if segment else None
     return f"{label}: {safe}" if safe else f"{label} {kind} command (redacted)"
 
 

@@ -41,6 +41,10 @@ _MAX_COMMAND_CHARS = 20_000
 
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 _PS_HERESTRING_RE = re.compile(r"@(['\"])\r?\n.*?\r?\n\1@", re.DOTALL)
+# Characters a POSIX shell backslash is used to escape in practice. Before
+# anything else (``\t`` in ``C:\tmp``) the backslash is kept, as PowerShell
+# and cmd read it.
+_ESCAPABLE = frozenset(" \t\\'\"$`&|;<>()*?[]{}#~!")
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 # Setup steps that may precede a check without making its failure ambiguous.
@@ -332,9 +336,16 @@ def _parse(command: str) -> list[list[_Simple]]:
             if command[i + 1] == "\n":
                 i += 2  # line continuation
                 continue
-            word.append(command[i + 1])
+            if command[i + 1] in _ESCAPABLE:
+                word.append(command[i + 1])
+                in_word = True
+                i += 2
+                continue
+            # A Windows path (``C:\tmp\venv\python.exe`` in PowerShell or cmd):
+            # the backslash is a separator there, not an escape.
+            word.append(ch)
             in_word = True
-            i += 2
+            i += 1
             continue
         two = command[i:i + 2]
         if two in ("&&", "||"):

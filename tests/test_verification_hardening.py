@@ -210,6 +210,15 @@ class TestSessionRecordAlone:
         assert block["checks"] == [{"name": "Bash: python -m pytest -q", "kind": "test", "status": "failed",
                                     "exit_code": 1}]
 
+    def test_a_long_test_path_keeps_the_check_name_readable(self, repo):
+        # Seen in acceptance: the generic secret heuristic dropped the whole name for a test path.
+        entry = _claude_session(repo, ("PostToolUse", {
+            "tool_name": "PowerShell",
+            "tool_input": {"command": "npx vitest run packages/contracts/test/receipt-sync.test.ts"},
+        }))
+        assert [c["name"] for c in entry["verification"]["checks"]] == [
+            "PowerShell: npx vitest run packages/contracts/test/receipt-sync.test.ts"]
+
     def test_tool_failures_are_reported_apart_from_check_failures(self, repo):
         entry = _claude_session(
             repo,

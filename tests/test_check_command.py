@@ -130,3 +130,28 @@ def test_no_outcome_reported_stays_unknown():
     check = cc.classify_check_command("pytest")
     assert cc.check_outcome(check, "unknown") == "unknown"
     assert cc.unattributed_reason(check, "unknown") is None
+
+
+def test_windows_paths_keep_their_backslashes():
+    # Seen in acceptance: PowerShell's `C:\tmp\venv\...\python.exe -m ruff check` was not a check.
+    (check,) = cc.classify_check_commands(
+        r"Set-Location C:\tmp\acc-core; C:\tmp\osvenv\Scripts\python.exe -m ruff check openshard/x.py"
+    )
+    assert check.kind == cc.KIND_LINT and check.segment == "python -m ruff check openshard/x.py"
+    assert cc.check_outcome(check, "failed") == "failed"
+    (cmd,) = cc.classify_check_commands(r"cmd /c C:\venv\Scripts\pytest.exe -q")
+    assert cmd.kind == cc.KIND_TEST and cmd.segment == "pytest -q"
+
+
+def test_posix_escapes_still_apply():
+    assert cc.classify_check_commands(r"echo a\ b\;c") == []
+    assert cc.classify_check_command(r"pytest\ -q").kind == cc.KIND_OTHER  # one escaped word, not pytest
+
+
+def test_check_names_are_scrubbed_word_by_word():
+    from openshard.safety.sanitize import sanitize_words
+
+    assert sanitize_words("npx vitest run packages/contracts/test/receipt-sync.test.ts", 100) == (
+        "npx vitest run packages/contracts/test/receipt-sync.test.ts")
+    assert sanitize_words("pytest --key AKIAIOSFODNN7EXAMPLEKEY12345 tests/x.py", 100) == "pytest --key <redacted> tests/x.py"
+    assert sanitize_words("AKIAIOSFODNN7EXAMPLEKEY12345", 100) is None
