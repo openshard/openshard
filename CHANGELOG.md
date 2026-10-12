@@ -2,7 +2,17 @@
 
 All notable changes to OpenShard are documented here.
 
-## Unreleased
+## 0.4.16 - 2026-10-12
+
+<!-- release-title: Openshard v0.4.16 - Reliable Capture and Accurate Receipts -->
+
+Fixes Claude Code capture failures across worktrees, records Git evidence
+against the checkout where work happened, adds opt-in transcript recovery
+for previously missed sessions, and simplifies the capture and Receipt code.
+Receipts now capture PowerShell commands, count a session's tokens and cost
+once across its checkouts, record only real checks with outcomes that are
+their own, keep every event of long sessions, and link a session's Receipts
+on the Platform.
 
 ### Added
 
@@ -18,8 +28,22 @@ All notable changes to OpenShard are documented here.
   a dry run; `--write` records it, with a receipt id derived from the session
   so a repeat is a no-op, and never over a session that already has a Receipt.
 
+### Changed
+
+- The Claude transcript usage reader, Receipt renderers and CLI import commands
+  now live in focused modules, with smaller code-health budgets and unchanged
+  public command paths.
+- Hosted Receipts now sync a validated checkout kind and directory basename,
+  for display by Platforms that support the optional checkout field.
+
 ### Fixed
 
+- **Capture-service state writes are reliable under Windows concurrency.** State-file replacements
+  now serialize within the process and retain bounded retries for external file handles,
+  preventing the intermittent lost state update found in the Windows release matrix (#543).
+- **Windows worktree tests do not stage live capture files.** The worktree test helper
+  excludes `.openshard/` from commits, matching installed repositories and avoiding a
+  race with the capture service while the tests run (#544).
 - **Synced Receipts of one session can be linked, and say where their usage is.** The sync
   receipt's `session` block carries `session_key` (`ses_` + 32 hex of sha256 of the agent and
   session id; the session id itself still never syncs), and `tokens_not_recorded_reason` /
