@@ -154,7 +154,7 @@ def discover(
             if st == _outbox.STATE_CONFLICT:
                 found.conflict += 1
                 continue
-            if st == _outbox.STATE_REJECTED:
+            if st == _outbox.STATE_REJECTED and _outbox.rejection_is_final(existing):
                 found.rejected += 1
                 continue
             if st == _outbox.STATE_STALE:

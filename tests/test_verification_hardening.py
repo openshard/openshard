@@ -161,6 +161,64 @@ class TestSessionRecordAlone:
         assert checks_label(receipt) == "1 passed, 1 failed, 1 unknown (agent-reported)"
         assert receipt.checks_display == "1/3 passed"  # the stored/synced string is unchanged
 
+    def test_a_command_that_only_mentions_a_tool_is_not_a_check(self, repo):
+        # Seen on real Receipts: a failed commit recorded as a failed lint check.
+        entry = _claude_session(
+            repo,
+            ("PostToolUseFailure", _bash('git add -A && git commit -m "Ran ruff and pytest"', error="Exit code 1")),
+            ("PostToolUse", _bash("grep -n pytest pyproject.toml")),
+            ("PostToolUse", _bash("python3 - <<'PY'\nprint('vitest')\nPY")),
+        )
+        assert entry["verification"]["status"] == "not_run"
+        assert entry["verification"]["checks"] == []
+
+    def test_a_check_piped_into_another_program_has_no_reported_outcome(self, repo):
+        # Seen: ``vitest | tail`` recorded as a passed test; the exit status is tail's.
+        entry = _claude_session(
+            repo, ("PostToolUse", _bash("cd /c/tmp/web && npx vitest run apps/web/test 2>&1 | tail -60")),
+        )
+        block = entry["verification"]
+        assert [c["status"] for c in block["checks"]] == ["unknown"]
+        assert block["checks"][0]["name"] == "Bash: npx vitest run apps/web/test"
+        assert block["status"] == "unknown" and block["checks_passed"] == 0
+        assert "output_piped_to_another_program" in block["incomplete_reasons"]
+        assert "another program" in block["reason"]
+        assert "outcome_unattributed" not in json.dumps(block["checks"])  # contract-shaped checks only
+
+    def test_each_check_in_a_passing_chain_passes(self, repo):
+        entry = _claude_session(repo, ("PostToolUse", _bash("cd /c/tmp/p && pnpm typecheck && npx vitest run")))
+        block = entry["verification"]
+        assert [(c["kind"], c["status"]) for c in block["checks"]] == [("typecheck", "passed"), ("test", "passed")]
+        assert block["status"] == "passed" and block["checks_passed"] == 2
+
+    def test_a_failed_chain_is_not_blamed_on_a_check_that_may_have_passed(self, repo):
+        entry = _claude_session(
+            repo, ("PostToolUseFailure", _bash('pytest -q && git commit -m "x"', error="Exit code 1")),
+        )
+        block = entry["verification"]
+        assert [c["status"] for c in block["checks"]] == ["unknown"]
+        assert block["status"] == "unknown" and block["checks_failed"] == 0
+        assert "failure_may_belong_to_another_command" in block["incomplete_reasons"]
+
+    def test_a_check_after_setup_steps_keeps_its_failure(self, repo):
+        entry = _claude_session(
+            repo, ("PostToolUseFailure", _bash("cd /c/tmp/os && /c/venv/Scripts/python.exe -m pytest -q",
+                                                 error="Exit code 1")),
+        )
+        block = entry["verification"]
+        assert block["status"] == "failed"
+        assert block["checks"] == [{"name": "Bash: python -m pytest -q", "kind": "test", "status": "failed",
+                                    "exit_code": 1}]
+
+    def test_a_long_test_path_keeps_the_check_name_readable(self, repo):
+        # Seen in acceptance: the generic secret heuristic dropped the whole name for a test path.
+        entry = _claude_session(repo, ("PostToolUse", {
+            "tool_name": "PowerShell",
+            "tool_input": {"command": "npx vitest run packages/contracts/test/receipt-sync.test.ts"},
+        }))
+        assert [c["name"] for c in entry["verification"]["checks"]] == [
+            "PowerShell: npx vitest run packages/contracts/test/receipt-sync.test.ts"]
+
     def test_tool_failures_are_reported_apart_from_check_failures(self, repo):
         entry = _claude_session(
             repo,
@@ -250,7 +308,7 @@ class TestSessionFinalisation:
         assert CliRunner().invoke(cli, ["verify", "--dry-run", "--json"]).exit_code == 0
         assert not path.exists()
         reasons = _runs(repo)[-1]["capture"]["completeness"]["reasons"]
-        assert [r["kind"] for r in reasons] == ["session_end_not_observed"]
+        assert [r["kind"] for r in reasons] == ["session_end_not_observed", "session_idle_sealed"]
 
 
 # ---------------------------------------------------------------------------

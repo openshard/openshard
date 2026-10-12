@@ -235,6 +235,7 @@ class TestSession:
     def test_shape_omits_session_id(self):
         d = _ext(_entry(capture=self.CAPTURE))["session"]
         assert d == {
+            "session_key": ev.session_key(self.CAPTURE),
             "checkout": None,
             "started_at": "2026-09-03T01:09:08Z", "first_prompt_at": None, "last_turn_completed_at": None,
             "last_activity_at": "2026-09-03T17:13:06Z", "ended": True, "end_reason": "other",
@@ -242,6 +243,22 @@ class TestSession:
             "tool_failure_count": 0,
         }
         assert "50bf9457" not in json.dumps(d)
+
+    def test_session_key_links_checkouts_without_revealing_the_session_id(self):
+        key = ev.session_key(self.CAPTURE)
+        assert key is not None and key.startswith("ses_") and len(key) == 36
+        assert key == ev.session_key({**self.CAPTURE, "checkout": {"kind": "linked_worktree", "name": "wt"}})
+        assert key != ev.session_key({**self.CAPTURE, "agent": "codex"})
+        assert key != ev.session_key({**self.CAPTURE, "session_id": "11111111-4f46-4cf0-8d3b-08dea904a3b8"})
+        for bad in (None, "", "C:/x/s.jsonl", "has space"):
+            assert ev.session_key({**self.CAPTURE, "session_id": bad}) is None
+
+    def test_usage_reasons_are_projected_as_codes_only(self):
+        data = _ext(_entry(capture={**self.CAPTURE,
+                                    "tokens_not_recorded_reason": "workspace_usage_attributed_to_other_repository",
+                                    "cost_not_recorded_reason": "Not A Code"}))
+        assert data["tokens_not_recorded_reason"] == "workspace_usage_attributed_to_other_repository"
+        assert data["cost_not_recorded_reason"] is None
 
     def test_checkout_evidence_is_projected_without_an_absolute_path(self):
         data = _ext(_entry(capture={**self.CAPTURE, "checkout": {

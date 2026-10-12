@@ -210,13 +210,13 @@ def _version() -> str:
 def _write_state(path: Path, state: dict) -> None:
     """Write the state file owner-only (0600): it names recent repository paths."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp = path.with_name(path.name + f".{os.getpid()}.{threading.get_ident()}.tmp")  # one per writing thread
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(state, fh, indent=2)
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    client.replace_with_retry(tmp, path)
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -307,7 +307,7 @@ class CaptureRecorder:
         self._locks_guard = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = {}
         self._root_cache: dict[tuple[str | None, str | None, str], Path | None] = {}
-        self._workspace = claude_workspace.WorkspaceRouter()
+        self._workspace = claude_workspace.WorkspaceRouter(state_path=state_path)
         # Sessions already known to this service (see _opens_session).
         self._known_sessions: set[str] = set()
         # Which project a credential belongs to and which checkout an event
@@ -776,6 +776,7 @@ class CaptureRecorder:
             repos = [entry] + [r for r in repos if r != entry]
             self._state["recent_repos"] = repos[:MAX_RECENT_REPOS]
             _write_state(self._state_path, self._state)
+            _write_state(self._state_path.with_name(client.REPOS_FILENAME), {"recent_repos": self._state["recent_repos"]})
         except Exception as exc:
             _log(f"could not update state file: {type(exc).__name__}")
 
@@ -1424,7 +1425,7 @@ def serve(
     previous = client.read_state(env) or {}
     recorder = CaptureRecorder(
         instance_id=instance_id, state_path=state_path,
-        state={"recent_repos": previous.get("recent_repos", [])},
+        state={"recent_repos": client.remembered_repos(previous, env)[:MAX_RECENT_REPOS]},
     )
     server = _bind(env, port, recorder, instance_id, started_at)
     if server is None:

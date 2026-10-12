@@ -630,6 +630,24 @@ class TestHookConfigShape(unittest.TestCase):
         for event in ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"):
             self.assertNotIn("matcher", config[event][0])
 
+    def test_tool_matcher_names_every_tool_the_adapter_records(self):
+        # A tool missing from the matcher never reaches the adapter: Claude
+        # Code on Windows runs shell commands through ``PowerShell``, and those
+        # calls were silently absent from Receipts while the matcher said Bash.
+        from openshard.adapters.claude_hooks import COMMAND_TOOLS, FILE_TOOLS
+
+        self.assertEqual(set(TOOL_MATCHER.split("|")), set(FILE_TOOLS | COMMAND_TOOLS))
+        self.assertIn("PowerShell", TOOL_MATCHER.split("|"))
+
+    def test_bash_only_matcher_from_an_older_install_is_updated(self):
+        old = build_hook_config()
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            old[event][0]["matcher"] = "Edit|Write|MultiEdit|NotebookEdit|Bash"
+        merged, changes = merge_openshard_hooks({"hooks": old})
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            self.assertEqual(changes[event], "updated")
+            self.assertEqual(merged["hooks"][event][0]["matcher"], TOOL_MATCHER)
+
     def test_primary_hooks_are_synchronous_and_watchdogs_are_async(self):
         # The direct HTTP path remains synchronous/ordered. The command
         # fallback is explicitly async so recovery never joins Claude's

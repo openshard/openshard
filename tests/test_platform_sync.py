@@ -49,6 +49,8 @@ CONTRACT_RECEIPT_KEYS = frozenset({
     # P1 additive optional keys (null when the record carries nothing):
     "policy_decisions", "permissions", "approval_detail", "sandbox_detail", "execution_loop", "base_commit",
     "content_hash", "session", "routing", "retry", "provider", "surface", "commit", "pr_url",
+    # Why usage is absent (e.g. another Receipt of the session holds it):
+    "tokens_not_recorded_reason", "cost_not_recorded_reason",
     # OSN control evidence (optional; null for records that predate it):
     "agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot", "organisation_policy",
 })
@@ -485,6 +487,26 @@ class TestFlush:
         paths = [d["path"] for p in doc["problems"] for d in (p["error"].get("details") or [])]
         assert paths == ["receipt.files[0].path"]
 
+    def test_a_rejection_is_retried_once_by_a_newer_core(self, repo, env, link, monkeypatch):
+        # Seen live: Receipts refused while Core and the Platform contract were
+        # out of step stayed refused for good, even after the cause was fixed.
+        _session(repo, _sid(1))
+        rt = transport.RecordingPlatformTransport([SendResult("rejected", 400, "invalid_payload")])
+        assert client.flush(repo, env=env, transport=rt).rejected == 1
+        (record,) = outbox.load_outbox(repo).values()
+        assert record["rejected_by"] == outbox.core_version()
+        assert client.flush(repo, env=env, transport=rt).sent == 0  # same Core: final
+
+        monkeypatch.setattr(outbox, "core_version", lambda: "9.9.9")
+        accepted = transport.RecordingPlatformTransport()
+        assert client.flush(repo, env=env, transport=accepted).created == 1
+        assert next(iter(outbox.load_outbox(repo).values()))["state"] == "synced"
+
+        _session(repo, _sid(2))
+        refused_again = transport.RecordingPlatformTransport([SendResult("rejected", 400, "invalid_payload")])
+        client.flush(repo, env=env, transport=refused_again)
+        assert client.flush(repo, env=env, transport=refused_again).sent == 0  # once per version
+
     def test_unavailable_stops_the_flush_and_backs_off(self, repo, env, link):
         _session(repo, _sid(1))
         _session(repo, _sid(2))
@@ -542,7 +564,7 @@ class TestFlush:
         receipt = recording.envelopes[-1]["receipt"]
         completeness = receipt["capture_completeness"]
         assert completeness["status"] == "incomplete"
-        assert [r["kind"] for r in completeness["reasons"]] == ["session_end_not_observed"]
+        assert [r["kind"] for r in completeness["reasons"]] == ["session_end_not_observed", "session_idle_sealed"]
         assert not list((repo / ".openshard").rglob(f"antigravity.{_sid(7)}.json"))  # buffer swept
         # Nothing left to fold later: the synced copy matches the local record.
         again = client.flush(repo, env=env, now=later + timedelta(hours=3))
