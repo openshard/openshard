@@ -2,6 +2,19 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Fixed
+
+- **A commit made before the capture service replays the session's first hook is still the
+  session's.** The service anchored the working-tree baseline when `SessionStart` (or the first
+  model invocation) was received, but read the repository's start HEAD only when the queue was
+  replayed into the staging buffer. An agent that committed in that window, which a multi-repository
+  workspace session or a fold backlog widens, had its commit fall outside the session's
+  `start..end` range and its files read as pre-existing. The queued session-opening line now carries
+  `start_head`, taken beside the baseline, and the buffer uses it; queue lines without it (older
+  services) behave as before.
+
 ## 0.4.15 - 2026-10-12
 
 <!-- release-title: Openshard v0.4.15 - Cloud Capture Readiness -->

@@ -1465,6 +1465,12 @@ class ReducedHookPayload:
     # so a replay that lags behind the agent's first edits still anchors
     # attribution at session start. Absent on every other line.
     baseline: dict | None = None
+    # The HEAD the repository was at when the session-opening hook was
+    # *received* (the same moment as ``baseline``), so a commit the agent
+    # makes before the queue is replayed still falls inside the session's
+    # ``start..end`` range instead of being read as pre-existing. Absent on
+    # every other line and on queues written by older services.
+    start_head: str | None = None
     # The policy class ``verification/plan.classify_command_safety`` gives the
     # raw command (``safe`` | ``needs_approval`` | ``blocked``), computed at
     # reduce time from the command text that is never stored. Metadata only:
@@ -1508,6 +1514,8 @@ class ReducedHookPayload:
             data["attrs"] = dict(self.attrs)
         if self.baseline is not None:
             data["baseline"] = self.baseline
+        if self.start_head is not None:
+            data["start_head"] = self.start_head
         if self.command_safety is not None:
             data["command_safety"] = self.command_safety
         # Only when reported, so queue lines of every other event keep their shape.
@@ -1590,6 +1598,7 @@ class ReducedHookPayload:
             tool_success=tool_success,
             attrs=_clean_attrs(data.get("attrs")),
             baseline=_valid_baseline(data.get("baseline")),
+            start_head=_sha_or_none(data.get("start_head")),
             command_safety=_command_safety_or_none(data.get("command_safety")),
             command_outcome=_command_outcome_or_none(data.get("command_outcome")),
             command_exit_code=_exit_code_or_none(data.get("command_exit_code")),
@@ -1743,7 +1752,7 @@ def _buffer_profile(buf: Mapping[str, Any]) -> AgentProfile:
 
 def _new_buffer(
     session_id: str, repo_root: Path, first_hook: str, *, now: str | None = None, agent: str = AGENT_CLAUDE_CODE,
-    baseline: dict | None = None,
+    baseline: dict | None = None, start_head: str | None = None,
 ) -> dict:
     from openshard.analysis.repo_map import collect_git_info
 
@@ -1758,7 +1767,9 @@ def _new_buffer(
         "last_activity_at": now,
         "start_source": None,
         "git_branch": git_info.branch,
-        "git_head_commit_hash": git_info.head_commit,
+        # The HEAD the capture service saw when the session opened wins over
+        # the one read now: a replay may lag behind the agent's first commit.
+        "git_head_commit_hash": start_head or git_info.head_commit,
         "git_dirty": git_info.dirty,
         # v0.4.4: the working tree as it already was when this session was
         # first observed. Anything dirty/untracked here is not this
@@ -2266,7 +2277,7 @@ def _entry_ended(entry: dict) -> bool:
 
 def _resumed_segment(
     persisted: dict, repo_root: Path, session_id: str, first_hook: str, *, now: str | None,
-    agent: str, baseline: dict | None,
+    agent: str, baseline: dict | None, start_head: str | None = None,
 ) -> dict:
     """A fresh buffer for hooks arriving after this session's receipt already ended.
 
@@ -2279,7 +2290,9 @@ def _resumed_segment(
     ended receipt's dedup ids are carried over, so a replayed queue line it
     already applied is still recognised as a duplicate.
     """
-    buf = _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline)
+    buf = _new_buffer(
+        session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline, start_head=start_head,
+    )
     buf["start_source"] = "resume"
     if agent == AGENT_CODEX:
         buf["codex_usage_baseline_required"] = True
@@ -2317,7 +2330,7 @@ def _late_hook_for_ended(persisted: dict, first_hook: str, now: str | None) -> b
 
 def _load_or_create_buffer(
     repo_root: Path, session_id: str, first_hook: str, *, now: str | None = None,
-    agent: str = AGENT_CLAUDE_CODE, baseline: dict | None = None,
+    agent: str = AGENT_CLAUDE_CODE, baseline: dict | None = None, start_head: str | None = None,
 ) -> dict | None:
     """The session's buffer: live, rebuilt from a not-ended record, a resumed segment, or new.
 
@@ -2336,11 +2349,14 @@ def _load_or_create_buffer(
                 return None
             return _resumed_segment(
                 persisted, repo_root, session_id, first_hook, now=now, agent=agent, baseline=baseline,
+                start_head=start_head,
             )
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
             return rebuilt
-    return _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline)
+    return _new_buffer(
+        session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline, start_head=start_head,
+    )
 
 
 def _load_buffer_light(repo_root: Path, session_id: str, agent: str = AGENT_CLAUDE_CODE) -> dict | None:
@@ -2531,6 +2547,17 @@ def _blob_ids(repo_root: Path, paths: list[str]) -> dict[str, str | None]:
             if len(ids) == len(existing):
                 out.update(zip(existing, ids, strict=True))
     return out
+
+
+def _snapshot_start_head(repo_root: Path) -> str | None:
+    """The HEAD commit at the moment a session-opening hook is received.
+
+    Taken by the capture service beside ``_snapshot_baseline`` so the
+    session's commit range starts where the session started, not where
+    the queue replay happened to catch up. None when git cannot answer;
+    the fold then reads HEAD itself as before.
+    """
+    return _sha_or_none(run_git(repo_root, ["rev-parse", "HEAD"]))
 
 
 def _snapshot_baseline(repo_root: Path, now: str) -> dict:
@@ -4436,7 +4463,7 @@ def apply_reduced_hook(
         with history_file_lock(path, timeout=_LOCK_TIMEOUT_SECONDS):
             loaded = _load_or_create_buffer(
                 repo_root, payload.session_id, payload.event, now=now, agent=payload.agent,
-                baseline=payload.baseline,
+                baseline=payload.baseline, start_head=payload.start_head,
             )
             if loaded is None:
                 ended = _find_persisted_entry(repo_root, payload.session_id, profile_for(payload.agent).executor)
