@@ -156,9 +156,13 @@ class _Turn:
 class WorkspaceRouter:
     """In-memory per-session turn state for workspace sessions. Thread-safe."""
 
-    def __init__(self) -> None:
+    def __init__(self, owner_dir: Path | None = None) -> None:
         self._lock = threading.Lock()
         self._sessions: dict[tuple[str, str], _Turn] = {}
+        # Where a project session's usage owner outlives a service restart: the
+        # capture service's own state directory, never a repository (a project
+        # that recorded nothing must hold no capture state). None: memory only.
+        self._owner_dir = owner_dir
 
     def _turn(self, workspace: Path, key: str) -> _Turn:
         marker = (str(workspace), key)
@@ -167,14 +171,13 @@ class WorkspaceRouter:
             if len(self._sessions) >= _MAX_SESSIONS:
                 self._sessions.pop(next(iter(self._sessions)))
             # A restarted service has no memory of the session: keep the owner it chose before.
-            turn = self._sessions[marker] = _Turn(session_owner=_read_owner(workspace, key))
+            turn = self._sessions[marker] = _Turn(session_owner=_read_owner(self._owner_dir, workspace, key))
         return turn
 
-    @staticmethod
-    def _own(turn: _Turn, workspace: Path, key: str, repo: Path) -> None:
+    def _own(self, turn: _Turn, workspace: Path, key: str, repo: Path) -> None:
         if turn.session_owner is None:
             turn.session_owner = repo
-            _write_owner(workspace, key, repo)
+            _write_owner(self._owner_dir, workspace, key, repo)
 
     def route(
         self, workspace: Path, key: str, payload: Any, at: str, *,
@@ -231,7 +234,8 @@ class WorkspaceRouter:
                 turn.touched = []
                 if event == EVENT_SESSION_END:
                     self._sessions.pop((str(workspace), key), None)
-                    _owner_path(workspace, key).unlink(missing_ok=True)
+                    if self._owner_dir is not None:
+                        _owner_path(self._owner_dir, workspace, key).unlink(missing_ok=True)
                 return out
             repo = checkout if checkout is not None else checkout_for(workspace, payload)
             if repo is None:
@@ -275,26 +279,30 @@ class WorkspaceRouter:
         return replace(payload, attrs=attrs)
 
 
-_OWNER_SUFFIX = ".usage-owner"
+def _owner_path(owner_dir: Path, workspace: Path, key: str) -> Path:
+    import hashlib
+
+    project = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()[:16]
+    return owner_dir / f"{project}-{key}.usage-owner"
 
 
-def _owner_path(workspace: Path, key: str) -> Path:
-    return workspace / ".openshard" / "claude_sessions" / f"{key}{_OWNER_SUFFIX}"
-
-
-def _read_owner(workspace: Path, key: str) -> Path | None:
-    """The checkout a project session's usage was given to, as recorded beside the project's buffers."""
+def _read_owner(owner_dir: Path | None, workspace: Path, key: str) -> Path | None:
+    """The checkout a project session's usage was given to before a service restart."""
+    if owner_dir is None:
+        return None
     try:
-        raw = _owner_path(workspace, key).read_text(encoding="utf-8").strip()
+        raw = _owner_path(owner_dir, workspace, key).read_text(encoding="utf-8").strip()
     except OSError:
         return None
     return Path(raw) if raw and (Path(raw) / ".git").exists() else None
 
 
-def _write_owner(workspace: Path, key: str, repo: Path) -> None:
+def _write_owner(owner_dir: Path | None, workspace: Path, key: str, repo: Path) -> None:
     """Only project sessions keep one Receipt per checkout for life; a workspace marker is harmless."""
+    if owner_dir is None:
+        return
     try:
-        path = _owner_path(workspace, key)
+        path = _owner_path(owner_dir, workspace, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(str(repo), encoding="utf-8")
     except OSError:

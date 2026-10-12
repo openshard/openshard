@@ -307,7 +307,8 @@ class CaptureRecorder:
         self._locks_guard = threading.Lock()
         self._session_locks: dict[str, threading.Lock] = {}
         self._root_cache: dict[tuple[str | None, str | None, str], Path | None] = {}
-        self._workspace = claude_workspace.WorkspaceRouter()
+        self._workspace = claude_workspace.WorkspaceRouter(
+            owner_dir=state_path.with_name("claude-usage-owners") if state_path is not None else None)
         # Sessions already known to this service (see _opens_session).
         self._known_sessions: set[str] = set()
         # Which project a credential belongs to and which checkout an event

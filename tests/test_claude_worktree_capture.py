@@ -385,7 +385,8 @@ def test_a_restarted_service_keeps_the_session_usage_on_the_same_receipt(repos):
     assert project_receipt["prompt_tokens"] == 1100 and project_receipt["completion_tokens"] == 110
     assert "prompt_tokens" not in worktree_receipt
     assert worktree_receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
-    assert not list((platform / ".openshard" / "claude_sessions").glob("*.usage-owner"))
+    # The owner is kept in the service's state, never in a repository, and is gone after the session ends.
+    assert not list(platform.rglob("*.usage-owner")) and not list(wt.rglob("*.usage-owner"))
 
 
 def test_delayed_queue_processing_folds_the_same_receipts(repos):
