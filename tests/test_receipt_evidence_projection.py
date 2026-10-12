@@ -235,12 +235,36 @@ class TestSession:
     def test_shape_omits_session_id(self):
         d = _ext(_entry(capture=self.CAPTURE))["session"]
         assert d == {
+            "checkout": None,
             "started_at": "2026-09-03T01:09:08Z", "first_prompt_at": None, "last_turn_completed_at": None,
             "last_activity_at": "2026-09-03T17:13:06Z", "ended": True, "end_reason": "other",
             "start_source": "startup", "prompt_count": 2, "turn_count": 2, "tool_call_count": 4,
             "tool_failure_count": 0,
         }
         assert "50bf9457" not in json.dumps(d)
+
+    def test_checkout_evidence_is_projected_without_an_absolute_path(self):
+        data = _ext(_entry(capture={**self.CAPTURE, "checkout": {
+            "kind": "linked_worktree", "name": "accept-core",
+        }}))["session"]
+        assert data["checkout"] == {"kind": "linked_worktree", "name": "accept-core"}
+        assert ev.session_block({"capture": {"checkout": {"kind": "main_checkout", "name": None}}})["checkout"] == {
+            "kind": "main_checkout", "name": None,
+        }
+
+    def test_checkout_rejects_paths_secrets_and_unknown_kinds(self):
+        for item in (
+            {"kind": "linked_worktree", "name": "/home/user/private"},
+            {"kind": "linked_worktree", "name": r"C:\\Users\\user\\secret"},
+            {"kind": "linked_worktree", "name": "nested/folder"},
+            {"kind": "linked_worktree", "name": "x" * 256},
+            {"kind": "linked_worktree", "name": "password=foo"},
+            {"kind": "linked_worktree", "name": ".."},
+        ):
+            projected = ev.session_block({"capture": {"checkout": item}})
+            assert projected is not None and projected["checkout"] == {"kind": "linked_worktree", "name": None}
+        for item in ({"kind": "unknown", "name": "foo"}, {"kind": "", "name": "foo"}, "oops"):
+            assert ev.session_block({"capture": {"checkout": item}}) is None
 
     def test_malformed_dropped(self):
         d = ev.session_block({"capture": {"started_at": "garbage", "prompt_count": -1, "tool_call_count": "4",
