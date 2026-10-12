@@ -211,7 +211,7 @@ def _io_floor(directory: Path, samples: int = 10) -> float:
     blob = json.dumps({"probe": "x" * 2048})
     timings = []
     for _ in range(samples):
-        t0 = time.monotonic()
+        t0 = time.perf_counter()  # monotonic() is 15.6ms-grained on Windows before 3.13
         with lock.open("a+"):
             pass
         with tmp.open("w", encoding="utf-8") as fh:
@@ -220,7 +220,7 @@ def _io_floor(directory: Path, samples: int = 10) -> float:
             os.fsync(fh.fileno())
         os.replace(tmp, probe)
         probe.read_text(encoding="utf-8")
-        timings.append(time.monotonic() - t0)
+        timings.append(time.perf_counter() - t0)
     timings.sort()
     return timings[len(timings) // 2]
 
@@ -2152,9 +2152,9 @@ class TestStatusLineFastPath:
         floor = _io_floor(repo / ".openshard")
         samples = []
         for i in range(10):
-            t0 = time.monotonic()
+            t0 = time.perf_counter()
             _status(repo, tokens_input=1000 + i, cost_total=0.01 * i)
-            samples.append(time.monotonic() - t0)
+            samples.append(time.perf_counter() - t0)
         samples.sort()
         median = samples[len(samples) // 2]
         budget = max(0.15, 12 * floor)
