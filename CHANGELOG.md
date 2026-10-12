@@ -20,6 +20,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **Synced Receipts of one session can be linked, and say where their usage is.** The sync
+  receipt's `session` block carries `session_key` (`ses_` + 32 hex of sha256 of the agent and
+  session id; the session id itself still never syncs), and `tokens_not_recorded_reason` /
+  `cost_not_recorded_reason` carry Core's reason code, e.g. that another Receipt of the session
+  holds the usage. Requires a Platform that accepts these keys (openshard/platform#164).
+
 - **A commit made before the capture service replays the session's first hook is still the
   session's.** The service anchored the working-tree baseline when `SessionStart` (or the first
   model invocation) was received, but read the repository's start HEAD only when the queue was

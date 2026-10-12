@@ -33,6 +33,8 @@ _DECISIONS = frozenset({"allow", "ask", "deny", "not_applicable"})
 _STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?$")
 _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 _CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_AGENT_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_REASON_CODE_RE = re.compile(r"^[a-z_]{1,64}$")
 _ROLES = ("planner", "executor", "validator")
 
 
@@ -1104,6 +1106,24 @@ def provider_value(entry: dict) -> str | None:
     return _text(_dict(entry.get("capture")).get("provider"), 128)
 
 
+def tokens_not_recorded_reason_value(entry: dict) -> str | None:
+    """Why the record has no tokens (``capture.tokens_not_recorded_reason``), as a reason code.
+
+    ``workspace_usage_attributed_to_other_repository`` means another Receipt
+    of the same session holds them: the Platform says so instead of Unknown.
+    """
+    return _reason_code(_dict(entry.get("capture")).get("tokens_not_recorded_reason"))
+
+
+def cost_not_recorded_reason_value(entry: dict) -> str | None:
+    """Why the record has no cost (``capture.cost_not_recorded_reason``), as a reason code."""
+    return _reason_code(_dict(entry.get("capture")).get("cost_not_recorded_reason"))
+
+
+def _reason_code(value: Any) -> str | None:
+    return value if isinstance(value, str) and _REASON_CODE_RE.match(value) else None
+
+
 def surface_value(entry: dict) -> str | None:
     """How the agent was launched (``capture.surface``: Claude Code's raw entrypoint)."""
     return _text(_dict(entry.get("capture")).get("surface"), 64)
@@ -1172,11 +1192,29 @@ def checkout_block(value: Any) -> dict[str, str | None] | None:
     return {"kind": kind, "name": name}
 
 
+def session_key(capture: dict) -> str | None:
+    """The one-way key linking the Receipts of one agent session (Platform ``SESSION_KEY_PATTERN``).
+
+    A session that works in several checkouts keeps one Receipt per checkout;
+    they share this key and nothing else. The agent's own session id never
+    crosses (it names a local transcript): the key is ``ses_`` + the first 32
+    hex characters of sha256("<agent>:<session id>"), which cannot be turned
+    back into it.
+    """
+    import hashlib
+
+    sid, agent = capture.get("session_id"), capture.get("agent") or "claude_code"
+    if not isinstance(sid, str) or not _AGENT_SESSION_ID_RE.match(sid) or not isinstance(agent, str):
+        return None
+    return "ses_" + hashlib.sha256(f"{agent}:{sid}".encode()).hexdigest()[:32]
+
+
 def session_block(entry: dict) -> dict[str, Any] | None:
     capture = _dict(entry.get("capture"))
     if not capture:
         return None
     block = {
+        "session_key": session_key(capture),
         "checkout": checkout_block(capture.get("checkout")),
         "started_at": _stamp(capture.get("started_at")),
         "first_prompt_at": _stamp(capture.get("first_prompt_at")),
@@ -1331,6 +1369,8 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "base_commit": base_commit_value,
         "provider": provider_value,
         "surface": surface_value,
+        "tokens_not_recorded_reason": tokens_not_recorded_reason_value,
+        "cost_not_recorded_reason": cost_not_recorded_reason_value,
         "commit": commit_value,
         "pr_url": pr_url_value,
         "content_hash": content_hash_value,
@@ -1359,6 +1399,8 @@ __all__ = [
     "provider_value",
     "surface_value",
     "content_hash_value",
+    "cost_not_recorded_reason_value",
+    "tokens_not_recorded_reason_value",
     "execution_loop_block",
     "multi_agent_block",
     "learning_block",

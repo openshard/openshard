@@ -1601,6 +1601,30 @@
             }
           ]
         },
+        "tokens_not_recorded_reason": {
+          "description": "Why tokens are absent, e.g. workspace_usage_attributed_to_other_repository when another Receipt of the same session holds them.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z_]{1,64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cost_not_recorded_reason": {
+          "description": "Why cost is absent; same vocabulary as tokens_not_recorded_reason.",
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z_]{1,64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "policy_decisions": {
           "anyOf": [
             {
@@ -2070,6 +2094,17 @@
             {
               "type": "object",
               "properties": {
+                "session_key": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^ses_[0-9a-f]{32}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "checkout": {
                   "anyOf": [
                     {
