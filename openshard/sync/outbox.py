@@ -17,7 +17,10 @@ replay of an already-synced receipt is free (the Platform answers
 ``conflict``  the Platform already holds different content under this
               ``receipt_id`` for this organisation (409); never retried
 ``rejected``  the Platform refused the payload (400/413/422); the error code
-              and field paths are kept, the payload is not; never retried
+              and field paths are kept, the payload is not; ``rejected_by``
+              names the Core version that built it. Retried once by a later
+              Core version (its projection or scrubbing may have been fixed),
+              never again by the same one
 ============  ==============================================================
 
 Later verification evidence (``sync/evidence.py``) rides on the same line:
@@ -172,7 +175,23 @@ def make_record(
         record["attempts"] = int(prev.get("attempts") or 0)  # nothing was sent
     if state in (STATE_CONFLICT, STATE_REJECTED):
         record["last_error"] = {"status": status, "code": code, "details": _bounded_details(details), "at": now}
+    if state == STATE_REJECTED:
+        # A refusal is final for the Core that built the payload, not for a
+        # later one: a newer Core may build an acceptable payload (a fixed
+        # projection or scrubber), so it retries once (``rejection_is_final``).
+        record["rejected_by"] = core_version()
     return record
+
+
+def core_version() -> str:
+    import openshard
+
+    return str(openshard.__version__)
+
+
+def rejection_is_final(record: dict) -> bool:
+    """A rejected record is retried once by each later Core version, never again by the same one."""
+    return record.get("rejected_by") == core_version()
 
 
 def with_evidence(
