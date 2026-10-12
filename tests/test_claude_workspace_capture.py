@@ -247,7 +247,8 @@ def test_multi_repository_cloud_session_produces_receipts_in_the_touched_checkou
     assert identities == ["github.com/openshard/core", "github.com/openshard/platform", "github.com/openshard/platform"]
 
 
-def test_workspace_routing_needs_the_cloud_surface(workspace, monkeypatch):
+def test_a_local_workspace_session_records_into_the_touched_checkout(workspace, monkeypatch):
+    """Without the cloud surface the parent is an ordinary project; its edits still land where they happened."""
     monkeypatch.delenv(cconfig.SURFACE_ENV)
     service = _Service({**os.environ})
     try:
@@ -258,11 +259,14 @@ def test_workspace_routing_needs_the_cloud_surface(workspace, monkeypatch):
         _edit(claude, workspace / "core" / "a.py", "A = 1\n")
         claude.send("Stop")
         claude.send("SessionEnd", reason="other")
-        time.sleep(0.5)
+        assert _wait_for(lambda: len(_receipts(workspace / "core")) == 1)
     finally:
         service.stop()
-    # Without hosted turn sealing nothing is routed into the checkouts.
-    assert _receipts(workspace / "core") == []
+    (core_receipt,) = _receipts(workspace / "core")
+    assert core_receipt["task"] == "local workspace"
+    assert {f["path"] for f in core_receipt["files_detail"] if f.get("attribution") != "pre_existing"} == {"a.py"}
+    assert core_receipt["capture"]["checkout"] == {"kind": "main_checkout", "name": None}
+    assert _receipts(workspace / "platform") == []
 
 
 def test_status_line_usage_goes_only_to_the_turn_owner(workspace):

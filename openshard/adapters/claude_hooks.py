@@ -1519,6 +1519,7 @@ def _new_buffer(
         "schema_version": BUFFER_SCHEMA_VERSION,
         "agent": profile.key,
         "session_id": session_id,
+        "checkout": checkout_facts(repo_root),
         "started_at": now,
         "last_activity_at": now,
         "start_source": None,
@@ -2314,6 +2315,30 @@ def _snapshot_start_head(repo_root: Path) -> str | None:
     the fold then reads HEAD itself as before.
     """
     return _sha_or_none(run_git(repo_root, ["rev-parse", "HEAD"]))
+
+
+def checkout_facts(repo_root: Path) -> dict:
+    """What kind of checkout the Receipt's git evidence was observed in. Never raises.
+
+    ``kind`` is ``linked_worktree`` when *repo_root* is a ``git worktree`` of
+    another checkout (its common git dir lives elsewhere), ``main_checkout``
+    for the checkout that owns the git dir, or ``not_git``. ``name`` is a
+    linked worktree's directory basename (never its absolute path), which
+    tells worktrees of one repository apart; a main checkout is identified
+    by its repository already and carries no name. A session that works in
+    several checkouts produces one Receipt per checkout, all with the same
+    ``capture.session_id``; this block says which one each is.
+    """
+    kind = "not_git"
+    try:
+        out = run_git(repo_root, ["rev-parse", "--git-common-dir"])
+        if out and out.strip():
+            common = Path(out.strip())
+            common = (common if common.is_absolute() else repo_root / common).resolve()
+            kind = "linked_worktree" if common.parent != repo_root.resolve() else "main_checkout"
+    except Exception:
+        kind = "not_git"
+    return {"kind": kind, "name": repo_root.name if kind == "linked_worktree" else None}
 
 
 def _snapshot_baseline(repo_root: Path, now: str) -> dict:
@@ -3376,6 +3401,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "agent_vendor": profile.vendor,
             "provider": provider_current,
             "session_id": buf.get("session_id"),
+            "checkout": buf.get("checkout"),
             "status": "ended" if ended else "in_progress",
             "session_end_observed": bool(ended),
             "session_end_reason": (ended or {}).get("reason"),

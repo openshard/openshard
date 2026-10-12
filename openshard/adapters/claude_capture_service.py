@@ -111,8 +111,10 @@ from openshard.adapters.claude_hooks import (
     HookPayload,
     ReducedHookPayload,
     StatusPayload,
+    _is_forbidden_capture_root,
     _snapshot_baseline,
     _snapshot_start_head,
+    _to_repo_relative,
     apply_agent_env,
     apply_capture_loss,
     apply_reduced_hook,
@@ -162,6 +164,30 @@ _RETRY_BACKOFF_SECONDS = 2.0
 
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _event_file_paths(payload: Any) -> list[str]:
+    """The file paths a hook event reports (raw, as the agent gave them). Never raises."""
+    out: list[str] = []
+    file_path = getattr(payload, "file_path", None)
+    if isinstance(file_path, str) and file_path:
+        out.append(file_path)
+    for raw, _kind in getattr(payload, "file_paths", None) or []:
+        if isinstance(raw, str) and raw and raw not in out:
+            out.append(raw)
+    return out
+
+
+def _drop_from_baseline(baseline: dict | None, raw_paths: list[str], root: Path) -> None:
+    """Remove *raw_paths* (relativised to *root*) from a baseline snapshot's dirty paths, in place."""
+    if not isinstance(baseline, dict) or not isinstance(baseline.get("paths"), dict):
+        return
+    for raw in raw_paths:
+        rel = _to_repo_relative(raw, root)
+        if rel is not None:
+            baseline["paths"].pop(rel, None)
+    if "dirty_paths" in baseline:
+        baseline["dirty_paths"] = len(baseline["paths"])
 
 
 def queue_key(session_id: str, agent: str = AGENT_CLAUDE_CODE) -> str:
@@ -304,10 +330,12 @@ class CaptureRecorder:
         self._workspace = claude_workspace.WorkspaceRouter()
         # Sessions already known to this service (see _opens_session).
         self._known_sessions: set[str] = set()
-        # Session queue key -> the repository root it records under, and the
-        # main checkout a linked worktree belongs to (see _capability_root).
+        # Session queue key -> the project root it was authorised for, and
+        # the main checkout a linked worktree belongs to (see _capability_root).
         self._session_roots: dict[str, Path] = {}
         self._main_checkout_cache: dict[str, Path | None] = {}
+        # cwd / file path -> the checkout containing it (see _checkout_of).
+        self._checkout_cache: dict[str, Path | None] = {}
         self._pending: queue.Queue[tuple[str, str] | None] = queue.Queue()
         self._stop = threading.Event()
         self._worker = threading.Thread(target=self._worker_loop, name="openshard-capture-worker", daemon=True)
@@ -543,7 +571,93 @@ class CaptureRecorder:
             if root is None:
                 self._bump("rejected")
                 return "rejected", "unauthenticated"
+        if payload.agent == AGENT_CLAUDE_CODE:
+            return self._record_project_hook(
+                root, payload, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env,
+            )
         return self._record_resolved(root, payload, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env)
+
+    def _record_project_hook(
+        self, home: Path, payload: Any, *, t0: float, correlation: dict | None,
+        task_id: str | None, agent_env: dict[str, str] | None,
+    ) -> tuple[str, str]:
+        """Record a Claude Code event of the project *home* into the checkout it touched.
+
+        *home* is the repository the session was authorised for (its
+        ``CLAUDE_PROJECT_DIR``). Most events happen there; one whose ``cwd``
+        or file paths lie in another checkout -- a linked worktree, another
+        repository -- is recorded into that checkout, where its branch,
+        commits and file changes are observed, with the session's start and
+        the turn's prompt replayed first so the checkout's Receipt keeps the
+        task and start (see ``claude_workspace.WorkspaceRouter``). Nothing
+        is written into *home* for work done elsewhere, and nothing from
+        elsewhere into *home*.
+        """
+        key = queue_key(str(payload.session_id), payload.agent)
+        self._remember_session_root(key, home)
+        checkout = self._checkout_of(payload, home)
+        deliveries = self._workspace.route(home, key, payload, _now(), checkout=checkout, home_is_checkout=True)
+        if not deliveries:
+            # A Stop/SessionEnd of a turn this service instance did not see
+            # start (it was restarted mid-turn): recorded where it arrived,
+            # as before routing existed, so the session still closes.
+            deliveries = [(checkout, payload, _now())]
+        written = _event_file_paths(payload)
+        for repo, routed, at in deliveries:
+            self._record_resolved(
+                repo, routed, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env, at=at,
+                baseline_exclude=written if routed is not payload else None,
+            )
+        return "queued", payload.event
+
+    def _checkout_of(self, payload: Any, home: Path) -> Path:
+        """The checkout a Claude event touched: its file paths' or ``cwd``'s repository, else *home*.
+
+        The nearest enclosing ``.git`` wins (a linked worktree has one), as
+        for the hook path's own root resolution; a path outside every
+        repository, or one that would resolve to the user's home directory,
+        stays with the project. Cached per path.
+        """
+        from openshard.adapters.claude_mcp_install import find_repo_root
+
+        cwd = payload.cwd if isinstance(getattr(payload, "cwd", None), str) and payload.cwd else None
+        raw_paths: list[str] = []
+        file_path = getattr(payload, "file_path", None)
+        if isinstance(file_path, str) and file_path:
+            raw_paths.append(file_path)
+        raw_paths += [raw for raw, _kind in (getattr(payload, "file_paths", None) or []) if isinstance(raw, str) and raw]
+        candidates: list[str] = []
+        for raw in raw_paths:
+            try:
+                candidate = Path(raw)
+                if not candidate.is_absolute():
+                    if cwd is None:
+                        continue
+                    candidate = Path(cwd) / candidate
+                candidates.append(str(candidate.parent))
+            except (OSError, ValueError):
+                continue
+        if cwd is not None:
+            candidates.append(cwd)
+        for location in candidates:
+            if location in self._checkout_cache:
+                found = self._checkout_cache[location]
+            else:
+                found = None
+                try:
+                    directory = Path(location)
+                    if directory.is_dir():
+                        root = find_repo_root(directory)
+                        if root is not None and not _is_forbidden_capture_root(root):
+                            found = root
+                except (OSError, ValueError):
+                    found = None
+                if len(self._checkout_cache) >= _ROOT_CACHE_MAX:
+                    self._checkout_cache.clear()
+                self._checkout_cache[location] = found
+            if found is not None:
+                return found
+        return home
 
     def _capability_root(self, cwd_root: Path, payload: Any, authorize: Callable[[Path], bool]) -> Path | None:
         """The project a credential refused for *cwd_root* was issued for, when the service can tell.
@@ -654,6 +768,7 @@ class CaptureRecorder:
     def _record_resolved(
         self, root: Path, payload: Any, *, t0: float, correlation: dict | None,
         task_id: str | None, agent_env: dict[str, str] | None, at: str | None = None,
+        baseline_exclude: list[str] | None = None,
     ) -> tuple[str, str]:
         if isinstance(payload, StatusPayload):
             key = queue_key(str(payload.session_id), payload.agent)
@@ -672,7 +787,8 @@ class CaptureRecorder:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
         key = queue_key(reduced.session_id, reduced.agent)
-        self._remember_session_root(key, root)
+        if reduced.agent != AGENT_CLAUDE_CODE:
+            self._remember_session_root(key, root)
         opens_session = self._opens_session(root, key, payload.event)
         if opens_session:
             # v0.4.4: anchor change attribution at the moment the session was
@@ -683,6 +799,11 @@ class CaptureRecorder:
             # with its first model invocation instead -- once per session.
             reduced.baseline = _snapshot_baseline(root, at or _now())
             reduced.start_head = _snapshot_start_head(root)
+            if baseline_exclude:
+                # The session is opened in this checkout by a tool event that
+                # already wrote these files (PostToolUse fires after the
+                # write): they are the session's own work, not pre-existing.
+                _drop_from_baseline(reduced.baseline, baseline_exclude, root)
         line = {"id": self._next_id(), "kind": "hook", "at": at or _now(), "data": reduced.to_dict()}
         self._queue_line(root, key, line)
         self._bump("queued", payload.event)
@@ -744,9 +865,16 @@ class CaptureRecorder:
             self._bump("ignored")
             return "ignored", "could not resolve repository directory"
         if authorize is not None and not authorize(root):
-            self._bump("rejected")
-            return "rejected", "unauthenticated"
+            root = self._capability_root(root, payload, authorize) if not project_dir else None
+            if root is None:
+                self._bump("rejected")
+                return "rejected", "unauthenticated"
         key = queue_key(payload.session_id, payload.agent)
+        if payload.agent == AGENT_CLAUDE_CODE:
+            # Usage belongs to the checkout that owns the current turn (the
+            # first one it touched), never to a checkout the turn did not visit.
+            owner = self._workspace.usage_owner(root, key)
+            root = owner if owner is not None else self._checkout_of(payload, root)
         line = {"id": self._next_id(), "kind": "status", "at": _now(), "data": payload.to_dict()}
         self._queue_line(root, key, line)
         self._bump("queued", "status")

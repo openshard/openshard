@@ -31,6 +31,24 @@ All notable changes to OpenShard are documented here.
   forwards the event through the command path whenever the running service
   lacks it, so an older service no longer drops those events either.
 
+## Unreleased
+
+### Fixed
+
+- A Claude Code session that works in another checkout -- a linked `git worktree`
+  under `C:	mp`, or another repository's checkout -- now gets one Receipt per
+  checkout it touched, each observing its own branch, HEAD, commits and file
+  changes, instead of every event landing in the project root's Receipt with the
+  project's git facts. The session's start and the turn's prompt are replayed
+  into a checkout the first time the session touches it, so each Receipt keeps
+  the task and start; a turn's usage and status-line cost are counted once, on
+  the checkout that owned the turn, and the others record why they have none.
+  `SessionEnd` closes every checkout the session opened. `capture.checkout`
+  says which checkout a Receipt describes (`main_checkout` or
+  `linked_worktree`, with the directory name). A tool event outside every
+  repository stays with the project. The same routing now serves a local
+  multi-repository workspace, not only hosted cloud sessions.
+
 ## 0.4.15 - 2026-10-12
 
 <!-- release-title: Openshard v0.4.15 - Cloud Capture Readiness -->
