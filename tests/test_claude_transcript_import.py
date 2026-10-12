@@ -136,6 +136,23 @@ def test_reconstruction_stores_nothing_sensitive_and_drops_paths_outside_the_rep
     assert tool_events[1]["metadata"]["checkout"] == "plat-wt"
 
 
+def test_a_powershell_call_is_reconstructed_as_a_command(tmp_path):
+    repo = _make_repo(tmp_path / "platform")
+    transcript = tmp_path / "claude" / f"{SID}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    records = [
+        _record("user", "2026-10-12T09:22:47.000Z", str(repo), "Run the tests"),
+        _assistant("2026-10-12T09:22:50.000Z", str(repo), [_tool_use("p1", "PowerShell", command="python -m pytest -q")],
+                   msg_id="m1", stop="tool_use"),
+        _record("user", "2026-10-12T09:22:51.000Z", str(repo), [_tool_result("p1")]),
+    ]
+    transcript.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    entry = cti.import_transcript(transcript, repo_path=repo).entry
+    (tool,) = [e for e in entry["events"] if e["event_type"] == "tool.invoked"]
+    assert tool["action"].startswith("PowerShell:") and "pytest" in tool["action"]
+    assert tool["metadata"]["command_kind"] == "test"
+
+
 def test_a_worktree_file_is_outside_the_project_and_not_claimed(tmp_path):
     """The Write happened in a separate worktree directory: the project's reconstruction does not list it."""
     repo, worktree, transcript = _setup(tmp_path)
