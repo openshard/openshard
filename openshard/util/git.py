@@ -218,14 +218,24 @@ _SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def head_at(root: Path, when: str) -> str | None:
-    """HEAD of *root* as of *when* (an ISO 8601 stamp), from its reflog; None when git cannot say. Never raises.
+    """HEAD of *root* just before *when* (an ISO 8601 UTC stamp), from its reflog; None when git cannot say. Never raises.
 
     ``HEAD@{<time>}`` is the reflog's answer, which reaches back to the
     checkout's first entry: a worktree created after *when* answers with
-    its initial HEAD, which is the right anchor for work done in it.
+    its initial HEAD, which is the right anchor for work done in it. The
+    lookup is one second before *when*: reflog stamps have one-second
+    precision, and the command that opened a checkout may have committed
+    within the same second as the session start it replays.
     """
     if not isinstance(when, str) or not when.strip():
         return None
-    out = run_git(root, ["rev-parse", "--verify", "--quiet", f"HEAD@{{{when.strip()}}}"])
+    try:
+        from datetime import UTC, datetime, timedelta
+
+        moment = datetime.fromisoformat(when.strip().replace("Z", "+00:00")).astimezone(UTC) - timedelta(seconds=1)
+        spec = moment.strftime("%Y-%m-%d %H:%M:%S +0000")
+    except (ValueError, TypeError):
+        return None
+    out = run_git(root, ["rev-parse", "--verify", "--quiet", f"HEAD@{{{spec}}}"])
     sha = (out or "").strip()
     return sha if _SHA_RE.fullmatch(sha) else None
