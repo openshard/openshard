@@ -351,6 +351,41 @@ def test_a_service_restart_mid_session_keeps_recording_into_the_worktree(repos):
     assert worktree_receipt["capture"]["session_end_observed"] is True
 
 
+def test_a_restarted_service_keeps_the_session_usage_on_the_same_receipt(repos):
+    platform, wt = repos["platform"], repos["wt"]
+    env = {**os.environ}
+    service = _Service(env)
+    try:
+        claude = _Claude(platform, service.port)
+        claude.start()
+        claude.send("UserPromptSubmit", prompt="Plan in the project")
+        claude.reply(input_tokens=100, output_tokens=10)
+        claude.edit(platform / "notes.md", "plan" + chr(10))
+        claude.send("Stop")
+        assert service.server.recorder.wait_idle(20)
+    finally:
+        service.stop()
+    time.sleep(1.1)
+    # The replacement service forgot the session; the next turn starts in the worktree.
+    service = _Service(env, port=service.port)
+    try:
+        claude.port = service.port
+        claude.send("UserPromptSubmit", prompt="Continue in the worktree", cwd=wt)
+        claude.reply(input_tokens=1000, output_tokens=100)
+        claude.edit(wt / "parser.py", "PARSED = True" + chr(10), cwd=wt)
+        claude.send("Stop", cwd=wt)
+        claude.send("SessionEnd", cwd=wt, reason="other")
+        assert _wait_for(lambda: _ended(platform) and _ended(wt))
+    finally:
+        service.stop()
+    (project_receipt,) = _receipts(platform)
+    (worktree_receipt,) = _receipts(wt)
+    assert project_receipt["prompt_tokens"] == 1100 and project_receipt["completion_tokens"] == 110
+    assert "prompt_tokens" not in worktree_receipt
+    assert worktree_receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
+    assert not list((platform / ".openshard" / "claude_sessions").glob("*.usage-owner"))
+
+
 def test_delayed_queue_processing_folds_the_same_receipts(repos):
     platform, wt = repos["platform"], repos["wt"]
     service = _Service({**os.environ})

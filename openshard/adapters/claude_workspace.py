@@ -166,8 +166,15 @@ class WorkspaceRouter:
         if turn is None:
             if len(self._sessions) >= _MAX_SESSIONS:
                 self._sessions.pop(next(iter(self._sessions)))
-            turn = self._sessions[marker] = _Turn()
+            # A restarted service has no memory of the session: keep the owner it chose before.
+            turn = self._sessions[marker] = _Turn(session_owner=_read_owner(workspace, key))
         return turn
+
+    @staticmethod
+    def _own(turn: _Turn, workspace: Path, key: str, repo: Path) -> None:
+        if turn.session_owner is None:
+            turn.session_owner = repo
+            _write_owner(workspace, key, repo)
 
     def route(
         self, workspace: Path, key: str, payload: Any, at: str, *,
@@ -205,8 +212,8 @@ class WorkspaceRouter:
                     turn.prompt, turn.touched = (payload, at), []
                 if not home_is_checkout or checkout is None:
                     return []
-                if event == EVENT_USER_PROMPT_SUBMIT and turn.session_owner is None:
-                    turn.session_owner = checkout  # where the session's first turn began
+                if event == EVENT_USER_PROMPT_SUBMIT:
+                    self._own(turn, workspace, key, checkout)  # where the session's first turn began
                 return self._deliver(turn, checkout, payload, at)
             if event in (EVENT_STOP, EVENT_SESSION_END):
                 targets = list(turn.touched)
@@ -214,18 +221,23 @@ class WorkspaceRouter:
                     # The session ends in every checkout it was opened in, not
                     # only in the ones the last turn touched.
                     targets += [repo for repo in turn.opened if repo not in targets]
+                    # The usage owner was opened in this session even when a restarted
+                    # service no longer remembers it: it must see the end and fold its usage.
+                    if turn.session_owner is not None and turn.session_owner not in targets:
+                        targets.append(turn.session_owner)
                 out = [(repo, self._for(turn, repo, payload), at) for repo in targets]
                 if turn.touched:
                     turn.last_owner = turn.touched[0]
                 turn.touched = []
                 if event == EVENT_SESSION_END:
                     self._sessions.pop((str(workspace), key), None)
+                    _owner_path(workspace, key).unlink(missing_ok=True)
                 return out
             repo = checkout if checkout is not None else checkout_for(workspace, payload)
             if repo is None:
                 return []
-            if home_is_checkout and turn.session_owner is None:
-                turn.session_owner = repo
+            if home_is_checkout:
+                self._own(turn, workspace, key, repo)
             return self._deliver(turn, repo, payload, at)
 
     @staticmethod
@@ -261,6 +273,32 @@ class WorkspaceRouter:
         attrs = dict(payload.attrs or {})
         attrs["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
         return replace(payload, transcript_path=None, attrs=attrs)
+
+
+_OWNER_SUFFIX = ".usage-owner"
+
+
+def _owner_path(workspace: Path, key: str) -> Path:
+    return workspace / ".openshard" / "claude_sessions" / f"{key}{_OWNER_SUFFIX}"
+
+
+def _read_owner(workspace: Path, key: str) -> Path | None:
+    """The checkout a project session's usage was given to, as recorded beside the project's buffers."""
+    try:
+        raw = _owner_path(workspace, key).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return Path(raw) if raw and (Path(raw) / ".git").exists() else None
+
+
+def _write_owner(workspace: Path, key: str, repo: Path) -> None:
+    """Only project sessions keep one Receipt per checkout for life; a workspace marker is harmless."""
+    try:
+        path = _owner_path(workspace, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(repo), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def note_usage_owner(buf: dict, payload: Any) -> None:
