@@ -1840,11 +1840,11 @@ def _render_log_entry(
 
     # Shard receipt (--more / --full) — shown near top before diagnostic blocks
     if detail != "default":
-        from openshard.history.shard_contract import (
-            build_shard_receipt,
+        from openshard.history.receipt_render import (
             render_compact_shard_receipt,
             render_full_shard_receipt,
         )
+        from openshard.history.shard_contract import build_shard_receipt
         _shard = build_shard_receipt(
             entry, index, post_session_verification=post_session_verification,
             usage_attestations=usage_attestations,
@@ -2088,10 +2088,8 @@ def _render_log_entry(
 
     # Compact RECEIPT — default view only, appears before Time/Cost footer
     if detail == "default":
-        from openshard.history.shard_contract import (
-            build_shard_receipt,
-            render_compact_shard_receipt,
-        )
+        from openshard.history.receipt_render import render_compact_shard_receipt
+        from openshard.history.shard_contract import build_shard_receipt
         _shard = build_shard_receipt(
             entry, index, post_session_verification=post_session_verification,
             usage_attestations=usage_attestations,

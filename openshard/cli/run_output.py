@@ -2477,10 +2477,8 @@ def render_post_run(
     """Render the post-execution receipt in compact shard format."""
     import click
 
-    from openshard.history.shard_contract import (
-        build_live_run_receipt,
-        render_compact_shard_receipt,
-    )
+    from openshard.history.receipt_render import render_compact_shard_receipt
+    from openshard.history.shard_contract import build_live_run_receipt
 
     _tl_lines = render_run_timeline(run_timeline, task=task, run_label=run_label)
     if _tl_lines:
