@@ -2,7 +2,13 @@
 
 All notable changes to OpenShard are documented here.
 
-## Unreleased
+## 0.4.16 - 2026-10-12
+
+<!-- release-title: Openshard v0.4.16 - Reliable Worktree Capture -->
+
+Fixes Claude Code capture failures across worktrees, records Git evidence
+against the checkout where work happened, adds opt-in transcript recovery
+for previously missed sessions, and simplifies the capture and Receipt code.
 
 ### Added
 
@@ -17,6 +23,14 @@ All notable changes to OpenShard are documented here.
   Event evidence `imported_transcript`, completeness reasons). The default is
   a dry run; `--write` records it, with a receipt id derived from the session
   so a repeat is a no-op, and never over a session that already has a Receipt.
+
+### Changed
+
+- The Claude transcript usage reader, Receipt renderers and CLI import commands
+  now live in focused modules, with smaller code-health budgets and unchanged
+  public command paths.
+- Hosted Receipts now sync a validated checkout kind and directory basename,
+  for display by Platforms that support the optional checkout field.
 
 ### Fixed
 
