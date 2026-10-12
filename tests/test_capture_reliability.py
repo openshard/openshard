@@ -21,7 +21,7 @@ from openshard.adapters.claude_hooks_install import (
     capability_state,
     installed_hook_port,
 )
-from tests.capture_fixtures import _payload
+from tests.capture_fixtures import _make_repo, _payload
 
 
 def _write_claude_settings(repo: Path, port: int, env: dict, *, capability: str | None = None) -> Path:
@@ -90,6 +90,56 @@ def test_watchdog_recovers_when_http_capability_is_stale(service, capture_env, r
     with patch.object(client, "_run_hook_raw", return_value="forwarded") as recover:
         label = client.run_claude_watchdog(
             io.BytesIO(_payload("PostToolUseFailure", repo, tool_name="Bash", tool_input={"command": "false"})),
+            env=env,
+        )
+
+    assert label == "forwarded"
+    recover.assert_called_once()
+
+
+def test_watchdog_forwards_when_the_session_left_its_project_and_the_service_cannot_follow(capture_env, repo, tmp_path):
+    """An older service resolves the root from cwd alone and refuses the project's capability there."""
+    env = {**capture_env, "CLAUDE_PROJECT_DIR": str(repo)}
+    port = client.resolve_port(env)
+    _write_claude_settings(repo, port, env)
+    elsewhere = _make_repo(tmp_path / "elsewhere")
+    old_service = {"ok": True, "credential": "accepted", "version": "0.4.9", "port": port}
+
+    with patch.object(client, "health", return_value=old_service), \
+         patch.object(client, "_run_hook_raw", return_value="forwarded") as recover, \
+         patch.object(client, "_heal_claude_hook_config"):
+        label = client.run_claude_watchdog(
+            io.BytesIO(_payload("PostToolUse", elsewhere, tool_name="Bash", tool_input={"command": "pytest"})),
+            env=env,
+        )
+
+    assert label == "forwarded"
+    recover.assert_called_once()
+
+
+def test_watchdog_stays_quiet_when_the_service_resolves_the_project_itself(service, capture_env, repo, tmp_path):
+    env = {**capture_env, "CLAUDE_PROJECT_DIR": str(repo)}
+    _write_claude_settings(repo, service.port, env)
+    elsewhere = _make_repo(tmp_path / "elsewhere")
+
+    with patch.object(client, "_run_hook_raw", side_effect=AssertionError("the HTTP hook already recorded this event")):
+        label = client.run_claude_watchdog(
+            io.BytesIO(_payload("PostToolUse", elsewhere, tool_name="Bash", tool_input={"command": "pytest"})),
+            env=env,
+        )
+
+    assert label == "healthy"
+
+
+def test_watchdog_forwards_when_the_http_request_resolves_no_repository(service, capture_env, repo, tmp_path):
+    """A cwd outside every repository: the service would ignore the HTTP copy, so the command copy must record it."""
+    env = {**capture_env, "CLAUDE_PROJECT_DIR": str(repo)}
+    _write_claude_settings(repo, service.port, env)
+
+    with patch.object(client, "_run_hook_raw", return_value="forwarded") as recover, \
+         patch.object(client, "_claude_repo_root", side_effect=lambda raw, e: repo if e.get("CLAUDE_PROJECT_DIR") else None):
+        label = client.run_claude_watchdog(
+            io.BytesIO(_payload("PostToolUse", repo, tool_name="Bash", tool_input={"command": "pytest"})),
             env=env,
         )
 

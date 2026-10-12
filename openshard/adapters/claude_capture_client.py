@@ -129,6 +129,15 @@ HERMES_EMPTY_RESPONSE = "{}"
 HEALTH_PATH = "/health"
 SHUTDOWN_PATH = "/shutdown"
 PROJECT_DIR_HEADER = "X-OpenShard-Project-Dir"
+# Behaviours a service advertises on ``/health`` (``features``) so a client can
+# tell what the running service -- possibly an older version -- will do.
+# ``capability_root_fallback``: a repository capability refused for the root
+# the payload's ``cwd`` resolves to is checked against the project it was
+# issued for (the session's root, a worktree's main checkout, recent
+# repositories), so HTTP hooks keep recording after the session leaves its
+# project root. Without it the async watchdog must forward those events.
+CAPABILITY_ROOT_FALLBACK = "capability_root_fallback"
+SERVICE_FEATURES: tuple[str, ...] = (CAPABILITY_ROOT_FALLBACK,)
 # Declared launch context (``OPENSHARD_TASK_ID``), forwarded on its own header
 # -- never inside the agent's payload, which is untrusted for this. Claude
 # Code's HTTP hooks fill it from ``$OPENSHARD_TASK_ID`` (allowedEnvVars); the
@@ -886,8 +895,24 @@ def _heal_claude_hook_config(
         pass
 
 
-def _claude_http_path_ready(raw: bytes, env: dict | os._Environ, service_port: int) -> bool:
-    """Whether the current Claude session's direct HTTP configuration is trustworthy."""
+def _claude_http_path_ready(
+    raw: bytes, env: dict | os._Environ, service_port: int, *, service_doc: dict | None = None
+) -> bool:
+    """Whether the current Claude session's direct HTTP configuration is trustworthy.
+
+    The installed port and capability must fit the project (the root
+    ``CLAUDE_PROJECT_DIR`` names), and the service must be able to apply
+    that capability to the request the HTTP hook actually sends. That
+    request never carries the project directory -- Claude Code interpolates
+    ``$CLAUDE_PROJECT_DIR`` in HTTP hook headers to an empty string, the
+    variable exists only in command-hook environments -- so the service
+    resolves the root from the payload's ``cwd`` alone. While the session
+    works inside its project root the two agree. Once it has entered a
+    linked worktree or another checkout they differ, and only a service
+    that advertises ``CAPABILITY_ROOT_FALLBACK`` (*service_doc*, its
+    ``/health`` answer) still accepts the event; an older service refuses
+    it with 401, so the watchdog must forward this copy.
+    """
     try:
         from openshard.adapters.claude_hooks_install import (
             capability_state,
@@ -901,12 +926,24 @@ def _claude_http_path_ready(raw: bytes, env: dict | os._Environ, service_port: i
         settings, err = load_settings(root)
         if err or settings is None:
             return False
-        return (
-            installed_hook_port(settings) == service_port
-            and capability_state(settings, root, env=env) == "ok"
-        )
+        if installed_hook_port(settings) != service_port or capability_state(settings, root, env=env) != "ok":
+            return False
+        http_root = _claude_repo_root(raw, {k: v for k, v in env.items() if k != "CLAUDE_PROJECT_DIR"})
+        if http_root is None:
+            return False  # the service answers 200 but records nothing for a cwd it cannot place
+        if _auth.normalise_root(http_root) == _auth.normalise_root(root):
+            return True
+        return _service_has_feature(service_doc, CAPABILITY_ROOT_FALLBACK)
     except Exception:
         return False
+
+
+def _service_has_feature(doc: dict | None, feature: str) -> bool:
+    """Whether a ``/health`` document advertises *feature* (an older service lists none)."""
+    if not isinstance(doc, dict):
+        return False
+    features = doc.get("features")
+    return isinstance(features, list) and feature in features
 
 
 def run_claude_watchdog(
@@ -934,7 +971,8 @@ def run_claude_watchdog(
         return "ignored"
     try:
         port = resolve_port(env)
-        if _usable_service(port, env) and _claude_http_path_ready(raw, env, port):
+        doc = health(port, env=env, credential=True)
+        if service_is_ours(doc, env) is True and _claude_http_path_ready(raw, env, port, service_doc=doc):
             return "healthy"
     except Exception:
         pass
