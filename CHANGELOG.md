@@ -4,11 +4,15 @@ All notable changes to OpenShard are documented here.
 
 ## 0.4.16 - 2026-10-12
 
-<!-- release-title: Openshard v0.4.16 - Reliable Worktree Capture -->
+<!-- release-title: Openshard v0.4.16 - Reliable Capture and Accurate Receipts -->
 
 Fixes Claude Code capture failures across worktrees, records Git evidence
 against the checkout where work happened, adds opt-in transcript recovery
 for previously missed sessions, and simplifies the capture and Receipt code.
+Receipts now capture PowerShell commands, count a session's tokens and cost
+once across its checkouts, record only real checks with outcomes that are
+their own, keep every event of long sessions, and link a session's Receipts
+on the Platform.
 
 ### Added
 
