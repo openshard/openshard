@@ -776,6 +776,7 @@ class CaptureRecorder:
             repos = [entry] + [r for r in repos if r != entry]
             self._state["recent_repos"] = repos[:MAX_RECENT_REPOS]
             _write_state(self._state_path, self._state)
+            _write_state(self._state_path.with_name(client.REPOS_FILENAME), {"recent_repos": self._state["recent_repos"]})
         except Exception as exc:
             _log(f"could not update state file: {type(exc).__name__}")
 
@@ -1424,7 +1425,7 @@ def serve(
     previous = client.read_state(env) or {}
     recorder = CaptureRecorder(
         instance_id=instance_id, state_path=state_path,
-        state={"recent_repos": previous.get("recent_repos", [])},
+        state={"recent_repos": client.remembered_repos(previous, env)[:MAX_RECENT_REPOS]},
     )
     server = _bind(env, port, recorder, instance_id, started_at)
     if server is None:

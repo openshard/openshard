@@ -78,6 +78,7 @@ from openshard.util.home import openshard_home
 DEFAULT_PORT = 47811
 PORT_RANGE = 10  # DEFAULT_PORT .. DEFAULT_PORT + PORT_RANGE - 1 are tried on conflict
 STATE_FILENAME = "claude-capture.json"
+REPOS_FILENAME = "claude-capture-repos.json"  # see remembered_repos
 LOG_FILENAME = "claude-capture.log"
 START_LOCK_FILENAME = "claude-capture.startlock"
 BACKOFF_FILENAME = "claude-capture.backoff.json"
@@ -167,6 +168,28 @@ def capture_home(env: dict | os._Environ | None = None) -> str:
 
 def state_path(env: dict | os._Environ | None = None) -> str:
     return os.path.join(capture_home(env), STATE_FILENAME)
+
+
+def remembered_repos(previous: dict, env: dict | os._Environ | None = None) -> list[str]:
+    """The repositories a starting service should still recognise (most recent first).
+
+    A clean stop removes the state file, and with it the only record of which
+    projects the service captured for. A restarted service then could not
+    place an HTTP hook from a session working outside its project root (a
+    linked worktree, another checkout), and refused it with 401 until a
+    command hook re-taught it -- losing that event for good. The service also
+    keeps the list in ``REPOS_FILENAME``, which a stop leaves alone.
+    """
+    repos = [r for r in previous.get("recent_repos", []) or [] if isinstance(r, str)]
+    if repos:
+        return repos
+    try:
+        with open(os.path.join(capture_home(env), REPOS_FILENAME), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    raw = data.get("recent_repos") if isinstance(data, dict) else None
+    return [r for r in raw or [] if isinstance(r, str)]
 
 
 def log_path(env: dict | os._Environ | None = None) -> str:

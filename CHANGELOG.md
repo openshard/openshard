@@ -20,6 +20,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- **A restarted capture service still accepts a session working outside its project.** A clean
+  stop removed the service's state file, and with it the list of projects it had captured for.
+  The restarted service could not place an HTTP hook from a linked worktree or another checkout,
+  refused it with 401 and lost the event until a command hook taught it the project again. The
+  list is now also kept in `claude-capture-repos.json`, which a stop leaves in place.
+
 - **A commit made before the capture service replays the session's first hook is still the
   session's.** The service anchored the working-tree baseline when `SessionStart` (or the first
   model invocation) was received, but read the repository's start HEAD only when the queue was
