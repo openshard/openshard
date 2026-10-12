@@ -149,7 +149,9 @@ def _changed(receipt: dict) -> set[str]:
 
 
 def _commit(repo: Path, message: str) -> str:
-    _git(repo, "add", ".")
+    # Never stage the capture state the running service is writing into the checkout:
+    # on Windows git exits 128 when a buffer file is replaced mid-scan (seen in CI).
+    _git(repo, "add", "--", ".", ":(exclude).openshard")
     _git(repo, "commit", "-q", "-m", message)
     return _head(repo)
 

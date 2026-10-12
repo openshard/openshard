@@ -38,6 +38,12 @@ on the Platform.
 
 ### Fixed
 
+- **Capture-service state writes are reliable under Windows concurrency.** State-file replacements
+  now serialize within the process and retain bounded retries for external file handles,
+  preventing the intermittent lost state update found in the Windows release matrix (#543).
+- **Windows worktree tests do not stage live capture files.** The worktree test helper
+  excludes `.openshard/` from commits, matching installed repositories and avoiding a
+  race with the capture service while the tests run (#544).
 - **Synced Receipts of one session can be linked, and say where their usage is.** The sync
   receipt's `session` block carries `session_key` (`ses_` + 32 hex of sha256 of the agent and
   session id; the session id itself still never syncs), and `tokens_not_recorded_reason` /
