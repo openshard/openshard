@@ -32,6 +32,8 @@ from openshard.verification import check_command as cc
     "tsc --watch",
     "gh pr checks 162 --repo openshard/platform",
     "git log --oneline -5 -- tests/test_ruff.py",
+    "bash scripts/run_pytest.sh",
+    "bash -lc 'echo pytest'",
 ])
 def test_commands_that_run_no_check_are_not_checks(command):
     assert cc.classify_check_commands(command) == []
@@ -61,6 +63,10 @@ def test_commands_that_run_no_check_are_not_checks(command):
     ("cargo clippy -- -D warnings", cc.KIND_LINT, "cargo clippy -- -D warnings"),
     ("black --check .", cc.KIND_LINT, "black --check ."),
     ("& 'C:/Python312/python.exe' -m pytest -q", cc.KIND_TEST, "python -m pytest -q"),
+    # Codex sends argv; it arrives joined: the inner script is what runs.
+    ("bash -lc python -m pytest -q", cc.KIND_TEST, "python -m pytest -q"),
+    ("bash -lc 'cd app && npm test'", cc.KIND_TEST, "npm test"),
+    ("pwsh -NoProfile -Command \"npx vitest run\"", cc.KIND_TEST, "npx vitest run"),
 ])
 def test_check_programs_are_recognised_with_a_readable_name(command, kind, segment):
     check = cc.classify_check_command(command)
@@ -77,6 +83,8 @@ def test_check_programs_are_recognised_with_a_readable_name(command, kind, segme
     ("pytest -q || true", cc.UNATTRIBUTED_ALTERNATIVE),
     ("pytest -q || echo failed", cc.UNATTRIBUTED_ALTERNATIVE),
     ("pytest -q &", cc.UNATTRIBUTED_BACKGROUND),
+    ("bash -lc 'pytest -q | tail -3'", cc.UNATTRIBUTED_PIPED),
+    ("bash -lc 'pytest -q' | tail -3", cc.UNATTRIBUTED_PIPED),
 ])
 def test_an_exit_status_that_belongs_to_another_program_is_not_the_checks(command, reason):
     check = cc.classify_check_command(command)

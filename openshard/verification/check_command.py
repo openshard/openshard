@@ -147,29 +147,61 @@ def classify_check_commands(command: str | None) -> list[CheckCommand]:
     success. A failure is pinned on a check only when everything else in the
     chain is a setup step.
     """
+    return _classify(command, depth=0)
+
+
+def _classify(command: str | None, *, depth: int) -> list[CheckCommand]:
     if not isinstance(command, str) or not command.strip():
         return []
     statements = _parse(_strip_inline_documents(command[:_MAX_COMMAND_CHARS]))
     out: list[CheckCommand] = []
     for si, statement in enumerate(statements):
         for ci, simple in enumerate(statement):
-            kind = _kind_of(simple.words)
-            if kind == KIND_OTHER:
+            outer, outer_failure = _position(statements, si, ci)
+            script = _shell_script(simple.words) if depth < 2 else None
+            if script is not None:
+                # ``bash -lc "pytest -q"``: the inner script's exit status is the shell's.
+                for inner in _classify(script, depth=depth + 1):
+                    out.append(CheckCommand(inner.kind, inner.segment, inner.unattributed or outer,
+                                            inner.failure_unattributed or outer_failure))
                 continue
-            segment = _display(simple.words)
-            if any(s.op_after == "&" for s in statement):
-                out.append(CheckCommand(kind, segment, UNATTRIBUTED_BACKGROUND))
-            elif si != len(statements) - 1:
-                out.append(CheckCommand(kind, segment, UNATTRIBUTED_NOT_LAST))
-            elif any(s.op_after == "||" for s in statement):
-                out.append(CheckCommand(kind, segment, UNATTRIBUTED_ALTERNATIVE))
-            elif simple.op_after == "|":
-                out.append(CheckCommand(kind, segment, UNATTRIBUTED_PIPED))
-            elif any(not _is_setup(s.words) for j, s in enumerate(statement) if j != ci):
-                out.append(CheckCommand(kind, segment, None, UNATTRIBUTED_SHARED_FAILURE))
-            else:
-                out.append(CheckCommand(kind, segment))
+            kind = _kind_of(simple.words)
+            if kind != KIND_OTHER:
+                out.append(CheckCommand(kind, _display(simple.words), outer, outer_failure))
     return out
+
+
+def _position(statements: list[list[_Simple]], si: int, ci: int) -> tuple[str | None, str | None]:
+    """Whether the line's exit status is that of simple command *ci* of statement *si*."""
+    statement = statements[si]
+    if any(s.op_after == "&" for s in statement):
+        return UNATTRIBUTED_BACKGROUND, None
+    if si != len(statements) - 1:
+        return UNATTRIBUTED_NOT_LAST, None
+    if any(s.op_after == "||" for s in statement):
+        return UNATTRIBUTED_ALTERNATIVE, None
+    if statement[ci].op_after == "|":
+        return UNATTRIBUTED_PIPED, None
+    if any(not _is_setup(s.words) for j, s in enumerate(statement) if j != ci):
+        return None, UNATTRIBUTED_SHARED_FAILURE
+    return None, None
+
+
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "pwsh", "powershell", "cmd"})
+_SCRIPT_FLAGS = frozenset({"-c", "-lc", "-ic", "-lic", "-command", "/c", "/k"})
+
+
+def _shell_script(words: list[str]) -> str | None:
+    """The script of ``bash -lc SCRIPT`` / ``pwsh -Command SCRIPT`` / ``cmd /c SCRIPT``, else None."""
+    if len(words) < 3 or _program(words[0]) not in _SHELLS:
+        return None
+    for i, word in enumerate(words[1:], start=1):
+        if word.lower() in _SCRIPT_FLAGS:
+            rest = words[i + 1:]
+            return " ".join(rest) if rest else None
+        if not word.startswith(("-", "/")):
+            return None  # ``bash script.sh``: a script file, not inline commands
+    return None
 
 
 def check_outcome(check: CheckCommand, command_outcome: str) -> str:
