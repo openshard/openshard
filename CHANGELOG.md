@@ -2,7 +2,13 @@
 
 All notable changes to OpenShard are documented here.
 
-## Unreleased
+## 0.4.15 - 2026-10-12
+
+<!-- release-title: Openshard v0.4.15 - Cloud Capture Readiness -->
+
+Cloud-capture readiness: sealed Claude cloud turns, multi-repository sessions,
+prelaunch installation, delayed usage evidence, workspace fixes and hosted
+guidance for connected cloud coding agents.
 
 ### Added
 
