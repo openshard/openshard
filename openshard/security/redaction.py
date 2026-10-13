@@ -8,6 +8,9 @@ command is something OpenShard should not keep, but their presence in a
 repository file is not by itself a finding (LICENSE files carry e-mails).
 So this module is applied only to text OpenShard stores about a session
 -- the task excerpt and the command text -- never to the secret scanner.
+A credential written in prose ("the password is ...") is redacted here
+too: it is what a person types into a prompt, and the assignment rule of
+the secret scanner does not see it.
 
 Conservative on purpose: each pattern needs the full documented shape
 (three base64url segments starting ``eyJ`` for a JWT, ``-----BEGIN ...
@@ -23,6 +26,7 @@ import re
 PLACEHOLDER_EMAIL = "[email]"
 PLACEHOLDER_JWT = "[jwt]"
 PLACEHOLDER_PRIVATE_KEY = "[private-key]"
+PLACEHOLDER_CREDENTIAL = "[credential]"
 
 # Order matters: a PEM block is removed before anything inside it is examined.
 _PEM_BLOCK_RE = re.compile(
@@ -35,10 +39,31 @@ _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{
 # a false negative there costs less than mangling ordinary text).
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![\w-])")
 
+# A credential written in prose, as people type it into a prompt: "the
+# password is hunter2", "my passphrase was: x", "API key: abc123",
+# "secret = x". Only the value after the keyword is replaced, so the sentence
+# stays readable. The secret scanner's assignment rule needs 12+ characters
+# and ``:``/``=``; ordinary passwords are shorter and introduced with "is".
+# Only password words take "is"/"was": "the token is cached" or "tokens are
+# counted" is ordinary text in a product about LLM tokens. Bare "pass" is
+# never a keyword (tests pass: 5).
+_PASSWORD_PROSE_RE = re.compile(
+    r"(?i)\b(password|passwd|passphrase|pwd)\b"
+    r"(\s+(?:is|was)\b\s*:?\s*|\s*[:=]\s*)"
+    r"(\"[^\"]*\"|'[^']*'|\S+)"
+)
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(api[ _-]?key|access[ _-]?token|auth[ _-]?token|token|client[ _-]?secret|secret)\b"
+    r"(\s*[:=]\s*)"
+    r"(\"[^\"]*\"|'[^']*'|\S+)"
+)
+
 _PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ("private_key", _PEM_BLOCK_RE, PLACEHOLDER_PRIVATE_KEY),
     ("jwt", _JWT_RE, PLACEHOLDER_JWT),
     ("email", _EMAIL_RE, PLACEHOLDER_EMAIL),
+    ("credential", _PASSWORD_PROSE_RE, rf"\1\2{PLACEHOLDER_CREDENTIAL}"),
+    ("credential", _CREDENTIAL_ASSIGNMENT_RE, rf"\1\2{PLACEHOLDER_CREDENTIAL}"),
 )
 
 
@@ -74,6 +99,7 @@ def scrub_sensitive_text(text: str, *, source_label: str) -> str:
 
 
 __all__ = [
+    "PLACEHOLDER_CREDENTIAL",
     "PLACEHOLDER_EMAIL",
     "PLACEHOLDER_JWT",
     "PLACEHOLDER_PRIVATE_KEY",
