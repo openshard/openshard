@@ -441,6 +441,33 @@ class TestRedaction:
                        "see docs/api.md", "a.b@c", "eyJ short.tok.en", "git log --author=me"):
             assert redact_sensitive_text(benign) == (benign, [])
 
+    def test_credentials_written_in_prose(self):
+        from openshard.security.redaction import redact_sensitive_text
+
+        cases = {
+            "username is ops@corp.example and password is 100%Hunter2": "username is [email] and password is [credential]",
+            "my passphrase was: correct-horse": "my passphrase was: [credential]",
+            "Password: hunter2 then log in": "Password: [credential] then log in",
+            'API key: abc123 and secret = "two words"': "API key: [credential] and secret = [credential]",
+            "set token=xyz before running": "set token=[credential] before running",
+        }
+        for raw, expected in cases.items():
+            text, kinds = redact_sensitive_text(raw)
+            assert text == expected, raw
+            assert "credential" in kinds
+        # Ordinary text about LLM tokens, tests and passwords in general stays as written.
+        for benign in ("the token is cached", "tokens are counted per run", "tests pass: 5",
+                       "reset the password flow", "count input tokens and output tokens"):
+            assert redact_sensitive_text(benign) == (benign, [])
+
+    def test_hook_task_excerpt_drops_a_prose_password(self):
+        from openshard.adapters.claude_hooks import sanitize_task_excerpt
+
+        task = sanitize_task_excerpt("check the dashboard; email is me@corp.example and password is S3cret%word")
+        assert task is not None
+        assert "S3cret%word" not in task and "me@corp.example" not in task
+        assert "password is [credential]" in task
+
     def test_command_text_is_redacted(self):
         from openshard.adapters.claude_hooks import summarize_command
 
