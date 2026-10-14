@@ -3229,14 +3229,9 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         tokens_not_recorded = TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE
     cost_not_recorded: str | None = USAGE_ELSEWHERE_REASON if tokens_not_recorded == USAGE_ELSEWHERE_REASON else None
     if transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
-        # Price the transcript's own per-message usage at the official list
-        # rates (1-hour cache writes at their own rate). This wins over the
-        # status line: live interactive sessions showed its windowed total
-        # missing early turns (the first ping can come after them) and the
-        # last turn (no ping after it), while transcript pricing matched
-        # Claude's own session totals exactly. Any model without a rate,
-        # unsplit cache writes, surcharged requests or incomplete usage ->
-        # fall back to the status line's figure, else unknown.
+        # Per-message list-rate pricing wins over the status line, whose window
+        # misses turns before its first ping and after its last. No rate, unsplit
+        # cache writes, surcharges or incomplete usage -> status line, else unknown.
         from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE
 
         priced = _transcript_cost(transcript_usage)
