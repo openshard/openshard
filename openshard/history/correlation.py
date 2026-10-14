@@ -11,6 +11,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
+from typing import Any
 
 from openshard.history.receipt_evidence import unsafe_text
 
@@ -94,6 +95,63 @@ def launch_correlation(env: Mapping[str, str] | None = None) -> dict | None:
     except Exception:  # Herdr is a best-effort enrichment, never a capture failure
         return explicit
     return correlation_block(merged)
+
+
+def herdr_delegated_sessions(command: object, env: Mapping[str, str] | None = None) -> list[str]:
+    """The child ``session_key`` of each Herdr delegation in *command*.
+
+    Raw agent session ids are hashed with the function that produces the
+    child Receipt's ``session.session_key`` and never stored.
+    """
+    from openshard.history.receipt_evidence import session_key_for
+    from openshard.util import herdr
+
+    found: list[str] = []
+    for agent, session in herdr.delegated_agents(command, env):
+        key = identifier(session_key_for(agent, session))
+        if key is not None and key not in found:
+            found.append(key)
+    return found
+
+
+def herdr_delegated_or_none(value: object) -> list[str] | None:
+    """Well-formed delegation ids only, deduplicated and capped."""
+    if not isinstance(value, list):
+        return None
+    clean: list[str] = []
+    for item in value:
+        ident = identifier(item)
+        if ident is not None and ident not in clean and len(clean) < MAX_EXTERNAL_IDS:
+            clean.append(ident)
+    return clean or None
+
+
+def record_herdr_delegated(entry: Mapping[str, Any]) -> list[str]:
+    from openshard.util.herdr import DELEGATED_NAMESPACE
+
+    block = correlation_block(entry.get("correlation"))
+    return [link["id"] for link in (block or {}).get("external_ids") or [] if link.get("namespace") == DELEGATED_NAMESPACE]
+
+
+def stamp_record_correlation(entry: dict, correlation: object, herdr_delegated: object) -> None:
+    """Copy a buffer's correlation onto its record, then append Herdr delegation ids (parent side).
+
+    Declared and deterministic: first-seen order, after every other id; extras
+    beyond the 16-id cap are dropped, so launch and explicit ids are never displaced.
+    """
+    from openshard.util.herdr import DELEGATED_NAMESPACE
+
+    if correlation_block(correlation) is not None:
+        entry["correlation"] = correlation_block(correlation)
+    delegated = herdr_delegated_or_none(herdr_delegated)
+    if not delegated:
+        return
+    block = correlation_block(entry.get("correlation")) or {}
+    links = [link for link in block.get("external_ids") or [] if link.get("namespace") != DELEGATED_NAMESPACE]
+    links.extend({"namespace": DELEGATED_NAMESPACE, "id": ident} for ident in delegated)
+    merged = correlation_block({**block, "external_ids": links})
+    if merged is not None:
+        entry["correlation"] = merged
 
 
 def stamp_launch_correlation(entry: dict, env: Mapping[str, str] | None = None) -> None:

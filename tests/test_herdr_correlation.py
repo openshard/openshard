@@ -11,7 +11,12 @@ import subprocess
 import pytest
 
 from openshard.adapters.claude_hooks import ReducedHookPayload, handle_hook
-from openshard.history.correlation import CONTEXT_ENV, launch_correlation, workflow_timeline
+from openshard.history.correlation import (
+    CONTEXT_ENV,
+    herdr_delegated_sessions,
+    launch_correlation,
+    workflow_timeline,
+)
 from openshard.history.receipt_evidence import session_key_for
 from openshard.util import herdr
 
@@ -110,16 +115,16 @@ def test_delegation_parsing(command, targets):
 
 def test_delegated_sessions_use_child_session_key(fake_herdr, monkeypatch):
     monkeypatch.setenv("HERDR_BIN_PATH", fake_herdr["env"]["HERDR_BIN_PATH"])
-    keys = herdr.delegated_sessions("herdr agent prompt w5:p3 hi")
+    keys = herdr_delegated_sessions("herdr agent prompt w5:p3 hi")
     assert keys == [session_key_for("claude_code", "abc-123")]
     assert "abc-123" not in json.dumps(keys)
     both = "herdr agent prompt w5:p3 hi && herdr agent send-keys w5:p3 esc"
-    assert herdr.delegated_sessions(both) == keys
+    assert herdr_delegated_sessions(both) == keys
     fake_herdr["out"] = _info(agent="gemini")
-    assert herdr.delegated_sessions("herdr agent prompt w5:p4 hi") == []
+    assert herdr_delegated_sessions("herdr agent prompt w5:p4 hi") == []
     fake_herdr["out"] = b"garbage"
-    assert herdr.delegated_sessions("herdr agent prompt w5:p5 hi") == []
-    assert herdr.delegated_sessions("herdr agent get w5:p5") == []
+    assert herdr_delegated_sessions("herdr agent prompt w5:p5 hi") == []
+    assert herdr_delegated_sessions("herdr agent get w5:p5") == []
 
 
 def test_reduced_payload_roundtrip_drops_bad_ids():

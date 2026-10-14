@@ -237,22 +237,17 @@ CAPTURE_AGENT = {
 }
 
 
-def delegated_sessions(command: object, env: Mapping[str, str] | None = None) -> list[str]:
-    """The child ``session_key`` of each delegation target Herdr resolves.
+def delegated_agents(command: object, env: Mapping[str, str] | None = None) -> list[tuple[str, str]]:
+    """``(capture agent, raw session id)`` for each delegation target Herdr resolves.
 
-    The agent's raw session id is hashed with the same function that
-    produces the child Receipt's ``session.session_key`` and never stored.
+    Raw ids stay in memory: ``history.correlation.herdr_delegated_sessions``
+    hashes them into ``session_key`` values before anything is stored.
     """
-    from openshard.history.correlation import identifier
-    from openshard.history.receipt_evidence import session_key_for
-
-    found: list[str] = []
+    found: list[tuple[str, str]] = []
     for target in delegation_targets(command)[:_MAX_DELEGATIONS]:
         info = agent_get(target, env)
         capture_agent = CAPTURE_AGENT.get(info["agent"]) if info and info.get("agent") else None
-        if not capture_agent:
-            continue
-        key = identifier(session_key_for(capture_agent, info.get("session") if info else None))
-        if key is not None and key not in found:
-            found.append(key)
+        session = info.get("session") if info else None
+        if capture_agent and isinstance(session, str) and (capture_agent, session) not in found:
+            found.append((capture_agent, session))
     return found
