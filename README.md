@@ -330,6 +330,7 @@ Openshard is licensed under Apache-2.0.
 
 - [Installation](docs/install.md)
 - [Agent capture](docs/agent-capture.md)
+- [Remote capture (cloud agents)](docs/remote-capture.md)
 - [What is a Receipt?](docs/what-is-a-shard.md)
 - [Platform sync](docs/platform-sync.md)
 - [CLI reference](docs/cli-reference.md)
