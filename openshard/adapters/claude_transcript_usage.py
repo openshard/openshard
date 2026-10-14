@@ -122,6 +122,19 @@ def _usage_row(usage: Mapping[str, Any]) -> list[int]:
             _count(usage.get("cache_read_input_tokens")), creation, five, one, unsplit]
 
 
+def _surcharged(usage: Mapping[str, Any]) -> bool:
+    """True when a message was billed beyond plain list rates: fast mode, US-only
+    inference (1.1x), a non-standard service tier or server-side tool fees.
+    Absent fields are older transcripts, which only had standard requests."""
+    speed, tier, geo = usage.get("speed"), usage.get("service_tier"), usage.get("inference_geo")
+    if (isinstance(speed, str) and speed != "standard") or (isinstance(tier, str) and tier != "standard"):
+        return True
+    if isinstance(geo, str) and geo.lower() == "us":
+        return True
+    tools = usage.get("server_tool_use")
+    return isinstance(tools, Mapping) and any(_count(v) for v in tools.values())
+
+
 def _new_transcript_state(since: object) -> dict:
     return {"since": since, "files": {}, "closed": {}, "closed_ids": [], "capped": False}
 
@@ -241,6 +254,13 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
                 invalid[mid] = True
                 continue
             invalid.pop(mid, None)
+            # List rates only describe standard requests; the latest line of a
+            # streamed message decides, like its counters.
+            surcharged = state.setdefault("surcharged", {})
+            if _surcharged(usage):
+                surcharged[mid] = True
+            else:
+                surcharged.pop(mid, None)
             order = state.setdefault("model_order", [])
             if name not in order:
                 order.append(name)
@@ -297,7 +317,8 @@ def _summarise_transcript_state(state: dict) -> dict | None:
     complete = not state.get("capped") and not state.get("invalid_usage") and len(by_model) <= _MAX_USAGE_MODELS
     return {"messages": messages, "totals": totals, "by_model": dict(list(by_model.items())[:_MAX_USAGE_MODELS]),
             "complete": complete,
-            **({"incomplete_reason": "malformed_runtime_counter"} if state.get("invalid_usage") else {})}
+            **({"incomplete_reason": "malformed_runtime_counter"} if state.get("invalid_usage") else {}),
+            **({"surcharged": True} if state.get("surcharged") else {})}
 
 
 def read_transcript_usage(path: Path, *, since: datetime | str | None = None) -> dict | None:

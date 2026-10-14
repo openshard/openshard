@@ -2008,8 +2008,27 @@ class TestModelTokenCostCapture:
         assert entry["capture"]["cost_not_recorded_reason"] == "no_official_rate_for_usage"
         assert build_shard_receipt(entry).cost_raw is None  # no aggregate-rate fallback either
 
-    def test_claude_codes_own_cost_wins_over_the_list_rate(self, repo: Path):
+    def test_transcript_price_wins_over_the_status_line_window(self, repo: Path):
+        # Live interactive sessions: the status line's first ping came after real
+        # work and its last ping before the final turn, so its windowed total
+        # undercounted; per-message transcript pricing covers every turn.
         transcript = _transcript(repo, [_assistant_line("o1", output_tokens=1_000)])
+        _run(repo, "SessionStart", source="startup")
+        _status(repo, cost_total=0.004)
+        _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+        _status(repo, cost_total=0.010)
+        _run(repo, "Stop", transcript_path=str(transcript))
+        entry = _runs_lines(repo)[0]
+        # Opus 5.5 output: 1k tokens * $20 per MTok.
+        assert entry["estimated_cost"] == pytest.approx(0.02)
+        assert entry["cost_provenance"] == "official_rate_estimate"
+
+    @pytest.mark.parametrize("surcharge", [{"speed": "fast"}, {"inference_geo": "us"}, {"service_tier": "priority"},
+                                           {"server_tool_use": {"web_search_requests": 2}}])
+    def test_surcharged_requests_fall_back_to_claude_codes_own_cost(self, repo: Path, surcharge):
+        line = _assistant_line("o1", output_tokens=1_000)
+        line["message"]["usage"].update(surcharge)
+        transcript = _transcript(repo, [line])
         _run(repo, "SessionStart", source="startup")
         _status(repo, cost_total=0.0)
         _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
@@ -2017,6 +2036,13 @@ class TestModelTokenCostCapture:
         _run(repo, "Stop", transcript_path=str(transcript))
         entry = _runs_lines(repo)[0]
         assert entry["estimated_cost"] == pytest.approx(0.5) and entry["cost_provenance"] == "agent_reported"
+
+    def test_surcharged_requests_without_a_status_line_leave_cost_unknown(self, repo: Path):
+        line = _assistant_line("o1", output_tokens=1_000)
+        line["message"]["usage"]["speed"] = "fast"
+        entry = self._headless(repo, [line])
+        assert "estimated_cost" not in entry
+        assert entry["capture"]["cost_not_recorded_reason"] == "no_official_rate_for_usage"
 
     def test_a_transcript_path_for_another_session_is_never_read(self, repo: Path):
         other = _transcript(repo, [_assistant_line("x", output_tokens=7)], session_id=SID2)

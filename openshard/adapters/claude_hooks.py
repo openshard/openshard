@@ -982,7 +982,7 @@ def _transcript_cost(usage: Mapping[str, Any]) -> float | None:
     """
     from openshard.models.pricing import estimate_usage_cost, official_rate
 
-    if not usage.get("complete"):
+    if not usage.get("complete") or usage.get("surcharged"):
         return None
     total = 0.0
     fields = ("input", "output", "cache_read", "cache_creation_5m", "cache_creation_1h")
@@ -3228,17 +3228,21 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         tokens_current = None
         tokens_not_recorded = TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE
     cost_not_recorded: str | None = USAGE_ELSEWHERE_REASON if tokens_not_recorded == USAGE_ELSEWHERE_REASON else None
-    if estimated_cost is None and transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
-        # No cost the agent reported (headless ``claude -p`` has no status
-        # line): price the usage per model at the official list rates, with
-        # 1-hour cache writes at their own rate. Any model without a rate,
-        # unsplit cache writes or incomplete usage -> unknown, never a partial sum.
+    if transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
+        # Price the transcript's own per-message usage at the official list
+        # rates (1-hour cache writes at their own rate). This wins over the
+        # status line: live interactive sessions showed its windowed total
+        # missing early turns (the first ping can come after them) and the
+        # last turn (no ping after it), while transcript pricing matched
+        # Claude's own session totals exactly. Any model without a rate,
+        # unsplit cache writes, surcharged requests or incomplete usage ->
+        # fall back to the status line's figure, else unknown.
         from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE
 
         priced = _transcript_cost(transcript_usage)
         if priced is not None:
             estimated_cost, cost_provenance = priced, COST_PROVENANCE_OFFICIAL_RATE
-        else:
+        elif estimated_cost is None:
             cost_not_recorded = "no_official_rate_for_usage"
     if tokens_current:
         prompt_tokens = int(tokens_current.get("input") or 0)
