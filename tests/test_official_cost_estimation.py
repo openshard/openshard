@@ -117,3 +117,8 @@ def test_provider_reported_cost_wins_over_rate_estimate() -> None:
     receipt = build_shard_receipt(entry)
     assert receipt.cost_raw == pytest.approx(1.23)
     assert receipt.cost_provenance == "provider_reported"
+
+
+def test_sonnet_and_opus_55_cache_read_rates() -> None:
+    assert official_rate("claude-sonnet-5-5").cached_input_per_mtok == 0.10
+    assert official_rate("claude-opus-5-5").cached_input_per_mtok == 0.20

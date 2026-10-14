@@ -91,7 +91,7 @@ _RATES: tuple[OfficialRate, ...] = (
     OfficialRate("anthropic", "claude-opus-4-8", 5.0, 25.0, 0.50, 6.25, _ANTHROPIC, aliases=("anthropic/claude-opus-4-8", "anthropic/claude-opus-4.8", "claude-opus-4.8"), cache_write_1h_per_mtok=10.0),
     OfficialRate("anthropic", "claude-opus-4-7", 5.0, 25.0, 0.50, 6.25, _ANTHROPIC, aliases=("anthropic/claude-opus-4-7", "anthropic/claude-opus-4.7", "claude-opus-4.7"), cache_write_1h_per_mtok=10.0),
     OfficialRate("anthropic", "claude-opus-4-6", 5.0, 25.0, 0.50, 6.25, _ANTHROPIC, aliases=("anthropic/claude-opus-4-6", "anthropic/claude-opus-4.6", "claude-opus-4.6"), cache_write_1h_per_mtok=10.0),
-    OfficialRate("anthropic", "claude-sonnet-5-5", 2.0, 10.0, 0.20, 2.50, _ANTHROPIC, aliases=("anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-5.5", "claude-sonnet-5.5"), cache_write_1h_per_mtok=4.0),
+    OfficialRate("anthropic", "claude-sonnet-5-5", 2.0, 10.0, 0.10, 2.50, _ANTHROPIC, aliases=("anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-5.5", "claude-sonnet-5.5"), cache_write_1h_per_mtok=4.0),
     OfficialRate("anthropic", "claude-sonnet-5", 2.0, 10.0, 0.20, 2.50, _ANTHROPIC, aliases=("anthropic/claude-sonnet-5",), cache_write_1h_per_mtok=4.0),
     OfficialRate("anthropic", "claude-sonnet-4-6", 3.0, 15.0, 0.30, 3.75, _ANTHROPIC, aliases=("anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4.6", "claude-sonnet-4.6"), cache_write_1h_per_mtok=6.0),
     OfficialRate("anthropic", "claude-haiku-4-5", 1.0, 5.0, 0.10, 1.25, _ANTHROPIC, aliases=("anthropic/claude-haiku-4-5", "anthropic/claude-haiku-4.5", "claude-haiku-4.5", "claude-haiku-4-5-20251001"), cache_write_1h_per_mtok=2.0),
