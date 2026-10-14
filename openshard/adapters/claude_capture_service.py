@@ -308,6 +308,7 @@ class CaptureRecorder:
         self._session_locks: dict[str, threading.Lock] = {}
         self._root_cache: dict[tuple[str | None, str | None, str], Path | None] = {}
         self._workspace = claude_workspace.WorkspaceRouter(state_path=state_path)
+        self._session_workspaces = claude_workspace.SessionWorkspaces()
         # Sessions already known to this service (see _opens_session).
         self._known_sessions: set[str] = set()
         # Which project a credential belongs to and which checkout an event
@@ -529,7 +530,12 @@ class CaptureRecorder:
         if payload.session_id is None:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
-        workspace = self._workspace_for(project_dir, payload.agent)
+        workspace = claude_workspace.declared_workspace(project_dir, payload.agent)
+        if workspace is None and not project_dir:  # an HTTP hook names no project directory
+            workspace = self._session_workspaces.infer(queue_key(str(payload.session_id), payload.agent), payload, authorize)
+        root = None if workspace is not None else self.resolve_root(project_dir, payload.cwd, payload.agent)
+        if root is not None and claude_workspace.is_cloud_workspace(root, payload.agent):
+            workspace = root  # the workspace parent never holds a Receipt of its own
         if workspace is not None:
             if authorize is not None and not authorize(workspace):
                 self._bump("rejected")
@@ -537,7 +543,6 @@ class CaptureRecorder:
             return self._record_workspace_hook(
                 workspace, payload, t0=t0, correlation=correlation, task_id=task_id, agent_env=agent_env,
             )
-        root = self.resolve_root(project_dir, payload.cwd, payload.agent)
         if root is None:
             self._bump("ignored")
             return "ignored", "could not resolve repository directory"
@@ -572,6 +577,7 @@ class CaptureRecorder:
         elsewhere into *home*.
         """
         key = queue_key(str(payload.session_id), payload.agent)
+        claude_workspace.stamp_declared(payload, correlation, task_id, agent_env)
         self._routing.remember(key, home)
         checkout = self._routing.checkout_of(payload, home)
         deliveries = self._workspace.route(home, key, payload, _now(), checkout=checkout, home_is_checkout=True)
@@ -588,21 +594,13 @@ class CaptureRecorder:
             )
         return "queued", payload.event
 
-    def _workspace_for(self, project_dir: str | None, agent: str) -> Path | None:
-        """The opted-in multi-repository workspace *project_dir* names, if routing applies (see claude_workspace)."""
-        if not project_dir or agent != AGENT_CLAUDE_CODE or not claude_workspace.workspace_enabled():
-            return None
-        try:
-            directory = Path(project_dir).resolve()
-        except OSError:
-            return None
-        return directory if claude_workspace.is_workspace(directory) else None
-
     def _record_workspace_hook(
         self, workspace: Path, payload: Any, *, t0: float, correlation: dict | None,
         task_id: str | None, agent_env: dict[str, str] | None,
     ) -> tuple[str, str]:
         key = queue_key(str(payload.session_id), payload.agent)
+        self._session_workspaces.remember(key, workspace, payload)
+        claude_workspace.stamp_declared(payload, correlation, task_id, agent_env)
         if isinstance(payload, StatusPayload):
             owner = self._workspace.usage_owner(workspace, key)
             if owner is None:
@@ -635,8 +633,9 @@ class CaptureRecorder:
             self.timings.add(time.perf_counter() - t0)
             self.enqueue(root, key)
             return "queued", "status"
-        payload.correlation = correlation_block(correlation)
-        payload.task_id = task_id if is_task_id(task_id) else None
+        # A replayed start keeps what its own request declared (stamp_declared).
+        payload.correlation = correlation_block(correlation) or payload.correlation
+        payload.task_id = task_id if is_task_id(task_id) else payload.task_id
         apply_agent_env(payload, agent_env)  # client-derived provider/surface (AGENT_ENV_HEADER)
         reduced = reduce_hook_payload(payload, root)
         if reduced is None:
@@ -713,7 +712,7 @@ class CaptureRecorder:
         if payload is None or payload.session_id is None:
             self._bump("ignored")
             return "ignored", "missing or invalid session_id"
-        workspace = self._workspace_for(project_dir, payload.agent)
+        workspace = claude_workspace.declared_workspace(project_dir, payload.agent)
         if workspace is not None:
             if authorize is not None and not authorize(workspace):
                 self._bump("rejected")
