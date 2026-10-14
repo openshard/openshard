@@ -990,7 +990,7 @@ def _transcript_cost(usage: Mapping[str, Any]) -> float | None:
         if not isinstance(row, Mapping) or int(row.get("cache_creation_unsplit") or 0):
             return None
         rate = official_rate(model)
-        buckets = [(row, None)]
+        buckets: list[tuple[Mapping, bool | None]] = [(row, None)]
         if rate and rate.long_context_threshold is not None:
             long = row.get("long_context")
             if not isinstance(long, Mapping):

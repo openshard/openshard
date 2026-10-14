@@ -34,6 +34,7 @@ def test_claude_incomplete_stream_does_not_price_older_counter(tmp_path):
 
 def test_haiku_tiers_are_per_message_and_survive_incremental_closure(tmp_path):
     import pytest
+
     from openshard.adapters import claude_transcript_usage as ctu
     from openshard.adapters.claude_hooks import _transcript_cost
     from tests.test_claude_hooks import _assistant_line as assistant

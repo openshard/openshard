@@ -278,7 +278,7 @@ def _summarise_transcript_state(state: dict) -> dict | None:
     if not messages:
         return None
     totals = {f: sum(acc[i] for acc in per_model.values()) for i, f in enumerate(_USAGE_FIELDS)}
-    by_model = {
+    by_model: dict[str, dict[str, object]] = {
         m: {**{f: acc[i] for i, f in enumerate(_USAGE_FIELDS)}, "messages": acc[-1]}
         for m in dict.fromkeys([*(state.get("model_order") or []), *per_model])
         if m in per_model
