@@ -3957,15 +3957,17 @@ def _remote_capture_record(
         pass
 
 
-def _schedule_post_session_verify(repo_root: Path, entry: dict | None) -> None:
-    """Opt-in (``post_session_verify: safe``): start a detached, safe-only
-    ``openshard verify`` for a Receipt whose session just closed, so its
-    verification does not stay at the agent's own account. Off by default;
-    see ``verification/auto.py``. Never raises."""
+def _schedule_post_session_verify(
+    repo_root: Path, entry: dict | None, *, finalized: bool = True, turn_ended: bool = False,
+) -> None:
+    """Start automatic verification for a folded Receipt: its resulting commit
+    at a completed turn or session end (on by default), else -- opt-in,
+    ``post_session_verify: safe`` -- the working tree at session end. See
+    ``verification/auto.py: schedule_for_receipt``. Never raises."""
     try:
-        from openshard.verification.auto import schedule_post_session_verify
+        from openshard.verification.auto import schedule_for_receipt
 
-        schedule_post_session_verify(repo_root, entry)
+        schedule_for_receipt(repo_root, entry, finalized=finalized, turn_ended=turn_ended)
     except Exception:
         pass
 
@@ -4088,8 +4090,8 @@ def apply_reduced_hook(
             else:
                 action = "record_updated"
             _emit_receipt_telemetry(entry, action)
-            if action == "record_finalized":
-                _schedule_post_session_verify(repo_root, entry)
+            _schedule_post_session_verify(repo_root, entry, finalized=action == "record_finalized",
+                                          turn_ended=payload.event == EVENT_STOP)
         else:
             action = "buffered" if not should_delete else "ignored"
         if remote_events is not None:

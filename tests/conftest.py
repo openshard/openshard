@@ -190,6 +190,10 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
                 "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_REMOTE_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "off")
+    # Commit verification is on by default for captured sessions: no test may
+    # start a real detached ``openshard verify``. Tests of the trigger pass
+    # their own env and spawner (tests/test_commit_verification.py).
+    monkeypatch.setenv("OPENSHARD_NO_AUTO_VERIFY", "1")
     yield
 
 

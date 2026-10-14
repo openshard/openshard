@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 import time
 import uuid
@@ -64,9 +63,12 @@ from openshard.history.verification import (
     MODE_OPENSHARD_EXECUTED,
     REASON_ARTIFACT_NOT_BOUND,
     REASON_CHECK_NOT_COMPLETED,
+    REASON_CHECKS_TRUNCATED,
     SOURCE_DIRECTLY_OBSERVED,
     SOURCE_INDEPENDENTLY_VERIFIED,
     STATUS_NOT_RUN,
+    STATUS_PARTIAL,
+    STATUS_PASSED,
     VerificationCheck,
     aggregate_status,
     build_verification,
@@ -97,6 +99,7 @@ DEFAULT_TIMEOUT_SECONDS = 600.0
 ORIGIN_CONTRACT = "contract"  # the repository's configured verification contract
 ORIGIN_DETECTED = "detected"  # the test command OpenShard detects for the repository
 ORIGIN_OBSERVED = "observed"  # a check command the agent was observed running (opt-in)
+ORIGIN_CHANGE = "change"  # selected from what the verified commit changed (verification/change_checks.py)
 
 # Read-only checkers a contract may name without extra approval. The shared
 # plan.py allowlist is left untouched (it also governs native runs); these
@@ -137,6 +140,8 @@ class PlannedCheck:
     origin: str
     safety: str  # safe | needs_approval | blocked
     reason: str
+    cwd: str = ""  # repo-relative directory the check runs in ("" = root)
+    why: str = ""  # why change-aware selection chose it (ORIGIN_CHANGE only)
 
 
 @dataclass
@@ -265,6 +270,63 @@ def plan_checks(
     return planned
 
 
+def plan_commit_checks(
+    repo_root: Path, config: dict, entry: dict | None, commit: str, base: str | None,
+) -> list[PlannedCheck]:
+    """The checks for verifying one exact *commit*.
+
+    The repository's configured contract still wins: when it names commands,
+    those are the required checks. Otherwise the checks come from what the
+    change touched (``change_checks.select_checks``); when the change calls
+    for none (a docs-only change, an unknown stack), the repository's detected
+    test command. A change-selected check is OpenShard's own command built
+    from a fixed script name, so it is ``safe`` unless the shared rules block
+    it or the change rewrote that check's own definition (``needs_approval``).
+    """
+    return plan_commit(repo_root, config, entry, commit, base)[0]
+
+
+_KEEP_FIRST = {"test": 0, "typecheck": 1, "build": 2, "lint": 3}
+
+
+def plan_commit(
+    repo_root: Path, config: dict, entry: dict | None, commit: str, base: str | None,
+) -> tuple[list[PlannedCheck], bool]:
+    """``plan_commit_checks`` plus whether selected checks were dropped to stay within ``MAX_PLANNED_CHECKS``.
+
+    When the change calls for more checks than the cap, tests are kept first,
+    then typecheck, build and lint, so a cap can never leave a change
+    "verified" by lint alone; the caller records the run as incomplete.
+    """
+    if _contract_argvs(config):
+        return plan_checks(repo_root, config, entry), len(_contract_argvs(config)) > MAX_PLANNED_CHECKS
+    from openshard.verification.change_checks import select_checks
+
+    try:
+        selected = select_checks(repo_root, commit, base)
+    except Exception:
+        selected = []
+    truncated = len(selected) > MAX_PLANNED_CHECKS
+    if truncated:
+        kept = sorted(range(len(selected)), key=lambda i: (_KEEP_FIRST.get(selected[i].kind, 4), i))[:MAX_PLANNED_CHECKS]
+        selected = [selected[i] for i in sorted(kept)]
+    planned: list[PlannedCheck] = []
+    for check in selected:
+        argv = list(check.argv)
+        shared, shared_reason = classify_command_safety(argv, VerificationSource.detected)
+        if shared == CommandSafety.blocked:
+            safety, reason = CommandSafety.blocked.value, shared_reason
+        elif check.safety_override:
+            safety, reason = check.safety_override, check.override_reason
+        else:
+            safety, reason = CommandSafety.safe.value, "selected by OpenShard for this change"
+        planned.append(PlannedCheck(
+            name=check.label, argv=argv, kind=check.kind, origin=ORIGIN_CHANGE, safety=safety,
+            reason=reason, cwd=check.cwd, why=check.why,
+        ))
+    return (planned, truncated) if planned else (plan_checks(repo_root, {}, entry), False)
+
+
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
@@ -289,6 +351,64 @@ def tree_state(repo_root: Path) -> TreeState:
     return TreeState(head=head_sha, dirty=dirty, tracked_dirty=tracked_dirty)
 
 
+def check_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a check runs in: OpenShard's own, plus *extra*, minus the Windows venv launcher hint.
+
+    A venv's ``python.exe`` on Windows sets ``__PYVENV_LAUNCHER__``; a child
+    interpreter that inherits it adopts *that* venv's site-packages. A
+    project's own ``.venv`` Python would then test against OpenShard's
+    packages instead of the project's -- so the hint never crosses over.
+    """
+    import os
+
+    env = {k: v for k, v in os.environ.items() if k != "__PYVENV_LAUNCHER__"}
+    env.update(extra or {})
+    return env
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Stop *proc* and everything it started (a check is often ``pnpm.cmd`` -> node -> vitest workers)."""
+    import os
+    import signal
+    import sys
+
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],  # noqa: S603,S607 - fixed argv
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=30, check=False)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+        proc.wait(timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def run_process_tree(argv: list[str], *, cwd: Path, timeout: float, check: bool = False, **kwargs: Any) -> Any:
+    """``subprocess.run`` for checks, except that a timeout stops the whole process tree, not just its head.
+
+    Output is never captured here (it is streamed or discarded), so waiting
+    cannot deadlock on a full pipe. Raises ``TimeoutExpired`` like ``run``.
+    """
+    import sys
+
+    if sys.platform == "win32":
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(argv, cwd=cwd, **kwargs)  # noqa: S603 - argv list, no shell
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        raise
+    return proc
+
+
 def run_checks(
     planned: list[PlannedCheck],
     repo_root: Path,
@@ -298,9 +418,16 @@ def run_checks(
     stream: bool = True,
     runner: Runner | None = None,
     on_start: Callable[[PlannedCheck], None] | None = None,
+    env: dict[str, str] | None = None,
 ) -> list[CheckRun]:
-    """Run each planned check that its safety class allows. Never raises."""
-    run = runner or subprocess.run
+    """Run each planned check that its safety class allows. Never raises.
+
+    *env* adds variables to the inherited environment (an isolated copy's
+    ``PYTHONPATH``). A check runs in ``repo_root / check.cwd``.
+    """
+    from openshard.verification.commit_checkout import resolve_tool
+
+    run = runner or run_process_tree
     results: list[CheckRun] = []
     for check in planned:
         if check.safety == CommandSafety.blocked.value:
@@ -309,16 +436,23 @@ def run_checks(
         if check.safety == CommandSafety.needs_approval.value and not approve:
             results.append(CheckRun(check, CHECK_SKIPPED, note="needs approval (re-run with --approve)"))
             continue
-        exe = shutil.which(check.argv[0]) if runner is None else check.argv[0]
-        if exe is None:
+        argv = resolve_tool(check.argv) if runner is None else list(check.argv)
+        if argv is None:
             results.append(CheckRun(check, CHECK_UNKNOWN, note="executable not found; not run"))
+            continue
+        cwd = repo_root / check.cwd if check.cwd else repo_root
+        if not cwd.is_dir():
+            results.append(CheckRun(check, CHECK_UNKNOWN, note="its directory does not exist at this commit"))
             continue
         if on_start is not None:
             on_start(check)
-        io: dict[str, Any] = {} if stream else {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        io: dict[str, Any] = {} if stream else {
+            "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+        }
+        io["env"] = check_environment(env)
         started = time.monotonic()
         try:
-            proc = run([exe, *check.argv[1:]], cwd=repo_root, timeout=timeout, check=False, **io)
+            proc = run(argv, cwd=cwd, timeout=timeout, check=False, **io)
         except subprocess.TimeoutExpired:
             results.append(CheckRun(
                 check, CHECK_UNKNOWN, duration_seconds=round(time.monotonic() - started, 2),
@@ -356,8 +490,15 @@ def build_attestation(
     after: TreeState,
     started_at: str,
     completed_at: str,
+    commit: str | None = None,
+    checkout: dict | None = None,
+    truncated: bool = False,
 ) -> dict:
-    """One ``verifications.jsonl`` line: what OpenShard ran, saw, and against which tree."""
+    """One ``verifications.jsonl`` line: what OpenShard ran, saw, and against which tree.
+
+    With *commit* (``openshard verify --commit``) the result binds only when
+    the tree that ran was exactly that commit; *checkout* says where it ran.
+    """
     checks = [
         VerificationCheck(name=r.check.name, status=r.status, kind=r.check.kind, exit_code=r.exit_code)
         for r in results
@@ -373,12 +514,14 @@ def build_attestation(
         and before.dirty is False
         and after_tracked is False
         and after.head == before.head
+        and (commit is None or before.head.startswith(commit.lower()))
     )
     if not bound:
         incomplete.append(REASON_ARTIFACT_NOT_BOUND)
     if any(r.status == CHECK_UNKNOWN for r in results):
         incomplete.append(REASON_CHECK_NOT_COMPLETED)
-    status = aggregate_status(checks) if checks else STATUS_NOT_RUN
+    status = _commit_verdict(aggregate_status(checks) if checks else STATUS_NOT_RUN, results,
+                             commit=commit, truncated=truncated, incomplete=incomplete)
     durations = [r.duration_seconds for r in results if r.duration_seconds is not None]
     ran = [r for r in results if r.status != CHECK_SKIPPED]
     reason = _reason(results, bound, before)
@@ -410,12 +553,32 @@ def build_attestation(
             "head_after": after.head, "dirty_after": after.dirty, "tracked_dirty_after": after.tracked_dirty,
         },
         "checks": [
-            {"name": r.check.name, "origin": r.check.origin, "safety": r.check.safety, "note": r.note[:120]}
+            {"name": r.check.name, "origin": r.check.origin, "safety": r.check.safety, "note": r.note[:120],
+             **({"why": r.check.why[:200]} if r.check.why else {}),
+             **({"cwd": r.check.cwd} if r.check.cwd else {})}
             for r in results
         ],
+        **({"commit": commit.lower()} if commit else {}),
+        **({"checkout": checkout} if checkout else {}),
         "raw_output_stored": False,
         "verification": block,
     }
+
+
+def _commit_verdict(status: str, results: list[CheckRun], *, commit: str | None, truncated: bool,
+                    incomplete: list[str]) -> str:
+    """A commit is verified only by every check its change called for.
+
+    A check dropped by the cap, or skipped (blocked, or needing approval
+    because the change rewrote it), leaves a would-be pass ``partial`` and the
+    evidence incomplete. Appends to *incomplete*; returns the status.
+    """
+    skipped = commit is not None and any(r.status == CHECK_SKIPPED for r in results)
+    if truncated:
+        incomplete.append(REASON_CHECKS_TRUNCATED)
+    if skipped:
+        incomplete.append(REASON_CHECK_NOT_COMPLETED)
+    return STATUS_PARTIAL if status == STATUS_PASSED and (truncated or skipped) else status
 
 
 def _reason(results: list[CheckRun], bound: bool, before: TreeState) -> str:
@@ -462,6 +625,16 @@ def load_attestations(history_dir: Path) -> list[dict]:
     except OSError:
         return out
     return out
+
+
+def commit_attested(attestations: list[dict], entry: dict, commit: str) -> bool:
+    """Whether an OpenShard re-run of exactly *commit* is already recorded for *entry*."""
+    sha = commit.lower()
+    return any(
+        isinstance(item, dict) and item.get("kind") == KIND_POST_SESSION
+        and item.get("commit") == sha and _names_entry(entry, item)
+        for item in attestations
+    )
 
 
 def _names_entry(entry: dict, item: dict) -> bool:
