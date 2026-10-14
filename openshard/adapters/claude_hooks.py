@@ -929,6 +929,13 @@ def _transcript_usage(buf: dict) -> dict | None:
     return usage
 
 
+def _stored_usage_owner(capture: Mapping[str, Any]) -> dict[str, str | None]:
+    """A rebuilt buffer keeps "another checkout owns this session's usage", so a non-owner
+    checkout never starts counting the session's transcript a second time."""
+    owned_elsewhere = capture.get("tokens_not_recorded_reason") == USAGE_ELSEWHERE_REASON
+    return {"usage_elsewhere": USAGE_ELSEWHERE_REASON if owned_elsewhere else None}
+
+
 def _models_with_usage(models_seen: list[str], transcript_usage: Mapping[str, Any] | None) -> list[str]:
     """Hook/status models first, then every model with transcript usage (subagents included),
     in first-seen order. Pricing aliases share one identity; the first spelling observed is
@@ -1870,7 +1877,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         # transcript is read again. Claude Code tokens recorded any other way
         # (pre-transcript records: the status line's last call) are never
         # carried forward as session totals.
-        "transcript_usage": _stored_transcript_usage(entry, capture),
+        "transcript_usage": _stored_transcript_usage(entry, capture), **_stored_usage_owner(capture),
         "tokens_scope": (
             "last_call"
             if entry.get("executor") == EXECUTOR and capture.get("tokens_source") != TOKENS_SOURCE_TRANSCRIPT

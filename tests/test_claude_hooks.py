@@ -2459,3 +2459,29 @@ def test_headless_primary_model_stays_ranked_separately_from_seen_order(repo):
     entry = _runs_lines(repo)[0]
     assert entry["execution_model"] == "claude-opus-5-5"
     assert entry["capture"]["models_seen"] == ["claude-haiku-5-5", "claude-opus-5-5"]
+
+
+def test_rebuilt_non_owner_keeps_transcript_usage_attributed_elsewhere(repo):
+    transcript = _transcript(repo, [
+        _assistant_line("main", input_tokens=1_000, output_tokens=200),
+    ])
+    _run(repo, "UserPromptSubmit", prompt="task")
+    _run(repo, "Stop")
+    original = _runs_lines(repo)[0]
+    # This is the persisted shape of a checkout that did not own the turn.
+    original["capture"]["tokens_not_recorded_reason"] = ch.USAGE_ELSEWHERE_REASON
+    original["capture"]["cost_not_recorded_reason"] = ch.USAGE_ELSEWHERE_REASON
+    rebuilt = ch._buffer_from_entry(original, SID)
+    assert rebuilt["usage_elsewhere"] == ch.USAGE_ELSEWHERE_REASON
+    rebuilt["transcript_path"] = str(transcript)
+    entry = build_hook_entry(rebuilt, repo)
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cache_read_tokens",
+                "cache_creation_tokens", "tokens_provenance", "estimated_cost", "cost_provenance"):
+        assert key not in entry
+    assert entry["capture"]["tokens_not_recorded_reason"] == ch.USAGE_ELSEWHERE_REASON
+    assert entry["capture"]["cost_not_recorded_reason"] == ch.USAGE_ELSEWHERE_REASON
+    assert build_shard_receipt(entry).cost_raw is None
+    # A second rebuild/fold cannot resurrect the owner's transcript counters.
+    again = ch._buffer_from_entry(entry, SID)
+    again["transcript_path"] = str(transcript)
+    assert "prompt_tokens" not in build_hook_entry(again, repo)
