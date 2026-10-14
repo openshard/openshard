@@ -7322,7 +7322,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
                 agent_checks.append(("Capture verified", True, ""))
             else:
                 agent_unverified = True
-                agent_checks.append(("Capture verified", False, _capture_unverified_detail(key, label)))
+                agent_checks.append(("Capture verified", False, status.trust_blocker or _capture_unverified_detail(key, label)))
         click.echo(f"\n{label}\n")
         for check_label, ok, detail in agent_checks:
             mark = "✓" if ok else "✗"
