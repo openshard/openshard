@@ -155,7 +155,15 @@ def _tokens(command: str) -> list[str]:
     return out
 
 
+# Herdr exports its own binary as HERDR_BIN_PATH, so agents commonly invoke it
+# through the variable (bash `$HERDR_BIN_PATH`/`${HERDR_BIN_PATH}`, PowerShell
+# `$env:HERDR_BIN_PATH`); the captured command carries the reference unexpanded.
+_HERDR_BIN_REF = re.compile(r"\$(?:env:)?\{?HERDR_BIN_PATH\}?", re.IGNORECASE)
+
+
 def _program(token: str) -> str:
+    if _HERDR_BIN_REF.fullmatch(token):
+        return "herdr"
     name = re.split(r"[\\/]", token)[-1].lower()
     return name[:-4] if name.endswith(".exe") else name
 

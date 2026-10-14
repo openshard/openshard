@@ -80,6 +80,11 @@ def test_explicit_context_wins_and_caps(fake_herdr):
 
 @pytest.mark.parametrize("command,targets", [
     ('herdr agent prompt w5:p3 "do the thing"', ["w5:p3"]),
+    # Seen live: Claude delegated through Herdr's own exported binary variable.
+    ('"$HERDR_BIN_PATH" agent prompt w5:p8 "do x" --wait', ["w5:p8"]),
+    ("${HERDR_BIN_PATH} agent prompt w5:p8 hi", ["w5:p8"]),
+    ("& $env:HERDR_BIN_PATH agent send-keys w5:p8 enter", ["w5:p8"]),
+    ("$HERDR_BIN_PATH_OTHER agent prompt w5:p8 hi", []),
     ('"C:\\Users\\Me\\.herdr\\bin\\herdr.exe" agent prompt w5:p3 hi', ["w5:p3"]),
     ('& "C:\\Program Files\\herdr\\herdr.exe" agent send-keys w5:p3 esc', ["w5:p3"]),
     ("HERDR_X=1 herdr agent prompt --wait --timeout 5 w1:p1 'a b'", ["w1:p1"]),
