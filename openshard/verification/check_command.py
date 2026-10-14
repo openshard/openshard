@@ -37,6 +37,10 @@ UNATTRIBUTED_ALTERNATIVE = "or_operator_masks_failure"
 UNATTRIBUTED_BACKGROUND = "run_in_background"
 UNATTRIBUTED_SHARED_FAILURE = "failure_may_belong_to_another_command"
 
+# Whose exit status the captured shell tool reports (see classify_check_commands).
+SHELL_POSIX = "posix"
+SHELL_POWERSHELL = "powershell"
+
 _MAX_COMMAND_CHARS = 20_000
 
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -134,34 +138,62 @@ class _Simple:
     words: list[str]
     text: str
     op_after: str | None  # the operator that ended it: && || | ; & or None at the end
+    start: int = 0  # offset of its text in the parsed command
+    in_block: bool = False  # led by a control keyword (``if pytest; then``)
 
 
-def classify_check_command(command: str | None) -> CheckCommand:
+def classify_check_command(command: str | None, *, shell: str = SHELL_POSIX) -> CheckCommand:
     """The last check *command* runs (``kind`` "other" when it runs none)."""
-    checks = classify_check_commands(command)
+    checks = classify_check_commands(command, shell=shell)
     return checks[-1] if checks else _OTHER
 
 
-def classify_check_commands(command: str | None) -> list[CheckCommand]:
+def classify_check_commands(command: str | None, *, shell: str = SHELL_POSIX) -> list[CheckCommand]:
     """Every check *command* runs, in order, each with whether the exit status is its own.
 
-    The shell's exit status is the last pipeline element's of the final
-    statement. Every member of that statement's ``&&`` chain had to succeed
-    for it to be zero, so a success of the whole line is each such check's
-    success. A failure is pinned on a check only when everything else in the
-    chain is a setup step.
+    POSIX shells (Claude Code's Bash tool): the exit status is the last
+    pipeline element's of the final statement -- unless ``set -o pipefail``
+    is on, or the line ends ``exit $?`` / ``exit ${PIPESTATUS[k]}``. Every
+    member of that statement's ``&&`` chain had to succeed for it to be
+    zero, so a success of the whole line is each such check's success. A
+    failure is pinned on a check only when everything else in the chain is
+    a setup step.
+
+    PowerShell (Claude Code's PowerShell tool): the reported exit code is
+    ``$LASTEXITCODE``, the last *native program's*. Cmdlets never change it
+    (``npx vitest run | Select-Object -Last 20`` reports vitest's code), so
+    a check is attributable when no native program runs after it.
+
+    Either shell: a check inside ``if``/loops/blocks is recorded as run but
+    its outcome is never attributed (whether it ran, and which command set
+    the status, depends on a condition).
     """
-    return _classify(command, depth=0)
+    return _classify(command, depth=0, shell=shell)
 
 
-def _classify(command: str | None, *, depth: int) -> list[CheckCommand]:
+def shell_for_tool(tool_name: str | None) -> str:
+    """The exit-status rules of a captured shell tool (Claude Code's ``PowerShell`` tool, else POSIX)."""
+    return SHELL_POWERSHELL if isinstance(tool_name, str) and tool_name.lower() == "powershell" else SHELL_POSIX
+
+
+def _classify(command: str | None, *, depth: int, shell: str = SHELL_POSIX) -> list[CheckCommand]:
     if not isinstance(command, str) or not command.strip():
         return []
-    statements = _parse(_strip_inline_documents(command[:_MAX_COMMAND_CHARS]))
+    text = _strip_inline_documents(command[:_MAX_COMMAND_CHARS])
+    statements = _parse(text)
+    for statement in statements:
+        for simple in statement:
+            simple.words, simple.in_block = _strip_keywords(simple.words, shell)
+    flat = [(si, ci) for si, st in enumerate(statements) for ci in range(len(st))]
     out: list[CheckCommand] = []
     for si, statement in enumerate(statements):
         for ci, simple in enumerate(statement):
-            outer, outer_failure = _position(statements, si, ci)
+            if shell == SHELL_POWERSHELL:
+                outer, outer_failure = _position_powershell(statements, flat, si, ci)
+            else:
+                outer, outer_failure = _position(statements, si, ci)
+            if outer is None and (simple.in_block or _block_depth(text[:simple.start], shell) > 0):
+                outer, outer_failure = UNATTRIBUTED_NOT_LAST, None
             script = _shell_script(simple.words) if depth < 2 else None
             if script is not None:
                 # ``bash -lc "pytest -q"``: the inner script's exit status is the shell's.
@@ -175,20 +207,216 @@ def _classify(command: str | None, *, depth: int) -> list[CheckCommand]:
     return out
 
 
+_EXIT_STATUS_WORD = "$?"
+_PIPESTATUS_RE = re.compile(r"^\$\{PIPESTATUS\[(\d{1,2})\]\}$")
+
+
+def _deciding(statements: list[list[_Simple]]) -> tuple[int, int | None]:
+    """``(statement index, pipeline element)`` whose status the POSIX line exits with.
+
+    The final statement, unless it is ``exit $?`` (then the one before it) or
+    ``exit ${PIPESTATUS[k]}`` (element *k* of the last pipeline before it).
+    ``None`` means the usual rule: the last element (or pipefail).
+    """
+    last = len(statements) - 1
+    final = statements[last]
+    if last > 0 and len(final) == 1 and len(final[0].words) == 2 and final[0].words[0] == "exit":
+        arg = final[0].words[1]
+        if arg == _EXIT_STATUS_WORD:
+            return last - 1, None
+        match = _PIPESTATUS_RE.match(arg)
+        if match:
+            return last - 1, int(match.group(1))
+    return last, None
+
+
+def _pipefail_before(statements: list[list[_Simple]], si: int, ci: int) -> bool:
+    """Whether ``set -o pipefail`` (or ``set -euo pipefail``...) ran earlier in the line."""
+    for sj, statement in enumerate(statements):
+        for cj, simple in enumerate(statement):
+            if (sj, cj) >= (si, ci):
+                return False
+            w = simple.words
+            if w and w[0] == "set" and "pipefail" in w:
+                at = w.index("pipefail")
+                if at > 0 and w[at - 1].startswith("-") and w[at - 1].endswith("o"):
+                    return True
+    return False
+
+
+def _last_pipeline(statement: list[_Simple]) -> list[int]:
+    """Indices of the statement's last pipeline (simple commands joined by ``|``)."""
+    indices = [len(statement) - 1]
+    for j in range(len(statement) - 2, -1, -1):
+        if statement[j].op_after != "|":
+            break
+        indices.insert(0, j)
+    return indices
+
+
 def _position(statements: list[list[_Simple]], si: int, ci: int) -> tuple[str | None, str | None]:
-    """Whether the line's exit status is that of simple command *ci* of statement *si*."""
+    """Whether the POSIX line's exit status is that of simple command *ci* of statement *si*."""
     statement = statements[si]
     if any(s.op_after == "&" for s in statement):
         return UNATTRIBUTED_BACKGROUND, None
-    if si != len(statements) - 1:
+    deciding, element = _deciding(statements)
+    if si != deciding:
         return UNATTRIBUTED_NOT_LAST, None
     if any(s.op_after == "||" for s in statement):
         return UNATTRIBUTED_ALTERNATIVE, None
-    if statement[ci].op_after == "|":
-        return UNATTRIBUTED_PIPED, None
-    if any(not _is_setup(s.words) for j, s in enumerate(statement) if j != ci):
+    pipeline = _last_pipeline(statement)
+    others = [j for j in range(len(statement)) if j != ci]
+    if element is not None:
+        # ``exit ${PIPESTATUS[k]}``: element *k* of the last pipeline is the status.
+        if ci not in pipeline or pipeline.index(ci) != element:
+            return UNATTRIBUTED_PIPED, None
+        others = [j for j in others if j not in pipeline]
+    elif statement[ci].op_after == "|":
+        if not _pipefail_before(statements, si, ci):
+            return UNATTRIBUTED_PIPED, None
+        # pipefail: a zero status means every element succeeded; a failure
+        # may be any element's.
+        return None, UNATTRIBUTED_SHARED_FAILURE
+    if any(not _is_setup(statement[j].words) for j in others):
         return None, UNATTRIBUTED_SHARED_FAILURE
     return None, None
+
+
+def _position_powershell(
+    statements: list[list[_Simple]], flat: list[tuple[int, int]], si: int, ci: int,
+) -> tuple[str | None, str | None]:
+    """Whether ``$LASTEXITCODE`` at the end of the PowerShell line is simple command *ci*'s.
+
+    It is the last *native program's* exit code: cmdlets, assignments and
+    keywords after the check leave it alone; any later native program, an
+    ``exit N`` or an assignment to ``$LASTEXITCODE`` replaces it.
+    """
+    statement = statements[si]
+    if any(s.op_after == "&" for s in statement):
+        return UNATTRIBUTED_BACKGROUND, None
+    if any(s.op_after == "||" for s in statement):
+        return UNATTRIBUTED_ALTERNATIVE, None
+    after = flat[flat.index((si, ci)) + 1:]
+    chained_failure: str | None = None
+    for sj, cj in after:
+        later = statements[sj][cj]
+        if _PS_LASTEXITCODE_SET_RE.search(later.text) or _ps_exit_overrides(later.words):
+            return UNATTRIBUTED_NOT_LAST, None
+        if _ps_native(later):
+            if sj == si and all(statement[k].op_after == "&&" for k in range(ci, cj)):
+                # ``check && other`` (PowerShell 7): ``other`` only runs after
+                # the check succeeded, so a success is still the check's.
+                chained_failure = UNATTRIBUTED_SHARED_FAILURE
+                continue
+            same_pipeline = sj == si and all(statement[k].op_after == "|" for k in range(ci, cj))
+            return (UNATTRIBUTED_PIPED if same_pipeline else UNATTRIBUTED_NOT_LAST), None
+    if chained_failure:
+        return None, chained_failure
+    # ``a && check``: a failure may be ``a``'s (a success means both ran clean).
+    if any(not _is_setup(s.words) and _ps_native(s) for s in statement[:ci]):
+        return None, UNATTRIBUTED_SHARED_FAILURE
+    return None, None
+
+
+_PS_LASTEXITCODE_SET_RE = re.compile(r"\$(?:global:)?LASTEXITCODE\s*=(?!=)", re.IGNORECASE)
+# Cmdlet verbs that never run a native program themselves (Invoke-*, Start-*
+# and anything unknown count as native, conservatively).
+_PS_SAFE_VERBS = frozenset({
+    "get", "set", "select", "where", "foreach", "write", "out", "tee", "sort", "measure", "format", "test",
+    "new", "remove", "copy", "move", "join", "split", "convertto", "convertfrom", "add", "clear", "resolve",
+    "push", "pop", "group", "compare", "read", "import", "export", "rename", "wait",
+})
+_PS_CMDLET_RE = re.compile(r"^([a-z]+)-[a-z][a-z0-9]*$")
+_PS_ALIASES = frozenset({
+    "echo", "write", "cd", "chdir", "sl", "pwd", "ls", "dir", "gci", "cat", "gc", "type", "select", "where",
+    "sort", "tee", "measure", "fl", "ft", "fw", "oh", "%", "?", "sleep", "cls", "clear", "rm", "del", "ri",
+    "cp", "copy", "mv", "move", "mkdir", "md", "ni", "gi", "gp", "gl", "gm", "foreach", "exit", "return",
+    "throw", "break", "continue", "param", "function",
+})
+
+
+def _ps_native(simple: _Simple) -> bool:
+    """Whether a PowerShell simple command may run a native program (and so set ``$LASTEXITCODE``)."""
+    words = simple.words
+    if not words:
+        return False
+    head = words[0]
+    if head.startswith(("$", "@", "'", '"', "[")) or re.match(r"^-?\d", head):
+        return False  # an expression, not a command
+    if head.lower().endswith((".exe", ".cmd", ".bat", ".com")):
+        return True  # ``where.exe`` is a program, not the ``where`` alias
+    name = _program(head)
+    match = _PS_CMDLET_RE.match(name)
+    cmdlet = name in _PS_ALIASES or (match is not None and match.group(1) in _PS_SAFE_VERBS)
+    # A cmdlet with a script block (``ForEach-Object { ... }``) may run a program in it.
+    return not cmdlet or "{" in simple.text
+
+
+def _ps_exit_overrides(words: list[str]) -> bool:
+    """``exit`` with anything but ``$LASTEXITCODE`` sets the reported code itself."""
+    if not words or words[0].lower() != "exit":
+        return False
+    return len(words) != 2 or words[1].lower() != "$lastexitcode"
+
+
+_POSIX_KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!"})
+_PS_KEYWORDS = frozenset({"if", "elseif", "else", "while", "for", "foreach", "do", "until", "try", "finally",
+                          "switch"})
+_PS_ASSIGN_RE = re.compile(r"^\$[A-Za-z_][\w:]*$")
+
+
+def _strip_keywords(words: list[str], shell: str) -> tuple[list[str], bool]:
+    """*words* without leading control keywords (and a PowerShell ``(condition)``), plus whether any were dropped.
+
+    ``if pytest; then`` still runs pytest, so it is still a check -- but one
+    whose outcome the line's status cannot be pinned on.
+    """
+    keywords = _PS_KEYWORDS if shell == SHELL_POWERSHELL else _POSIX_KEYWORDS
+    out = list(words)
+    dropped = False
+    while out:
+        head = out[0].lower()
+        if head in keywords:
+            out = out[1:]
+            dropped = True
+            if shell == SHELL_POWERSHELL and out and out[0].startswith("("):
+                while out:
+                    word = out.pop(0)
+                    if word.endswith(")"):
+                        break
+            continue
+        if shell == SHELL_POWERSHELL and len(out) > 2 and _PS_ASSIGN_RE.match(out[0]) and out[1] == "=":
+            out = out[2:]  # ``$r = npx vitest run``: the program still runs
+            continue
+        break
+    return (_unwrap(out) if dropped else out), dropped
+
+
+_QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\`]|[\\`].)*\"")
+_EXPANSION_RE = re.compile(r"[$@]\{[^}]*\}")
+_POSIX_TOKEN_RE = re.compile(r"[^\s;&|()]+|[;&|()\n]")
+_POSIX_OPENERS = frozenset({"if", "while", "until", "for", "case", "select", "{"})
+_POSIX_CLOSERS = frozenset({"fi", "done", "esac", "}"})
+_POSIX_COMMAND_START = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{"})
+
+
+def _block_depth(prefix: str, shell: str) -> int:
+    """How many compound commands / script blocks are open at the end of *prefix*."""
+    text = _EXPANSION_RE.sub("", _QUOTED_RE.sub("''", prefix))
+    if shell == SHELL_POWERSHELL:
+        return max(0, text.count("{") - text.count("}"))
+    depth = 0
+    command_position = True
+    for token in _POSIX_TOKEN_RE.findall(text):
+        if token in (";", "&", "|", "(", ")", "\n"):
+            command_position = True
+            continue
+        if command_position and token in _POSIX_OPENERS:
+            depth += 1
+        elif command_position and token in _POSIX_CLOSERS:
+            depth = max(0, depth - 1)
+        command_position = token in _POSIX_COMMAND_START
+    return depth
 
 
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "pwsh", "powershell", "cmd"})
@@ -299,7 +527,7 @@ def _parse(command: str) -> list[list[_Simple]]:
         nonlocal words, text_start
         end_word()
         if words:
-            current.append(_Simple(_unwrap(words), command[text_start:at].strip(), op))
+            current.append(_Simple(_unwrap(words), command[text_start:at].strip(), op, text_start))
         elif current and op is not None and current[-1].op_after is None:
             current[-1].op_after = op
         words = []
@@ -560,7 +788,7 @@ _REASON_CODE_RE = re.compile(r"^[a-z_]{1,64}$")
 MAX_CHECKS_PER_COMMAND = 10
 
 
-def check_command_items(command: str | None, name_of) -> list[dict]:
+def check_command_items(command: str | None, name_of, *, shell: str = SHELL_POSIX) -> list[dict]:
     """The queue form of *command*'s checks: ``{"kind", "name", "unattributed", "failure_unattributed"}``.
 
     *name_of(segment, kind)* turns the raw check segment into a stored name
@@ -569,7 +797,7 @@ def check_command_items(command: str | None, name_of) -> list[dict]:
     return [
         {"kind": c.kind, "name": name_of(c.segment, c.kind), "unattributed": c.unattributed,
          "failure_unattributed": c.failure_unattributed}
-        for c in classify_check_commands(command)[:MAX_CHECKS_PER_COMMAND]
+        for c in classify_check_commands(command, shell=shell)[:MAX_CHECKS_PER_COMMAND]
     ]
 
 

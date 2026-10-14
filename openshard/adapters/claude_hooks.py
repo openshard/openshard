@@ -227,6 +227,7 @@ from openshard.verification.check_command import (
     check_command_items,
     classify_check_command,
     queued_check_commands,
+    shell_for_tool,
 )
 
 # Claude Code identity constants -- kept as module names for existing
@@ -1176,7 +1177,7 @@ def _summarize_command(command: str | None, label: str) -> tuple[str, str | None
     if not isinstance(command, str) or not command.strip():
         return f"{label} command", None, "other", None
 
-    kind = classify_check_command(command).kind
+    kind = classify_check_command(command, shell=shell_for_tool(label)).kind
     collapsed = _scrubbed_command(command)
     safe = sanitize_text(collapsed, _COMMAND_CAP)
     first = collapsed.split(" ", 1)[0] if collapsed else ""
@@ -1474,7 +1475,8 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
             reduced.command_action, reduced.command_target, reduced.command_kind = action, target, ckind
             if ckind in CHECK_COMMAND_KINDS:
                 reduced.command_key = key  # only check-shaped commands need one (see _record_check)
-                reduced.check_commands = check_command_items(payload.command, lambda seg, k: _check_name(tool, seg, k))
+                reduced.check_commands = check_command_items(
+                    payload.command, lambda seg, k: _check_name(tool, seg, k), shell=shell_for_tool(tool))
             reduced.command_outcome = _command_outcome_or_none(payload.command_outcome)
             reduced.command_exit_code = _exit_code_or_none(payload.command_exit_code)
             reduced.command_safety = classify_command_text(payload.command)

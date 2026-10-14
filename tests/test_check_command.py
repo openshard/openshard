@@ -155,3 +155,93 @@ def test_check_names_are_scrubbed_word_by_word():
         "npx vitest run packages/contracts/test/receipt-sync.test.ts")
     assert sanitize_words("pytest --key AKIAIOSFODNN7EXAMPLEKEY12345 tests/x.py", 100) == "pytest --key <redacted> tests/x.py"
     assert sanitize_words("AKIAIOSFODNN7EXAMPLEKEY12345", 100) is None
+
+
+# -- exit-status rules per shell ------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "set -o pipefail; npx vitest run 2>&1 | tail -5",
+    "set -euo pipefail\nnpx vitest run | tail -20",
+])
+def test_pipefail_makes_a_piped_success_the_checks(command):
+    check = cc.classify_check_command(command)
+    assert check.unattributed is None
+    assert cc.check_outcome(check, "passed") == "passed"
+    assert cc.check_outcome(check, "failed") == "unknown"  # tail may be the one that failed
+
+
+@pytest.mark.parametrize("command", [
+    "npx vitest run 2>&1 | tail -5; exit ${PIPESTATUS[0]}",
+    "cd /c/tmp/p && pytest -q | tee out.txt; exit ${PIPESTATUS[0]}",
+    "pytest -q > out.log 2>&1; exit $?",
+])
+def test_an_explicit_exit_of_the_checks_status_owns_both_outcomes(command):
+    check = cc.classify_check_command(command)
+    assert check.unattributed is None and check.failure_unattributed is None
+
+
+@pytest.mark.parametrize("command,reason", [
+    ("pytest -q | tail -5; exit ${PIPESTATUS[1]}", cc.UNATTRIBUTED_PIPED),  # tail's status
+    ("pytest -q | tail -5; exit $?", cc.UNATTRIBUTED_PIPED),
+    ("pytest -q; echo \"exit $?\"", cc.UNATTRIBUTED_NOT_LAST),  # an echoed status is not the exit status
+    ("if pytest -q; then echo ok; fi", cc.UNATTRIBUTED_NOT_LAST),
+    ("for f in a b; do pytest $f; done", cc.UNATTRIBUTED_NOT_LAST),
+    ("if true; then\n  pytest -q\nfi", cc.UNATTRIBUTED_NOT_LAST),
+])
+def test_posix_statuses_that_are_not_the_checks(command, reason):
+    check = cc.classify_check_command(command)
+    assert check.is_check, "a check in a conditional is still a check that ran"
+    assert check.unattributed == reason
+
+
+@pytest.mark.parametrize("command", [
+    "npx vitest run 2>&1 | Select-Object -Last 20",
+    r"Set-Location C:\tmp\x; npx vitest run; Write-Output done",
+    "npx vitest run *> out.log; exit $LASTEXITCODE",
+    "$r = npx vitest run; $r | Select-Object -Last 5",
+    r"& C:\tmp\venv\Scripts\python.exe -m pytest -q 2>&1 | Out-String",
+    "npx vitest run | Tee-Object run.log",
+])
+def test_powershell_reports_the_last_native_programs_code(command):
+    check = cc.classify_check_command(command, shell=cc.SHELL_POWERSHELL)
+    assert check.is_check and check.unattributed is None and check.failure_unattributed is None
+    # The same text under POSIX rules is never attributed that generously.
+    posix = cc.classify_check_commands(command)
+    assert all(c.unattributed or c.failure_unattributed for c in posix) or "|" not in command
+
+
+@pytest.mark.parametrize("command,reason", [
+    ("npx vitest run; git status", cc.UNATTRIBUTED_NOT_LAST),
+    ("npx vitest run | findstr FAIL", cc.UNATTRIBUTED_PIPED),
+    ("npx vitest run; exit 0", cc.UNATTRIBUTED_NOT_LAST),
+    ("npx vitest run; $LASTEXITCODE = 0", cc.UNATTRIBUTED_NOT_LAST),
+    ("npx vitest run || Write-Output failed", cc.UNATTRIBUTED_ALTERNATIVE),
+    ("npx vitest run; Get-ChildItem | ForEach-Object { npx tsc }", cc.UNATTRIBUTED_NOT_LAST),
+    ("npx vitest run &", cc.UNATTRIBUTED_BACKGROUND),
+    ("npx vitest run; where.exe python", cc.UNATTRIBUTED_NOT_LAST),  # a program, not the where alias
+])
+def test_powershell_statuses_that_are_not_the_checks(command, reason):
+    check = cc.classify_check_commands(command, shell=cc.SHELL_POWERSHELL)[0]
+    assert check.unattributed == reason
+
+
+def test_powershell_checks_in_blocks_are_recorded_but_never_attributed():
+    for command in ("npx vitest run; if ($?) { npx tsc --noEmit }",
+                    "npx vitest run\nif ($LASTEXITCODE -eq 0) {\n  npx tsc --noEmit\n}",
+                    "try { npx tsc --noEmit } finally { Write-Output x }"):
+        checks = cc.classify_check_commands(command, shell=cc.SHELL_POWERSHELL)
+        assert cc.KIND_TYPECHECK in [c.kind for c in checks]
+        assert all(c.unattributed for c in checks)
+
+
+def test_powershell_and_chain_success_is_each_checks():
+    checks = cc.classify_check_commands("pnpm typecheck && pnpm test", shell=cc.SHELL_POWERSHELL)
+    assert [(c.unattributed, c.failure_unattributed) for c in checks] == [
+        (None, cc.UNATTRIBUTED_SHARED_FAILURE), (None, cc.UNATTRIBUTED_SHARED_FAILURE)]
+
+
+def test_the_shell_follows_the_captured_tool():
+    assert cc.shell_for_tool("PowerShell") == cc.SHELL_POWERSHELL
+    assert cc.shell_for_tool("Bash") == cc.SHELL_POSIX
+    assert cc.shell_for_tool(None) == cc.SHELL_POSIX
