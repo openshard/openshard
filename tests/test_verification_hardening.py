@@ -219,6 +219,53 @@ class TestSessionRecordAlone:
         assert [c["name"] for c in entry["verification"]["checks"]] == [
             "PowerShell: npx vitest run packages/contracts/test/receipt-sync.test.ts"]
 
+    def test_a_powershell_check_piped_into_a_cmdlet_keeps_its_own_outcome(self, repo):
+        # Claude Code's PowerShell tool reports $LASTEXITCODE (observed on 2.1.299:
+        # ``cmd /c exit 4 | Select-Object -Last 1`` -> "Exit code 4"), so a cmdlet
+        # after the check never decides the reported status.
+        ps = {"tool_name": "PowerShell", "tool_input": {"command": "npx vitest run 2>&1 | Select-Object -Last 20"}}
+        entry = _claude_session(repo, ("PostToolUse", ps))
+        block = entry["verification"]
+        assert [c["status"] for c in block["checks"]] == ["passed"]
+        assert block["status"] == "passed" and block["source"] == "agent_reported"
+
+    def test_a_powershell_check_failure_is_the_checks_even_with_a_later_cmdlet(self, repo):
+        ps = {"tool_name": "PowerShell", "error": "Exit code 1",
+              "tool_input": {"command": "npx vitest run; Write-Output done"}}
+        entry = _claude_session(repo, ("PostToolUseFailure", ps))
+        block = entry["verification"]
+        assert block["status"] == "failed"
+        assert block["checks"][0]["exit_code"] == 1
+
+    def test_a_later_native_program_still_decides_a_powershell_status(self, repo):
+        ps = {"tool_name": "PowerShell", "tool_input": {"command": "npx vitest run; git status"}}
+        entry = _claude_session(repo, ("PostToolUse", ps))
+        block = entry["verification"]
+        assert block["status"] == "unknown" and block["checks_passed"] == 0
+        assert "later_command_decides_exit_status" in block["incomplete_reasons"]
+
+    def test_the_same_pipe_in_bash_stays_unknown(self, repo):
+        # The Bash tool reports the last pipeline element's status (tail's).
+        entry = _claude_session(repo, ("PostToolUse", _bash("npx vitest run 2>&1 | tail -20")))
+        assert entry["verification"]["status"] == "unknown"
+
+    def test_bash_pipestatus_exit_makes_a_piped_check_attributable(self, repo):
+        entry = _claude_session(
+            repo, ("PostToolUseFailure", _bash("npx vitest run 2>&1 | tail -20; exit ${PIPESTATUS[0]}",
+                                                 error="Exit code 1")),
+        )
+        assert entry["verification"]["status"] == "failed"
+
+    def test_a_check_inside_a_conditional_is_recorded_not_dropped(self, repo):
+        # Seen: ``if (...) { npx tsc }`` left no check at all, so the Receipt
+        # could read "No checks run" although a type-check ran.
+        ps = {"tool_name": "PowerShell",
+              "tool_input": {"command": "npx vitest run; if ($?) { npx tsc --noEmit }"}}
+        entry = _claude_session(repo, ("PostToolUse", ps))
+        block = entry["verification"]
+        assert [(c["kind"], c["status"]) for c in block["checks"]] == [("test", "unknown"), ("typecheck", "unknown")]
+        assert block["status"] == "unknown"
+
     def test_tool_failures_are_reported_apart_from_check_failures(self, repo):
         entry = _claude_session(
             repo,
