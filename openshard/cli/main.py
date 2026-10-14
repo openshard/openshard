@@ -3830,11 +3830,6 @@ def capture_install(
     else:
         service = ensure_capture_service()
     result = install_agent(_agent_key(agent), repo_root=root, port=service.get("port") or None)
-    if agent.lower() == "claude" and root is not None and result.configured:
-        from openshard.adapters.claude_workspace import unhooked_parent_warning
-
-        if (parent_warning := unhooked_parent_warning(root)) is not None:
-            result.warnings.append(parent_warning)
     learning = None
     if learn and result.status != "error" and root is not None:
         learning = _install_hosted_learning(agent.lower(), [root])

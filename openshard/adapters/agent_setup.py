@@ -38,6 +38,7 @@ from openshard.adapters.antigravity_hooks_install import (
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.adapters.claude_hooks import _is_forbidden_capture_root
 from openshard.adapters.claude_hooks_install import install_claude_hooks, uninstall_claude_hooks
+from openshard.adapters.claude_workspace import unhooked_parent_warning
 from openshard.adapters.codex_hooks_install import (
     HOOK_EVENTS as CODEX_HOOK_EVENTS,
 )
@@ -697,6 +698,8 @@ def install_agent(agent: str, *, repo_root: Path | None, port: int | None = None
     if agent == AGENT_CLAUDE_CODE:
         result = install_claude_hooks(repo_root=repo_root, port=port)
         steps = ["Capture hooks are configured; this command does not install the Claude CLI or MCP server."]
+        if result.status != "error" and (parent_warning := unhooked_parent_warning(repo_root)) is not None:
+            result.warnings.append(parent_warning)
     elif agent == AGENT_CODEX:
         result = install_codex_hooks(repo_root=repo_root)
         steps = []
