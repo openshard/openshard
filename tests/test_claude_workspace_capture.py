@@ -330,3 +330,131 @@ def test_install_keeps_capture_state_out_of_every_checkout(workspace):
         assert ignored(repo, ".openshard/claude_sessions/x.queue.1.jsonl")
         assert not ignored(repo, ".openshard/config.yml")
         assert not (repo / ".gitignore").exists()  # local rule only; nothing of the user's is changed
+
+
+CLOUD_SESSION = "session_01Uze9QtYmeCTuxJ7dKTKTAP"
+
+
+class _CloudClaude(_Claude):
+    """Claude Code on the web as it really behaves in a workspace session.
+
+    Command hooks (SessionStart) run with ``CLAUDE_PROJECT_DIR`` and the
+    launch environment, so they name the workspace and the cloud session. HTTP
+    hooks do not: ``$CLAUDE_PROJECT_DIR`` interpolates to an empty string
+    there, and they carry no agent environment either.
+    """
+
+    def __init__(self, workspace: Path) -> None:
+        super().__init__(workspace)
+        self.headers = {k: ("" if "$" in v or v == str(workspace) else v) for k, v in self.headers.items()}
+        self.headers = {k: v for k, v in self.headers.items() if v}
+        self.transcript = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / ws._project_folder_name(workspace) / f"{SID}.jsonl"
+        self.transcript.parent.mkdir(parents=True, exist_ok=True)
+        self.transcript.touch()
+
+    def command_start(self, source: str = "startup") -> None:
+        """SessionStart, sent as ``openshard hooks claude`` sends it."""
+        body = {"session_id": SID, "transcript_path": str(self.transcript), "cwd": str(self.workspace),
+                "hook_event_name": "SessionStart", "source": source}
+        headers = {"Content-Type": "application/json", **self.headers,
+                   "X-OpenShard-Project-Dir": str(self.workspace),
+                   "X-OpenShard-Agent-Env": f"provider=anthropic;surface=sdk-cli;cloud_session={CLOUD_SESSION}"}
+        request = urllib.request.Request(self.url, data=json.dumps(body).encode(), method="POST", headers=headers)
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert response.status == 200
+
+
+def _commit(repo: Path, name: str) -> str:
+    (repo / name).write_text("X = 1\n", encoding="utf-8")
+    _git(repo, "add", name)
+    _git(repo, "commit", "-q", "-m", f"add {name}")
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def test_http_hooks_without_a_project_dir_make_one_receipt_for_the_task(workspace):
+    """The live failure: the workspace parent and the checkout each held a Receipt of one run.
+
+    The checkout had the repository and commit but no tokens; the parent had the
+    model and tokens but no repository. A cloud task is one Receipt, in the
+    checkout, carrying the commit, the files, the model and the usage once.
+    """
+    service = _Service({**os.environ})
+    try:
+        ws.install_workspace(workspace, port=service.port)
+        claude = _CloudClaude(workspace)
+        core = (workspace / "core").resolve()
+
+        claude.command_start()
+        claude.send("UserPromptSubmit", prompt="Improve the docs")
+        claude.reply(input_tokens=100, output_tokens=10)
+        _edit(claude, core / "docs.md", "# Docs\n")
+        head = _commit(core, "docs.md")
+        claude.send("PostToolUse", cwd=core, tool_name="Bash", tool_input={"command": "git commit -am docs"},
+                    tool_response={"stdout": "[main] docs"})
+        claude.reply(input_tokens=200, output_tokens=20)
+        claude.send("Stop")  # an HTTP hook: no project dir, run from the workspace parent
+        assert _wait_for(lambda: _sealed(core, 1))
+    finally:
+        service.stop()
+
+    # Nothing is recorded for the workspace parent: no Receipt, no session buffer.
+    assert not (workspace / ".openshard" / "runs.jsonl").exists()
+    assert not (workspace / ".openshard" / "claude_sessions").exists()
+    assert _receipts(workspace / "platform") == []
+
+    (receipt,) = _receipts(core)
+    assert receipt["task"] == "Improve the docs"
+    assert receipt["capture"]["checkout"] == {"kind": "main_checkout", "name": None}
+    assert {f["path"] for f in receipt["files_detail"] if f.get("attribution") != "pre_existing"} >= {"docs.md"}
+    # Repository, commit, model and usage are on the same Receipt, counted once.
+    assert receipt["repo_identity"] == "github.com/openshard/core"
+    assert receipt["git_end_head"] == head and head in receipt["session_commits"]["shas"]
+    assert receipt["execution_model"] == "claude-opus-5-5"
+    assert receipt["prompt_tokens"] == 300 and receipt["completion_tokens"] == 30
+    assert "tokens_not_recorded_reason" not in receipt["capture"]
+    # The command hook's launch environment survived the replay of the held start.
+    assert receipt["capture"]["surface"] == "sdk-cli"
+    links = {(link["namespace"], link["id"]) for link in receipt["correlation"]["external_ids"]}
+    assert ("claude.cloud_session", CLOUD_SESSION) in links
+    # The missing SessionEnd is admitted, not papered over.
+    assert receipt["capture"]["session_end_observed"] is False
+    assert receipt["capture"]["completeness"]["status"] == "incomplete"
+    assert {r["kind"] for r in receipt["capture"]["completeness"]["reasons"]} == {"session_end_not_observed"}
+
+
+def test_a_restarted_service_still_routes_http_hooks_to_the_workspace(workspace):
+    """Only the transcript's project folder names the workspace once the service forgot the session."""
+    service = _Service({**os.environ})
+    try:
+        ws.install_workspace(workspace, port=service.port)
+        claude = _CloudClaude(workspace)
+        core = (workspace / "core").resolve()
+        claude.send("UserPromptSubmit", prompt="Resume after a restart")  # no command start was ever seen
+        claude.reply(input_tokens=7, output_tokens=3)
+        _edit(claude, core / "a.py", "A = 1\n")
+        claude.send("Stop")
+        assert _wait_for(lambda: _sealed(core, 1))
+    finally:
+        service.stop()
+    assert not (workspace / ".openshard" / "runs.jsonl").exists()
+    (receipt,) = _receipts(core)
+    assert receipt["task"] == "Resume after a restart"
+    assert receipt["prompt_tokens"] == 7
+
+
+def test_workspace_from_transcript_only_names_an_opted_in_workspace(workspace, tmp_path):
+    ws.install_workspace(workspace, port=47999)
+    folder = tmp_path / "claude" / "projects" / ws._project_folder_name(workspace.resolve())
+    transcript = str(folder / "s.jsonl")
+    assert ws.workspace_from_transcript(transcript, str(workspace)) == workspace.resolve()
+    # From inside a checkout: the folder still names the workspace the session started in.
+    assert ws.workspace_from_transcript(transcript, str(workspace / "core")) == workspace.resolve()
+    # A transcript of another project, or none at all, names nothing.
+    other = str(tmp_path / "claude" / "projects" / "-somewhere-else" / "s.jsonl")
+    assert ws.workspace_from_transcript(other, str(workspace)) is None
+    assert ws.workspace_from_transcript(None, str(workspace)) is None
+    assert ws.workspace_from_transcript(transcript, None) is None
+    # A folder that matches a directory which never opted in is not a workspace.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert ws.workspace_from_transcript(str(folder.parent / ws._project_folder_name(plain) / "s.jsonl"), str(plain)) is None

@@ -21,6 +21,14 @@ never into the parent:
   checkout: the first one the turn touched. Every other checkout's Receipt has
   no transcript and records why, so a turn is never counted twice.
 
+Claude Code's HTTP hooks carry no project directory (``$CLAUDE_PROJECT_DIR``
+interpolates to an empty string there), so only the command hooks name the
+workspace. ``SessionWorkspaces`` remembers it per session, and the transcript's
+project folder names it after a service restart; an event that still resolves to
+the workspace parent is routed like any other, never recorded into the parent. A
+replayed ``SessionStart`` keeps the launch environment (provider, surface, cloud
+session) its own command hook declared (``stamp_declared``).
+
 Workspace routing is used only where hosted turns are sealed at ``Stop``
 (``OPENSHARD_CONNECTED_SURFACE=claude-code-web``): a buffer then never spans a
 turn it did not observe. Nothing here invents an event, a repository, an agent
@@ -41,7 +49,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -72,6 +82,34 @@ def is_workspace(directory: Path) -> bool:
 
 def _is_checkout(directory: Path) -> bool:
     return (directory / ".git").exists()
+
+
+def _project_folder_name(directory: Path) -> str:
+    """Claude Code's name for *directory* under ``projects/`` (every non-alphanumeric becomes ``-``)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(directory))
+
+
+def workspace_from_transcript(transcript_path: str | None, cwd: str | None) -> Path | None:
+    """The opted-in workspace a session was started in, from its transcript's project folder.
+
+    Claude Code's HTTP hooks carry no project directory (``$CLAUDE_PROJECT_DIR``
+    interpolates to an empty string), but the session's transcript lives in
+    ``projects/<project directory with separators replaced>/``. When that
+    folder names *cwd* or one of its ancestors and that directory is an
+    opted-in workspace, the session belongs to it. Nothing else is inferred:
+    no match, or an unreadable path, is ``None``. Never raises.
+    """
+    if not transcript_path or not cwd:
+        return None
+    try:
+        folder = Path(transcript_path).parent.name
+        directory = Path(os.path.realpath(cwd))
+        for candidate in (directory, *directory.parents):
+            if _project_folder_name(candidate) == folder:
+                return candidate if is_workspace(candidate) else None
+    except (OSError, ValueError):
+        return None
+    return None
 
 
 def checkouts(workspace: Path) -> list[Path]:
@@ -134,6 +172,77 @@ def checkout_for(workspace: Path, payload: Any) -> Path | None:
             if _within(candidate, repo):
                 return repo
     return None
+
+
+class SessionWorkspaces:
+    """Which opted-in workspace each Claude session was started in.
+
+    Only command hooks (SessionStart, the status line) carry the project
+    directory, so the workspace is remembered per session from them and
+    matched to the HTTP hooks that follow; after a service restart the
+    transcript's project folder names it instead (``workspace_from_transcript``).
+    """
+
+    def __init__(self) -> None:
+        self._by_key: dict[str, Path] = {}
+
+    def remember(self, key: str, workspace: Path, payload: Any) -> None:
+        """Remember *workspace* for the session; its SessionEnd forgets it."""
+        from openshard.adapters.claude_hooks import EVENT_SESSION_END
+
+        if getattr(payload, "event", None) == EVENT_SESSION_END:
+            self._by_key.pop(key, None)
+            return
+        if len(self._by_key) >= _MAX_SESSIONS:
+            self._by_key.pop(next(iter(self._by_key)))
+        self._by_key[key] = workspace
+
+    def infer(self, key: str, payload: Any, authorize: Callable[[Path], bool] | None = None) -> Path | None:
+        """The workspace a Claude event with no project directory belongs to, else None.
+
+        An inference never turns a refusal into a rejection: a workspace the
+        presented credential is not valid for is simply not inferred.
+        """
+        if not workspace_enabled() or payload.agent != "claude_code":
+            return None
+        found = self._by_key.get(key) or workspace_from_transcript(payload.transcript_path, payload.cwd)
+        return found if found is not None and (authorize is None or authorize(found)) else None
+
+
+def declared_workspace(project_dir: str | None, agent: str) -> Path | None:
+    """The opted-in multi-repository workspace *project_dir* names, if cloud routing applies."""
+    if not project_dir or agent != "claude_code" or not workspace_enabled():
+        return None
+    try:
+        directory = Path(project_dir).resolve()
+    except OSError:
+        return None
+    return directory if is_workspace(directory) else None
+
+
+def is_cloud_workspace(directory: Path, agent: str) -> bool:
+    """Whether *directory* is an opted-in workspace parent that must never hold a Claude Receipt itself."""
+    return agent == "claude_code" and workspace_enabled() and is_workspace(directory)
+
+
+def stamp_declared(payload: Any, correlation: dict | None, task_id: str | None, agent_env: dict[str, str] | None) -> None:
+    """Attach the request's declared context to *payload* before it can be held for replay.
+
+    A held ``SessionStart`` is replayed later, on the back of another event; an
+    HTTP hook carries neither the agent environment (provider, surface, cloud
+    session) nor always the task, so the context must travel with the start.
+    """
+    from openshard.adapters.claude_hooks import StatusPayload, apply_agent_env
+    from openshard.history.correlation import correlation_block
+    from openshard.history.task_identity import is_task_id
+
+    if isinstance(payload, StatusPayload):
+        return
+    if (block := correlation_block(correlation)) is not None:
+        payload.correlation = block
+    if is_task_id(task_id):
+        payload.task_id = task_id
+    apply_agent_env(payload, agent_env)
 
 
 @dataclass
