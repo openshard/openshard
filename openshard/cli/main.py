@@ -2418,7 +2418,7 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
     if mode == "commit":
         from openshard.cli.verify_commit import run_verify_commit
 
-        run_verify_commit(entry, loc, receipt_label, commit_ref or "", approve=approve and not unattended,
+        run_verify_commit(entry, loc, str(receipt_label or ""), commit_ref or "", approve=approve and not unattended,
                           unattended=unattended, dry_run=dry_run, timeout=timeout, as_json=as_json, strict=strict)
         return
 
