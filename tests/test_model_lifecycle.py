@@ -36,8 +36,9 @@ class TestLifecycleValues(unittest.TestCase):
         # Two evaluated GPT-5.6 lanes plus four provider-backed OpenAI watchlist
         # entries; six current provider models catalogued as watchlist 2026-10-03;
         # deepseek-v4.1-flash promoted to the cheap default 2026-10-07 (its
-        # predecessor stays, deprecated).
-        self.assertEqual(len(_REGISTRY), 56)
+        # predecessor stays, deprecated). Haiku 5.5 was catalogued for Receipt
+        # pricing on 2026-10-14.
+        self.assertEqual(len(_REGISTRY), 57)
 
 
 class TestRoutingDefaultEligibility(unittest.TestCase):
