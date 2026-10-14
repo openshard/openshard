@@ -88,6 +88,24 @@ def checkouts(workspace: Path) -> list[Path]:
     return found
 
 
+def unhooked_parent_warning(repo_root: Path) -> str | None:
+    """Warn when hooks installed in *repo_root* alone will not fire for a multi-repository session.
+
+    Claude Code loads project hooks only from the directory it starts in, which
+    for a session with several repositories is their parent. Returns None when
+    the parent is itself a checkout, is already a configured workspace, or holds
+    fewer than two checkouts. Never raises.
+    """
+    parent = repo_root.resolve().parent
+    if _is_checkout(parent) or is_workspace(parent) or len(checkouts(parent)) < 2:
+        return None
+    return (
+        f"{parent} holds several checkouts. A Claude Code session started there loads hooks only from "
+        f"{parent}, so hooks installed in this repository alone never fire. Run "
+        f"`openshard capture install claude --workspace {parent}` as well."
+    )
+
+
 def write_marker(workspace: Path, repos: list[Path]) -> None:
     path = workspace / WORKSPACE_MARKER
     path.parent.mkdir(parents=True, exist_ok=True)
