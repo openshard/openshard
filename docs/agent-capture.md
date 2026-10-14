@@ -1336,3 +1336,53 @@ zero.
 This fallback still records `capture_depth: partial`: GitHub and CI can prove
 repository state and verification, but they cannot claim runtime events they
 did not observe.
+
+## Herdr
+
+[Herdr](https://herdr.dev) runs each agent CLI in a terminal pane and exports
+`HERDR_ENV=1`, `HERDR_WORKSPACE_ID`, `HERDR_PANE_ID` and `HERDR_BIN_PATH` to
+processes in it. OpenShard turns that into **declared** `correlation` links
+(`evidence: declared`, no new Receipt fields):
+
+```json
+{"evidence": "declared", "source": "herdr", "external_ids": [
+  {"namespace": "herdr.terminal", "id": "term_65dd088a69b528"},
+  {"namespace": "herdr.pane", "id": "w5/p2"},
+  {"namespace": "herdr.delegated_session", "id": "ses_0123456789abcdef0123456789abcdef"}]}
+```
+
+- **Launch context** (`herdr.terminal`, `herdr.pane`, `source: herdr`) is read
+  where `OPENSHARD_CORRELATION_CONTEXT` is read: the command-hook processes
+  (Claude `SessionStart`, Codex, Cursor, Antigravity, OpenCode, ...), `wrap` and
+  `run`. One `herdr agent get <pane>` call with a 2 s timeout resolves the
+  terminal id (cached per pane within the process). If Herdr is absent, slow or
+  returns garbage, the terminal id is skipped and capture is unaffected.
+  Claude's HTTP hooks carry no environment; the launch context reaches them
+  through the existing authenticated capture header.
+- An explicit `OPENSHARD_CORRELATION_CONTEXT` always wins. Herdr only supplies a
+  missing `source` and appends its ids while the 16-id cap has room.
+- **Delegation edges.** When a captured shell command (Claude `Bash`,
+  Codex/others whose command hooks expose it) successfully runs
+  `herdr agent prompt|send-keys|start <target>`, the target is resolved with
+  `agent get` and the **child's `session_key`** is recorded on the **parent**
+  Receipt as `herdr.delegated_session`. `get/list/read/wait` are ignored. If
+  resolution fails, or the Herdr agent has no Core capture adapter, nothing is
+  recorded. Order is first-seen; ids beyond the 16 cap are dropped (they are
+  appended last, so launch and explicit ids are never displaced).
+- **Privacy.** The agent's raw session id never leaves the machine: the id is
+  `ses_` + sha256(`<capture agent>:<session id>`)[:32], the same function that
+  produces `session.session_key`. Only ids are copied: no prompt text, cwd or
+  terminal output.
+
+Platform matching rule: a parent Receipt's `herdr.delegated_session` id equals
+the child Receipt's `session.session_key`. `herdr.terminal` groups Receipts
+captured in one terminal.
+
+Limitations: workspace and pane ids are reused across Herdr restarts, so
+`herdr.pane` is a hint, not an identity (`herdr.terminal` and the session key
+are the strong identifiers). A delegation is seen only if the orchestrator's
+shell command is captured. A Herdr-run agent without a Core capture adapter
+has no child Receipt to link. Cost and tokens stay on each agent's own Receipt;
+Core never sums across a delegation, which would double count.
+`openshard workflow timeline --task-id ID --herdr-terminal TERM` shows these ids
+and can filter by terminal.

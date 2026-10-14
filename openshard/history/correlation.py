@@ -80,7 +80,20 @@ def parse_correlation(raw: object) -> dict | None:
 
 
 def launch_correlation(env: Mapping[str, str] | None = None) -> dict | None:
-    return parse_correlation((os.environ if env is None else env).get(CONTEXT_ENV))
+    """Explicit launch context, filled in with the Herdr pane when run inside one.
+
+    ``OPENSHARD_CORRELATION_CONTEXT`` always wins: Herdr only supplies a
+    missing ``source`` and appends its ids while the 16-id cap has room.
+    """
+    mapping = os.environ if env is None else env
+    explicit = parse_correlation(mapping.get(CONTEXT_ENV))
+    try:
+        from openshard.util import herdr
+
+        merged = herdr.merge_launch_context(explicit, herdr.launch_context(mapping), MAX_EXTERNAL_IDS)
+    except Exception:  # Herdr is a best-effort enrichment, never a capture failure
+        return explicit
+    return correlation_block(merged)
 
 
 def stamp_launch_correlation(entry: dict, env: Mapping[str, str] | None = None) -> None:
@@ -92,7 +105,7 @@ def stamp_launch_correlation(entry: dict, env: Mapping[str, str] | None = None) 
         entry["correlation"] = block
 
 
-def workflow_timeline(entries: list[dict], *, task_id: str) -> list[dict]:
+def workflow_timeline(entries: list[dict], *, task_id: str, herdr_terminal: str | None = None) -> list[dict]:
     """Join only explicitly attached task IDs, keeping individual Receipts.
 
     A local read-only view, not proof of causality or a hosted grouping key.
@@ -105,6 +118,11 @@ def workflow_timeline(entries: list[dict], *, task_id: str) -> list[dict]:
     rows = []
     for entry in entries:
         if entry.get("task_id") != task_id:
+            continue
+        if herdr_terminal is not None and not any(
+            link.get("namespace") == "herdr.terminal" and link.get("id") == herdr_terminal
+            for link in (correlation_block(entry.get("correlation")) or {}).get("external_ids", [])
+        ):
             continue
         rows.append({
             "task_id": task_id,
