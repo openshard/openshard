@@ -1156,6 +1156,16 @@ _REGISTRY: list[ModelEntry] = [
         ),
     ),
     ModelEntry(
+        id="anthropic/claude-haiku-5.5",
+        lifecycle="watchlist",
+        display_name="Claude Haiku 5.5",
+        provider="Anthropic",
+        tier="mid",
+        roles=(),
+        experimental=False,
+        notes="API id claude-haiku-5-5. Watchlist until Openshard evaluation.",
+    ),
+    ModelEntry(
         id="google/gemini-3.8-flash",
         lifecycle="watchlist",
         display_name="Google: Gemini 3.8 Flash",

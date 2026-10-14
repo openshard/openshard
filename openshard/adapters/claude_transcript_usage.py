@@ -137,6 +137,15 @@ def _file_head(file: Path) -> str | None:
         return None
 
 
+def _long_context(model: str, row: list[int]) -> bool:
+    """The tier of one validated message, including cached prompt tokens."""
+    from openshard.models.pricing import official_rate
+
+    rate = official_rate(model)
+    return bool(rate and rate.long_context_threshold is not None
+                and row[0] + row[2] + row[3] > rate.long_context_threshold)
+
+
 def _close_message(state: dict, mid: str, model: str, row: list) -> None:
     """Fold one message whose streaming lines are behind us into its model's totals, once per id."""
     closed_ids: list = state.setdefault("closed_ids", [])
@@ -154,6 +163,11 @@ def _close_message(state: dict, mid: str, model: str, row: list) -> None:
         totals[i] += int(v)
     totals[-1] += 1  # messages
     closed[model] = totals
+    if _long_context(model, row):
+        long = state.setdefault("long_context_closed", {}).setdefault(model, [0] * (len(_USAGE_FIELDS) + 1))
+        for i, v in enumerate(row):
+            long[i] += int(v)
+        long[-1] += 1
 
 
 def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
@@ -240,6 +254,7 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
 def _summarise_transcript_state(state: dict) -> dict | None:
     """``{"messages", "totals", "by_model", "complete"}`` from an incremental state, or None when empty."""
     per_model: dict[str, list[int]] = {}
+    long_context = {m: list(acc) for m, acc in (state.get("long_context_closed") or {}).items()}
     for model, totals in (state.get("closed") or {}).items():
         if isinstance(totals, list) and len(totals) == len(_USAGE_FIELDS) + 1:
             per_model[model] = [int(v) for v in totals]
@@ -251,6 +266,11 @@ def _summarise_transcript_state(state: dict) -> dict | None:
             for i, v in enumerate(row[1:]):
                 acc[i] += int(v)
             acc[-1] += 1
+            if _long_context(row[0], row[1:]):
+                long = long_context.setdefault(row[0], [0] * (len(_USAGE_FIELDS) + 1))
+                for i, v in enumerate(row[1:]):
+                    long[i] += int(v)
+                long[-1] += 1
     messages = sum(acc[-1] for acc in per_model.values())
     if not messages:
         return None
@@ -259,6 +279,16 @@ def _summarise_transcript_state(state: dict) -> dict | None:
         m: {**{f: acc[i] for i, f in enumerate(_USAGE_FIELDS)}, "messages": acc[-1]}
         for m, acc in sorted(per_model.items(), key=lambda kv: -kv[1][-1])
     }
+    from openshard.models.pricing import official_rate
+
+    for model in by_model:
+        rate = official_rate(model)
+        if rate and rate.long_context_threshold is not None:
+            long_context.setdefault(model, [0] * (len(_USAGE_FIELDS) + 1))
+    for model, acc in long_context.items():
+        by_model[model]["long_context"] = {
+            **{f: acc[i] for i, f in enumerate(_USAGE_FIELDS)}, "messages": acc[-1],
+        }
     complete = not state.get("capped") and not state.get("invalid_usage") and len(by_model) <= _MAX_USAGE_MODELS
     return {"messages": messages, "totals": totals, "by_model": dict(list(by_model.items())[:_MAX_USAGE_MODELS]),
             "complete": complete,

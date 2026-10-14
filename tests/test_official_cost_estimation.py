@@ -122,3 +122,23 @@ def test_provider_reported_cost_wins_over_rate_estimate() -> None:
 def test_sonnet_and_opus_55_cache_read_rates() -> None:
     assert official_rate("claude-sonnet-5-5").cached_input_per_mtok == 0.10
     assert official_rate("claude-opus-5-5").cached_input_per_mtok == 0.20
+
+
+@pytest.mark.parametrize("alias", ["claude-haiku-5-5", "anthropic/claude-haiku-5-5", "claude-haiku-5.5", "anthropic/claude-haiku-5.5"])
+def test_haiku_55_tier_rates(alias):
+    rate = official_rate(alias)
+    assert rate.long_context_threshold == 100_000
+    assert estimate_usage_cost(alias, input_tokens=1) is None
+    short = estimate_usage_cost(alias, input_tokens=1_000_000, output_tokens=1_000_000,
+                                cache_read_tokens=1_000_000, cache_write_tokens=1_000_000,
+                                cache_write_1h_tokens=1_000_000, long_context=False)
+    long = estimate_usage_cost(alias, input_tokens=1_000_000, output_tokens=1_000_000,
+                               cache_read_tokens=1_000_000, cache_write_tokens=1_000_000,
+                               cache_write_1h_tokens=1_000_000, long_context=True)
+    assert short.usd == pytest.approx(0.935)
+    assert long.usd == pytest.approx(4.675)
+
+
+def test_haiku_55_registry_display():
+    from openshard.models.registry import display_name_for
+    assert display_name_for("anthropic/claude-haiku-5.5") == "Claude Haiku 5.5"

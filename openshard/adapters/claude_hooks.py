@@ -953,27 +953,36 @@ def _transcript_cost(usage: Mapping[str, Any]) -> float | None:
     some cache writes carry no TTL split (their rate is unknown), or when
     the usage itself is incomplete.
     """
-    from openshard.models.pricing import estimate_usage_cost
+    from openshard.models.pricing import estimate_usage_cost, official_rate
 
     if not usage.get("complete"):
         return None
     total = 0.0
+    fields = ("input", "output", "cache_read", "cache_creation_5m", "cache_creation_1h")
     for model, row in (usage.get("by_model") or {}).items():
-        if not isinstance(row, Mapping):
+        if not isinstance(row, Mapping) or int(row.get("cache_creation_unsplit") or 0):
             return None
-        if int(row.get("cache_creation_unsplit") or 0):
-            return None
-        tokens = [int(row.get(k) or 0) for k in ("input", "output", "cache_read", "cache_creation_5m",
-                                                    "cache_creation_1h")]
-        if not any(tokens):
-            continue
-        estimate = estimate_usage_cost(
-            model, input_tokens=tokens[0], output_tokens=tokens[1], cache_read_tokens=tokens[2],
-            cache_write_tokens=tokens[3], cache_write_1h_tokens=tokens[4],
-        )
-        if estimate is None:
-            return None
-        total += estimate.usd
+        rate = official_rate(model)
+        buckets = [(row, None)]
+        if rate and rate.long_context_threshold is not None:
+            long = row.get("long_context")
+            if not isinstance(long, Mapping):
+                return None
+            short = {k: int(row.get(k) or 0) - int(long.get(k) or 0) for k in fields}
+            if any(v < 0 for v in short.values()):
+                return None
+            buckets = [(short, False), (long, True)]
+        for bucket, tier in buckets:
+            tokens = [int(bucket.get(k) or 0) for k in fields]
+            if not any(tokens):
+                continue
+            estimate = estimate_usage_cost(
+                model, input_tokens=tokens[0], output_tokens=tokens[1], cache_read_tokens=tokens[2],
+                cache_write_tokens=tokens[3], cache_write_1h_tokens=tokens[4], long_context=tier,
+            )
+            if estimate is None:
+                return None
+            total += estimate.usd
     return round(total, 6)
 
 

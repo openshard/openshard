@@ -48,6 +48,12 @@ class OfficialRate:
     as_of: str = PRICING_SNAPSHOT_DATE
     aliases: tuple[str, ...] = ()
     cache_write_1h_per_mtok: float | None = None
+    long_context_threshold: int | None = None
+    long_context_input_per_mtok: float | None = None
+    long_context_output_per_mtok: float | None = None
+    long_context_cached_input_per_mtok: float | None = None
+    long_context_cache_write_per_mtok: float | None = None
+    long_context_cache_write_1h_per_mtok: float | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +100,7 @@ _RATES: tuple[OfficialRate, ...] = (
     OfficialRate("anthropic", "claude-sonnet-5-5", 2.0, 10.0, 0.10, 2.50, _ANTHROPIC, aliases=("anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-5.5", "claude-sonnet-5.5"), cache_write_1h_per_mtok=4.0),
     OfficialRate("anthropic", "claude-sonnet-5", 2.0, 10.0, 0.20, 2.50, _ANTHROPIC, aliases=("anthropic/claude-sonnet-5",), cache_write_1h_per_mtok=4.0),
     OfficialRate("anthropic", "claude-sonnet-4-6", 3.0, 15.0, 0.30, 3.75, _ANTHROPIC, aliases=("anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4.6", "claude-sonnet-4.6"), cache_write_1h_per_mtok=6.0),
+    OfficialRate("anthropic", "claude-haiku-5-5", 0.10, 0.50, 0.01, 0.125, _ANTHROPIC, as_of="2026-10-14", aliases=("anthropic/claude-haiku-5-5", "anthropic/claude-haiku-5.5", "claude-haiku-5.5"), cache_write_1h_per_mtok=0.20, long_context_threshold=100_000, long_context_input_per_mtok=0.50, long_context_output_per_mtok=2.50, long_context_cached_input_per_mtok=0.05, long_context_cache_write_per_mtok=0.625, long_context_cache_write_1h_per_mtok=1.0),
     OfficialRate("anthropic", "claude-haiku-4-5", 1.0, 5.0, 0.10, 1.25, _ANTHROPIC, aliases=("anthropic/claude-haiku-4-5", "anthropic/claude-haiku-4.5", "claude-haiku-4.5", "claude-haiku-4-5-20251001"), cache_write_1h_per_mtok=2.0),
     # Gemini 3.6-3.8 Flash list rates rise on 2027-01-01 per the pricing page;
     # these are the rates in force on PRICING_SNAPSHOT_DATE.
@@ -136,12 +143,17 @@ def estimate_usage_cost(
     cache_read_tokens: object = 0,
     cache_write_tokens: object = 0,
     cache_write_1h_tokens: object = 0,
+    long_context: bool | None = None,
 ) -> CostEstimate | None:
     """Estimate list-rate USD from normalized token counters.
 
     input_tokens means uncached/base input when cache counters are supplied.
     Adapters that receive a provider total containing cached input must
     normalize it before storing the Receipt counters.
+
+    ``long_context`` must be explicit for tiered models, after partitioning
+    messages using the rate's prompt-length threshold. Never infer a tier
+    from aggregate counters.
 
     ``cache_write_tokens`` are priced at the 5-minute cache-write rate and
     ``cache_write_1h_tokens`` at the 1-hour rate. If a positive cache counter
@@ -151,6 +163,24 @@ def estimate_usage_cost(
     rate = official_rate(model_id)
     if rate is None:
         return None
+
+    # Aggregates cannot reveal a request tier. Callers must partition tiered
+    # usage per request before pricing; old aggregate-only Receipts stay unknown.
+    if rate.long_context_threshold is not None:
+        if not isinstance(long_context, bool):
+            return None
+        if long_context:
+            from dataclasses import replace
+
+            if rate.long_context_input_per_mtok is None or rate.long_context_output_per_mtok is None:
+                return None
+            rate = replace(
+                rate, input_per_mtok=rate.long_context_input_per_mtok,
+                output_per_mtok=rate.long_context_output_per_mtok,
+                cached_input_per_mtok=rate.long_context_cached_input_per_mtok,
+                cache_write_per_mtok=rate.long_context_cache_write_per_mtok,
+                cache_write_1h_per_mtok=rate.long_context_cache_write_1h_per_mtok,
+            )
 
     i = _tokens(input_tokens)
     o = _tokens(output_tokens)
