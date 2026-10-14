@@ -2411,3 +2411,51 @@ class TestConcurrentHookActivity:
             _run(repo, "Stop")
         assert len(_runs_lines(repo)) == 1
         assert _runs_lines(repo)[0]["capture"]["turn_count"] == 15
+
+
+def test_subagent_usage_models_reach_receipt_stages_once(repo):
+    main = _assistant_line("main", model="claude-opus-5-5", input_tokens=1_000, output_tokens=200)
+    haiku = _assistant_line("sub", model="claude-haiku-5.5", input_tokens=100_002, output_tokens=100)
+    transcript = _transcript(repo, [main])
+    subdir = transcript.with_suffix("") / "subagents"
+    subdir.mkdir(parents=True)
+    (subdir / "agent.jsonl").write_text(
+        json.dumps(main) + "\n" + json.dumps(haiku) + "\n" + json.dumps(haiku) + "\n", encoding="utf-8")
+    _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+    _status(repo, model_id="anthropic/claude-opus-5.5", cost_total=None)
+    _run(repo, "Stop", transcript_path=str(transcript))
+    entry = _runs_lines(repo)[0]
+    assert entry["execution_model"] == "anthropic/claude-opus-5.5"
+    assert entry["capture"]["models_seen"] == ["anthropic/claude-opus-5.5", "claude-haiku-5.5"]
+    assert entry["capture"]["usage_messages"] == 2
+    assert entry["prompt_tokens"] == 101_002
+    assert entry["completion_tokens"] == 300
+    assert entry["estimated_cost"] == pytest.approx(round((1_000 * 4 + 200 * 20 + 100_002 * .5 + 100 * 2.5) / 1e6, 6))
+    assert entry["cost_provenance"] == "official_rate_estimate"
+    stages = build_shard_receipt(entry).model_stages
+    assert [label for label, _ in stages] == ["Observed 1", "Observed 2"]
+    assert "Opus 5.5" in stages[0][1]
+    assert "Haiku 5.5" in stages[1][1]
+
+
+def test_transcript_models_keep_first_seen_order_and_existing_cap(repo):
+    rows = [_assistant_line(f"m-{i}", model=f"model-{i}", output_tokens=i + 1) for i in range(7)]
+    transcript = _transcript(repo, rows)
+    _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+    _status(repo, model_id="claude-opus-5-5", cost_total=None)
+    _run(repo, "Stop", transcript_path=str(transcript))
+    entry = _runs_lines(repo)[0]
+    assert entry["capture"]["models_seen"] == ["claude-opus-5-5", "model-0", "model-1", "model-2", "model-3"]
+    assert entry["execution_model"] == "claude-opus-5-5"
+
+
+def test_headless_primary_model_stays_ranked_separately_from_seen_order(repo):
+    transcript = _transcript(repo, [
+        _assistant_line("first", model="claude-haiku-5-5", output_tokens=1),
+        _assistant_line("second", model="claude-opus-5-5", output_tokens=100),
+    ])
+    _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+    _run(repo, "Stop", transcript_path=str(transcript))
+    entry = _runs_lines(repo)[0]
+    assert entry["execution_model"] == "claude-opus-5-5"
+    assert entry["capture"]["models_seen"] == ["claude-haiku-5-5", "claude-opus-5-5"]

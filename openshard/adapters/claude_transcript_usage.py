@@ -241,6 +241,9 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
                 invalid[mid] = True
                 continue
             invalid.pop(mid, None)
+            order = state.setdefault("model_order", [])
+            if name not in order:
+                order.append(name)
             recent.pop(mid, None)  # the latest line of a streamed message wins
             recent[mid] = [name, *_usage_row(usage)]
             while len(recent) > _TRANSCRIPT_RECENT_IDS:
@@ -277,7 +280,9 @@ def _summarise_transcript_state(state: dict) -> dict | None:
     totals = {f: sum(acc[i] for acc in per_model.values()) for i, f in enumerate(_USAGE_FIELDS)}
     by_model = {
         m: {**{f: acc[i] for i, f in enumerate(_USAGE_FIELDS)}, "messages": acc[-1]}
-        for m, acc in sorted(per_model.items(), key=lambda kv: -kv[1][-1])
+        for m in dict.fromkeys([*(state.get("model_order") or []), *per_model])
+        if m in per_model
+        for acc in [per_model[m]]
     }
     from openshard.models.pricing import official_rate
 

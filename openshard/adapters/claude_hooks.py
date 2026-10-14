@@ -929,6 +929,26 @@ def _transcript_usage(buf: dict) -> dict | None:
     return usage
 
 
+def _models_with_usage(models_seen: list[str], transcript_usage: Mapping[str, Any] | None) -> list[str]:
+    """Hook/status models first, then every model with transcript usage (subagents included),
+    in first-seen order. Pricing aliases share one identity; the first spelling observed is
+    kept. At most five. Primary-model selection is separate."""
+    from openshard.models.pricing import official_rate
+
+    out: list[str] = []
+    identities: set[str] = set()
+    for raw_model in [*models_seen, *((transcript_usage or {}).get("by_model") or {})]:
+        safe = _sanitize_model_id(raw_model)
+        if not safe or safe.startswith("<"):
+            continue
+        rate = official_rate(safe)
+        identity = rate.model_id if rate else safe.casefold()
+        if identity not in identities and len(out) < 5:
+            out.append(safe)
+            identities.add(identity)
+    return out
+
+
 def _transcript_models(usage: Mapping[str, Any]) -> list[str]:
     """API-reported model ids in transcript *usage*, most output tokens first (sanitized)."""
     by_model = usage.get("by_model")
@@ -3154,7 +3174,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         transcript_models = _transcript_models(transcript_usage)
         if transcript_models:
             model_current, model_source = transcript_models[0], MODEL_SOURCE_TRANSCRIPT
-            models_seen = transcript_models[:5]
+    models_seen = _models_with_usage(models_seen, transcript_usage)
     execution_model = model_current or "unknown"
     provider_current = buf.get("provider_current") if isinstance(buf.get("provider_current"), str) else None
     transcript_provider = transcript_usage.get("provider") if isinstance(transcript_usage, Mapping) else None
