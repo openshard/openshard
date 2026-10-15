@@ -334,6 +334,14 @@ class WorkspaceRouter:
                 if not home_is_checkout or checkout is None:
                     return []
                 if event == EVENT_USER_PROMPT_SUBMIT:
+                    # A harness notification is not work: the shell merely sitting
+                    # in another checkout when one arrives never opens that
+                    # checkout's Receipt (it is still held and replayed if the turn
+                    # does work there). A user's prompt keeps opening the checkout
+                    # its cwd is in *before* any command runs, so the checkout's
+                    # baseline is taken before the turn's work, never after it.
+                    if _is_notification(payload):
+                        checkout = self._open_or_home(turn, workspace, checkout)
                     self._own(turn, workspace, key, checkout)  # where the session's first turn began
                 return self._deliver(turn, checkout, payload, at)
             if event in (EVENT_STOP, EVENT_SESSION_END):
@@ -359,8 +367,19 @@ class WorkspaceRouter:
             if repo is None:
                 return []
             if home_is_checkout:
+                if _only_reads(payload):
+                    # Looking at another checkout (``git log``, ``ls``...) is not
+                    # working in it: recorded with the session's own Receipt.
+                    repo = self._open_or_home(turn, workspace, repo)
                 self._own(turn, workspace, key, repo)
             return self._deliver(turn, repo, payload, at)
+
+    @staticmethod
+    def _open_or_home(turn: _Turn, home: Path, repo: Path) -> Path:
+        """*repo* when this session already opened it (or it is *home*), else the session owner or *home*."""
+        if repo == home or repo in turn.opened:
+            return repo
+        return turn.session_owner or home
 
     @staticmethod
     def _deliver(turn: _Turn, repo: Path, payload: Any, at: str) -> list[tuple[Path, Any, str]]:
@@ -407,6 +426,26 @@ def _is_user_prompt(payload: Any) -> bool:
 
     prompt = getattr(payload, "prompt", None)
     return isinstance(prompt, str) and bool(prompt.strip()) and prompt_source(prompt) is None
+
+
+def _is_notification(payload: Any) -> bool:
+    """True for a harness-delivered prompt (``<task-notification>``...), never for a user's prompt."""
+    from openshard.adapters.claude_session_fidelity import prompt_source
+
+    prompt = getattr(payload, "prompt", None)
+    return isinstance(prompt, str) and prompt_source(prompt) is not None
+
+
+def _only_reads(payload: Any) -> bool:
+    """True for a shell tool event whose single command is on the narrow read-only allowlist."""
+    from openshard.adapters.claude_capture_routing import is_read_only_command
+    from openshard.adapters.claude_hooks import COMMAND_TOOLS
+
+    if getattr(payload, "tool_name", None) not in COMMAND_TOOLS:
+        return False
+    if getattr(payload, "file_path", None) or getattr(payload, "file_paths", None):
+        return False
+    return is_read_only_command(getattr(payload, "command", None))
 
 
 def _owner_path(owner_dir: Path, workspace: Path, key: str) -> Path:

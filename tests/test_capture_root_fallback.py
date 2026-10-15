@@ -122,7 +122,7 @@ class TestServiceResolvesTheProject:
             return auth.verify_presented(capability, token, root, "claude_code") is not None
 
         action, _ = recorder.record_hook(
-            json.loads(_payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "ls"}, tool_response={})),
+            json.loads(_payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "make build"}, tool_response={})),
             project_dir=None, authorize=authorize,
         )
 
@@ -148,7 +148,7 @@ class TestServiceResolvesTheProject:
             status = _http_hook(
                 second.port,
                 _payload("PostToolUse", other, tool_name="Bash",
-                         tool_input={"command": "ls"}, tool_response={}),
+                         tool_input={"command": "make build"}, tool_response={}),
                 _capability(capture_env, repo),
             )
             assert status == 200
@@ -167,7 +167,7 @@ class TestServiceResolvesTheProject:
         def authorize(root: Path) -> bool:
             return auth.verify_presented(capability, token, root, "claude_code") is not None
 
-        tool_event = json.loads(_payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "ls"}, tool_response={}))
+        tool_event = json.loads(_payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "make build"}, tool_response={}))
         assert recorder.record_hook(tool_event, project_dir=None, authorize=authorize) == ("rejected", "unauthenticated")
         # The status line arrives with CLAUDE_PROJECT_DIR and the token.
         ping = json.loads(_status_payload(repo))
@@ -180,7 +180,7 @@ class TestServiceResolvesTheProject:
         # The service has never seen `repo`: nothing ties the credential to a project.
         status = _http_hook(
             service.port,
-            _payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "ls"}, tool_response={}),
+            _payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "make build"}, tool_response={}),
             _capability(capture_env, repo),
         )
 
@@ -193,7 +193,7 @@ class TestServiceResolvesTheProject:
         other = _make_repo(tmp_path / "other")
         _open_session(service.port, repo)
         # The command path (token) records where cwd says, as before: no re-routing.
-        assert _post(service.port, _payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "ls"}, tool_response={}))
+        assert _post(service.port, _payload("PostToolUse", other, tool_name="Bash", tool_input={"command": "make build"}, tool_response={}))
         assert service.server.recorder.wait_idle(10)
         assert list(_session_dir(other).glob("*.json*"))
 
