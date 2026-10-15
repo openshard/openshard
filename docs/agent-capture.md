@@ -1394,3 +1394,15 @@ has no child Receipt to link. Cost and tokens stay on each agent's own Receipt;
 Core never sums across a delegation, which would double count.
 `openshard workflow timeline --task-id ID --herdr-terminal TERM` shows these ids
 and can filter by terminal.
+
+**Codex in Herdr: start it with `codex --no-daemon`.** Codex 0.162 runs hooks
+and tools in a shared background app-server daemon by default. The daemon was
+started outside the pane, so its hooks never see `HERDR_*` (or the pane's
+`PATH`): the Codex Receipt carries no `herdr.terminal`, Herdr never learns the
+Codex session id, and the lead's delegation cannot be linked. `--no-daemon`
+runs Codex, and so its hooks, as a child of the pane. Also note that
+`herdr agent prompt ... --wait` fails with `agent_prompt_stalled` when the
+agent reports `working` later than 5 s (cold hook start-up on Windows);
+because that command then exits non-zero, no delegation edge is recorded. A
+more robust orchestrator sequence is `agent prompt` without `--wait`, then
+`agent wait --until working`, then `agent wait --until done --until idle`.
