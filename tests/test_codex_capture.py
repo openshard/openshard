@@ -836,3 +836,76 @@ class TestCli:
         assert data["codex"]["cli_available"] is True and data["codex"]["configured"] is False
         assert data["opencode"]["cli_available"] is False
         assert not (repo / HOOKS_RELPATH).exists()  # --agent is read-only
+
+
+# ---------------------------------------------------------------------------
+# Commit verification for a delegated Codex commit
+# ---------------------------------------------------------------------------
+
+
+def _git_commit(repo: Path, message: str) -> str:
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "add", "-A", "--", ".",
+                    ":(exclude).openshard"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", message],
+                   cwd=repo, check=True)
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+class TestCommitVerification:
+    """Live E2E shape: a delegated Codex session committed (8042ff9); its commit must be re-verified.
+
+    Codex ran its tests inside an MCP tool, so no check is observable from its
+    hooks; verifying the commit is the only OpenShard-observed outcome.
+    """
+
+    @pytest.fixture
+    def scheduled(self, monkeypatch):
+        from openshard.verification import auto
+
+        calls: list[tuple[str, str | None]] = []
+
+        def fake(repo_root, entry, **_kw):
+            from openshard.history.receipt_evidence import commit_value
+
+            calls.append((entry.get("capture", {}).get("agent"), commit_value(entry)))
+            return True
+
+        monkeypatch.setattr(auto, "schedule_commit_verify", fake)
+        return calls
+
+    def _commit_turn(self, repo: Path) -> str:
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="Add lerp")
+        (repo / "calc.py").write_text("def lerp(a, b, t):\n    return a + (b - a) * t\n", encoding="utf-8")
+        sha = _git_commit(repo, "Added lerp")
+        _run(repo, "PostToolUse", tool_name="Bash", tool_use_id="call_1",
+             tool_input={"command": "git commit -am 'Added lerp'"}, tool_response={"exit_code": 0})
+        return sha
+
+    def test_session_end_schedules_the_codex_commit(self, repo, scheduled):
+        sha = self._commit_turn(repo)
+        _run(repo, "Stop", stop_hook_active=False)
+        _run(repo, "SessionEnd")
+        assert ("codex", sha) in scheduled
+
+    def test_a_completed_turn_schedules_it_in_the_capture_service(self, repo, scheduled, monkeypatch):
+        # The live Codex session never sent SessionEnd: the commit was found at a Stop.
+        from openshard.adapters import claude_hooks as ch
+
+        monkeypatch.setattr(ch, "_PR_LOOKUP_ENABLED", True)
+        monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "off")
+        sha = self._commit_turn(repo)
+        _run(repo, "Stop", stop_hook_active=False)
+        assert ("codex", sha) in scheduled
+
+    def test_off_by_environment(self, repo, monkeypatch):
+        from openshard.verification import auto
+
+        spawned: list[list[str]] = []
+        monkeypatch.setattr(auto, "_spawn_detached", lambda argv, cwd: spawned.append(argv) or True)
+        monkeypatch.setenv(auto.ENV_DISABLE, "1")
+        self._commit_turn(repo)
+        _run(repo, "Stop", stop_hook_active=False)
+        _run(repo, "SessionEnd")
+        assert spawned == []
