@@ -11,6 +11,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
+from typing import Any
 
 from openshard.history.receipt_evidence import unsafe_text
 
@@ -80,7 +81,104 @@ def parse_correlation(raw: object) -> dict | None:
 
 
 def launch_correlation(env: Mapping[str, str] | None = None) -> dict | None:
-    return parse_correlation((os.environ if env is None else env).get(CONTEXT_ENV))
+    """Explicit launch context, filled in with the Herdr pane when run inside one.
+
+    ``OPENSHARD_CORRELATION_CONTEXT`` always wins: Herdr only supplies a
+    missing ``source`` and appends its ids while the 16-id cap has room.
+    """
+    mapping = os.environ if env is None else env
+    explicit = parse_correlation(mapping.get(CONTEXT_ENV))
+    try:
+        from openshard.util import herdr
+
+        merged = herdr.merge_launch_context(explicit, herdr.launch_context(mapping), MAX_EXTERNAL_IDS)
+    except Exception:  # Herdr is a best-effort enrichment, never a capture failure
+        return explicit
+    return correlation_block(merged)
+
+
+def herdr_delegated_sessions(command: object, env: Mapping[str, str] | None = None) -> list[str]:
+    """The child ``session_key`` of each Herdr delegation in *command*.
+
+    Raw agent session ids are hashed with the function that produces the
+    child Receipt's ``session.session_key`` and never stored.
+    """
+    return herdr_delegations(command, env)[0]
+
+
+def herdr_delegations(command: object, env: Mapping[str, str] | None = None) -> tuple[list[str], list[str]]:
+    """``(child session_keys, target terminal ids)`` of the Herdr delegations in *command*.
+
+    One ``herdr agent get`` per target. The terminal id is kept even when
+    Herdr reports no agent session for the target, so the parent still names
+    which pane it delegated to.
+    """
+    from openshard.history.receipt_evidence import session_key_for
+    from openshard.util import herdr
+
+    sessions, terminals = herdr.delegations(command, env)
+    keys: list[str] = []
+    for agent, session in sessions:
+        key = identifier(session_key_for(agent, session))
+        if key is not None and key not in keys:
+            keys.append(key)
+    clean_terminals = [t for t in (identifier(t) for t in terminals) if t is not None]
+    return keys, list(dict.fromkeys(clean_terminals))
+
+
+def herdr_delegated_or_none(value: object) -> list[str] | None:
+    """Well-formed delegation ids only, deduplicated and capped."""
+    if not isinstance(value, list):
+        return None
+    clean: list[str] = []
+    for item in value:
+        ident = identifier(item)
+        if ident is not None and ident not in clean and len(clean) < MAX_EXTERNAL_IDS:
+            clean.append(ident)
+    return clean or None
+
+
+def record_herdr_delegated(entry: Mapping[str, Any], namespace: str | None = None) -> list[str]:
+    """Delegation ids a persisted record carries (sessions by default, or *namespace*)."""
+    from openshard.util.herdr import DELEGATED_NAMESPACE
+
+    wanted = namespace or DELEGATED_NAMESPACE
+    block = correlation_block(entry.get("correlation"))
+    return [link["id"] for link in (block or {}).get("external_ids") or [] if link.get("namespace") == wanted]
+
+
+def record_herdr_terminals(entry: Mapping[str, Any]) -> list[str]:
+    """Delegated Herdr terminal ids a persisted record carries."""
+    from openshard.util.herdr import DELEGATED_TERMINAL_NAMESPACE
+
+    return record_herdr_delegated(entry, DELEGATED_TERMINAL_NAMESPACE)
+
+
+def stamp_record_correlation(
+    entry: dict, correlation: object, herdr_delegated: object, herdr_terminals: object = None,
+) -> None:
+    """Copy a buffer's correlation onto its record, then append Herdr delegation ids (parent side).
+
+    Declared and deterministic: delegated sessions then delegated terminals,
+    first-seen order, after every other id; extras beyond the 16-id cap are
+    dropped, so launch and explicit ids are never displaced.
+    """
+    from openshard.util.herdr import DELEGATED_NAMESPACE, DELEGATED_TERMINAL_NAMESPACE
+
+    if correlation_block(correlation) is not None:
+        entry["correlation"] = correlation_block(correlation)
+    delegated = herdr_delegated_or_none(herdr_delegated) or []
+    terminals = herdr_delegated_or_none(herdr_terminals) or []
+    if not delegated and not terminals:
+        return
+    block = correlation_block(entry.get("correlation")) or {}
+    ours = (DELEGATED_NAMESPACE, DELEGATED_TERMINAL_NAMESPACE)
+    links = [link for link in block.get("external_ids") or [] if link.get("namespace") not in ours]
+    links.extend({"namespace": DELEGATED_NAMESPACE, "id": ident} for ident in delegated)
+    links.extend({"namespace": DELEGATED_TERMINAL_NAMESPACE, "id": ident} for ident in terminals)
+    merged = correlation_block({**block, "external_ids": links})
+    if merged is not None:
+        entry["correlation"] = merged
 
 
 def stamp_launch_correlation(entry: dict, env: Mapping[str, str] | None = None) -> None:
@@ -92,7 +190,7 @@ def stamp_launch_correlation(entry: dict, env: Mapping[str, str] | None = None) 
         entry["correlation"] = block
 
 
-def workflow_timeline(entries: list[dict], *, task_id: str) -> list[dict]:
+def workflow_timeline(entries: list[dict], *, task_id: str, herdr_terminal: str | None = None) -> list[dict]:
     """Join only explicitly attached task IDs, keeping individual Receipts.
 
     A local read-only view, not proof of causality or a hosted grouping key.
@@ -105,6 +203,11 @@ def workflow_timeline(entries: list[dict], *, task_id: str) -> list[dict]:
     rows = []
     for entry in entries:
         if entry.get("task_id") != task_id:
+            continue
+        if herdr_terminal is not None and not any(
+            link.get("namespace") == "herdr.terminal" and link.get("id") == herdr_terminal
+            for link in (correlation_block(entry.get("correlation")) or {}).get("external_ids", [])
+        ):
             continue
         rows.append({
             "task_id": task_id,

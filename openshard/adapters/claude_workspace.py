@@ -249,6 +249,12 @@ def stamp_declared(payload: Any, correlation: dict | None, task_id: str | None, 
 class _Turn:
     session_start: tuple[Any, str] | None = None
     prompt: tuple[Any, str] | None = None
+    # The session's latest *user* prompt. ``prompt`` is whatever opened the
+    # current turn, which may be a harness-delivered notification
+    # (``<task-notification>``...); a checkout first opened during such a
+    # turn is given this as its task as well, so its Receipt does not read
+    # "task not captured".
+    task_prompt: tuple[Any, str] | None = None
     touched: list[Path] = field(default_factory=list)  # first entry owns the turn's usage
     opened: set[Path] = field(default_factory=set)  # checkouts this session's start was replayed into
     last_owner: Path | None = None  # owner of the turn Stop just closed (a SessionEnd after it has no turn)
@@ -320,11 +326,22 @@ class WorkspaceRouter:
             if event in (EVENT_SESSION_START, EVENT_USER_PROMPT_SUBMIT):
                 if event == EVENT_SESSION_START:
                     turn.session_start, turn.prompt, turn.touched, turn.opened = (payload, at), None, [], set()
+                    turn.task_prompt = None
                 else:
                     turn.prompt, turn.touched = (payload, at), []
+                    if _is_user_prompt(payload):
+                        turn.task_prompt = (payload, at)
                 if not home_is_checkout or checkout is None:
                     return []
                 if event == EVENT_USER_PROMPT_SUBMIT:
+                    # A harness notification is not work: the shell merely sitting
+                    # in another checkout when one arrives never opens that
+                    # checkout's Receipt (it is still held and replayed if the turn
+                    # does work there). A user's prompt keeps opening the checkout
+                    # its cwd is in *before* any command runs, so the checkout's
+                    # baseline is taken before the turn's work, never after it.
+                    if _is_notification(payload):
+                        checkout = self._open_or_home(turn, workspace, checkout)
                     self._own(turn, workspace, key, checkout)  # where the session's first turn began
                 return self._deliver(turn, checkout, payload, at)
             if event in (EVENT_STOP, EVENT_SESSION_END):
@@ -350,8 +367,19 @@ class WorkspaceRouter:
             if repo is None:
                 return []
             if home_is_checkout:
+                if _only_reads(payload):
+                    # Looking at another checkout (``git log``, ``ls``...) is not
+                    # working in it: recorded with the session's own Receipt.
+                    repo = self._open_or_home(turn, workspace, repo)
                 self._own(turn, workspace, key, repo)
             return self._deliver(turn, repo, payload, at)
+
+    @staticmethod
+    def _open_or_home(turn: _Turn, home: Path, repo: Path) -> Path:
+        """*repo* when this session already opened it (or it is *home*), else the session owner or *home*."""
+        if repo == home or repo in turn.opened:
+            return repo
+        return turn.session_owner or home
 
     @staticmethod
     def _deliver(turn: _Turn, repo: Path, payload: Any, at: str) -> list[tuple[Path, Any, str]]:
@@ -363,6 +391,10 @@ class WorkspaceRouter:
             if repo not in turn.opened:
                 # A session starts once per checkout; later turns resume it.
                 turn.opened.add(repo)
+                if turn.task_prompt is not None and (turn.prompt is None or not _is_user_prompt(turn.prompt[0])):
+                    # Opened during a notification-driven turn: the checkout's
+                    # task is still the user's latest prompt, replayed first.
+                    held.insert(0, turn.task_prompt)
                 held.insert(0, turn.session_start)
             for item in held:
                 if item is not None and item[0] is not payload:
@@ -386,6 +418,34 @@ class WorkspaceRouter:
         attrs = dict(payload.attrs or {})
         attrs["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
         return replace(payload, attrs=attrs)
+
+
+def _is_user_prompt(payload: Any) -> bool:
+    """True for a prompt the user typed; False for a harness notification or no prompt text."""
+    from openshard.adapters.claude_session_fidelity import prompt_source
+
+    prompt = getattr(payload, "prompt", None)
+    return isinstance(prompt, str) and bool(prompt.strip()) and prompt_source(prompt) is None
+
+
+def _is_notification(payload: Any) -> bool:
+    """True for a harness-delivered prompt (``<task-notification>``...), never for a user's prompt."""
+    from openshard.adapters.claude_session_fidelity import prompt_source
+
+    prompt = getattr(payload, "prompt", None)
+    return isinstance(prompt, str) and prompt_source(prompt) is not None
+
+
+def _only_reads(payload: Any) -> bool:
+    """True for a shell tool event whose single command is on the narrow read-only allowlist."""
+    from openshard.adapters.claude_capture_routing import is_read_only_command
+    from openshard.adapters.claude_hooks import COMMAND_TOOLS
+
+    if getattr(payload, "tool_name", None) not in COMMAND_TOOLS:
+        return False
+    if getattr(payload, "file_path", None) or getattr(payload, "file_paths", None):
+        return False
+    return is_read_only_command(getattr(payload, "command", None))
 
 
 def _owner_path(owner_dir: Path, workspace: Path, key: str) -> Path:

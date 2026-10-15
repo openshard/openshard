@@ -186,12 +186,25 @@ from openshard.adapters.capture_agents import (
     is_known_agent,
     profile_for,
 )
+from openshard.adapters.claude_git_outcome import (  # noqa: F401  (re-exported for callers and tests)
+    _MAX_SESSION_COMMITS,
+    _REFLOG_CREATED_RE,
+    _SHA_RE,
+    _merge_git_outcome,
+    _own_result_commit,
+    _reflog_created,
+    _sha_or_none,
+    _stamp_git_outcome,
+    _stored_git_outcome,
+)
 from openshard.adapters.claude_hook_checks import (
     MAX_BUFFERED_CHECKS,
     MAX_CHECK_KEYS,
     hook_verification,
     record_checks,
 )
+from openshard.adapters.claude_lead_models import model_roles as _model_roles
+from openshard.adapters.claude_lead_models import transcript_models as _transcript_models
 from openshard.adapters.claude_session_fidelity import sweep_stale_buffers  # noqa: F401  (re-exported)
 from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-exported for callers and tests)
     _count,
@@ -210,7 +223,14 @@ from openshard.history.capture_completeness import (
     build_completeness,
     make_reason,
 )
-from openshard.history.correlation import correlation_block, launch_correlation
+from openshard.history.correlation import (
+    correlation_block,
+    herdr_delegated_or_none,
+    launch_correlation,
+    record_herdr_delegated,
+    record_herdr_terminals,
+    stamp_record_correlation,
+)
 from openshard.history.task_identity import (
     EVIDENCE_DECLARED,
     TASK_CONTEXT_SOURCE_LAUNCH_ENV,
@@ -375,7 +395,6 @@ _LOCK_TIMEOUT_SECONDS = 3.0
 
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 _FIRST_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")
-
 
 
 def _now() -> str:
@@ -929,21 +948,31 @@ def _transcript_usage(buf: dict) -> dict | None:
     return usage
 
 
-def _transcript_models(usage: Mapping[str, Any]) -> list[str]:
-    """API-reported model ids in transcript *usage*, most output tokens first (sanitized)."""
-    by_model = usage.get("by_model")
-    if not isinstance(by_model, Mapping):
-        return []
-    ranked = sorted(
-        ((m, row) for m, row in by_model.items() if isinstance(m, str) and isinstance(row, Mapping)),
-        key=lambda kv: -_count(kv[1].get("output")),
-    )
-    models: list[str] = []
-    for raw, _row in ranked:
-        safe = _sanitize_model_id(raw)
-        if safe and not safe.startswith("<") and safe not in models:
-            models.append(safe)
-    return models
+def _stored_usage_owner(capture: Mapping[str, Any]) -> dict[str, str | None]:
+    """A rebuilt buffer keeps "another checkout owns this session's usage", so a non-owner
+    checkout never starts counting the session's transcript a second time."""
+    owned_elsewhere = capture.get("tokens_not_recorded_reason") == USAGE_ELSEWHERE_REASON
+    return {"usage_elsewhere": USAGE_ELSEWHERE_REASON if owned_elsewhere else None}
+
+
+def _models_with_usage(models_seen: list[str], transcript_usage: Mapping[str, Any] | None) -> list[str]:
+    """Hook/status models first, then every model with transcript usage (subagents included),
+    in first-seen order. Pricing aliases share one identity; the first spelling observed is
+    kept. At most five. Primary-model selection is separate."""
+    from openshard.models.pricing import official_rate
+
+    out: list[str] = []
+    identities: set[str] = set()
+    for raw_model in [*models_seen, *((transcript_usage or {}).get("by_model") or {})]:
+        safe = _sanitize_model_id(raw_model)
+        if not safe or safe.startswith("<"):
+            continue
+        rate = official_rate(safe)
+        identity = rate.model_id if rate else safe.casefold()
+        if identity not in identities and len(out) < 5:
+            out.append(safe)
+            identities.add(identity)
+    return out
 
 
 def _transcript_cost(usage: Mapping[str, Any]) -> float | None:
@@ -953,27 +982,36 @@ def _transcript_cost(usage: Mapping[str, Any]) -> float | None:
     some cache writes carry no TTL split (their rate is unknown), or when
     the usage itself is incomplete.
     """
-    from openshard.models.pricing import estimate_usage_cost
+    from openshard.models.pricing import estimate_usage_cost, official_rate
 
-    if not usage.get("complete"):
+    if not usage.get("complete") or usage.get("surcharged"):
         return None
     total = 0.0
+    fields = ("input", "output", "cache_read", "cache_creation_5m", "cache_creation_1h")
     for model, row in (usage.get("by_model") or {}).items():
-        if not isinstance(row, Mapping):
+        if not isinstance(row, Mapping) or int(row.get("cache_creation_unsplit") or 0):
             return None
-        if int(row.get("cache_creation_unsplit") or 0):
-            return None
-        tokens = [int(row.get(k) or 0) for k in ("input", "output", "cache_read", "cache_creation_5m",
-                                                    "cache_creation_1h")]
-        if not any(tokens):
-            continue
-        estimate = estimate_usage_cost(
-            model, input_tokens=tokens[0], output_tokens=tokens[1], cache_read_tokens=tokens[2],
-            cache_write_tokens=tokens[3], cache_write_1h_tokens=tokens[4],
-        )
-        if estimate is None:
-            return None
-        total += estimate.usd
+        rate = official_rate(model)
+        buckets: list[tuple[Mapping, bool | None]] = [(row, None)]
+        if rate and rate.long_context_threshold is not None:
+            long = row.get("long_context")
+            if not isinstance(long, Mapping):
+                return None
+            short = {k: int(row.get(k) or 0) - int(long.get(k) or 0) for k in fields}
+            if any(v < 0 for v in short.values()):
+                return None
+            buckets = [(short, False), (long, True)]
+        for bucket, tier in buckets:
+            tokens = [int(bucket.get(k) or 0) for k in fields]
+            if not any(tokens):
+                continue
+            estimate = estimate_usage_cost(
+                model, input_tokens=tokens[0], output_tokens=tokens[1], cache_read_tokens=tokens[2],
+                cache_write_tokens=tokens[3], cache_write_1h_tokens=tokens[4], long_context=tier,
+            )
+            if estimate is None:
+                return None
+            total += estimate.usd
     return round(total, 6)
 
 
@@ -1239,6 +1277,9 @@ class ReducedHookPayload:
     # verification/check_command.queued_check_commands; None on older queue lines.
     check_commands: list[dict] | None = None
     git_write: bool = False  # the command can create commits (see _GIT_WRITE_RE); corroborates them
+    # Child ``session_key`` (never a raw session id) of Herdr agents this shell command delegated to, resolved at reduce time.
+    herdr_delegated: list[str] | None = None
+    herdr_terminals: list[str] | None = None  # Herdr terminal ids of those delegation targets
     correlation: dict | None = None
     task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
     transcript_path: str | None = None  # see HookPayload.transcript_path
@@ -1288,6 +1329,10 @@ class ReducedHookPayload:
             data["check_commands"] = [dict(c) for c in self.check_commands]
         if self.git_write:
             data["git_write"] = True
+        if self.herdr_delegated:
+            data["herdr_delegated"] = list(self.herdr_delegated)
+        if self.herdr_terminals:
+            data["herdr_terminals"] = list(self.herdr_terminals)
         # Only when declared, so queue lines of an undeclared session keep their shape.
         if self.correlation is not None:
             data["correlation"] = correlation_block(self.correlation)
@@ -1366,6 +1411,8 @@ class ReducedHookPayload:
             command_key=_command_key_or_none(data.get("command_key")),
             check_commands=queued_check_commands(data.get("check_commands")),
             git_write=data.get("git_write") is True,
+            herdr_delegated=herdr_delegated_or_none(data.get("herdr_delegated")),
+            herdr_terminals=herdr_delegated_or_none(data.get("herdr_terminals")),
             correlation=correlation_block(data.get("correlation")),
             task_id=stored_task_id(data),
             transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id, agent=agent_key),
@@ -1375,6 +1422,16 @@ class ReducedHookPayload:
             agent_surface=_agent_surface_or_none(data.get("agent_surface")),
             agent_cloud_session=_cloud_session_or_none(data.get("agent_cloud_session")),
         )
+
+
+def _herdr_delegations(payload: Any, outcome: str | None) -> tuple[list[str] | None, list[str] | None]:
+    """Child session keys and target terminal ids of Herdr delegations in a successful shell command."""
+    if payload.event != EVENT_POST_TOOL_USE or outcome not in (None, OUTCOME_PASSED) or not payload.command:
+        return None, None
+    from openshard.history.correlation import herdr_delegations
+
+    keys, terminals = herdr_delegations(payload.command)
+    return keys or None, terminals or None
 
 
 _COMMAND_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -1390,7 +1447,6 @@ def _check_name(label: str, segment: str | None, kind: str) -> str:
 
 def _command_key_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and _COMMAND_KEY_RE.match(value) else None
-
 
 
 def _valid_baseline(raw: object) -> dict | None:
@@ -1481,6 +1537,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
             reduced.command_exit_code = _exit_code_or_none(payload.command_exit_code)
             reduced.command_safety = classify_command_text(payload.command)
             reduced.git_write = bool(payload.command and _GIT_WRITE_RE.search(payload.command))
+            reduced.herdr_delegated, reduced.herdr_terminals = _herdr_delegations(payload, reduced.command_outcome)
         elif kind == TOOL_KIND_READ:
             reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
             reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
@@ -1841,7 +1898,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         # transcript is read again. Claude Code tokens recorded any other way
         # (pre-transcript records: the status line's last call) are never
         # carried forward as session totals.
-        "transcript_usage": _stored_transcript_usage(entry, capture),
+        "transcript_usage": _stored_transcript_usage(entry, capture), **_stored_usage_owner(capture),
         "tokens_scope": (
             "last_call"
             if entry.get("executor") == EXECUTOR and capture.get("tokens_source") != TOKENS_SOURCE_TRANSCRIPT
@@ -2102,6 +2159,12 @@ def _resumed_segment(
         # The next turn of the same hosted session: SessionStart, the only
         # hook that reads the environment, does not fire again.
         buf["cloud_session_id"] = cloud_session
+    delegated = record_herdr_delegated(persisted)
+    if delegated:
+        buf["herdr_delegated"] = delegated
+    terminals = record_herdr_terminals(persisted)
+    if terminals:
+        buf["herdr_terminals"] = terminals
     raw_capture = persisted.get("capture")
     capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
     buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
@@ -2393,6 +2456,8 @@ def _snapshot_baseline(repo_root: Path, now: str) -> dict:
         for candidate in candidates:
             if candidate.startswith(_LOCAL_STATE_PREFIXES):
                 continue
+            if candidate.endswith("/"):
+                continue  # a nested checkout/worktree: its own Receipt, not a path here
             safe = sanitize_path(candidate, _PATH_CAP)
             if not safe or safe in paths:
                 continue
@@ -2437,6 +2502,42 @@ def _other_sessions_reported_paths(repo_root: Path, buf: dict) -> set[str]:
     return found
 
 
+_MAX_OWN_COMMIT_PATHS = 2000
+
+
+def _own_commit_paths(buf: dict, repo_root: Path) -> set[str]:
+    """Repo-relative paths changed by the commits git observed this session create. Never raises.
+
+    From the session's git outcome (``_session_git_outcome``: reflog-created,
+    inside the session window, corroborated by the agent's own git call), one
+    bounded ``git diff-tree`` per commit, cached on the buffer per commit set.
+    Empty when the commits are unknown.
+    """
+    outcome = buf.get("git_outcome")
+    commits = outcome.get("commits") if isinstance(outcome, dict) else None
+    if not isinstance(commits, list):
+        return set()
+    shas = [c for c in commits if _sha_or_none(c)][:_MAX_SESSION_COMMITS]
+    if not shas:
+        return set()
+    cached = buf.get("own_commit_paths")
+    if isinstance(cached, dict) and cached.get("commits") == shas and isinstance(cached.get("paths"), list):
+        return {p for p in cached["paths"] if isinstance(p, str)}
+    from openshard.safety.sanitize import sanitize_path
+
+    paths: set[str] = set()
+    for sha in shas:
+        out = run_git(repo_root, ["diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "--root", sha])
+        if out is None:
+            return set()  # unknown: never widen attribution on a partial answer
+        for line in out.splitlines():
+            safe = sanitize_path(line.strip(), _PATH_CAP) if line.strip() else None
+            if safe and len(paths) < _MAX_OWN_COMMIT_PATHS:
+                paths.add(safe)
+    buf["own_commit_paths"] = {"commits": shas, "paths": sorted(paths)}
+    return paths
+
+
 def _attempted_file_targets(buf: dict) -> set[str]:
     """Paths the agent *tried* to change (file-tool targets without a success signal)."""
     out: set[str] = set()
@@ -2475,6 +2576,7 @@ def _classify_changed_files(buf: dict, repo_root: Path, files: list[dict]) -> li
     hook_files: dict = _hook_raw if isinstance(_hook_raw, dict) else {}
     attempted = _attempted_file_targets(buf)
     others = _other_sessions_reported_paths(repo_root, buf)
+    own_committed = _own_commit_paths(buf, repo_root) if others else set()
     need_blob = [f["path"] for f in files if f.get("path") in base_paths and f.get("path") not in hook_files]
     current = _blob_ids(repo_root, need_blob) if need_blob else {}
     out: list[dict] = []
@@ -2502,6 +2604,11 @@ def _classify_changed_files(buf: dict, repo_root: Path, files: list[dict]) -> li
                 summary = (
                     "observed in git diff; changed again during the session; actor not established"
                 )
+        elif path in others and path in own_committed:
+            # Another session also reported this path, but git observed it
+            # change in a commit this session created: this session's work.
+            attribution = ATTR_GIT_OBSERVED
+            summary = "observed in a commit this session created; another session also reported it"
         elif path in others:
             attribution = ATTR_OTHER_SESSION
             summary = "reported by another agent session; not counted as this session's work"
@@ -2611,8 +2718,6 @@ def _hook_file_events(buf: dict) -> list[dict]:
         )
         events.append(ev.to_dict())
     return events
-
-
 
 
 def _command_status(payload: ReducedHookPayload, failed_event: bool) -> str:
@@ -2768,31 +2873,10 @@ def _stamp_task_context(entry: dict, buf: dict) -> None:
 # the commits created during it, and the pull request that carries one.
 # ---------------------------------------------------------------------------
 
-_MAX_SESSION_COMMITS = 50
 _GH_TIMEOUT_SECONDS = 5.0
 PR_LOOKUP_ENV = "OPENSHARD_PR_LOOKUP"  # "off" disables the ``gh`` pull-request lookup
-_SHA_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
 
-def _sha_or_none(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    value = value.strip().lower()
-    return value if _SHA_RE.match(value) else None
-
-
-# Reflog subjects of entries that *create* a new commit in this checkout:
-# commit / amend / merge commit, cherry-pick, revert, ``git am``, and a true
-# (non-fast-forward) merge or pull ("... Merge made by the 'ort' strategy.").
-# A fast-forward ("pull: Fast-forward", "merge x: Fast-forward"), checkout
-# or reset only moves HEAD onto existing commits and never qualifies.
-# Rebase picks ("rebase (pick)", "pull --rebase (pick)") are excluded too:
-# they rewrite commits that may have been made before the session, so they
-# are under-counted rather than claimed.
-_REFLOG_CREATED_RE = re.compile(
-    r"^(?:commit(?: \((?:amend|merge|initial)\))?|cherry-pick|revert|am):"
-    r"|^(?:merge|pull)\b[^:]*: Merge made by "
-)
 _SESSION_COMMIT_GRACE_SECONDS = 120  # clock slack after the session's last observed hook
 _GIT_WRITE_CORROBORATION_SECONDS = 900  # a commit may take this long before its tool call returns
 # A shell command that can create commits (the agent's own tool call is the
@@ -2811,25 +2895,6 @@ def enable_pr_lookup() -> None:
     """
     global _PR_LOOKUP_ENABLED
     _PR_LOOKUP_ENABLED = True
-
-
-def _reflog_created(repo_root: Path) -> dict[str, int] | None:
-    """``{sha: reflog unix time}`` for HEAD reflog entries that created a commit, or None. Never raises."""
-    out = run_git(repo_root, ["reflog", "show", "--date=unix", "--format=%H%x09%gd%x09%gs", "-n", "500", "HEAD"])
-    if not out or not out.strip():
-        # No reflog (core.logAllRefUpdates=false, a fresh clone, an error):
-        # which commits the session created is unknown, never "none".
-        return None
-    created: dict[str, int] = {}
-    for line in out.splitlines():
-        parts = line.split("\t", 2)
-        if len(parts) != 3:
-            continue
-        sha = _sha_or_none(parts[0])
-        stamp = re.search(r"@\{(\d+)\}$", parts[1].strip())
-        if sha and stamp and _REFLOG_CREATED_RE.match(parts[2]):
-            created.setdefault(sha, int(stamp.group(1)))  # newest entry first
-    return created
 
 
 def _session_git_outcome(buf: dict, repo_root: Path, previous: dict | None = None) -> dict | None:
@@ -2864,7 +2929,7 @@ def _session_git_outcome(buf: dict, repo_root: Path, previous: dict | None = Non
             lo, hi = int(started.timestamp()), int(last.timestamp()) + _SESSION_COMMIT_GRACE_SECONDS
             writes = [int(t.timestamp()) for t in (_parse_utc(s) for s in (buf.get("git_write_at") or [])) if t]
             log = run_git(repo_root, [
-                "log", f"--max-count={_MAX_SESSION_COMMITS + 1}", "--format=%H %ct", f"{start}..{end}",
+                "log", "--topo-order", f"--max-count={_MAX_SESSION_COMMITS + 1}", "--format=%H %ct", f"{start}..{end}",
             ])
             if log is not None:
                 commits: list[str] = []
@@ -2881,6 +2946,9 @@ def _session_git_outcome(buf: dict, repo_root: Path, previous: dict | None = Non
                     commits.append(sha)
                 outcome["commits"] = commits
                 outcome["truncated"] = len(rows) > _MAX_SESSION_COMMITS
+                result = _own_result_commit(repo_root, commits, end)
+                if result is not None:
+                    outcome["result"] = result
         prev_pr = previous.get("pull_request") if isinstance(previous, dict) else None
         if (
             previous is not None and outcome["commits"] and isinstance(prev_pr, dict)
@@ -2941,36 +3009,6 @@ def _gh_pull_request(repo_root: Path, branch: str, session_commits: set[str]) ->
     return None
 
 
-def _merge_git_outcome(fresh: dict | None, stored: object) -> dict | None:
-    """*fresh* with what an earlier outcome for this session already established.
-
-    A failed git read (*fresh* None -- e.g. Claude Code tearing the session
-    down at SessionEnd) keeps the stored outcome instead of dropping it; an
-    unknown commit set at the same end HEAD keeps the stored one; a pull
-    request found earlier for a commit still in the session's set is kept
-    when this lookup found none (``gh`` failing, offline). Never invents a
-    commit or a PR the earlier, attributed outcome did not hold.
-    """
-    prior = stored if isinstance(stored, dict) and _sha_or_none(stored.get("end_head")) else None
-    if fresh is None:
-        return dict(prior) if prior is not None else None
-    if prior is None:
-        return fresh
-    merged = dict(fresh)
-    if merged.get("commits") is None and isinstance(prior.get("commits"), list) and (
-        prior.get("end_head") == merged.get("end_head")
-    ):
-        merged["commits"] = list(prior["commits"])
-        merged["truncated"] = bool(prior.get("truncated"))
-    prior_pr = prior.get("pull_request")
-    if (
-        "pull_request" not in merged and isinstance(prior_pr, dict) and isinstance(prior_pr.get("url"), str)
-        and prior_pr.get("head") in (merged.get("commits") or [])
-    ):
-        merged["pull_request"] = dict(prior_pr)
-    return merged
-
-
 def _refresh_git_outcome_on_stop(buf: dict, repo_root: Path) -> None:
     """Capture-service only: record the session's git outcome at a completed turn.
 
@@ -2999,38 +3037,21 @@ def _refresh_git_outcome_on_stop(buf: dict, repo_root: Path) -> None:
         pass
 
 
-def _stamp_git_outcome(entry: dict, buf: dict) -> None:
-    """Persist the finalisation-time git outcome (``_session_git_outcome``) on *entry*."""
-    outcome = buf.get("git_outcome")
-    if not isinstance(outcome, dict) or _sha_or_none(outcome.get("end_head")) is None:
-        return
-    entry["git_end_head"] = outcome["end_head"]
-    commits = outcome.get("commits")
-    if isinstance(commits, list):
-        entry["session_commits"] = {
-            "source": ATTR_GIT_OBSERVED,
-            "shas": [c for c in commits if _sha_or_none(c)][:_MAX_SESSION_COMMITS],
-            "truncated": bool(outcome.get("truncated")),
-        }
-    pr = outcome.get("pull_request")
-    if isinstance(pr, dict) and isinstance(pr.get("url"), str):
-        entry["pull_request"] = {k: pr.get(k) for k in ("url", "number", "head", "source")}
-
-
-def _stored_git_outcome(entry: dict) -> dict | None:
-    """The git outcome a persisted record carries (rebuilt buffers keep it until re-finalised)."""
-    end = _sha_or_none(entry.get("git_end_head"))
-    if end is None:
-        return None
-    outcome: dict[str, Any] = {"source": ATTR_GIT_OBSERVED, "end_head": end, "commits": None, "truncated": False}
-    block = entry.get("session_commits")
-    if isinstance(block, dict) and isinstance(block.get("shas"), list):
-        outcome["commits"] = [c for c in block["shas"] if _sha_or_none(c)]
-        outcome["truncated"] = bool(block.get("truncated"))
-    pr = entry.get("pull_request")
-    if isinstance(pr, dict) and isinstance(pr.get("url"), str):
-        outcome["pull_request"] = dict(pr)
-    return outcome
+def _stamp_reported_counts(entry: dict, buf: dict, model_roles: dict[str, str] | None) -> None:
+    """Optional capture facts that are absent unless observed (build_hook_entry)."""
+    if model_roles:
+        # Which observed model was the lead's and which a subagent's (transcript-proven); local only.
+        entry["capture"]["model_roles"] = model_roles
+    invocation_count = int(buf.get("invocation_count") or 0)
+    if invocation_count:
+        # Model invocations observed (Antigravity PreInvocation); absent for
+        # agents whose hooks expose no such event.
+        entry["capture"]["invocation_count"] = invocation_count
+    permission_denied_count = int(buf.get("permission_denied_count") or 0)
+    if permission_denied_count:
+        # Permission denials the agent reported (Grok Build PermissionDenied);
+        # absent for agents whose hooks expose no such event.
+        entry["capture"]["permission_denied_count"] = permission_denied_count
 
 
 def build_hook_entry(buf: dict, repo_root: Path) -> dict:
@@ -3145,7 +3166,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         transcript_models = _transcript_models(transcript_usage)
         if transcript_models:
             model_current, model_source = transcript_models[0], MODEL_SOURCE_TRANSCRIPT
-            models_seen = transcript_models[:5]
+    model_roles = _model_roles(models_seen, _models_with_usage(models_seen, transcript_usage), transcript_usage)
+    models_seen = _models_with_usage(models_seen, transcript_usage)
     execution_model = model_current or "unknown"
     provider_current = buf.get("provider_current") if isinstance(buf.get("provider_current"), str) else None
     transcript_provider = transcript_usage.get("provider") if isinstance(transcript_usage, Mapping) else None
@@ -3192,17 +3214,16 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         tokens_current = None
         tokens_not_recorded = TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE
     cost_not_recorded: str | None = USAGE_ELSEWHERE_REASON if tokens_not_recorded == USAGE_ELSEWHERE_REASON else None
-    if estimated_cost is None and transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
-        # No cost the agent reported (headless ``claude -p`` has no status
-        # line): price the usage per model at the official list rates, with
-        # 1-hour cache writes at their own rate. Any model without a rate,
-        # unsplit cache writes or incomplete usage -> unknown, never a partial sum.
+    if transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
+        # Per-message list-rate pricing wins over the status line, whose window
+        # misses turns before its first ping and after its last. No rate, unsplit
+        # cache writes, surcharges or incomplete usage -> status line, else unknown.
         from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE
 
         priced = _transcript_cost(transcript_usage)
         if priced is not None:
             estimated_cost, cost_provenance = priced, COST_PROVENANCE_OFFICIAL_RATE
-        else:
+        elif estimated_cost is None:
             cost_not_recorded = "no_official_rate_for_usage"
     if tokens_current:
         prompt_tokens = int(tokens_current.get("input") or 0)
@@ -3322,8 +3343,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
     _stamp_task_context(entry, buf)
-    if correlation_block(buf.get("correlation")) is not None:
-        entry["correlation"] = correlation_block(buf["correlation"])
+    stamp_record_correlation(entry, buf.get("correlation"), buf.get("herdr_delegated"), buf.get("herdr_terminals"))
     _stamp_cloud_session(entry, buf)
     if buf.get("correlation_conflicts"):
         entry["capture"]["correlation_conflicts"] = _stored_count(buf["correlation_conflicts"])
@@ -3342,16 +3362,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         }
         if buf.get("check_latest_overflow"):
             entry["capture"]["check_latest_overflow"] = True
-    invocation_count = int(buf.get("invocation_count") or 0)
-    if invocation_count:
-        # Model invocations observed (Antigravity PreInvocation); absent for
-        # agents whose hooks expose no such event.
-        entry["capture"]["invocation_count"] = invocation_count
-    permission_denied_count = int(buf.get("permission_denied_count") or 0)
-    if permission_denied_count:
-        # Permission denials the agent reported (Grok Build PermissionDenied);
-        # absent for agents whose hooks expose no such event.
-        entry["capture"]["permission_denied_count"] = permission_denied_count
+    _stamp_reported_counts(entry, buf, model_roles)
     for count_key, count_names in (
         ("subagents", ("started", "stopped", "failed")),
         ("approvals", ("requested", "granted", "denied", "unanswered")),
@@ -3547,6 +3558,10 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     if payload.agent_cloud_session and not buf.get("cloud_session_id"):
         # First observation wins: one cloud session per hosted VM.
         buf["cloud_session_id"] = payload.agent_cloud_session
+    for key in ("herdr_delegated", "herdr_terminals"):
+        if getattr(payload, key):
+            seen = herdr_delegated_or_none(buf.get(key)) or []
+            buf[key] = herdr_delegated_or_none(seen + list(getattr(payload, key)))
     if payload.agent == AGENT_CLAUDE_CODE and payload.effort_level:
         buf["effort_level"] = payload.effort_level
         levels = buf.setdefault("effort_levels_seen", [])
@@ -3957,15 +3972,17 @@ def _remote_capture_record(
         pass
 
 
-def _schedule_post_session_verify(repo_root: Path, entry: dict | None) -> None:
-    """Opt-in (``post_session_verify: safe``): start a detached, safe-only
-    ``openshard verify`` for a Receipt whose session just closed, so its
-    verification does not stay at the agent's own account. Off by default;
-    see ``verification/auto.py``. Never raises."""
+def _schedule_post_session_verify(
+    repo_root: Path, entry: dict | None, *, finalized: bool = True, turn_ended: bool = False,
+) -> None:
+    """Start automatic verification for a folded Receipt: its resulting commit
+    at a completed turn or session end (on by default), else -- opt-in,
+    ``post_session_verify: safe`` -- the working tree at session end. See
+    ``verification/auto.py: schedule_for_receipt``. Never raises."""
     try:
-        from openshard.verification.auto import schedule_post_session_verify
+        from openshard.verification.auto import schedule_for_receipt
 
-        schedule_post_session_verify(repo_root, entry)
+        schedule_for_receipt(repo_root, entry, finalized=finalized, turn_ended=turn_ended)
     except Exception:
         pass
 
@@ -4088,8 +4105,8 @@ def apply_reduced_hook(
             else:
                 action = "record_updated"
             _emit_receipt_telemetry(entry, action)
-            if action == "record_finalized":
-                _schedule_post_session_verify(repo_root, entry)
+            _schedule_post_session_verify(repo_root, entry, finalized=action == "record_finalized",
+                                          turn_ended=payload.event == EVENT_STOP)
         else:
             action = "buffered" if not should_delete else "ignored"
         if remote_events is not None:

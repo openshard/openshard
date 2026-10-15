@@ -65,6 +65,58 @@ def command_directory_hint(command: object, cwd: str | None) -> str | None:
         return None
 
 
+# A single shell command that only reads: running it in another checkout is
+# looking, not working there, so it never opens that checkout's Receipt.
+# Deliberately narrow. A command that is wrongly called read-only would hide
+# real work in a checkout, so anything not listed here (and any pipe,
+# redirection, chaining, substitution or variable) keeps the normal routing.
+# Quotes are rejected too: ``git log "--output=x"`` would otherwise hide a
+# write behind whitespace splitting. Unsupported syntax is never read-only.
+_READ_ONLY_SHELL_METACHARS = re.compile(r"""[|&;<>`$\r\n(){}'"\\]""")
+_READ_ONLY_GIT = frozenset({"status", "log", "diff", "show", "rev-parse"})
+_READ_ONLY_GIT_EXACT = (("branch", "--show-current"), ("remote", "-v"))
+_READ_ONLY_OPENSHARD = frozenset({"history", "receipt", "status"})
+_READ_ONLY_GH_PR = frozenset({"view", "list", "checks"})
+_READ_ONLY_PLAIN = frozenset({"ls", "pwd", "cat", "head", "tail", "get-content", "get-childitem"})
+
+
+def is_read_only_command(command: object) -> bool:
+    """True only for one plain, allow-listed read-only shell command. Never raises.
+
+    ``git status|log|diff|show|rev-parse``, ``git branch --show-current``,
+    ``git remote -v``, ``openshard history|receipt|status``,
+    ``gh pr view|list|checks``, ``ls``, ``pwd``, ``cat``/``head``/``tail`` and
+    ``Get-Content``/``Get-ChildItem``. No pipes, redirections, chaining,
+    substitutions, quotes, backslashes or environment assignments; no ``--output`` (``git diff
+    --output=<file>`` writes a file).
+    """
+    if not isinstance(command, str):
+        return False
+    text = command.strip()
+    if not text or len(text) > 512 or _READ_ONLY_SHELL_METACHARS.search(text):
+        return False
+    tokens = text.split()
+    head = tokens[0].lower()
+    args = tokens[1:]
+    if any(t.lower().startswith("--output") for t in args):
+        return False
+    if head in _READ_ONLY_PLAIN:
+        return True
+    if head == "git":
+        if args and args[0] == "--no-pager":
+            args = args[1:]
+        if not args:
+            return False
+        if args[0] in _READ_ONLY_GIT:
+            return True
+        return tuple(args) in _READ_ONLY_GIT_EXACT
+    if head == "openshard":
+        return bool(args) and args[0] in _READ_ONLY_OPENSHARD
+    if head == "gh":
+        return len(args) >= 2 and args[0] == "pr" and args[1] in _READ_ONLY_GH_PR
+    return False
+
+
 def event_file_paths(payload: Any) -> list[str]:
     """The file paths a hook event reports (raw, as the agent gave them). Never raises."""
     out: list[str] = []

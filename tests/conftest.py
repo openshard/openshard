@@ -157,6 +157,12 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
     """
     monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path_factory.mktemp("openshard-home")))
     monkeypatch.setenv("OPENSHARD_CAPTURE_DISABLE", "1")
+    # Never let a developer's Herdr session (or its socket) reach a test.
+    for _name in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_SOCKET_PATH", "HERDR_BIN_PATH"):
+        monkeypatch.delenv(_name, raising=False)
+    from openshard.util import herdr as _herdr
+
+    _herdr.clear_cache()
     monkeypatch.delenv("OPENSHARD_CAPTURE_PORT", raising=False)
     # v0.4.4: the *default* port is repointed at a free ephemeral port too.
     # Tests that re-enable the service (no state file yet, or a state file
@@ -190,7 +196,17 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
                 "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_REMOTE_SESSION_ID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "off")
+    # Commit verification is on by default for captured sessions: no test may
+    # start a real detached ``openshard verify``. Tests of the trigger pass
+    # their own env and spawner (tests/test_commit_verification.py).
+    monkeypatch.setenv("OPENSHARD_NO_AUTO_VERIFY", "1")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_codex_home(tmp_path_factory, monkeypatch):
+    """Codex hook-trust detection never reads the developer's real ~/.codex."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex_home")))
 
 
 @pytest.fixture(autouse=True)

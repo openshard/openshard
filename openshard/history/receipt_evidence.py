@@ -1136,13 +1136,24 @@ def commit_value(entry: dict) -> str | None:
     commits created during the session (``session_commits``, git_observed).
     The end HEAD is the result only when it is one of those -- a HEAD that
     merely moved (checkout, reset, pull) is never presented as the work.
+
+    When another agent committed on top (the end HEAD is not this session's),
+    the result is the session's own last commit that capture confirmed is an
+    ancestor of the end HEAD (``session_commits.result``); otherwise None.
     """
     end = entry.get("git_end_head")
     block = _dict(entry.get("session_commits"))
     shas = block.get("shas")
-    if not isinstance(end, str) or not isinstance(shas, list) or end not in shas:
+    if not isinstance(end, str) or not isinstance(shas, list):
         return None
-    value = end.strip().lower()
+    if end in shas:
+        candidate = end
+    else:
+        result = block.get("result")
+        if not isinstance(result, str) or result not in shas or block.get("source") != "git_observed":
+            return None
+        candidate = result
+    value = candidate.strip().lower()
     return value if _SHA_RE.match(value) else None
 
 
@@ -1201,12 +1212,16 @@ def session_key(capture: dict) -> str | None:
     hex characters of sha256("<agent>:<session id>"), which cannot be turned
     back into it.
     """
+    return session_key_for(capture.get("agent") or "claude_code", capture.get("session_id"))
+
+
+def session_key_for(agent: object, session_id: object) -> str | None:
+    """``session_key`` from a capture agent name and the agent's own session id."""
     import hashlib
 
-    sid, agent = capture.get("session_id"), capture.get("agent") or "claude_code"
-    if not isinstance(sid, str) or not _AGENT_SESSION_ID_RE.match(sid) or not isinstance(agent, str):
+    if not isinstance(session_id, str) or not _AGENT_SESSION_ID_RE.match(session_id) or not isinstance(agent, str):
         return None
-    return "ses_" + hashlib.sha256(f"{agent}:{sid}".encode()).hexdigest()[:32]
+    return "ses_" + hashlib.sha256(f"{agent}:{session_id}".encode()).hexdigest()[:32]
 
 
 def session_block(entry: dict) -> dict[str, Any] | None:
