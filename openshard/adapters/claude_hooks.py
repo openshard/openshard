@@ -192,6 +192,8 @@ from openshard.adapters.claude_hook_checks import (
     hook_verification,
     record_checks,
 )
+from openshard.adapters.claude_lead_models import model_roles as _model_roles
+from openshard.adapters.claude_lead_models import transcript_models as _transcript_models
 from openshard.adapters.claude_session_fidelity import sweep_stale_buffers  # noqa: F401  (re-exported)
 from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-exported for callers and tests)
     _count,
@@ -954,23 +956,6 @@ def _models_with_usage(models_seen: list[str], transcript_usage: Mapping[str, An
             out.append(safe)
             identities.add(identity)
     return out
-
-
-def _transcript_models(usage: Mapping[str, Any]) -> list[str]:
-    """API-reported model ids in transcript *usage*, most output tokens first (sanitized)."""
-    by_model = usage.get("by_model")
-    if not isinstance(by_model, Mapping):
-        return []
-    ranked = sorted(
-        ((m, row) for m, row in by_model.items() if isinstance(m, str) and isinstance(row, Mapping)),
-        key=lambda kv: -_count(kv[1].get("output")),
-    )
-    models: list[str] = []
-    for raw, _row in ranked:
-        safe = _sanitize_model_id(raw)
-        if safe and not safe.startswith("<") and safe not in models:
-            models.append(safe)
-    return models
 
 
 def _transcript_cost(usage: Mapping[str, Any]) -> float | None:
@@ -3140,6 +3125,23 @@ def _stored_git_outcome(entry: dict) -> dict | None:
     return outcome
 
 
+def _stamp_reported_counts(entry: dict, buf: dict, model_roles: dict[str, str] | None) -> None:
+    """Optional capture facts that are absent unless observed (build_hook_entry)."""
+    if model_roles:
+        # Which observed model was the lead's and which a subagent's (transcript-proven); local only.
+        entry["capture"]["model_roles"] = model_roles
+    invocation_count = int(buf.get("invocation_count") or 0)
+    if invocation_count:
+        # Model invocations observed (Antigravity PreInvocation); absent for
+        # agents whose hooks expose no such event.
+        entry["capture"]["invocation_count"] = invocation_count
+    permission_denied_count = int(buf.get("permission_denied_count") or 0)
+    if permission_denied_count:
+        # Permission denials the agent reported (Grok Build PermissionDenied);
+        # absent for agents whose hooks expose no such event.
+        entry["capture"]["permission_denied_count"] = permission_denied_count
+
+
 def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     """Build the coerced runs.jsonl record for a session's current state.
 
@@ -3252,6 +3254,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         transcript_models = _transcript_models(transcript_usage)
         if transcript_models:
             model_current, model_source = transcript_models[0], MODEL_SOURCE_TRANSCRIPT
+    model_roles = _model_roles(models_seen, _models_with_usage(models_seen, transcript_usage), transcript_usage)
     models_seen = _models_with_usage(models_seen, transcript_usage)
     execution_model = model_current or "unknown"
     provider_current = buf.get("provider_current") if isinstance(buf.get("provider_current"), str) else None
@@ -3448,16 +3451,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         }
         if buf.get("check_latest_overflow"):
             entry["capture"]["check_latest_overflow"] = True
-    invocation_count = int(buf.get("invocation_count") or 0)
-    if invocation_count:
-        # Model invocations observed (Antigravity PreInvocation); absent for
-        # agents whose hooks expose no such event.
-        entry["capture"]["invocation_count"] = invocation_count
-    permission_denied_count = int(buf.get("permission_denied_count") or 0)
-    if permission_denied_count:
-        # Permission denials the agent reported (Grok Build PermissionDenied);
-        # absent for agents whose hooks expose no such event.
-        entry["capture"]["permission_denied_count"] = permission_denied_count
+    _stamp_reported_counts(entry, buf, model_roles)
     for count_key, count_names in (
         ("subagents", ("started", "stopped", "failed")),
         ("approvals", ("requested", "granted", "denied", "unanswered")),

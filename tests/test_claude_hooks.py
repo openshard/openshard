@@ -2458,10 +2458,52 @@ def test_subagent_usage_models_reach_receipt_stages_once(repo):
     assert entry["completion_tokens"] == 300
     assert entry["estimated_cost"] == pytest.approx(round((1_000 * 4 + 200 * 20 + 100_002 * .5 + 100 * 2.5) / 1e6, 6))
     assert entry["cost_provenance"] == "official_rate_estimate"
+    # The transcript proves Haiku only ran in a subagent: the stages say so.
+    assert entry["capture"]["model_roles"] == {"anthropic/claude-opus-5.5": "lead", "claude-haiku-5.5": "subagent"}
     stages = build_shard_receipt(entry).model_stages
-    assert [label for label, _ in stages] == ["Observed 1", "Observed 2"]
+    assert [label for label, _ in stages] == ["Observed lead", "Observed subagent"]
     assert "Opus 5.5" in stages[0][1]
     assert "Haiku 5.5" in stages[1][1]
+
+
+def test_headline_model_is_the_leads_even_when_a_subagent_wrote_more(repo):
+    """Seen live: a non-owner checkout headlined a subagent's model (no status line there, ranked by output)."""
+    transcript = _transcript(repo, [
+        _assistant_line("lead-1", model="claude-opus-5-5", output_tokens=50),
+        # A sidechain message in the main transcript is a subagent's, not the lead's.
+        {**_assistant_line("side-1", model="claude-haiku-5-5", output_tokens=9_000), "isSidechain": True},
+    ])
+    subdir = transcript.with_suffix("") / "subagents"
+    subdir.mkdir(parents=True)
+    (subdir / "agent.jsonl").write_text(
+        json.dumps(_assistant_line("sub-1", model="claude-sonnet-5-5", output_tokens=5_000)) + "\n", encoding="utf-8")
+    _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+    _run(repo, "Stop", transcript_path=str(transcript))
+    entry = _runs_lines(repo)[0]
+    assert entry["execution_model"] == "claude-opus-5-5"
+    assert entry["capture"]["model_source"] == "transcript"
+    stages = build_shard_receipt(entry).model_stages
+    labels = dict((model, label) for label, model in stages)
+    assert [label for label, _ in stages].count("Observed lead") == 1
+    assert sorted(label for label in labels.values() if label.startswith("Observed subagent")) == [
+        "Observed subagent 1", "Observed subagent 2"]
+
+
+def test_headline_falls_back_to_output_ranking_without_lead_messages(repo):
+    # Only subagent usage in the window: today's ranking (most output first) still applies.
+    transcript = _transcript(repo, [])
+    subdir = transcript.with_suffix("") / "subagents"
+    subdir.mkdir(parents=True)
+    (subdir / "agent.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [
+        _assistant_line("a", model="claude-haiku-5-5", output_tokens=1),
+        _assistant_line("b", model="claude-sonnet-5-5", output_tokens=100),
+    ]), encoding="utf-8")
+    _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
+    _run(repo, "Stop", transcript_path=str(transcript))
+    entry = _runs_lines(repo)[0]
+    assert entry["execution_model"] == "claude-sonnet-5-5"
+    assert "model_roles" not in entry["capture"]
+    assert [label for label, _ in build_shard_receipt(entry).model_stages] == ["Observed 1", "Observed 2"]
 
 
 def test_transcript_models_keep_first_seen_order_and_existing_cap(repo):
