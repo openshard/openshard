@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE, AGENT_CODEX
+from openshard.adapters.claude_lead_models import lead_models_block, note_lead_output
 
 _TRANSCRIPT_MAX_FILES = 50  # main transcript + subagent transcripts read per receipt
 _TRANSCRIPT_RECENT_IDS = 16  # message ids per file kept open for re-reported streaming lines
@@ -266,13 +267,7 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
                 order.append(name)
             previous = recent.pop(mid, None)  # the latest line of a streamed message wins
             recent[mid] = [name, *_usage_row(usage)]
-            if index == 0 and rec.get("isSidechain") is not True:
-                # The lead agent's own output per model (main transcript, not a
-                # sidechain): what the Receipt headlines when no model was reported.
-                lead = state.setdefault("lead_output", {})
-                if isinstance(previous, list) and len(previous) > 2 and previous[0] in lead:
-                    lead[previous[0]] = max(0, int(lead[previous[0]]) - int(previous[2]))
-                lead[name] = int(lead.get(name) or 0) + int(recent[mid][2])
+            note_lead_output(state, index, rec, previous, recent[mid])
             while len(recent) > _TRANSCRIPT_RECENT_IDS:
                 old_id = next(iter(recent))
                 old = recent.pop(old_id)
@@ -322,15 +317,9 @@ def _summarise_transcript_state(state: dict) -> dict | None:
             **{f: acc[i] for i, f in enumerate(_USAGE_FIELDS)}, "messages": acc[-1],
         }
     complete = not state.get("capped") and not state.get("invalid_usage") and len(by_model) <= _MAX_USAGE_MODELS
-    raw_lead = state.get("lead_output")
-    lead_output: dict = raw_lead if isinstance(raw_lead, dict) else {}
-    lead_models = [m for m, _ in sorted(
-        ((m, out) for m, out in lead_output.items() if isinstance(m, str) and m in by_model),
-        key=lambda kv: -int(kv[1] or 0),
-    )]
     return {"messages": messages, "totals": totals, "by_model": dict(list(by_model.items())[:_MAX_USAGE_MODELS]),
             "complete": complete,
-            **({"lead_models": lead_models} if lead_models else {}),
+            **lead_models_block(state, by_model),
             **({"incomplete_reason": "malformed_runtime_counter"} if state.get("invalid_usage") else {}),
             **({"surcharged": True} if state.get("surcharged") else {})}
 
