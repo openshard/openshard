@@ -2439,6 +2439,42 @@ def _other_sessions_reported_paths(repo_root: Path, buf: dict) -> set[str]:
     return found
 
 
+_MAX_OWN_COMMIT_PATHS = 2000
+
+
+def _own_commit_paths(buf: dict, repo_root: Path) -> set[str]:
+    """Repo-relative paths changed by the commits git observed this session create. Never raises.
+
+    From the session's git outcome (``_session_git_outcome``: reflog-created,
+    inside the session window, corroborated by the agent's own git call), one
+    bounded ``git diff-tree`` per commit, cached on the buffer per commit set.
+    Empty when the commits are unknown.
+    """
+    outcome = buf.get("git_outcome")
+    commits = outcome.get("commits") if isinstance(outcome, dict) else None
+    if not isinstance(commits, list):
+        return set()
+    shas = [c for c in commits if _sha_or_none(c)][:_MAX_SESSION_COMMITS]
+    if not shas:
+        return set()
+    cached = buf.get("own_commit_paths")
+    if isinstance(cached, dict) and cached.get("commits") == shas and isinstance(cached.get("paths"), list):
+        return {p for p in cached["paths"] if isinstance(p, str)}
+    from openshard.safety.sanitize import sanitize_path
+
+    paths: set[str] = set()
+    for sha in shas:
+        out = run_git(repo_root, ["diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "--root", sha])
+        if out is None:
+            return set()  # unknown: never widen attribution on a partial answer
+        for line in out.splitlines():
+            safe = sanitize_path(line.strip(), _PATH_CAP) if line.strip() else None
+            if safe and len(paths) < _MAX_OWN_COMMIT_PATHS:
+                paths.add(safe)
+    buf["own_commit_paths"] = {"commits": shas, "paths": sorted(paths)}
+    return paths
+
+
 def _attempted_file_targets(buf: dict) -> set[str]:
     """Paths the agent *tried* to change (file-tool targets without a success signal)."""
     out: set[str] = set()
@@ -2477,6 +2513,7 @@ def _classify_changed_files(buf: dict, repo_root: Path, files: list[dict]) -> li
     hook_files: dict = _hook_raw if isinstance(_hook_raw, dict) else {}
     attempted = _attempted_file_targets(buf)
     others = _other_sessions_reported_paths(repo_root, buf)
+    own_committed = _own_commit_paths(buf, repo_root) if others else set()
     need_blob = [f["path"] for f in files if f.get("path") in base_paths and f.get("path") not in hook_files]
     current = _blob_ids(repo_root, need_blob) if need_blob else {}
     out: list[dict] = []
@@ -2504,6 +2541,11 @@ def _classify_changed_files(buf: dict, repo_root: Path, files: list[dict]) -> li
                 summary = (
                     "observed in git diff; changed again during the session; actor not established"
                 )
+        elif path in others and path in own_committed:
+            # Another session also reported this path, but git observed it
+            # change in a commit this session created: this session's work.
+            attribution = ATTR_GIT_OBSERVED
+            summary = "observed in a commit this session created; another session also reported it"
         elif path in others:
             attribution = ATTR_OTHER_SESSION
             summary = "reported by another agent session; not counted as this session's work"
