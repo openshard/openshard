@@ -2393,6 +2393,8 @@ def _snapshot_baseline(repo_root: Path, now: str) -> dict:
         for candidate in candidates:
             if candidate.startswith(_LOCAL_STATE_PREFIXES):
                 continue
+            if candidate.endswith("/"):
+                continue  # a nested checkout/worktree: its own Receipt, not a path here
             safe = sanitize_path(candidate, _PATH_CAP)
             if not safe or safe in paths:
                 continue

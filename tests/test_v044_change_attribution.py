@@ -15,6 +15,7 @@ All sessions here run through the synchronous in-process path
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from openshard.adapters.claude_hooks import HookOutcome, handle_claude_hook
@@ -112,6 +113,28 @@ class TestBaselineAndAttribution:
         assert files["scratch.txt"]["change_type"] == "create"
         assert entry["files_created"] == 1  # calc.py only
         assert entry["changes"]["pre_existing_excluded"] == 1
+
+    def test_nested_git_checkouts_are_not_counted_as_created_files(self, repo):
+        # A nested checkout (e.g. a worktree under .worktrees/) shows up in
+        # git as an untracked "dir/" entry. It is a separate checkout with its
+        # own Receipt, never a file this session created -- whether it existed
+        # before the session or was created during it.
+        def _nested(rel: str) -> None:
+            nested = repo / rel
+            nested.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(nested)], check=True)
+            (nested / "inner.py").write_text("y = 2\n", encoding="utf-8")
+
+        _nested(".worktrees/before")
+        _start(repo)
+        _nested(".worktrees/during")
+        _agent_write(repo, "calc.py", "x = 1\n")
+        entry = _finish(repo)
+        files = _by_path(entry)
+        assert set(files) == {"calc.py"}
+        assert entry["files_created"] + entry["files_updated"] == 1
+        assert entry["changes"]["git_observed"] == 0
+        assert entry["changes"]["baseline"]["dirty_paths"] == 0
 
     def test_git_only_change_is_git_observed_not_agent(self, repo):
         _start(repo)

@@ -69,9 +69,15 @@ def _list_untracked_files(repo_path: Path) -> list[str] | None:
         return None
     if result.returncode != 0:
         return None
+    # An entry ending in "/" is a directory git refuses to descend into: a
+    # nested git checkout or linked worktree (e.g. ``.worktrees/core/``). It
+    # is a separate checkout with its own Receipt, never a file this one
+    # created.
     return [
         ln.strip() for ln in result.stdout.splitlines()
-        if ln.strip() and not ln.strip().startswith(_UNTRACKED_EXCLUDED_PREFIXES)
+        if ln.strip()
+        and not ln.strip().endswith("/")
+        and not ln.strip().startswith(_UNTRACKED_EXCLUDED_PREFIXES)
     ]
 
 
