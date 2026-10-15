@@ -157,6 +157,12 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
     """
     monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path_factory.mktemp("openshard-home")))
     monkeypatch.setenv("OPENSHARD_CAPTURE_DISABLE", "1")
+    # Never let a developer's Herdr session (or its socket) reach a test.
+    for _name in ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_SOCKET_PATH", "HERDR_BIN_PATH"):
+        monkeypatch.delenv(_name, raising=False)
+    from openshard.util import herdr as _herdr
+
+    _herdr.clear_cache()
     monkeypatch.delenv("OPENSHARD_CAPTURE_PORT", raising=False)
     # v0.4.4: the *default* port is repointed at a free ephemeral port too.
     # Tests that re-enable the service (no state file yet, or a state file
