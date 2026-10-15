@@ -167,3 +167,82 @@ def test_timeline_herdr_terminal_filter():
     entries = [{"task_id": task, "run_id": "a", "correlation": corr}, {"task_id": task, "run_id": "b"}]
     assert [r["run_id"] for r in workflow_timeline(entries, task_id=task, herdr_terminal="term_1")] == ["a"]
     assert len(workflow_timeline(entries, task_id=task)) == 2
+
+
+def test_codex_hooks_stamp_the_herdr_pane(fake_herdr, monkeypatch, tmp_path):
+    """Live E2E: the delegated Codex Receipt (pane w5:p9) carried no Herdr ids.
+
+    Codex hooks are command hooks (``openshard hooks codex``); with the pane's
+    environment they record the same launch context a Claude session does.
+    """
+    from openshard.adapters import claude_capture_client as client
+    from openshard.history.store import load_history
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.check_call(["git", "init", "-q", str(repo)])
+    monkeypatch.setenv("OPENSHARD_CAPTURE_DISABLE", "1")  # no service: the in-process fold
+    fake_herdr["out"] = _info(agent="codex", session="019a-codex", terminal="term_65dd7b80e182cf")
+    env = {**fake_herdr["env"], "HERDR_PANE_ID": "w5:p9", "OPENSHARD_CAPTURE_DISABLE": "1"}
+    sid = "019a4f3c-6c1e-7d2b-9c3e-2f4a5b6c7d8e"
+    for event, extra in (("SessionStart", {"source": "startup"}), ("UserPromptSubmit", {"prompt": "add lerp"}),
+                         ("Stop", {}), ("SessionEnd", {})):
+        raw = json.dumps({"hook_event_name": event, "session_id": sid, "cwd": str(repo), "model": "gpt-6.1-sol",
+                          **extra}).encode()
+        client._run_hook_raw(raw, env, event_override=None, agent="codex", spawn=False)
+    entries = load_history(repo / ".openshard" / "runs.jsonl")
+    ids = [(i["namespace"], i["id"]) for e in entries for i in (e.get("correlation") or {}).get("external_ids", [])]
+    assert ("herdr.pane", "w5/p9") in ids
+    assert ("herdr.terminal", "term_65dd7b80e182cf") in ids
+
+
+def _codex_without_session(terminal="term_65dd7b80e182cf"):
+    # Herdr 0.9.4 shape for a Codex pane: detected by title, no agent_session.
+    return json.dumps({"id": "cli:agent:get", "result": {"agent": {
+        "agent": "codex", "terminal_id": terminal, "cwd": "C:/secret/cwd", "pane_id": "w5:p9"},
+        "type": "agent_info"}}).encode()
+
+
+def _parent_ids(fake_herdr, monkeypatch, tmp_path, command, corr=None):
+    from openshard.history.store import load_history
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.check_call(["git", "init", "-q", str(repo)])
+    monkeypatch.setenv("HERDR_BIN_PATH", fake_herdr["env"]["HERDR_BIN_PATH"])
+    sid = "11111111-2222-3333-4444-555555555555"
+
+    def fire(event, **extra):
+        return handle_hook({"hook_event_name": event, "session_id": sid, "cwd": str(repo), **extra},
+                           env={"CLAUDE_PROJECT_DIR": str(repo)}, correlation=corr)
+
+    fire("SessionStart", source="startup")
+    fire("PostToolUse", tool_name="Bash", tool_input={"command": command}, tool_response={"interrupted": False})
+    fire("Stop")
+    fire("SessionEnd", reason="other")
+    entries = load_history(repo / ".openshard" / "runs.jsonl")
+    return [(i["namespace"], i["id"]) for e in entries for i in (e.get("correlation") or {}).get("external_ids", [])]
+
+
+def test_delegated_terminal_recorded_when_herdr_reports_no_session(fake_herdr, monkeypatch, tmp_path):
+    """Live E2E: the lead delegated to Codex in w5:p9; Herdr 0.9.4 gave no agent_session, so no edge was recorded."""
+    fake_herdr["out"] = _codex_without_session()
+    ids = _parent_ids(fake_herdr, monkeypatch, tmp_path, '"$HERDR_BIN_PATH" agent prompt w5:p9 "add lerp" --wait')
+    assert ("herdr.delegated_terminal", "term_65dd7b80e182cf") in ids
+    assert not any(ns == "herdr.delegated_session" for ns, _ in ids)
+    assert "C:/secret" not in json.dumps(ids)
+
+
+def test_delegated_terminal_recorded_alongside_the_session(fake_herdr, monkeypatch, tmp_path):
+    ids = _parent_ids(fake_herdr, monkeypatch, tmp_path, 'herdr agent prompt w5:p3 "go"')
+    assert ("herdr.delegated_session", session_key_for("claude_code", "abc-123")) in ids
+    assert ("herdr.delegated_terminal", "term_65dd") in ids
+    assert ids.index(("herdr.delegated_session", session_key_for("claude_code", "abc-123"))) < ids.index(
+        ("herdr.delegated_terminal", "term_65dd"))
+
+
+def test_delegated_terminal_respects_the_id_cap(fake_herdr, monkeypatch, tmp_path):
+    full = {"external_ids": [{"namespace": "ci", "id": str(i)} for i in range(16)]}
+    fake_herdr["out"] = _codex_without_session()
+    ids = _parent_ids(fake_herdr, monkeypatch, tmp_path, "herdr agent prompt w5:p9 hi", corr=full)
+    assert len(ids) == 16 and all(ns == "ci" for ns, _ in ids)
