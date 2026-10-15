@@ -30,6 +30,7 @@ from collections.abc import Mapping
 TERMINAL_NAMESPACE = "herdr.terminal"
 PANE_NAMESPACE = "herdr.pane"
 DELEGATED_NAMESPACE = "herdr.delegated_session"
+DELEGATED_TERMINAL_NAMESPACE = "herdr.delegated_terminal"
 SOURCE = "herdr"
 GET_TIMEOUT_SECONDS = 2.0
 _MAX_OUTPUT = 256 * 1024
@@ -237,17 +238,31 @@ CAPTURE_AGENT = {
 }
 
 
-def delegated_agents(command: object, env: Mapping[str, str] | None = None) -> list[tuple[str, str]]:
-    """``(capture agent, raw session id)`` for each delegation target Herdr resolves.
+def delegations(command: object, env: Mapping[str, str] | None = None) -> tuple[list[tuple[str, str]], list[str]]:
+    """``(agent sessions, terminal ids)`` of the delegation targets Herdr resolves, one ``agent get`` each.
 
-    Raw ids stay in memory: ``history.correlation.herdr_delegated_sessions``
-    hashes them into ``session_key`` values before anything is stored.
+    Agent sessions are ``(capture agent, raw session id)`` -- raw ids stay in
+    memory; ``history.correlation.herdr_delegations`` hashes them into
+    ``session_key`` values before anything is stored. Terminal ids are
+    recorded whenever Herdr reports one, even when it reports no agent
+    session (Herdr 0.9.4 detects Codex by title and gives none).
     """
-    found: list[tuple[str, str]] = []
+    sessions: list[tuple[str, str]] = []
+    terminals: list[str] = []
     for target in delegation_targets(command)[:_MAX_DELEGATIONS]:
         info = agent_get(target, env)
-        capture_agent = CAPTURE_AGENT.get(info["agent"]) if info and info.get("agent") else None
-        session = info.get("session") if info else None
-        if capture_agent and isinstance(session, str) and (capture_agent, session) not in found:
-            found.append((capture_agent, session))
-    return found
+        if not info:
+            continue
+        capture_agent = CAPTURE_AGENT.get(info["agent"]) if info.get("agent") else None
+        session = info.get("session")
+        if capture_agent and isinstance(session, str) and (capture_agent, session) not in sessions:
+            sessions.append((capture_agent, session))
+        terminal = info.get("terminal_id")
+        if isinstance(terminal, str) and terminal and terminal not in terminals:
+            terminals.append(terminal)
+    return sessions, terminals
+
+
+def delegated_agents(command: object, env: Mapping[str, str] | None = None) -> list[tuple[str, str]]:
+    """``(capture agent, raw session id)`` for each delegation target Herdr resolves."""
+    return delegations(command, env)[0]

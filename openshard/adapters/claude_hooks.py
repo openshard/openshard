@@ -217,6 +217,7 @@ from openshard.history.correlation import (
     herdr_delegated_or_none,
     launch_correlation,
     record_herdr_delegated,
+    record_herdr_terminals,
     stamp_record_correlation,
 )
 from openshard.history.task_identity import (
@@ -1268,6 +1269,7 @@ class ReducedHookPayload:
     git_write: bool = False  # the command can create commits (see _GIT_WRITE_RE); corroborates them
     # Child ``session_key`` (never a raw session id) of Herdr agents this shell command delegated to, resolved at reduce time.
     herdr_delegated: list[str] | None = None
+    herdr_terminals: list[str] | None = None  # Herdr terminal ids of those delegation targets
     correlation: dict | None = None
     task_id: str | None = None  # see HookPayload.task_id; only ever a well-formed task id
     transcript_path: str | None = None  # see HookPayload.transcript_path
@@ -1319,6 +1321,8 @@ class ReducedHookPayload:
             data["git_write"] = True
         if self.herdr_delegated:
             data["herdr_delegated"] = list(self.herdr_delegated)
+        if self.herdr_terminals:
+            data["herdr_terminals"] = list(self.herdr_terminals)
         # Only when declared, so queue lines of an undeclared session keep their shape.
         if self.correlation is not None:
             data["correlation"] = correlation_block(self.correlation)
@@ -1398,6 +1402,7 @@ class ReducedHookPayload:
             check_commands=queued_check_commands(data.get("check_commands")),
             git_write=data.get("git_write") is True,
             herdr_delegated=herdr_delegated_or_none(data.get("herdr_delegated")),
+            herdr_terminals=herdr_delegated_or_none(data.get("herdr_terminals")),
             correlation=correlation_block(data.get("correlation")),
             task_id=stored_task_id(data),
             transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id, agent=agent_key),
@@ -1409,13 +1414,14 @@ class ReducedHookPayload:
         )
 
 
-def _herdr_delegations(payload: Any, outcome: str | None) -> list[str] | None:
-    """Child session keys of Herdr delegations in a successful shell command."""
+def _herdr_delegations(payload: Any, outcome: str | None) -> tuple[list[str] | None, list[str] | None]:
+    """Child session keys and target terminal ids of Herdr delegations in a successful shell command."""
     if payload.event != EVENT_POST_TOOL_USE or outcome not in (None, OUTCOME_PASSED) or not payload.command:
-        return None
-    from openshard.history.correlation import herdr_delegated_sessions
+        return None, None
+    from openshard.history.correlation import herdr_delegations
 
-    return herdr_delegated_sessions(payload.command) or None
+    keys, terminals = herdr_delegations(payload.command)
+    return keys or None, terminals or None
 
 
 _COMMAND_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -1522,7 +1528,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
             reduced.command_exit_code = _exit_code_or_none(payload.command_exit_code)
             reduced.command_safety = classify_command_text(payload.command)
             reduced.git_write = bool(payload.command and _GIT_WRITE_RE.search(payload.command))
-            reduced.herdr_delegated = _herdr_delegations(payload, reduced.command_outcome)
+            reduced.herdr_delegated, reduced.herdr_terminals = _herdr_delegations(payload, reduced.command_outcome)
         elif kind == TOOL_KIND_READ:
             reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
             reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
@@ -2147,6 +2153,9 @@ def _resumed_segment(
     delegated = record_herdr_delegated(persisted)
     if delegated:
         buf["herdr_delegated"] = delegated
+    terminals = record_herdr_terminals(persisted)
+    if terminals:
+        buf["herdr_terminals"] = terminals
     raw_capture = persisted.get("capture")
     capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
     buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
@@ -3455,7 +3464,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
     _stamp_task_context(entry, buf)
-    stamp_record_correlation(entry, buf.get("correlation"), buf.get("herdr_delegated"))
+    stamp_record_correlation(entry, buf.get("correlation"), buf.get("herdr_delegated"), buf.get("herdr_terminals"))
     _stamp_cloud_session(entry, buf)
     if buf.get("correlation_conflicts"):
         entry["capture"]["correlation_conflicts"] = _stored_count(buf["correlation_conflicts"])
@@ -3670,9 +3679,10 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     if payload.agent_cloud_session and not buf.get("cloud_session_id"):
         # First observation wins: one cloud session per hosted VM.
         buf["cloud_session_id"] = payload.agent_cloud_session
-    if payload.herdr_delegated:
-        seen = herdr_delegated_or_none(buf.get("herdr_delegated")) or []
-        buf["herdr_delegated"] = herdr_delegated_or_none(seen + list(payload.herdr_delegated))
+    for key in ("herdr_delegated", "herdr_terminals"):
+        if getattr(payload, key):
+            seen = herdr_delegated_or_none(buf.get(key)) or []
+            buf[key] = herdr_delegated_or_none(seen + list(getattr(payload, key)))
     if payload.agent == AGENT_CLAUDE_CODE and payload.effort_level:
         buf["effort_level"] = payload.effort_level
         levels = buf.setdefault("effort_levels_seen", [])

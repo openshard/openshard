@@ -103,15 +103,27 @@ def herdr_delegated_sessions(command: object, env: Mapping[str, str] | None = No
     Raw agent session ids are hashed with the function that produces the
     child Receipt's ``session.session_key`` and never stored.
     """
+    return herdr_delegations(command, env)[0]
+
+
+def herdr_delegations(command: object, env: Mapping[str, str] | None = None) -> tuple[list[str], list[str]]:
+    """``(child session_keys, target terminal ids)`` of the Herdr delegations in *command*.
+
+    One ``herdr agent get`` per target. The terminal id is kept even when
+    Herdr reports no agent session for the target, so the parent still names
+    which pane it delegated to.
+    """
     from openshard.history.receipt_evidence import session_key_for
     from openshard.util import herdr
 
-    found: list[str] = []
-    for agent, session in herdr.delegated_agents(command, env):
+    sessions, terminals = herdr.delegations(command, env)
+    keys: list[str] = []
+    for agent, session in sessions:
         key = identifier(session_key_for(agent, session))
-        if key is not None and key not in found:
-            found.append(key)
-    return found
+        if key is not None and key not in keys:
+            keys.append(key)
+    clean_terminals = [t for t in (identifier(t) for t in terminals) if t is not None]
+    return keys, list(dict.fromkeys(clean_terminals))
 
 
 def herdr_delegated_or_none(value: object) -> list[str] | None:
@@ -126,29 +138,44 @@ def herdr_delegated_or_none(value: object) -> list[str] | None:
     return clean or None
 
 
-def record_herdr_delegated(entry: Mapping[str, Any]) -> list[str]:
+def record_herdr_delegated(entry: Mapping[str, Any], namespace: str | None = None) -> list[str]:
+    """Delegation ids a persisted record carries (sessions by default, or *namespace*)."""
     from openshard.util.herdr import DELEGATED_NAMESPACE
 
+    wanted = namespace or DELEGATED_NAMESPACE
     block = correlation_block(entry.get("correlation"))
-    return [link["id"] for link in (block or {}).get("external_ids") or [] if link.get("namespace") == DELEGATED_NAMESPACE]
+    return [link["id"] for link in (block or {}).get("external_ids") or [] if link.get("namespace") == wanted]
 
 
-def stamp_record_correlation(entry: dict, correlation: object, herdr_delegated: object) -> None:
+def record_herdr_terminals(entry: Mapping[str, Any]) -> list[str]:
+    """Delegated Herdr terminal ids a persisted record carries."""
+    from openshard.util.herdr import DELEGATED_TERMINAL_NAMESPACE
+
+    return record_herdr_delegated(entry, DELEGATED_TERMINAL_NAMESPACE)
+
+
+def stamp_record_correlation(
+    entry: dict, correlation: object, herdr_delegated: object, herdr_terminals: object = None,
+) -> None:
     """Copy a buffer's correlation onto its record, then append Herdr delegation ids (parent side).
 
-    Declared and deterministic: first-seen order, after every other id; extras
-    beyond the 16-id cap are dropped, so launch and explicit ids are never displaced.
+    Declared and deterministic: delegated sessions then delegated terminals,
+    first-seen order, after every other id; extras beyond the 16-id cap are
+    dropped, so launch and explicit ids are never displaced.
     """
-    from openshard.util.herdr import DELEGATED_NAMESPACE
+    from openshard.util.herdr import DELEGATED_NAMESPACE, DELEGATED_TERMINAL_NAMESPACE
 
     if correlation_block(correlation) is not None:
         entry["correlation"] = correlation_block(correlation)
-    delegated = herdr_delegated_or_none(herdr_delegated)
-    if not delegated:
+    delegated = herdr_delegated_or_none(herdr_delegated) or []
+    terminals = herdr_delegated_or_none(herdr_terminals) or []
+    if not delegated and not terminals:
         return
     block = correlation_block(entry.get("correlation")) or {}
-    links = [link for link in block.get("external_ids") or [] if link.get("namespace") != DELEGATED_NAMESPACE]
+    ours = (DELEGATED_NAMESPACE, DELEGATED_TERMINAL_NAMESPACE)
+    links = [link for link in block.get("external_ids") or [] if link.get("namespace") not in ours]
     links.extend({"namespace": DELEGATED_NAMESPACE, "id": ident} for ident in delegated)
+    links.extend({"namespace": DELEGATED_TERMINAL_NAMESPACE, "id": ident} for ident in terminals)
     merged = correlation_block({**block, "external_ids": links})
     if merged is not None:
         entry["correlation"] = merged
