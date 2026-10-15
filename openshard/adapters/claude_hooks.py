@@ -956,8 +956,41 @@ def _models_with_usage(models_seen: list[str], transcript_usage: Mapping[str, An
     return out
 
 
+def _model_roles(
+    reported: list[str], models: list[str], usage: Mapping[str, Any] | None,
+) -> dict[str, str] | None:
+    """``{model: "lead" | "subagent"}`` for *models*, only when the transcript proves it.
+
+    A model the agent itself reported (hook / status line: the session's own
+    model) or that wrote the main transcript's non-sidechain messages is the
+    lead's; one with usage only in subagent transcripts or sidechain messages
+    is a subagent's. None when the transcript did not say which messages were
+    the lead's, or when every model is the lead's (a mid-session switch).
+    """
+    from openshard.models.pricing import official_rate
+
+    lead_raw = (usage or {}).get("lead_models")
+    if not isinstance(lead_raw, list) or not lead_raw:
+        return None
+
+    def identity(model: str) -> str:
+        rate = official_rate(model)
+        return rate.model_id if rate else model.casefold()
+
+    lead_ids = {identity(s) for s in (_sanitize_model_id(m) for m in [*reported, *lead_raw] if isinstance(m, str)) if s}
+    roles = {m: ("lead" if identity(m) in lead_ids else "subagent") for m in models}
+    return roles if "subagent" in roles.values() and "lead" in roles.values() else None
+
+
 def _transcript_models(usage: Mapping[str, Any]) -> list[str]:
-    """API-reported model ids in transcript *usage*, most output tokens first (sanitized)."""
+    """API-reported model ids in transcript *usage*, the lead agent's first (sanitized).
+
+    The lead's models (main transcript, not subagent transcripts or sidechain
+    messages) come first, ranked by the lead's own output tokens, so a
+    subagent that wrote more never headlines the session. Then every other
+    model, most output tokens first -- the only ranking when the transcript
+    did not say which messages were the lead's.
+    """
     by_model = usage.get("by_model")
     if not isinstance(by_model, Mapping):
         return []
@@ -965,8 +998,9 @@ def _transcript_models(usage: Mapping[str, Any]) -> list[str]:
         ((m, row) for m, row in by_model.items() if isinstance(m, str) and isinstance(row, Mapping)),
         key=lambda kv: -_count(kv[1].get("output")),
     )
+    lead = [m for m in (usage.get("lead_models") or []) if isinstance(m, str) and m in by_model]
     models: list[str] = []
-    for raw, _row in ranked:
+    for raw in [*lead, *(m for m, _row in ranked)]:
         safe = _sanitize_model_id(raw)
         if safe and not safe.startswith("<") and safe not in models:
             models.append(safe)
@@ -3181,7 +3215,9 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         transcript_models = _transcript_models(transcript_usage)
         if transcript_models:
             model_current, model_source = transcript_models[0], MODEL_SOURCE_TRANSCRIPT
-    models_seen = _models_with_usage(models_seen, transcript_usage)
+    reported_models = models_seen
+    models_seen = _models_with_usage(reported_models, transcript_usage)
+    model_roles = _model_roles(reported_models, models_seen, transcript_usage)
     execution_model = model_current or "unknown"
     provider_current = buf.get("provider_current") if isinstance(buf.get("provider_current"), str) else None
     transcript_provider = transcript_usage.get("provider") if isinstance(transcript_usage, Mapping) else None
@@ -3377,6 +3413,9 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         }
         if buf.get("check_latest_overflow"):
             entry["capture"]["check_latest_overflow"] = True
+    if model_roles:
+        # Which observed model was the lead's and which a subagent's (transcript-proven); local only.
+        entry["capture"]["model_roles"] = model_roles
     invocation_count = int(buf.get("invocation_count") or 0)
     if invocation_count:
         # Model invocations observed (Antigravity PreInvocation); absent for

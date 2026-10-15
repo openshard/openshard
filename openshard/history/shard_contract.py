@@ -1275,6 +1275,19 @@ def build_shard_receipt(
             model_stages = [
                 (f"Observed {i + 1}", _display_model_name(m)) for i, m in enumerate(_models_seen)
             ]
+            # When the transcript proved which model was the lead agent's and
+            # which a subagent's, say so. Still "Observed ..." -- observed, not
+            # routed (the Platform reads the prefix that way).
+            _roles = _capture_block.get("model_roles")
+            if isinstance(_roles, dict) and all(_roles.get(m) in ("lead", "subagent") for m in _models_seen):
+                _counts = {r: sum(1 for m in _models_seen if _roles[m] == r) for r in ("lead", "subagent")}
+                _seen_role: dict[str, int] = {}
+                model_stages = []
+                for m in _models_seen:
+                    _role = _roles[m]
+                    _seen_role[_role] = _seen_role.get(_role, 0) + 1
+                    _label = f"Observed {_role}" + (f" {_seen_role[_role]}" if _counts[_role] > 1 else "")
+                    model_stages.append((_label, _display_model_name(m)))
 
     command_policy = entry.get("command_policy") or {}
     allowed_paths = list(command_policy.get("allowed_paths") or [])
