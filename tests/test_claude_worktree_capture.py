@@ -325,6 +325,39 @@ def test_two_worktrees_in_one_turn_share_the_task_and_count_usage_once(repos):
     assert all(_changed(r) == set() and r["capture"]["prompt_count"] == 0 for r in project)
 
 
+def test_a_worktree_first_opened_by_a_notification_turn_keeps_the_users_task(repos):
+    """Seen live: a checkout first touched in a turn a background-task notification opened said "task not captured".
+
+    The notification is what Claude Code delivers as the turn's prompt; the
+    worktree's task is still what the user asked for.
+    """
+    platform, wt = repos["platform"], repos["wt"]
+    service = _Service({**os.environ})
+    try:
+        claude = _Claude(platform, service.port)
+        claude.start()
+        claude.send("UserPromptSubmit", prompt="Fix the parser")
+        claude.reply(input_tokens=300, output_tokens=30)
+        claude.edit(platform / "notes.md", "plan\n")
+        claude.send("Stop")
+        time.sleep(1.1)
+        claude.send("UserPromptSubmit", prompt="<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+                                               "</task-notification>")
+        claude.edit(wt / "parser.py", "PARSED = True\n", cwd=wt)
+        claude.send("Stop", cwd=wt)
+        claude.send("SessionEnd", cwd=wt, reason="other")
+        assert _wait_for(lambda: _ended(platform) and _ended(wt))
+    finally:
+        service.stop()
+
+    (project_receipt,) = _receipts(platform)
+    (worktree_receipt,) = _receipts(wt)
+    assert worktree_receipt["task"] == project_receipt["task"] == "Fix the parser"
+    assert worktree_receipt["capture"]["task_source"] == "first_user_prompt_excerpt"
+    assert "task-notification" not in json.dumps(worktree_receipt)
+    assert _changed(worktree_receipt) == {"parser.py"}
+
+
 def test_a_service_restart_mid_session_keeps_recording_into_the_worktree(repos):
     platform, wt = repos["platform"], repos["wt"]
     env = {**os.environ}
