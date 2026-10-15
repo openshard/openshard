@@ -2832,6 +2832,23 @@ def _reflog_created(repo_root: Path) -> dict[str, int] | None:
     return created
 
 
+def _own_result_commit(repo_root: Path, commits: list[str], end: str) -> str | None:
+    """The session's last own commit when another session committed on top of it, else None.
+
+    When the end HEAD is one of the session's own commits it is the result
+    (``commit_value``). When it is not -- a delegated agent committed after
+    this session in the same checkout -- the result is the session's newest
+    own commit (``commits`` is topologically ordered, newest first), but only
+    when git confirms it is an ancestor of the end HEAD. Unknown stays None.
+    """
+    if not commits or end in commits:
+        return None
+    last = commits[0]
+    if run_git(repo_root, ["merge-base", "--is-ancestor", last, end]) is None:
+        return None
+    return last
+
+
 def _session_git_outcome(buf: dict, repo_root: Path, previous: dict | None = None) -> dict | None:
     """``git_observed`` end state of the session, or None when git cannot say. Never raises.
 
@@ -2864,7 +2881,7 @@ def _session_git_outcome(buf: dict, repo_root: Path, previous: dict | None = Non
             lo, hi = int(started.timestamp()), int(last.timestamp()) + _SESSION_COMMIT_GRACE_SECONDS
             writes = [int(t.timestamp()) for t in (_parse_utc(s) for s in (buf.get("git_write_at") or [])) if t]
             log = run_git(repo_root, [
-                "log", f"--max-count={_MAX_SESSION_COMMITS + 1}", "--format=%H %ct", f"{start}..{end}",
+                "log", "--topo-order", f"--max-count={_MAX_SESSION_COMMITS + 1}", "--format=%H %ct", f"{start}..{end}",
             ])
             if log is not None:
                 commits: list[str] = []
@@ -2881,6 +2898,9 @@ def _session_git_outcome(buf: dict, repo_root: Path, previous: dict | None = Non
                     commits.append(sha)
                 outcome["commits"] = commits
                 outcome["truncated"] = len(rows) > _MAX_SESSION_COMMITS
+                result = _own_result_commit(repo_root, commits, end)
+                if result is not None:
+                    outcome["result"] = result
         prev_pr = previous.get("pull_request") if isinstance(previous, dict) else None
         if (
             previous is not None and outcome["commits"] and isinstance(prev_pr, dict)
@@ -2962,6 +2982,8 @@ def _merge_git_outcome(fresh: dict | None, stored: object) -> dict | None:
     ):
         merged["commits"] = list(prior["commits"])
         merged["truncated"] = bool(prior.get("truncated"))
+        if prior.get("result") in merged["commits"]:
+            merged["result"] = prior["result"]
     prior_pr = prior.get("pull_request")
     if (
         "pull_request" not in merged and isinstance(prior_pr, dict) and isinstance(prior_pr.get("url"), str)
@@ -3012,6 +3034,9 @@ def _stamp_git_outcome(entry: dict, buf: dict) -> None:
             "shas": [c for c in commits if _sha_or_none(c)][:_MAX_SESSION_COMMITS],
             "truncated": bool(outcome.get("truncated")),
         }
+        if outcome.get("result") in entry["session_commits"]["shas"]:
+            # The session's own last commit, an ancestor of a later agent's end HEAD.
+            entry["session_commits"]["result"] = outcome["result"]
     pr = outcome.get("pull_request")
     if isinstance(pr, dict) and isinstance(pr.get("url"), str):
         entry["pull_request"] = {k: pr.get(k) for k in ("url", "number", "head", "source")}
@@ -3027,6 +3052,8 @@ def _stored_git_outcome(entry: dict) -> dict | None:
     if isinstance(block, dict) and isinstance(block.get("shas"), list):
         outcome["commits"] = [c for c in block["shas"] if _sha_or_none(c)]
         outcome["truncated"] = bool(block.get("truncated"))
+        if block.get("result") in outcome["commits"]:
+            outcome["result"] = block["result"]
     pr = entry.get("pull_request")
     if isinstance(pr, dict) and isinstance(pr.get("url"), str):
         outcome["pull_request"] = dict(pr)

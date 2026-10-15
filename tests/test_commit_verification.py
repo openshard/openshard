@@ -372,3 +372,73 @@ class TestVerdictCompleteness:
         kinds = [p.kind for p in planned]
         assert truncated and len(planned) == ps.MAX_PLANNED_CHECKS
         assert kinds.count("test") == 5 and "lint" not in kinds
+
+# ---------------------------------------------------------------------------
+# The session's own commit when a delegated agent committed on top
+# ---------------------------------------------------------------------------
+
+
+def _iso(ts: float) -> str:
+    from datetime import UTC, datetime
+
+    return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _commit_at(root: Path, message: str, when: int) -> str:
+    import os
+
+    env = {**os.environ, "GIT_COMMITTER_DATE": f"{when} +0000", "GIT_AUTHOR_DATE": f"{when} +0000"}
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", message],
+                   cwd=root, check=True, env=env)
+    return _git(root, "rev-parse", "HEAD")
+
+
+class TestOwnCommitUnderALaterAgentsCommit:
+    """Live E2E shape: the lead committed 24cd66b, then the delegated Codex committed 8042ff9 on top.
+
+    The lead's end HEAD is Codex's commit, so the lead Receipt had no commit and
+    no verification although git observed it create its own.
+    """
+
+    def _lead_outcome(self, tmp_path):
+        import time
+
+        from openshard.adapters import claude_hooks as ch
+
+        root, start = _repo(tmp_path, {"calc/__init__.py": "x = 1\n"})
+        now = int(time.time())
+        _write(root, "calc/__init__.py", "x = 2\n")
+        lead = _commit_at(root, "lead change", now)
+        _write(root, "calc/__init__.py", "x = 3\n")
+        delegated = _commit_at(root, "delegated change", now + 30)  # after the lead's git call returned
+        buf = {"git_head_commit_hash": start, "started_at": _iso(now - 60), "last_activity_at": _iso(now + 40),
+               "git_write_at": [_iso(now + 1)]}
+        return root, lead, delegated, ch._session_git_outcome(buf, root)
+
+    def test_the_sessions_last_own_commit_is_its_result(self, tmp_path):
+        from openshard.adapters import claude_hooks as ch
+        from openshard.history.receipt_evidence import commit_value
+        from openshard.verification.commit_run import session_commits
+
+        _root, lead, delegated, outcome = self._lead_outcome(tmp_path)
+        assert outcome["end_head"] == delegated
+        assert outcome["commits"] == [lead]
+        assert outcome["result"] == lead
+        entry: dict = {"receipt_id": "rcpt_lead"}
+        ch._stamp_git_outcome(entry, {"git_outcome": outcome})
+        assert commit_value(entry) == lead
+        assert delegated not in session_commits(entry)  # never presented as the lead's work
+        rebuilt = ch._stored_git_outcome(entry)
+        assert rebuilt is not None and rebuilt["result"] == lead
+
+    def test_without_a_confirmed_ancestor_there_is_no_commit(self):
+        from openshard.history.receipt_evidence import commit_value
+
+        lead, other = "a" * 40, "b" * 40
+        assert commit_value({"git_end_head": other, "session_commits": {"source": "git_observed", "shas": [lead]}}) is None
+        # A result that is not one of the session's own commits is never used.
+        assert commit_value({"git_end_head": other, "session_commits": {
+            "source": "git_observed", "shas": [lead], "result": other}}) is None
+        assert commit_value({"git_end_head": other, "session_commits": {
+            "source": "git_observed", "shas": [lead], "result": lead}}) == lead
