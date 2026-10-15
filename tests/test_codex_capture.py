@@ -761,7 +761,7 @@ class TestCli:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["status"] == "installed" and data["configured"] is True
-        assert any("review" in s for s in data["next_steps"])
+        assert data["next_steps"] == []  # Codex trust state unknown here: no hint
         assert (repo / HOOKS_RELPATH).exists()
         result = runner.invoke(cli, ["capture", "install", "codex", "--repo-path", str(repo)])
         assert result.exit_code == 0 and "already installed" in result.output

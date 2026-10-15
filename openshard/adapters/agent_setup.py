@@ -50,6 +50,11 @@ from openshard.adapters.codex_hooks_install import (
     load_codex_hooks,
     uninstall_codex_hooks,
 )
+from openshard.adapters.codex_trust import (
+    HOOKS_TRUST_NEXT_STEP,
+    codex_hook_trust,
+    codex_hooks_reviewed,
+)
 from openshard.adapters.cursor_hooks_install import (
     HOOK_EVENTS as CURSOR_HOOK_EVENTS,
 )
@@ -343,6 +348,11 @@ class AgentIntegrationStatus:
     # agent whose integration is fully configured: a plugin can fail to load
     # and a hook command can fail to run, and neither leaves a trace.
     capture_observed: bool | None = None
+    # Codex only: whether Codex trusts the project (or every hook): "trusted","untrusted",
+    # "partial" or "unknown" (None for other agents).
+    hooks_trust: str | None = None
+    # Codex only: "reviewed"/"unreviewed"/"unknown" /hooks review (informational).
+    hooks_review: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -352,6 +362,15 @@ class AgentIntegrationStatus:
     def capture_verified(self) -> bool:
         """Configured *and* proven to deliver (a real capture exists)."""
         return self.configured and self.capture_observed is True
+
+    @property
+    def trust_blocker(self) -> str | None:
+        """Why no session can be captured yet: the agent has not trusted the hooks."""
+        if self.hooks_trust in ("untrusted", "partial"):
+            from openshard.adapters.codex_trust import HOOKS_TRUST_NEXT_STEP
+
+            return HOOKS_TRUST_NEXT_STEP
+        return None
 
     def to_dict(self) -> dict:
         return {
@@ -369,6 +388,8 @@ class AgentIntegrationStatus:
             "config_error": self.config_error,
             "port": self.port,
             "capture_port_mismatch": self.capture_port_mismatch,
+            "hooks_trust": self.hooks_trust,
+            "hooks_review": self.hooks_review,
         }
 
 
@@ -399,6 +420,8 @@ def detect_codex_integration(repo_root: Path | None) -> AgentIntegrationStatus:
         AGENT_CODEX, available, path, repo_root, state, detail, rel,
         events_installed=installed, events_missing=missing,
         capture_observed=agent_capture_observed(AGENT_CODEX, repo_root) if state == "openshard" else None,
+        hooks_trust=codex_hook_trust(repo_root) if installed else None,
+        hooks_review=codex_hooks_reviewed(repo_root) if installed else None,
     )
 
 
@@ -700,11 +723,10 @@ def install_agent(agent: str, *, repo_root: Path | None, port: int | None = None
     elif agent == AGENT_CODEX:
         result = install_codex_hooks(repo_root=repo_root)
         steps = []
-        if result.status in ("installed", "updated"):
-            steps.append(
-                "Codex reviews new hooks once before running them: open Codex in this repository "
-                "and approve the `openshard hooks codex` hooks under /hooks (Codex must trust the project)."
-            )
+        if result.status in ("installed", "updated", "already_installed") and codex_hook_trust(repo_root) in (
+            "untrusted", "partial",
+        ):
+            steps.append(HOOKS_TRUST_NEXT_STEP)
     elif agent == AGENT_OPENCODE:
         result = install_opencode_plugin(repo_root=repo_root, port=port)
         steps = []

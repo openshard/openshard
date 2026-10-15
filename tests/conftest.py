@@ -204,6 +204,12 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_codex_home(tmp_path_factory, monkeypatch):
+    """Codex hook-trust detection never reads the developer's real ~/.codex."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex_home")))
+
+
+@pytest.fixture(autouse=True)
 def _default_pipeline_provider():
     """Patch detect_provider at the pipeline import site for every test.
 

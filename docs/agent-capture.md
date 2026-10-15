@@ -774,8 +774,16 @@ can be closed and independently verified in one step.
   (spawn-coordinated, once) or, with `--no-spawn` / when disabled, folds
   in-process as a fallback. The fold-side translator never imports in the
   hook process while a service is reachable.
-* **Trust**: Codex reviews new non-managed hooks once (`/hooks`); the
-  installer cannot bypass that and `setup` lists it as a next step.
+* **Trust**: Codex runs project hooks only once it trusts the project
+  (`[projects.'<path>'] trust_level = "trusted"` in `$CODEX_HOME/config.toml`).
+  The first `codex exec` in a fresh repository writes that entry and
+  captures nothing; later sessions capture. `openshard doctor` (and
+  `--json`, `codex.hooks_trust`: `trusted|untrusted|partial|unknown`)
+  detects a missing entry, and `setup` / `capture install codex` print the
+  next step only when it is missing. Per-hook `[hooks.state.*]` entries only
+  come from interactive `/hooks` review: they are informational
+  (`codex.hooks_review`), and doctor adds a soft note when they are absent in
+  a trusted project. OpenShard does not recompute Codex's hash.
 * **Commands**: `openshard setup` (when `codex` is on PATH),
   `openshard capture install codex`, `openshard capture uninstall codex`.
 
