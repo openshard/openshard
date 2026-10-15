@@ -15,6 +15,7 @@ All sessions here run through the synchronous in-process path
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from openshard.adapters.claude_hooks import HookOutcome, handle_claude_hook
@@ -48,6 +49,10 @@ def _finish(repo: Path, sid: str = SID) -> dict:
     assert _run(repo, "Stop", sid).action != "error"
     assert _run(repo, "SessionEnd", sid, reason="prompt_input_exit").action != "error"
     return _entry_for(repo, sid)
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args], cwd=repo, check=True)
 
 
 def _entries(repo: Path) -> list[dict]:
@@ -186,6 +191,32 @@ class TestMultipleSessions:
         assert files_b["a.py"]["attribution"] in ("other_session", "git_observed")
         assert files_b["a.py"]["attribution"] != "agent_reported"
         assert entry_b["files_created"] == 1 if files_b["a.py"]["attribution"] == "other_session" else 2
+
+    def test_a_path_in_a_commit_this_session_created_is_its_work_not_another_sessions(self, repo):
+        """Live E2E shape: the lead edited calc.py and committed; the delegated agent then edited
+        the same file through an MCP tool (no reported path) and committed it. The delegated
+        Receipt listed calc.py as other_session (excluded) although its own commit changed it."""
+        _start(repo, SID2)  # the lead, still live
+        _agent_write(repo, "calc.py", "x = 1\n", sid=SID2)
+        _git(repo, "add", "calc.py")
+        _git(repo, "commit", "-q", "-m", "lead change")
+        _run(repo, "PostToolUse", SID2, tool_name="Bash", tool_input={"command": "git commit -m 'lead change'"})
+        _start(repo, SID)  # the delegated agent
+        (repo / "calc.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+        _run(repo, "PostToolUse", SID, tool_name="mcp__node_repl__js", tool_input={"code": "edit"})
+        (repo / "notes.md").write_text("unrelated\n", encoding="utf-8")  # reported by the lead only, not committed
+        _run(repo, "PostToolUse", SID2, tool_name="Write",
+             tool_input={"file_path": str(repo / "notes.md"), "content": "unrelated\n"})
+        _git(repo, "add", "calc.py")
+        _git(repo, "commit", "-q", "-m", "delegated change")
+        _run(repo, "PostToolUse", SID, tool_name="Bash", tool_input={"command": "git commit -m 'delegated change'"})
+        entry = _finish(repo, SID)
+        assert entry["session_commits"]["shas"] and len(entry["session_commits"]["shas"]) == 1
+        files = _by_path(entry)
+        assert files["calc.py"]["attribution"] == "git_observed"
+        assert "commit this session created" in files["calc.py"]["summary"]
+        # A path the other session reported and this session never committed stays excluded.
+        assert files["notes.md"]["attribution"] == "other_session"
 
     def test_second_session_baseline_excludes_first_sessions_uncommitted_work(self, repo):
         _start(repo, SID)
