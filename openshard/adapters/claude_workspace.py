@@ -249,6 +249,12 @@ def stamp_declared(payload: Any, correlation: dict | None, task_id: str | None, 
 class _Turn:
     session_start: tuple[Any, str] | None = None
     prompt: tuple[Any, str] | None = None
+    # The session's latest *user* prompt. ``prompt`` is whatever opened the
+    # current turn, which may be a harness-delivered notification
+    # (``<task-notification>``...); a checkout first opened during such a
+    # turn is given this as its task as well, so its Receipt does not read
+    # "task not captured".
+    task_prompt: tuple[Any, str] | None = None
     touched: list[Path] = field(default_factory=list)  # first entry owns the turn's usage
     opened: set[Path] = field(default_factory=set)  # checkouts this session's start was replayed into
     last_owner: Path | None = None  # owner of the turn Stop just closed (a SessionEnd after it has no turn)
@@ -320,8 +326,11 @@ class WorkspaceRouter:
             if event in (EVENT_SESSION_START, EVENT_USER_PROMPT_SUBMIT):
                 if event == EVENT_SESSION_START:
                     turn.session_start, turn.prompt, turn.touched, turn.opened = (payload, at), None, [], set()
+                    turn.task_prompt = None
                 else:
                     turn.prompt, turn.touched = (payload, at), []
+                    if _is_user_prompt(payload):
+                        turn.task_prompt = (payload, at)
                 if not home_is_checkout or checkout is None:
                     return []
                 if event == EVENT_USER_PROMPT_SUBMIT:
@@ -363,6 +372,10 @@ class WorkspaceRouter:
             if repo not in turn.opened:
                 # A session starts once per checkout; later turns resume it.
                 turn.opened.add(repo)
+                if turn.task_prompt is not None and (turn.prompt is None or not _is_user_prompt(turn.prompt[0])):
+                    # Opened during a notification-driven turn: the checkout's
+                    # task is still the user's latest prompt, replayed first.
+                    held.insert(0, turn.task_prompt)
                 held.insert(0, turn.session_start)
             for item in held:
                 if item is not None and item[0] is not payload:
@@ -386,6 +399,14 @@ class WorkspaceRouter:
         attrs = dict(payload.attrs or {})
         attrs["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
         return replace(payload, attrs=attrs)
+
+
+def _is_user_prompt(payload: Any) -> bool:
+    """True for a prompt the user typed; False for a harness notification or no prompt text."""
+    from openshard.adapters.claude_session_fidelity import prompt_source
+
+    prompt = getattr(payload, "prompt", None)
+    return isinstance(prompt, str) and bool(prompt.strip()) and prompt_source(prompt) is None
 
 
 def _owner_path(owner_dir: Path, workspace: Path, key: str) -> Path:
