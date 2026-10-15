@@ -929,6 +929,33 @@ def _transcript_usage(buf: dict) -> dict | None:
     return usage
 
 
+def _stored_usage_owner(capture: Mapping[str, Any]) -> dict[str, str | None]:
+    """A rebuilt buffer keeps "another checkout owns this session's usage", so a non-owner
+    checkout never starts counting the session's transcript a second time."""
+    owned_elsewhere = capture.get("tokens_not_recorded_reason") == USAGE_ELSEWHERE_REASON
+    return {"usage_elsewhere": USAGE_ELSEWHERE_REASON if owned_elsewhere else None}
+
+
+def _models_with_usage(models_seen: list[str], transcript_usage: Mapping[str, Any] | None) -> list[str]:
+    """Hook/status models first, then every model with transcript usage (subagents included),
+    in first-seen order. Pricing aliases share one identity; the first spelling observed is
+    kept. At most five. Primary-model selection is separate."""
+    from openshard.models.pricing import official_rate
+
+    out: list[str] = []
+    identities: set[str] = set()
+    for raw_model in [*models_seen, *((transcript_usage or {}).get("by_model") or {})]:
+        safe = _sanitize_model_id(raw_model)
+        if not safe or safe.startswith("<"):
+            continue
+        rate = official_rate(safe)
+        identity = rate.model_id if rate else safe.casefold()
+        if identity not in identities and len(out) < 5:
+            out.append(safe)
+            identities.add(identity)
+    return out
+
+
 def _transcript_models(usage: Mapping[str, Any]) -> list[str]:
     """API-reported model ids in transcript *usage*, most output tokens first (sanitized)."""
     by_model = usage.get("by_model")
@@ -953,27 +980,36 @@ def _transcript_cost(usage: Mapping[str, Any]) -> float | None:
     some cache writes carry no TTL split (their rate is unknown), or when
     the usage itself is incomplete.
     """
-    from openshard.models.pricing import estimate_usage_cost
+    from openshard.models.pricing import estimate_usage_cost, official_rate
 
-    if not usage.get("complete"):
+    if not usage.get("complete") or usage.get("surcharged"):
         return None
     total = 0.0
+    fields = ("input", "output", "cache_read", "cache_creation_5m", "cache_creation_1h")
     for model, row in (usage.get("by_model") or {}).items():
-        if not isinstance(row, Mapping):
+        if not isinstance(row, Mapping) or int(row.get("cache_creation_unsplit") or 0):
             return None
-        if int(row.get("cache_creation_unsplit") or 0):
-            return None
-        tokens = [int(row.get(k) or 0) for k in ("input", "output", "cache_read", "cache_creation_5m",
-                                                    "cache_creation_1h")]
-        if not any(tokens):
-            continue
-        estimate = estimate_usage_cost(
-            model, input_tokens=tokens[0], output_tokens=tokens[1], cache_read_tokens=tokens[2],
-            cache_write_tokens=tokens[3], cache_write_1h_tokens=tokens[4],
-        )
-        if estimate is None:
-            return None
-        total += estimate.usd
+        rate = official_rate(model)
+        buckets: list[tuple[Mapping, bool | None]] = [(row, None)]
+        if rate and rate.long_context_threshold is not None:
+            long = row.get("long_context")
+            if not isinstance(long, Mapping):
+                return None
+            short = {k: int(row.get(k) or 0) - int(long.get(k) or 0) for k in fields}
+            if any(v < 0 for v in short.values()):
+                return None
+            buckets = [(short, False), (long, True)]
+        for bucket, tier in buckets:
+            tokens = [int(bucket.get(k) or 0) for k in fields]
+            if not any(tokens):
+                continue
+            estimate = estimate_usage_cost(
+                model, input_tokens=tokens[0], output_tokens=tokens[1], cache_read_tokens=tokens[2],
+                cache_write_tokens=tokens[3], cache_write_1h_tokens=tokens[4], long_context=tier,
+            )
+            if estimate is None:
+                return None
+            total += estimate.usd
     return round(total, 6)
 
 
@@ -1841,7 +1877,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         # transcript is read again. Claude Code tokens recorded any other way
         # (pre-transcript records: the status line's last call) are never
         # carried forward as session totals.
-        "transcript_usage": _stored_transcript_usage(entry, capture),
+        "transcript_usage": _stored_transcript_usage(entry, capture), **_stored_usage_owner(capture),
         "tokens_scope": (
             "last_call"
             if entry.get("executor") == EXECUTOR and capture.get("tokens_source") != TOKENS_SOURCE_TRANSCRIPT
@@ -3216,7 +3252,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         transcript_models = _transcript_models(transcript_usage)
         if transcript_models:
             model_current, model_source = transcript_models[0], MODEL_SOURCE_TRANSCRIPT
-            models_seen = transcript_models[:5]
+    models_seen = _models_with_usage(models_seen, transcript_usage)
     execution_model = model_current or "unknown"
     provider_current = buf.get("provider_current") if isinstance(buf.get("provider_current"), str) else None
     transcript_provider = transcript_usage.get("provider") if isinstance(transcript_usage, Mapping) else None
@@ -3263,17 +3299,16 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         tokens_current = None
         tokens_not_recorded = TOKENS_NOT_RECORDED_TRANSCRIPT_UNAVAILABLE
     cost_not_recorded: str | None = USAGE_ELSEWHERE_REASON if tokens_not_recorded == USAGE_ELSEWHERE_REASON else None
-    if estimated_cost is None and transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
-        # No cost the agent reported (headless ``claude -p`` has no status
-        # line): price the usage per model at the official list rates, with
-        # 1-hour cache writes at their own rate. Any model without a rate,
-        # unsplit cache writes or incomplete usage -> unknown, never a partial sum.
+    if transcript_usage and buf.get("usage_elsewhere") != USAGE_ELSEWHERE_REASON:
+        # Per-message list-rate pricing wins over the status line, whose window
+        # misses turns before its first ping and after its last. No rate, unsplit
+        # cache writes, surcharges or incomplete usage -> status line, else unknown.
         from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE
 
         priced = _transcript_cost(transcript_usage)
         if priced is not None:
             estimated_cost, cost_provenance = priced, COST_PROVENANCE_OFFICIAL_RATE
-        else:
+        elif estimated_cost is None:
             cost_not_recorded = "no_official_rate_for_usage"
     if tokens_current:
         prompt_tokens = int(tokens_current.get("input") or 0)

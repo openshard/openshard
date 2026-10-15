@@ -122,6 +122,19 @@ def _usage_row(usage: Mapping[str, Any]) -> list[int]:
             _count(usage.get("cache_read_input_tokens")), creation, five, one, unsplit]
 
 
+def _surcharged(usage: Mapping[str, Any]) -> bool:
+    """True when a message was billed beyond plain list rates: fast mode, US-only
+    inference (1.1x), a non-standard service tier or server-side tool fees.
+    Absent fields are older transcripts, which only had standard requests."""
+    speed, tier, geo = usage.get("speed"), usage.get("service_tier"), usage.get("inference_geo")
+    if (isinstance(speed, str) and speed != "standard") or (isinstance(tier, str) and tier != "standard"):
+        return True
+    if isinstance(geo, str) and geo.lower() == "us":
+        return True
+    tools = usage.get("server_tool_use")
+    return isinstance(tools, Mapping) and any(_count(v) for v in tools.values())
+
+
 def _new_transcript_state(since: object) -> dict:
     return {"since": since, "files": {}, "closed": {}, "closed_ids": [], "capped": False}
 
@@ -135,6 +148,15 @@ def _file_head(file: Path) -> str | None:
             return hashlib.sha256(fh.read(512)).hexdigest()[:16]
     except OSError:
         return None
+
+
+def _long_context(model: str, row: list[int]) -> bool:
+    """The tier of one validated message, including cached prompt tokens."""
+    from openshard.models.pricing import official_rate
+
+    rate = official_rate(model)
+    return bool(rate and rate.long_context_threshold is not None
+                and row[0] + row[2] + row[3] > rate.long_context_threshold)
 
 
 def _close_message(state: dict, mid: str, model: str, row: list) -> None:
@@ -154,6 +176,11 @@ def _close_message(state: dict, mid: str, model: str, row: list) -> None:
         totals[i] += int(v)
     totals[-1] += 1  # messages
     closed[model] = totals
+    if _long_context(model, row):
+        long = state.setdefault("long_context_closed", {}).setdefault(model, [0] * (len(_USAGE_FIELDS) + 1))
+        for i, v in enumerate(row):
+            long[i] += int(v)
+        long[-1] += 1
 
 
 def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
@@ -227,6 +254,16 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
                 invalid[mid] = True
                 continue
             invalid.pop(mid, None)
+            # List rates only describe standard requests; the latest line of a
+            # streamed message decides, like its counters.
+            surcharged = state.setdefault("surcharged", {})
+            if _surcharged(usage):
+                surcharged[mid] = True
+            else:
+                surcharged.pop(mid, None)
+            order = state.setdefault("model_order", [])
+            if name not in order:
+                order.append(name)
             recent.pop(mid, None)  # the latest line of a streamed message wins
             recent[mid] = [name, *_usage_row(usage)]
             while len(recent) > _TRANSCRIPT_RECENT_IDS:
@@ -240,6 +277,7 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
 def _summarise_transcript_state(state: dict) -> dict | None:
     """``{"messages", "totals", "by_model", "complete"}`` from an incremental state, or None when empty."""
     per_model: dict[str, list[int]] = {}
+    long_context = {m: list(acc) for m, acc in (state.get("long_context_closed") or {}).items()}
     for model, totals in (state.get("closed") or {}).items():
         if isinstance(totals, list) and len(totals) == len(_USAGE_FIELDS) + 1:
             per_model[model] = [int(v) for v in totals]
@@ -251,18 +289,36 @@ def _summarise_transcript_state(state: dict) -> dict | None:
             for i, v in enumerate(row[1:]):
                 acc[i] += int(v)
             acc[-1] += 1
+            if _long_context(row[0], row[1:]):
+                long = long_context.setdefault(row[0], [0] * (len(_USAGE_FIELDS) + 1))
+                for i, v in enumerate(row[1:]):
+                    long[i] += int(v)
+                long[-1] += 1
     messages = sum(acc[-1] for acc in per_model.values())
     if not messages:
         return None
     totals = {f: sum(acc[i] for acc in per_model.values()) for i, f in enumerate(_USAGE_FIELDS)}
-    by_model = {
+    by_model: dict[str, dict[str, object]] = {
         m: {**{f: acc[i] for i, f in enumerate(_USAGE_FIELDS)}, "messages": acc[-1]}
-        for m, acc in sorted(per_model.items(), key=lambda kv: -kv[1][-1])
+        for m in dict.fromkeys([*(state.get("model_order") or []), *per_model])
+        if m in per_model
+        for acc in [per_model[m]]
     }
+    from openshard.models.pricing import official_rate
+
+    for model in by_model:
+        rate = official_rate(model)
+        if rate and rate.long_context_threshold is not None:
+            long_context.setdefault(model, [0] * (len(_USAGE_FIELDS) + 1))
+    for model, acc in long_context.items():
+        by_model[model]["long_context"] = {
+            **{f: acc[i] for i, f in enumerate(_USAGE_FIELDS)}, "messages": acc[-1],
+        }
     complete = not state.get("capped") and not state.get("invalid_usage") and len(by_model) <= _MAX_USAGE_MODELS
     return {"messages": messages, "totals": totals, "by_model": dict(list(by_model.items())[:_MAX_USAGE_MODELS]),
             "complete": complete,
-            **({"incomplete_reason": "malformed_runtime_counter"} if state.get("invalid_usage") else {})}
+            **({"incomplete_reason": "malformed_runtime_counter"} if state.get("invalid_usage") else {}),
+            **({"surcharged": True} if state.get("surcharged") else {})}
 
 
 def read_transcript_usage(path: Path, *, since: datetime | str | None = None) -> dict | None:
