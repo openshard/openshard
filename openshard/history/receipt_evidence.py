@@ -1136,13 +1136,24 @@ def commit_value(entry: dict) -> str | None:
     commits created during the session (``session_commits``, git_observed).
     The end HEAD is the result only when it is one of those -- a HEAD that
     merely moved (checkout, reset, pull) is never presented as the work.
+
+    When another agent committed on top (the end HEAD is not this session's),
+    the result is the session's own last commit that capture confirmed is an
+    ancestor of the end HEAD (``session_commits.result``); otherwise None.
     """
     end = entry.get("git_end_head")
     block = _dict(entry.get("session_commits"))
     shas = block.get("shas")
-    if not isinstance(end, str) or not isinstance(shas, list) or end not in shas:
+    if not isinstance(end, str) or not isinstance(shas, list):
         return None
-    value = end.strip().lower()
+    if end in shas:
+        candidate = end
+    else:
+        result = block.get("result")
+        if not isinstance(result, str) or result not in shas or block.get("source") != "git_observed":
+            return None
+        candidate = result
+    value = candidate.strip().lower()
     return value if _SHA_RE.match(value) else None
 
 
