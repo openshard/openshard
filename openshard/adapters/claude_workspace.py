@@ -325,10 +325,14 @@ class WorkspaceRouter:
                 if not home_is_checkout or checkout is None:
                     return []
                 if event == EVENT_USER_PROMPT_SUBMIT:
-                    # A prompt is not work: the shell merely sitting in another
-                    # checkout never opens that checkout's Receipt. The prompt is
-                    # still held and replayed if the turn does work there.
-                    checkout = self._open_or_home(turn, workspace, checkout)
+                    # A harness notification is not work: the shell merely sitting
+                    # in another checkout when one arrives never opens that
+                    # checkout's Receipt (it is still held and replayed if the turn
+                    # does work there). A user's prompt keeps opening the checkout
+                    # its cwd is in *before* any command runs, so the checkout's
+                    # baseline is taken before the turn's work, never after it.
+                    if _is_notification(payload):
+                        checkout = self._open_or_home(turn, workspace, checkout)
                     self._own(turn, workspace, key, checkout)  # where the session's first turn began
                 return self._deliver(turn, checkout, payload, at)
             if event in (EVENT_STOP, EVENT_SESSION_END):
@@ -401,6 +405,14 @@ class WorkspaceRouter:
         attrs = dict(payload.attrs or {})
         attrs["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
         return replace(payload, attrs=attrs)
+
+
+def _is_notification(payload: Any) -> bool:
+    """True for a harness-delivered prompt (``<task-notification>``...), never for a user's prompt."""
+    from openshard.adapters.claude_session_fidelity import prompt_source
+
+    prompt = getattr(payload, "prompt", None)
+    return isinstance(prompt, str) and prompt_source(prompt) is not None
 
 
 def _only_reads(payload: Any) -> bool:

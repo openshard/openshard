@@ -70,7 +70,9 @@ def command_directory_hint(command: object, cwd: str | None) -> str | None:
 # Deliberately narrow. A command that is wrongly called read-only would hide
 # real work in a checkout, so anything not listed here (and any pipe,
 # redirection, chaining, substitution or variable) keeps the normal routing.
-_READ_ONLY_SHELL_METACHARS = re.compile(r"[|&;<>`$\r\n(){}]")
+# Quotes are rejected too: ``git log "--output=x"`` would otherwise hide a
+# write behind whitespace splitting. Unsupported syntax is never read-only.
+_READ_ONLY_SHELL_METACHARS = re.compile(r"""[|&;<>`$\r\n(){}'"\\]""")
 _READ_ONLY_GIT = frozenset({"status", "log", "diff", "show", "rev-parse"})
 _READ_ONLY_GIT_EXACT = (("branch", "--show-current"), ("remote", "-v"))
 _READ_ONLY_OPENSHARD = frozenset({"history", "receipt", "status"})
@@ -85,7 +87,7 @@ def is_read_only_command(command: object) -> bool:
     ``git remote -v``, ``openshard history|receipt|status``,
     ``gh pr view|list|checks``, ``ls``, ``pwd``, ``cat``/``head``/``tail`` and
     ``Get-Content``/``Get-ChildItem``. No pipes, redirections, chaining,
-    substitutions or environment assignments; no ``--output`` (``git diff
+    substitutions, quotes, backslashes or environment assignments; no ``--output`` (``git diff
     --output=<file>`` writes a file).
     """
     if not isinstance(command, str):

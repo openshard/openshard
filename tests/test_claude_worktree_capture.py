@@ -303,8 +303,7 @@ def test_two_worktrees_in_one_turn_share_the_task_and_count_usage_once(repos):
     try:
         claude = _Claude(platform, service.port)
         claude.start()
-        # The prompt arrives with the shell already in the worktree. A prompt is not
-        # work: it is recorded in the project, which owns the session's usage.
+        # The prompt arrives with the shell already in the worktree: that checkout owns the turn.
         claude.send("UserPromptSubmit", cwd=wt, prompt="Touch both worktrees")
         claude.reply(input_tokens=300, output_tokens=30)
         claude.edit(wt / "one.py", "1\n", cwd=wt)
@@ -319,14 +318,37 @@ def test_two_worktrees_in_one_turn_share_the_task_and_count_usage_once(repos):
     (core_receipt,) = _receipts(core_wt)
     assert wt_receipt["task"] == core_receipt["task"] == "Touch both worktrees"
     assert _changed(wt_receipt) == {"one.py"} and _changed(core_receipt) == {"two.py"}
-    for receipt in (wt_receipt, core_receipt):
-        assert "prompt_tokens" not in receipt
-        assert receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
-    # The project saw the session start and the prompt, changed nothing, and counts the usage once.
-    (project_receipt,) = _receipts(platform)
-    assert _changed(project_receipt) == set()
-    assert project_receipt["capture"]["prompt_count"] == 1
-    assert project_receipt["prompt_tokens"] == 300
+    assert wt_receipt["prompt_tokens"] == 300
+    assert "prompt_tokens" not in core_receipt
+    assert core_receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
+    # The project itself was never touched this turn; it only saw the session start.
+    project = _receipts(platform)
+    assert all(_changed(r) == set() and r["capture"]["prompt_count"] == 0 for r in project)
+
+
+def test_a_shell_write_after_a_prompt_from_an_unopened_checkout_counts_as_the_sessions_work(repos):
+    """Review finding on #560: opening the checkout only after the write snapshotted the new file as pre-existing.
+
+    A user's prompt whose cwd is another checkout opens it before any command
+    runs, so a file a shell command then writes is this session's change.
+    """
+    platform, wt = repos["platform"], repos["wt"]
+    service = _Service({**os.environ})
+    try:
+        claude = _Claude(platform, service.port)
+        claude.start()
+        claude.send("UserPromptSubmit", cwd=wt, prompt="Write the result in the worktree")
+        assert service.server.recorder.wait_idle(20)
+        (wt / "result.txt").write_text("done", encoding="utf-8")
+        claude.run("python -c \"open('result.txt','w').write('done')\"", cwd=wt)
+        claude.send("Stop", cwd=wt)
+        claude.send("SessionEnd", cwd=wt, reason="other")
+        assert _wait_for(lambda: _ended(wt))
+    finally:
+        service.stop()
+    (worktree_receipt,) = _receipts(wt)
+    assert _changed(worktree_receipt) == {"result.txt"}
+    assert worktree_receipt["task"] == "Write the result in the worktree"
 
 
 def test_a_service_restart_mid_session_keeps_recording_into_the_worktree(repos):
@@ -543,6 +565,8 @@ def test_read_only_allowlist_accepts(command):
     "git log | head", "git status && git commit -m x", "cat a > b", "ls; rm -rf x", "git log $(echo x)",
     "gh pr create", "gh pr merge 1", "python -m pytest", "Set-Content a b", "GIT_PAGER=cat git log",
     "openshard sync now", "git -C ../other log", "cd /tmp/wt && git log", "echo `rm x`",
+    'git log "--output=history.txt"', "git log '--output=history.txt'", "git log --output history.txt",
+    "git -c alias.x=!rm log", 'cat "a file.txt"', "cat C:\\tmp\\x.txt",
 ])
 def test_read_only_allowlist_rejects(command):
     from openshard.adapters.claude_capture_routing import is_read_only_command
