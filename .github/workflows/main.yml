@@ -51,7 +51,10 @@ jobs:
   test-full-matrix:
     name: Tests (full, ${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    # Windows runs of the serial suite took 23-40 min across 2026-10-12..15
+    # and two were cancelled at the old 40 min cap; 75 gives headroom while
+    # still catching a hang. Ubuntu finishes in ~8-13 min and keeps 40.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 40 }}
     strategy:
       fail-fast: false
       matrix:
