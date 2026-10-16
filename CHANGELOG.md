@@ -2,6 +2,57 @@
 
 All notable changes to OpenShard are documented here.
 
+## 0.4.17 - 2026-10-16
+
+<!-- release-title: Openshard v0.4.17 - Complete and Trustworthy Receipts -->
+
+Receipts now verify each session commit on the exact commit it made. They
+count the right files and price Claude 5.5 usage correctly. Checks reported
+through PowerShell are attributed to their own outcomes, and Herdr and Codex
+delegation is linked. Cloud tasks keep one Receipt, and passwords written in
+prose no longer reach Receipt task text.
+
+### Added
+
+- Each session commit is verified automatically on that exact commit. The
+  session's own commit is kept when a later agent commits on top, and
+  verification is pinned for delegated Codex commits (#554, #562, #563).
+- Receipt correlation links Herdr multi-agent sessions and records the Herdr
+  terminal a session delegated to (#556, #565). `docs/agent-capture.md`
+  explains running Codex with `codex --no-daemon` inside Herdr so its hooks
+  see the pane.
+- Codex capture detects when Codex has not trusted a project's capture hooks
+  (#557).
+- `openshard capture install claude` warns when the repository's parent holds
+  several checkouts. A session started there never loads hooks installed only
+  in the repository, so the warning suggests `--workspace <parent>` (#568).
+
+### Changed
+
+- Check outcomes follow the shell that reported them. For the PowerShell tool,
+  the outcome is `$LASTEXITCODE`, so `pytest | Select-Object -Last 3` records
+  the check's own result. The Bash tool keeps POSIX rules and now understands
+  `set -o pipefail` and a trailing `exit $?`. Checks inside `if`/`while`/`for`/
+  `try` or script blocks are recorded with an unknown outcome instead of being
+  dropped (#547).
+- A session's own commits count as its work, and the lead agent's model is
+  the headline model, not a subagent's (#564, #561).
+- The README links the Architecture and Remote capture docs (#567).
+
+### Fixed
+
+- Passwords written in prose ("password is ...", `token: ...`) are redacted
+  from Receipt task text and stored command text (#546).
+- A Claude cloud task keeps one Receipt when HTTP hooks send no project
+  directory. The workspace a session started in is remembered and survives
+  restarts, the workspace parent never holds its own Receipt, and a replayed
+  `SessionStart` keeps its provider, surface, cloud session and task (#553).
+- Claude 5.5 cache reads and subagent usage are priced correctly (#555).
+- Nested git checkouts are no longer counted as created files (#558).
+- Notification turns replay the user's task into the checkouts they open, and
+  notifications and read-only commands no longer open other checkouts
+  (#559, #560).
+
 ## 0.4.16 - 2026-10-12
 
 <!-- release-title: Openshard v0.4.16 - Reliable Capture and Accurate Receipts -->
