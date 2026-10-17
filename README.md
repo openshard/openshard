@@ -334,6 +334,7 @@ Openshard is licensed under Apache-2.0.
 - [What is a Receipt?](docs/what-is-a-shard.md)
 - [Architecture](docs/architecture.md)
 - [Platform sync](docs/platform-sync.md)
+- [Signed Receipts (proposal)](docs/signing.md)
 - [CLI reference](docs/cli-reference.md)
 - [Telemetry](docs/telemetry.md)
 - [Changelog](CHANGELOG.md)
