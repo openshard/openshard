@@ -60,6 +60,8 @@ class HistoryStats:
     tokens_input: int | None = None
     tokens_output: int | None = None
     tokens_cache_read: int | None = None
+    # None when no counted Shard reported cache writes: unknown, not zero.
+    tokens_cache_write: int | None = None
     tokens_shards: int = 0
     duration_total_seconds: float | None = None
     duration_shards: int = 0
@@ -91,6 +93,7 @@ class HistoryStats:
                 "input": self.tokens_input,
                 "output": self.tokens_output,
                 "cache_read": self.tokens_cache_read,
+                "cache_write": self.tokens_cache_write,
                 "shards_with_tokens": self.tokens_shards,
                 "provenance": "provider_reported",
             },
@@ -153,6 +156,7 @@ def compute_history_stats(items: list[RecentShard], *, total_attempts: int | Non
 
     cost_total = 0.0
     tokens_in = tokens_out = tokens_cache = 0
+    tokens_cache_write: int | None = None
     duration_total = 0.0
     timestamps: list[str] = []
 
@@ -191,6 +195,8 @@ def compute_history_stats(items: list[RecentShard], *, total_attempts: int | Non
             tokens_in += r.tokens_input or 0
             tokens_out += r.tokens_output or 0
             tokens_cache += r.tokens_cache_read or 0
+            if isinstance(r.tokens_cache_creation, int) and not isinstance(r.tokens_cache_creation, bool):
+                tokens_cache_write = (tokens_cache_write or 0) + r.tokens_cache_creation
 
         if isinstance(r.duration_seconds, (int, float)) and not isinstance(r.duration_seconds, bool):
             duration_total += float(r.duration_seconds)
@@ -216,6 +222,7 @@ def compute_history_stats(items: list[RecentShard], *, total_attempts: int | Non
         stats.tokens_input = tokens_in
         stats.tokens_output = tokens_out
         stats.tokens_cache_read = tokens_cache
+        stats.tokens_cache_write = tokens_cache_write
     stats.duration_total_seconds = round(duration_total, 2) if stats.duration_shards else None
     stats.top_files = sorted(files.items(), key=lambda kv: (-kv[1], kv[0]))[:_TOP_FILES]
     return stats

@@ -101,6 +101,22 @@ def _format_token_count(n: int) -> str:
     k = n / 1000
     return f"{k:.0f}k" if k == int(k) else f"{k:.1f}k"
 
+
+def tokens_line(
+    tokens_input: int | None, tokens_output: int | None,
+    cache_read: int | None = None, cache_write: int | None = None,
+) -> str:
+    """The Tokens row: "18 input / 4k output (+505.3k cache read, +35.2k cache write)".
+
+    Cache reads and writes are priced at their own rates, so a cost estimate
+    only adds up when both are itemised. A cache counter the source never
+    reported (None) is left out, never shown as 0.
+    """
+    line = f"{_format_token_count(tokens_input or 0)} input / {_format_token_count(tokens_output or 0)} output"
+    extras = [f"+{_format_token_count(n)} {label}"
+              for n, label in ((cache_read, "cache read"), (cache_write, "cache write")) if n]
+    return line + (f" ({', '.join(extras)})" if extras else "")
+
 def _tool_activity_counts(receipt: ShardReceipt) -> list[tuple[str, int]]:
     """Per-tool invocation counts (e.g. [("Read", 3), ("Edit", 2)]), first-seen order.
 
@@ -784,12 +800,8 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         lines.append(_row("Permissions", _permissions))
     lines.append(_row("Cost", receipt.cost_display))
     if receipt.tokens_input is not None or receipt.tokens_output is not None:
-        _tok_in = _format_token_count(receipt.tokens_input or 0)
-        _tok_out = _format_token_count(receipt.tokens_output or 0)
-        _tok_line = f"{_tok_in} input / {_tok_out} output"
-        if receipt.tokens_cache_read:
-            _tok_line += f" (+{_format_token_count(receipt.tokens_cache_read)} cache read)"
-        lines.append(_row("Tokens", _tok_line))
+        lines.append(_row("Tokens", tokens_line(receipt.tokens_input, receipt.tokens_output,
+                                                receipt.tokens_cache_read, receipt.tokens_cache_creation)))
     if _shows_usage_row(receipt):
         lines.append(_row("Usage", usage_line(receipt.usage)))
     lines.append(_row("Result", receipt.result))
@@ -1062,9 +1074,8 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     lines.append(f"{_INDENT}COST")
     lines.append(f"{_INDENT}{receipt.cost_display}")
     if receipt.tokens_input is not None or receipt.tokens_output is not None:
-        _tok_in = _format_token_count(receipt.tokens_input or 0)
-        _tok_out = _format_token_count(receipt.tokens_output or 0)
-        lines.append(_row("Tokens", f"{_tok_in} input / {_tok_out} output"))
+        lines.append(_row("Tokens", tokens_line(receipt.tokens_input, receipt.tokens_output,
+                                                receipt.tokens_cache_read, receipt.tokens_cache_creation)))
     if _shows_usage_row(receipt):
         lines.append(_row("Usage", usage_line(receipt.usage)))
     lines.append("")
