@@ -735,6 +735,26 @@ def lines_changed_display(receipt: ShardReceipt) -> str:
     return f"+{receipt.diff_added} / {minus}{receipt.diff_removed}"
 
 
+_FILES_UNKNOWN_PHRASES = {
+    "branch_switch_base_unknown": "files changed on the final branch unknown (branch switch could not be placed)",
+}
+
+
+def changed_display(receipt: ShardReceipt) -> str:
+    """The Changed/Files value: ``changed_files_display``, or why git could not list the files.
+
+    When capture recorded ``git_files_unknown_reason`` the count holds only
+    the files the agent reported, so the row says the git-observed set is
+    unknown before it gives that count (missing is never zero).
+    """
+    reason = (receipt.recorded_evidence or {}).get("git_files_unknown_reason")
+    phrase = _FILES_UNKNOWN_PHRASES.get(reason) if isinstance(reason, str) else None
+    if phrase is None:
+        return changed_files_display(receipt)
+    n = receipt.files_changed
+    return f"{phrase}; agent-reported files only: {n} file{'s' if n != 1 else ''}"
+
+
 def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     """Render a bordered, column-aligned RECEIPT block. Pure, no I/O."""
     evidence = receipt.recorded_evidence or {}
@@ -763,7 +783,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     lines.append(_row(model_label, model_value))
     if receipt.duration_seconds is not None:
         lines.append(_row("Duration", f"{receipt.duration_seconds:.1f}s"))
-    lines.append(_row("Changed", changed_files_display(receipt)))
+    lines.append(_row("Changed", changed_display(receipt)))
     lines.append(_row("Lines changed", lines_changed_display(receipt), width=15))
     lines += excluded_changes_rows(receipt)
     if receipt.files_detail:
@@ -1041,7 +1061,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append("")
 
     lines.append(f"{_INDENT}CHANGES")
-    file_str = changed_files_display(receipt)
+    file_str = changed_display(receipt)
     if receipt.diff_added is not None and receipt.diff_removed is not None:
         file_str += f" changed (+{receipt.diff_added} / -{receipt.diff_removed})"
     elif receipt.files_changed > 0 and not receipt.changes:

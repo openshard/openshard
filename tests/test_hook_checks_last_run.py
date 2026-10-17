@@ -16,7 +16,9 @@ from pathlib import Path
 import pytest
 
 from openshard.adapters.claude_hooks import handle_claude_hook
-from openshard.history.shard_contract import build_shard_receipt, checks_label
+from openshard.history.receipt_render import render_compact_shard_receipt, render_full_shard_receipt
+from openshard.history.shard_contract import build_shard_receipt, checks_label, verified_label
+from openshard.history.verification_truth import replaced_failures_phrase
 from openshard.verification.check_command import classify_check_commands, suite_supersedes
 from tests.capture_fixtures import _make_repo
 
@@ -166,3 +168,58 @@ class TestSuiteClassification:
         assert not suite_supersedes("a" * 16 + ":vitest:narrow", "a" * 16 + ":vitest:narrow")
         assert not suite_supersedes("a" * 16 + ":vitest:full", "a" * 16 + ":vitest:full")
         assert not suite_supersedes(None, "a" * 16 + ":vitest:narrow")
+
+
+REPLACED = "passed · 1 earlier failure replaced by a later run"
+
+
+class TestReplacedFailureWording:
+    """A pass that replaced an earlier failure reads as a pass, never as ``1/2 passed``."""
+
+    @pytest.mark.parametrize("later", [NARROW, "npm run test"])
+    def test_checks_and_verified_rows_name_the_replaced_failure(self, repo, later):
+        entry = _session(repo, (NARROW, False), (later, True))
+        receipt = build_shard_receipt(entry)
+        assert checks_label(receipt) == f"{REPLACED} (agent-reported)"
+        assert verified_label(receipt) == f"Not verified by OpenShard (agent reported {REPLACED})"
+        compact = render_compact_shard_receipt(receipt)
+        assert f"{REPLACED} (agent-reported)" in compact and "1/2 passed" not in compact
+        assert "1/2 passed" not in render_full_shard_receipt(receipt)
+
+    def test_display_only_evidence_history_and_synced_fields_unchanged(self, repo):
+        entry = _session(repo, (NARROW, False), ("npm run test", True))
+        receipt = build_shard_receipt(entry)
+        checks_label(receipt)
+        assert receipt.checks_display == "1/2 passed"  # synced string, unchanged
+        # The evidence history still lists the failed run, unchanged.
+        assert [(c["name"], c["status"]) for c in receipt.verification["checks"]] == [
+            (f"Bash: {NARROW}", "failed"), ("Bash: npm run test", "passed"),
+        ]
+        assert entry["capture"]["check_runs"] == {"passed": 1, "failed": 1}
+
+    def test_two_replaced_failures_are_plural(self, repo):
+        entry = _session(repo, (NARROW, False), (NARROW, False), ("npm run test", True))
+        label = checks_label(build_shard_receipt(entry))
+        assert label == "passed · 2 earlier failures replaced by later runs (agent-reported)"
+
+    def test_failure_still_standing_keeps_counts(self, repo):
+        entry = _session(repo, ("npm run test", True), (NARROW, False))
+        label = checks_label(build_shard_receipt(entry))
+        assert "replaced" not in label and "failed" in label
+
+    def test_clean_pass_keeps_ratio(self, repo):
+        entry = _session(repo, ("npm run test", True))
+        assert checks_label(build_shard_receipt(entry)) == "1/1 passed (agent-reported)"
+
+    def test_truncated_run_list_is_a_lower_bound(self):
+        block = {"source": "agent_reported", "status": "passed", "checks_failed": 0,
+                 "checks": [{"status": "failed"}, {"status": "passed"}],
+                 "incomplete_reasons": ["checks_truncated"]}
+        assert replaced_failures_phrase(block) == "passed · at least 1 earlier failure replaced by a later run"
+
+    def test_observed_or_malformed_blocks_get_no_phrase(self):
+        observed = {"source": "directly_observed", "status": "passed", "checks_failed": 0,
+                    "checks": [{"status": "failed"}]}
+        assert replaced_failures_phrase(observed) == ""
+        assert replaced_failures_phrase(None) == ""
+        assert replaced_failures_phrase({"source": "agent_reported", "status": "passed", "checks": "x"}) == ""

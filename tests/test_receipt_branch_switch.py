@@ -13,7 +13,14 @@ import subprocess
 from pathlib import Path
 
 from openshard.adapters.claude_git_outcome import FILES_BRANCH_SWITCH_UNKNOWN
-from openshard.adapters.claude_hooks import handle_claude_hook
+from openshard.adapters.claude_hooks import _buffer_from_entry, handle_claude_hook
+from openshard.history.receipt_render import (
+    changed_display,
+    render_compact_shard_receipt,
+    render_full_shard_receipt,
+)
+from openshard.history.shard_contract import build_shard_receipt
+from openshard.sync.envelope import receipt_payload
 from tests.capture_fixtures import SID
 
 
@@ -134,3 +141,77 @@ class TestBranchSwitch:
         assert _paths(entry) == ["new.py"]
         assert all(f["attribution"] == "agent_reported" for f in entry["files_detail"])
         assert entry["files_deleted"] == 0
+
+
+class TestFinalBranch:
+    """After a switch the Receipt's branch is the one the session ended on (where its files were counted)."""
+
+    def _switched(self, repo: Path) -> dict:
+        _two_branches(repo)
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="Do the work")
+        _bash(repo, "git checkout main", "checkout", "-q", "main")
+        _bash(repo, "git checkout -b demo/receipt-check", "checkout", "-q", "-b", "demo/receipt-check")
+        _write(repo, "new.py", "x = 1\n")
+        return _finish(repo)
+
+    def test_receipt_branch_is_the_final_branch_and_start_branch_stays_local(self, repo):
+        entry = self._switched(repo)
+        assert entry["git_branch"] == "demo/receipt-check"
+        assert entry["capture"]["start_branch"] == "work-a"
+        assert build_shard_receipt(entry).branch == "demo/receipt-check"
+
+    def test_sync_sends_the_final_branch_and_no_start_branch(self, repo):
+        payload = receipt_payload(self._switched(repo), 0)
+        assert payload["branch"] == "demo/receipt-check"
+        assert "start_branch" not in json.dumps(payload) and "work-a" not in json.dumps(payload)
+
+    def test_a_rebuilt_buffer_keeps_the_start_branch(self, repo):
+        entry = self._switched(repo)
+        assert _buffer_from_entry(entry, SID)["git_branch"] == "work-a"
+
+    def test_no_switch_keeps_branch_and_adds_nothing(self, repo):
+        _two_branches(repo)
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="Do the work")
+        _write(repo, "new.py", "x = 1\n")
+        entry = _finish(repo)
+        assert entry["git_branch"] == "work-a"
+        assert "start_branch" not in entry["capture"]
+
+    def test_round_trip_keeps_the_start_branch(self, repo):
+        _two_branches(repo)
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="Do the work")
+        _bash(repo, "git checkout main", "checkout", "-q", "main")
+        _bash(repo, "git checkout work-a", "checkout", "-q", "work-a")
+        entry = _finish(repo)
+        assert entry["git_branch"] == "work-a"
+        assert "start_branch" not in entry["capture"]
+
+
+class TestUnknownFileListWording:
+    def test_changed_row_says_the_final_branch_files_are_unknown(self, repo):
+        _two_branches(repo)
+        _git(repo, "config", "core.logAllRefUpdates", "false")
+        for log in (repo / ".git" / "logs").rglob("*"):
+            if log.is_file():
+                log.unlink()
+        _run(repo, "SessionStart", source="startup")
+        _run(repo, "UserPromptSubmit", prompt="Do the work")
+        _bash(repo, "git checkout main", "checkout", "-q", "main")
+        _write(repo, "new.py", "x = 1\n")
+        entry = _finish(repo)
+        assert entry["git_branch"] == "main"  # where the session ended, even though its files are unknown
+        receipt = build_shard_receipt(entry)
+        expected = ("files changed on the final branch unknown (branch switch could not be placed); "
+                    "agent-reported files only: 1 file")
+        assert changed_display(receipt) == expected
+        assert f"Changed     {expected}" in render_compact_shard_receipt(receipt)
+        assert expected in render_full_shard_receipt(receipt)
+        # Platform sync is unchanged: the reason is local only.
+        assert "branch_switch_base_unknown" not in json.dumps(receipt_payload(entry, 0))
+
+    def test_known_file_list_keeps_the_usual_row(self, repo):
+        entry = TestFinalBranch()._switched(repo)
+        assert changed_display(build_shard_receipt(entry)).startswith("1 file")
