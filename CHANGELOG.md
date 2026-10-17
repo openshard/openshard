@@ -2,6 +2,39 @@
 
 All notable changes to OpenShard are documented here.
 
+## 0.4.18 - 2026-10-18
+
+<!-- release-title: Openshard v0.4.18 - Receipts That Add Up -->
+
+Receipts now tell the truth in the cases a real session exposed. A branch
+switch no longer inflates the file count, a test that fails and then passes
+counts as passed, and a re-run that cannot set up the project says so instead
+of reporting a failure. Cost lines now add up, and every receipt records lines
+added and removed.
+
+### Added
+
+- Each Receipt records lines added and removed, or says why it could not
+  count them (#571).
+- Receipts show cache-write tokens next to cache reads, so the token lines add
+  up to the estimated cost (#572).
+- When a re-run's tests pass but a later setup step cannot run, the Receipt
+  keeps the result: "OpenShard re-ran the tests: 69 / 69 passed (vitest); then
+  Electron's binary is not installed..." The check stays unverified (#576).
+
+### Changed
+
+- A re-run that cannot set up the project (Electron or a native module not
+  installed, a missing command or module) is recorded as unknown with a
+  reason, never as failed (#573).
+- A narrow test run that fails and a later full run of the same suite that
+  passes count as passed. The failed run stays in the history, and the
+  Receipt reads "passed · 1 earlier failure replaced by a later run"
+  (#574, #577).
+- After a mid-session branch switch, only files changed on the final branch
+  count. The Receipt shows that branch, and says when the file list cannot be
+  placed (#575, #577).
+
 ## 0.4.17 - 2026-10-16
 
 <!-- release-title: Openshard v0.4.17 - Complete and Trustworthy Receipts -->
