@@ -105,3 +105,121 @@ def setup_failure_metadata(
         "verification": block,
         "outcome_classification": classify(facts, attempt=attempt, model=model).to_dict(),
     }
+
+
+# ---------------------------------------------------------------------------
+# OpenShard's own re-run of a check on an exact commit (post_session.run_checks)
+# ---------------------------------------------------------------------------
+#
+# A re-run often happens in an isolated copy of the commit whose JavaScript
+# dependencies were installed offline with install scripts disabled. A suite
+# that cannot start there (Electron's binary is never downloaded, a native
+# addon is never built, a package is not in the offline store) exits non-zero
+# without saying anything about the change. Those runs are ``unknown`` with a
+# reason, never ``failed``.
+#
+# Two tiers, both conservative:
+#
+# * an *incomplete install* (Electron or a native addon missing its install
+#   step) is the environment whatever else the output says;
+# * every other "could not start" signature counts only when the output shows
+#   no test results at all. Once a runner has reported results, a non-zero
+#   exit stays ``failed``: a test that raises ``Cannot find module`` is a real
+#   failure of the change.
+
+_ANSI = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+
+_INCOMPLETE_INSTALL: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"Electron failed to install correctly", re.IGNORECASE),
+     "Electron's binary is not installed (its install script did not run)"),
+    (re.compile(r"Could not locate the bindings file", re.IGNORECASE),
+     "a native module is not built (its install script did not run)"),
+    (re.compile(r"was compiled against a different Node\.js version", re.IGNORECASE),
+     "a native module was built for a different Node.js or Electron version"),
+    (re.compile(r"Cannot find module '[^'\n]*\.node'"),
+     "a native module is not built (its install script did not run)"),
+)
+
+# Evidence that a test runner started and reported results.
+_TEST_RESULTS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^=+ .*test session starts", re.MULTILINE),  # pytest
+    re.compile(r"^=+ .*\b\d+ (?:passed|failed|errors?|skipped|deselected)\b", re.MULTILINE),  # pytest
+    re.compile(r"^\s*Test Suites:\s+.*\d+ total", re.MULTILINE),  # jest
+    re.compile(r"^\s*Tests:\s+.*\d+ total", re.MULTILINE),  # jest
+    re.compile(r"^\s*Test Files\s+.*\d+ (?:passed|failed|skipped)", re.MULTILINE),  # vitest
+    re.compile(r"^\s*Tests\s+.*\d+ (?:passed|failed|skipped)", re.MULTILINE),  # vitest
+    re.compile(r"^\s*\d+ (?:passing|failing|pending)\b", re.MULTILINE),  # mocha
+    re.compile(r"^#\s*(?:tests|pass|fail)\s+\d+", re.MULTILINE),  # node --test / TAP
+    re.compile(r"^(?:not )?ok \d+\b", re.MULTILINE),  # TAP
+    re.compile(r"^\s*\d+ (?:passed|failed|flaky)\b", re.MULTILINE),  # playwright
+    re.compile(r"^test result: ", re.MULTILINE),  # cargo
+    re.compile(r"^(?:--- FAIL|FAIL\s+\S+|ok\s+\S+\s+[\d.]+s)", re.MULTILINE),  # go test
+    re.compile(r"^Ran \d+ tests? in ", re.MULTILINE),  # unittest
+)
+
+_BARE_PACKAGE = r"(?P<pkg>(?:@[\w.\-]+/)?[\w][\w.\-]*)(?:/[^'\"\s]*)?"
+_NODE_MISSING_PACKAGE = re.compile(
+    r"^\s*(?:Uncaught )?(?:\w*Error)?(?: \[ERR_MODULE_NOT_FOUND\])?:? ?Cannot find (?:module|package) "
+    r"['\"]" + _BARE_PACKAGE + r"['\"]",
+    re.MULTILINE,
+)
+_NPM_MISSING_SCRIPT = re.compile(r"^npm (?:ERR!|error) Missing script", re.MULTILINE | re.IGNORECASE)
+_NPM_ENOENT = re.compile(r"^npm (?:ERR!|error) (?:code ENOENT|enoent )", re.MULTILINE | re.IGNORECASE)
+_SPAWN_ENOENT = re.compile(r"\bspawn \S+ ENOENT\b")
+
+_SCAN_HEAD = 16_000
+_SCAN_TAIL = 48_000
+
+
+def _scan_text(output: str | None) -> str:
+    text = output or ""
+    if len(text) > _SCAN_HEAD + _SCAN_TAIL:
+        text = text[:_SCAN_HEAD] + "\n" + text[-_SCAN_TAIL:]
+    return _ANSI.sub("", text)
+
+
+def reports_test_results(output: str | None) -> bool:
+    """Whether *output* shows a test runner that started and reported results."""
+    from openshard.verification.failed_tests import failing_test_ids
+
+    text = _scan_text(output)
+    return any(p.search(text) for p in _TEST_RESULTS) or bool(failing_test_ids(text))
+
+
+def rerun_setup_failure(exit_code: int | None, output: str | None) -> str | None:
+    """Why a re-run check that exited non-zero could not run here, or ``None`` when it is a real failure.
+
+    The reason is short and path-free (at most a package name). A zero or
+    missing exit code is never a setup failure: a timeout or a check that
+    could not start is already ``unknown`` before this is asked.
+    """
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code == 0:
+        return None
+    text = _scan_text(output)
+    for pattern, reason in _INCOMPLETE_INSTALL:
+        if pattern.search(text):
+            return reason
+    if reports_test_results(text):
+        return None
+    kind = detect_setup_failure(exit_code, text)
+    if kind == KIND_MISSING_MODULE:
+        return "a required Python module is not installed"
+    if kind == KIND_COMMAND_NOT_FOUND:
+        return "a command the check needs was not found"
+    if _NPM_MISSING_SCRIPT.search(text):
+        return "the package script the check runs does not exist at this commit"
+    if _NPM_ENOENT.search(text):
+        return "npm could not find a file it needs (ENOENT)"
+    missing = _NODE_MISSING_PACKAGE.search(text)
+    if missing:
+        return f"the dependency {missing.group('pkg')[:60]} is not installed"
+    if _SPAWN_ENOENT.search(text):
+        return "a program the tests start was not found (ENOENT)"
+    if exit_code < 0:
+        return f"the test runner was stopped by signal {-exit_code} before it reported any results"
+    return None
+
+
+def rerun_setup_reason(reason: str) -> str:
+    """The receipt/CLI sentence for a re-run that could not set the project up."""
+    return f"OpenShard couldn't set up the project to re-run the check: {reason}"

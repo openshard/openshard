@@ -30,6 +30,7 @@ from openshard.verification.post_session import (
     run_checks,
     tree_state,
 )
+from openshard.verification.setup_failure import rerun_setup_reason
 
 STATUS_OK = "ok"
 STATUS_DRY_RUN = "dry_run"
@@ -59,7 +60,7 @@ def _runnable(planned: list[PlannedCheck], approve: bool) -> list[PlannedCheck]:
 def _not_run(planned: list[PlannedCheck], runnable: list[PlannedCheck], problem: str) -> list[CheckRun]:
     """No isolated copy: runnable checks are ``unknown`` (a missing package cache says nothing about the change)."""
     return [
-        CheckRun(c, CHECK_UNKNOWN, note=problem[:120]) if c in runnable
+        CheckRun(c, CHECK_UNKNOWN, note=rerun_setup_reason(problem), setup_failed=True) if c in runnable
         else CheckRun(c, CHECK_SKIPPED, note="needs approval (re-run with --approve)")
         for c in planned
     ]
@@ -93,7 +94,8 @@ def _run_in(path: Path, planned: list[PlannedCheck], runnable: list[PlannedCheck
     ran = iter(run_checks([c for c in planned if id(c) not in missing], path, approve=approve, timeout=timeout,
                           stream=stream, env=env or None, on_start=on_start))
     return [
-        CheckRun(c, CHECK_UNKNOWN, note=f"{missing[id(c)]} is not installed for {Path(c.argv[0]).name}; not run")
+        CheckRun(c, CHECK_UNKNOWN, setup_failed=True,
+                 note=rerun_setup_reason(f"{missing[id(c)]} is not installed for {Path(c.argv[0]).name}"))
         if id(c) in missing else next(ran)
         for c in planned
     ]
