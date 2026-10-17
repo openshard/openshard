@@ -915,9 +915,12 @@ def _transcript_usage(buf: dict) -> dict | None:
             totals = usage.get("totals")
             if not isinstance(baseline, dict) or not isinstance(totals, dict):
                 return None
-            delta = {}
+            delta: dict[str, int | None] = {}
             for key, value in totals.items():
                 before = baseline.get(key)
+                if value is None:
+                    delta[key] = None  # not reported by the counter: stays unknown
+                    continue
                 if (not isinstance(value, int) or not isinstance(before, int)
                         or isinstance(value, bool) or isinstance(before, bool) or value < before):
                     return None  # reset/changed counter: never manufacture a delta
@@ -1892,7 +1895,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
             {
                 "input": entry.get("prompt_tokens") or 0,
                 "output": entry.get("completion_tokens") or 0,
-                "cache_creation": entry.get("cache_creation_tokens") or 0,
+                "cache_creation": _int_or_none(entry.get("cache_creation_tokens")),  # None stays unknown
                 "cache_read": entry.get("cache_read_tokens") or 0,
             }
             if isinstance(entry.get("prompt_tokens"), int)
@@ -1951,7 +1954,9 @@ def _stored_transcript_usage(entry: dict, capture: dict) -> dict | None:
     names = {"input": "prompt_tokens", "output": "completion_tokens",
              "cache_read": "cache_read_tokens", "cache_creation": "cache_creation_tokens"}
     totals = {k: entry.get(v) for k, v in names.items()}
-    if not all(isinstance(v, int) and not isinstance(v, bool) for v in totals.values()):
+    # Cache writes may be unreported (Codex): None round-trips; 0 from older records still loads.
+    if not all(isinstance(v, int) and not isinstance(v, bool) for k, v in totals.items()
+               if not (k == "cache_creation" and v is None)):
         return None
     by_model = capture.get("usage_by_model")
     return {
@@ -3259,7 +3264,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         prompt_tokens = int(tokens_current.get("input") or 0)
         completion_tokens = int(tokens_current.get("output") or 0)
         total_tokens = prompt_tokens + completion_tokens
-        cache_creation_tokens = int(tokens_current.get("cache_creation") or 0)
+        cache_creation_tokens = _int_or_none(tokens_current.get("cache_creation"))
         cache_read_tokens = int(tokens_current.get("cache_read") or 0)
         tokens_provenance = usage_provenance
 
@@ -4369,6 +4374,18 @@ def run_hook_from_stream(
 # ---------------------------------------------------------------------------
 
 
+def _per_message_totals(usage: dict) -> dict[str, int | None]:
+    """Per-message usage totals (OpenCode, Hermes); cache writes are None unless every message reported them."""
+    reports = [r for r in usage.values() if isinstance(r, dict)]
+    totals: dict[str, int | None] = {
+        k: sum(int(r.get(k) or 0) for r in reports) for k in ("input", "output", "cache_read")
+    }
+    writes = [r.get("cache_creation") for r in reports]
+    known = [w for w in writes if isinstance(w, int) and not isinstance(w, bool)]
+    totals["cache_creation"] = sum(known) if known and len(known) == len(writes) else None
+    return totals
+
+
 def _apply_status(payload: StatusPayload, buf: dict, *, now: str | None = None) -> bool:
     """Merge one status-line observation into *buf*. Returns True if anything changed.
 
@@ -4394,7 +4411,8 @@ def _apply_status(payload: StatusPayload, buf: dict, *, now: str | None = None) 
             "cost": payload.cost_total_usd,
             "input": payload.tokens_input or 0,
             "output": payload.tokens_output or 0,
-            "cache_creation": payload.tokens_cache_creation or 0,
+            # A message that did not report cache writes stays unknown (None).
+            "cache_creation": payload.tokens_cache_creation,
             "cache_read": payload.tokens_cache_read or 0,
         }
         if usage.get(payload.usage_key) != report:
@@ -4419,11 +4437,7 @@ def _apply_status(payload: StatusPayload, buf: dict, *, now: str | None = None) 
         else:
             buf["cost_baseline_usd"] = None
             buf["cost_total_usd"] = None
-        totals = {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
-        for r in usage.values():
-            if isinstance(r, dict):
-                for k in totals:
-                    totals[k] += int(r.get(k) or 0)
+        totals = _per_message_totals(usage)
         if any(totals.values()):
             buf["tokens_current"] = totals
         return changed
