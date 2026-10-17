@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from openshard.verification.check_command import item_outcome
+from openshard.verification.check_command import item_outcome, suite_supersedes
 
 MAX_BUFFERED_CHECKS = 20
 
@@ -40,12 +40,12 @@ def record_checks(buf: dict, payload: Any, action: str, outcome: str, at: str) -
         key = payload.command_key if len(items) == 1 or not payload.command_key else f"{payload.command_key[:14]}{index:02d}"
         _record_check(buf, item["name"], item["kind"], status=status, at=at,
                       exit_code=payload.command_exit_code if status != "unknown" else None,
-                      key=key, unattributed=reason)
+                      key=key, unattributed=reason, suite=item.get("suite"))
 
 
 def _record_check(
     buf: dict, name: str, kind: str, *, status: str, at: str, exit_code: int | None = None,
-    key: str | None = None, unattributed: str | None = None,
+    key: str | None = None, unattributed: str | None = None, suite: str | None = None,
 ) -> None:
     """Remember one hook-observed check command with the outcome its hook reported
     (``unknown`` when the hook reported none).
@@ -55,6 +55,12 @@ def _record_check(
     (``check_latest``, keyed by ``command_key``) is what the verification
     status is computed from -- a check that failed and then passed on a
     re-run is passed; the earlier failed run stays listed and counted.
+
+    A passed *full-suite* run also supersedes earlier failed *narrow* runs of
+    the same suite (``check_command.suite_supersedes`` has the rule): their
+    slots leave ``check_latest``, so the status follows the later full run,
+    while their runs stay in ``checks`` and ``checks_failed_runs``. A narrow
+    run that fails again afterwards gets a new slot and fails the session.
     """
     buf["checks_total"] = int(buf.get("checks_total") or 0) + 1
     if status in ("passed", "failed"):
@@ -63,10 +69,22 @@ def _record_check(
     latest = buf.get("check_latest")
     if not isinstance(latest, dict):
         latest = buf["check_latest"] = {}
+    suites = buf.get("check_suites")
+    if not isinstance(suites, dict):
+        suites = buf["check_suites"] = {}
     slot = key or f"name:{name}"
+    if status == "passed" and suite:
+        for other, other_suite in list(suites.items()):
+            if other != slot and latest.get(other) == "failed" and suite_supersedes(suite, other_suite):
+                latest.pop(other, None)
+                suites.pop(other, None)
     if slot in latest or len(latest) < MAX_CHECK_KEYS:
         latest.pop(slot, None)  # re-insert: most recently run last
         latest[slot] = status
+        if suite:
+            suites[slot] = suite
+        else:
+            suites.pop(slot, None)
     else:
         buf["check_latest_overflow"] = True
     checks = buf.get("checks")
@@ -197,8 +215,8 @@ def _reason(latest_failed: int, latest_passed: int, unknown: int, superseded: in
     if latest_failed:
         reason = "The agent's hook reported a check command as failed; OpenShard did not run it."
     elif superseded and latest_passed and not unknown:
-        reason = (f"The agent's hook reported {superseded} failed check run(s) that passed on a later re-run; "
-                  "OpenShard did not run them.")
+        reason = (f"The agent's hook reported {superseded} failed check run(s) that passed on a later re-run "
+                  "or a later full-suite run of the same tests; OpenShard did not run them.")
     elif latest_passed and not unknown:
         reason = "The agent's hook reported the check command outcome(s); OpenShard did not run them."
     elif latest_passed:

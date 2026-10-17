@@ -124,6 +124,9 @@ class CheckCommand:
     # non-setup command ran before it in the same ``&&`` chain); a success of
     # the whole chain still means the check passed.
     failure_unattributed: str | None = None
+    # ``"<family>:full"`` / ``"<family>:narrow"`` for a test-runner run whose
+    # scope can be read off its words (see ``_suite``); None otherwise.
+    suite: str | None = None
 
     @property
     def is_check(self) -> bool:
@@ -185,6 +188,9 @@ def _classify(command: str | None, *, depth: int, shell: str = SHELL_POSIX) -> l
         for simple in statement:
             simple.words, simple.in_block = _strip_keywords(simple.words, shell)
     flat = [(si, ci) for si, st in enumerate(statements) for ci in range(len(st))]
+    # A command line that changes directory may be running another package's
+    # tests: none of its checks gets a suite (never superseding, never superseded).
+    moves_dir = any(s.words and _program(s.words[0]) in _DIR_CHANGE for st in statements for s in st)
     out: list[CheckCommand] = []
     for si, statement in enumerate(statements):
         for ci, simple in enumerate(statement):
@@ -199,11 +205,13 @@ def _classify(command: str | None, *, depth: int, shell: str = SHELL_POSIX) -> l
                 # ``bash -lc "pytest -q"``: the inner script's exit status is the shell's.
                 for inner in _classify(script, depth=depth + 1):
                     out.append(CheckCommand(inner.kind, inner.segment, inner.unattributed or outer,
-                                            inner.failure_unattributed or outer_failure))
+                                            inner.failure_unattributed or outer_failure,
+                                            None if moves_dir else inner.suite))
                 continue
             kind = _kind_of(simple.words)
             if kind != KIND_OTHER:
-                out.append(CheckCommand(kind, _display(simple.words), outer, outer_failure))
+                suite = _suite(simple.words) if kind == KIND_TEST and not moves_dir else None
+                out.append(CheckCommand(kind, _display(simple.words), outer, outer_failure, suite))
     return out
 
 
@@ -782,23 +790,172 @@ def _first_positional(words: list[str], *, value_flags: frozenset[str] = frozens
     return []
 
 
+# -- test-suite scope (which later run supersedes an earlier failure) -------------
+#
+# The rule, deliberately narrow. An earlier *failed* run of a test runner is
+# superseded by a later *passed* run only when all of these hold:
+#
+# 1. both ran in the same working directory (the hook's ``cwd``, compared as a
+#    hash) and neither command line changed directory (``cd``/``pushd``...);
+# 2. the earlier run was *narrow*: it named files, a filter or any argument
+#    not on the small allowlist below, so it ran a subset of the suite;
+# 3. the later run was *full*: the runner, or the package manager's ``test``
+#    script, with no arguments beyond that allowlist (output/verbosity only);
+# 4. the later run is of the same runner, or is the package manager's
+#    ``test`` script (``npm test``, ``npm run test``, ``pnpm test``,
+#    ``yarn test``) and the earlier run was a JS test runner or a narrowed
+#    ``test`` script. The project's ``test`` script is taken to be its full JS
+#    suite; a full ``vitest run`` does *not* supersede a narrowed ``npm test``
+#    (the script may run more than vitest);
+# 5. the later pass is attributable to the check itself (not piped etc.).
+#
+# Anything else -- another runner, another script (``test:unit``), a
+# workspace/prefix flag, an unrecognised argument -- has no suite and never
+# supersedes anything: the earlier failure stands. An earlier *full* run that
+# failed is only ever superseded by re-running the same command.
+
+SUITE_FULL = "full"
+SUITE_NARROW = "narrow"
+SUITE_PM_TEST = "pm_test"
+_JS_TEST_RUNNERS = frozenset({"vitest", "jest", "mocha", "ava"})
+SUITE_FAMILIES: frozenset[str] = _JS_TEST_RUNNERS | {"pytest", SUITE_PM_TEST}
+_DIR_CHANGE = frozenset({"cd", "pushd", "popd", "chdir", "set-location", "sl", "push-location", "pop-location"})
+# Arguments that change only output or stop-on-first-failure, never which tests run.
+_SUITE_FLAGS: dict[str, frozenset[str]] = {
+    "pytest": frozenset({"-q", "-qq", "-v", "-vv", "-vvv", "-x", "--exitfirst", "--quiet", "--verbose",
+                         "--no-header", "--color=yes", "--color=no"}),
+    "vitest": frozenset({"--run", "--silent", "--color", "--no-color", "--bail=1"}),
+    "jest": frozenset({"--ci", "--silent", "--verbose", "--color", "--no-color", "--bail"}),
+    "mocha": frozenset({"--color", "--no-color", "--bail"}),
+    "ava": frozenset({"--verbose", "--color", "--no-color", "--fail-fast"}),
+    SUITE_PM_TEST: frozenset({"--silent", "-s", "--quiet", "-q"}),
+}
+_SUITE_KEY_RE = re.compile(r"^[0-9a-f]{16}:(?P<family>[a-z_]+):(?P<scope>full|narrow)$")
+
+
+def _suite(words: list[str]) -> str | None:
+    """``"<family>:full"`` / ``"<family>:narrow"`` for a test-runner run, else None (see the rule above)."""
+    if not words:
+        return None
+    head, rest = _program(words[0]), _without_redirects(words[1:])
+    if head in _PYTHONS:
+        if len(rest) >= 2 and rest[0] == "-m" and rest[1].lower() == "pytest":
+            return _runner_suite("pytest", rest[2:])
+        return None
+    if head in ("pytest", "py.test"):
+        return _runner_suite("pytest", rest)
+    if head in _NODE_EXEC:
+        return _js_runner_suite(rest)
+    if head in _PACKAGE_MANAGERS:
+        if not rest or rest[0].startswith("-"):
+            return None  # ``--prefix``/``--filter``/``-w``: maybe another package
+        sub = rest[0].lower()
+        if sub in _PM_SUBCOMMANDS_EXEC:
+            return _js_runner_suite(rest[1:])
+        if sub in ("run", "run-script"):
+            if len(rest) < 2 or rest[1] != "test":
+                return None
+            return _runner_suite(SUITE_PM_TEST, rest[2:])
+        if sub in ("test", "t", "tst"):
+            return None if head == "bun" else _runner_suite(SUITE_PM_TEST, rest[1:])
+        if head in ("yarn", "pnpm") and sub in _JS_TEST_RUNNERS:
+            return _js_runner_suite(rest)
+        return None
+    if head in _JS_TEST_RUNNERS:
+        return _js_runner_suite(words[:1] + rest)
+    return None
+
+
+def _js_runner_suite(words: list[str]) -> str | None:
+    if not words or words[0].startswith("-"):
+        return None  # ``npx -p pkg vitest``: not read
+    runner = _program(words[0])
+    if runner not in _JS_TEST_RUNNERS:
+        return None
+    args = _without_redirects(words[1:])
+    if runner == "vitest" and args and args[0] == "run":
+        args = args[1:]
+    return _runner_suite(runner, args)
+
+
+def _runner_suite(family: str, args: list[str]) -> str:
+    full = all(a in _SUITE_FLAGS[family] for a in args)
+    return f"{family}:{SUITE_FULL if full else SUITE_NARROW}"
+
+
+def _without_redirects(words: list[str]) -> list[str]:
+    out: list[str] = []
+    skip_target = False
+    for w in words:
+        if skip_target:
+            skip_target = False
+            continue
+        redirect = _REDIRECT_RE.match(w)
+        if redirect:
+            skip_target = not redirect.group(1)
+            continue
+        out.append(w)
+    return out
+
+
+def suite_key(suite: str | None, context: str | None) -> str | None:
+    """The queued form of *suite*: ``"<16 hex of the context>:<family>:<scope>"``.
+
+    *context* is the working directory the agent reported; only its hash is
+    kept. None when either is missing -- an unknown directory never matches.
+    """
+    if not suite or not isinstance(context, str) or not context.strip():
+        return None
+    import hashlib
+
+    digest = hashlib.sha256(context.strip().encode("utf-8", "replace")).hexdigest()[:16]
+    key = f"{digest}:{suite}"
+    return key if _valid_suite_key(key) else None
+
+
+def _valid_suite_key(value: object) -> bool:
+    match = _SUITE_KEY_RE.match(value) if isinstance(value, str) else None
+    return match is not None and match.group("family") in SUITE_FAMILIES
+
+
+def suite_supersedes(later: object, earlier: object) -> bool:
+    """True when a *passed* run with suite key *later* supersedes an earlier *failed* run with *earlier*."""
+    if not (_valid_suite_key(later) and _valid_suite_key(earlier)):
+        return False
+    l_dir, l_family, l_scope = str(later).split(":")
+    e_dir, e_family, e_scope = str(earlier).split(":")
+    if l_dir != e_dir or l_scope != SUITE_FULL or e_scope != SUITE_NARROW:
+        return False
+    if l_family == e_family:
+        return True
+    return l_family == SUITE_PM_TEST and e_family in _JS_TEST_RUNNERS
+
+
 # -- capture queue ---------------------------------------------------------------
 
 _REASON_CODE_RE = re.compile(r"^[a-z_]{1,64}$")
 MAX_CHECKS_PER_COMMAND = 10
 
 
-def check_command_items(command: str | None, name_of, *, shell: str = SHELL_POSIX) -> list[dict]:
+def check_command_items(
+    command: str | None, name_of, *, shell: str = SHELL_POSIX, context: str | None = None,
+) -> list[dict]:
     """The queue form of *command*'s checks: ``{"kind", "name", "unattributed", "failure_unattributed"}``.
 
     *name_of(segment, kind)* turns the raw check segment into a stored name
-    (the caller's scrubber); the raw command never leaves this call.
+    (the caller's scrubber); the raw command never leaves this call. With a
+    *context* (the reported working directory) a test-runner check also
+    carries ``suite`` (``suite_key``: a hash of the directory, never its text).
     """
-    return [
-        {"kind": c.kind, "name": name_of(c.segment, c.kind), "unattributed": c.unattributed,
-         "failure_unattributed": c.failure_unattributed}
-        for c in classify_check_commands(command, shell=shell)[:MAX_CHECKS_PER_COMMAND]
-    ]
+    items: list[dict] = []
+    for c in classify_check_commands(command, shell=shell)[:MAX_CHECKS_PER_COMMAND]:
+        item = {"kind": c.kind, "name": name_of(c.segment, c.kind), "unattributed": c.unattributed,
+                "failure_unattributed": c.failure_unattributed}
+        key = suite_key(c.suite, context)
+        if key is not None:
+            item["suite"] = key
+        items.append(item)
+    return items
 
 
 def queued_check_commands(value: object) -> list[dict] | None:
@@ -816,6 +973,8 @@ def queued_check_commands(value: object) -> list[dict] | None:
         for field_name in ("unattributed", "failure_unattributed"):
             raw = item.get(field_name)
             clean[field_name] = raw if isinstance(raw, str) and _REASON_CODE_RE.match(raw) else None
+        if _valid_suite_key(item.get("suite")):
+            clean["suite"] = item["suite"]
         out.append(clean)
     return out
 
