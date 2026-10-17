@@ -92,6 +92,10 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
     ``advanced_osn``, receives exactly the receipt it did before.
     """
     payload = receipt_to_dict(build_shard_receipt(entry, index=index), extended=True)
+    # Not in the Platform receipt-sync contract yet (its schema is strict and
+    # would reject the whole envelope); diff_added/diff_removed still carry
+    # the counts, and null still means unknown.
+    payload.pop("lines_not_recorded_reason", None)
     if not multi_agent:
         payload.pop("multi_agent", None)
     return payload

@@ -1363,6 +1363,7 @@ class TestCompactReceiptExactFormat(unittest.TestCase):
             "  Executor    OpenShard Native",
             "  Model       claude-sonnet-4-5",
             "  Changed     0 files",
+            "  Lines changed  not captured yet",
             "  Checks      3/3 passed",
             "  Verified    Passed (OpenShard ran the check(s))",
             "  Integrity   Not recorded",

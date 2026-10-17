@@ -10,7 +10,7 @@ from typing import Any
 from openshard.history.capture_completeness import (
     derive_capture_completeness,
 )
-from openshard.history.receipt_evidence import project_entry_evidence
+from openshard.history.receipt_evidence import project_entry_evidence, recorded_line_counts
 from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.run_cost import run_total_cost
 from openshard.history.shard import (
@@ -498,6 +498,7 @@ class ShardReceipt:
     check_results: list[str] = field(default_factory=list)
     diff_added: int | None = None
     diff_removed: int | None = None
+    lines_not_recorded_reason: str | None = None
     cost_raw: float | None = None
     # Each tuple is (friendly_stage_label, friendly_model_name).
     model_stages: list[tuple[str, str]] = field(default_factory=list)
@@ -1249,6 +1250,9 @@ def build_shard_receipt(
     if diff_removed is None:
         fr = entry.get("final_report") or {}
         diff_removed = fr.get("removed_lines")
+    lines_not_recorded_reason: str | None = None
+    if diff_added is None and diff_removed is None:  # hook capture's git numstat counts, or why unknown
+        diff_added, diff_removed, lines_not_recorded_reason = recorded_line_counts(entry)
 
     stage_runs = entry.get("stage_runs") or []
     _is_ro = entry.get("routing_rationale") == "read-only analysis" or bool(form_factor.get("read_only"))
@@ -1501,6 +1505,7 @@ def build_shard_receipt(
         osn_actions=_osn_actions(entry),
         diff_added=diff_added,
         diff_removed=diff_removed,
+        lines_not_recorded_reason=lines_not_recorded_reason,
         cost_raw=cost_raw,
         model_stages=model_stages,
         allowed_paths=allowed_paths,

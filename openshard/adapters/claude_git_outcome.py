@@ -83,6 +83,64 @@ def _own_result_commit(repo_root: Path, commits: list[str], end: str) -> str | N
     return last
 
 
+# Why a Receipt carries no line counts (``capture.lines_not_recorded_reason``).
+LINES_NO_BASE_COMMIT = "no_base_commit"
+LINES_NO_COMMIT = "no_session_commit"
+LINES_BINARY_FILE = "binary_file_changed"
+LINES_FILES_TRUNCATED = "changed_files_truncated"
+LINES_GIT_UNAVAILABLE = "git_diff_unavailable"
+LINES_UNCOMMITTED = "uncommitted_changes_present"
+
+
+def _session_line_counts(
+    repo_root: Path, base: str | None, commit: str | None, paths: list[str], *, truncated: bool = False,
+) -> tuple[int | None, int | None, str | None]:
+    """``(added, removed, None)`` from ``git diff --numstat base commit -- paths``, else ``(None, None, reason)``.
+
+    *base* is HEAD when the session started, *commit* the session's own result
+    commit (``receipt_evidence.commit_value``) and *paths* the changes counted
+    as this session's (the same attribution as ``files_detail``). Unknown
+    stays unknown: no base, no commit, a binary file (numstat ``-``), a
+    truncated file list, uncommitted changes on those paths or a failed git
+    read give no numbers, never 0. Never raises.
+    """
+    if _sha_or_none(base) is None:
+        return None, None, LINES_NO_BASE_COMMIT
+    if _sha_or_none(commit) is None:
+        return None, None, LINES_NO_COMMIT
+    if truncated:
+        return None, None, LINES_FILES_TRUNCATED
+    if not paths:
+        return 0, 0, None  # git observed the range; nothing in it is this session's
+    pathspec = ["--", *(f":(literal){p}" for p in paths)]
+    # This session's paths still differing from *commit* (tracked edits or
+    # untracked files) are work the commit range cannot count: unknown, not
+    # an undercount presented as the total.
+    pending = run_git(repo_root, ["diff", "--name-only", "-z", str(commit), *pathspec])
+    untracked = run_git(repo_root, ["ls-files", "--others", "--exclude-standard", "-z", *pathspec])
+    if pending is None or untracked is None:
+        return None, None, LINES_GIT_UNAVAILABLE
+    if pending.strip("\0").strip() or untracked.strip("\0").strip():
+        return None, None, LINES_UNCOMMITTED
+    out = run_git(repo_root, ["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", str(base), str(commit), *pathspec])
+    if out is None:
+        return None, None, LINES_GIT_UNAVAILABLE
+    added = removed = 0
+    for row in out.split("\0"):
+        if not row.strip():
+            continue
+        cols = row.split("\t", 2)
+        if len(cols) < 2:
+            continue
+        if cols[0] == "-" or cols[1] == "-":
+            return None, None, LINES_BINARY_FILE
+        if not (cols[0].isdigit() and cols[1].isdigit()):
+            return None, None, LINES_GIT_UNAVAILABLE
+        added += int(cols[0])
+        removed += int(cols[1])
+    return added, removed, None
+
+
 def _merge_git_outcome(fresh: dict | None, stored: object) -> dict | None:
     """*fresh* with what an earlier outcome for this session already established.
 
