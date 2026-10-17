@@ -39,6 +39,7 @@ from openshard.history.verification_truth import (
     counts_phrase,
     integrity_label,
     interpret_receipt,
+    replaced_failures_phrase,
     verification_label,
 )
 from openshard.models.pricing import (
@@ -727,7 +728,7 @@ def checks_label(receipt: ShardReceipt) -> str:
         display = counts_phrase(
             block.get("checks_passed"), block.get("checks_failed"), block.get("checks_attempted"),
         ) or display
-    return display + agent_reported_suffix(receipt)
+    return (replaced_failures_phrase(block) or display) + agent_reported_suffix(receipt)
 
 
 def agent_reported_suffix(receipt: ShardReceipt) -> str:
@@ -765,7 +766,7 @@ def permission_mode_label(receipt: ShardReceipt) -> str | None:
 
 def verified_label(receipt: ShardReceipt) -> str:
     """The one sentence every surface uses for "was this verified, and by whom?"."""
-    return verification_label(interpret_receipt(receipt))
+    return verification_label(interpret_receipt(receipt), replaced=replaced_failures_phrase(receipt.verification))
 
 
 def _make_shard_id(timestamp: str, index: int | None) -> str:

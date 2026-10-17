@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING, Any
 from openshard.history.verification import (
     MODE_CI_REPORT,
     MODE_OPENSHARD_EXECUTED,
+    REASON_CHECKS_TRUNCATED,
     REASON_OUTCOME_NOT_OBSERVED,
     SOURCE_AGENT_REPORTED,
     SOURCE_DIRECTLY_OBSERVED,
@@ -480,8 +481,38 @@ def counts_phrase(passed: int | None, failed: int | None, attempted: int | None)
     return ", ".join(parts)
 
 
-def verification_label(truth: VerificationTruth) -> str:
-    """One receipt-row sentence: the claim, who vouches for it, and any older claim."""
+def replaced_failures_phrase(block: object) -> str:
+    """``passed · 1 earlier failure replaced by a later run`` for an agent-reported pass, else ``""``.
+
+    A hook-captured session passes once every check's *last* run passed
+    (``adapters/claude_hook_checks.py``), so its run list can still hold
+    failed runs a later re-run or full-suite run replaced. ``1/2 passed``
+    would read like one check is still failing. Display text only: the
+    block, its counts and every listed run stay exactly as recorded. When
+    the run list was truncated the count is a lower bound and says so.
+    """
+    if not isinstance(block, dict) or block.get("source") != SOURCE_AGENT_REPORTED:
+        return ""
+    if block.get("status") != STATUS_PASSED or block.get("checks_failed"):
+        return ""
+    raw = block.get("checks")
+    checks: list[Any] = raw if isinstance(raw, list) else []
+    failed = sum(1 for c in checks if isinstance(c, dict) and c.get("status") == STATUS_FAILED)
+    if not failed:
+        return ""
+    reasons = block.get("incomplete_reasons")
+    at_least = "at least " if isinstance(reasons, list) and REASON_CHECKS_TRUNCATED in reasons else ""
+    if failed == 1:
+        return f"passed · {at_least}1 earlier failure replaced by a later run"
+    return f"passed · {at_least}{failed} earlier failures replaced by later runs"
+
+
+def verification_label(truth: VerificationTruth, *, replaced: str = "") -> str:
+    """One receipt-row sentence: the claim, who vouches for it, and any older claim.
+
+    *replaced* (``replaced_failures_phrase``) stands in for the ratio of an
+    agent-reported session pass whose run list holds replaced failures.
+    """
     if truth.basis == BASIS_CI:
         ratio = _ratio(truth.checks_passed, truth.checks_attempted)
         word = {STATE_VERIFIED_PASSED: "Passed", STATE_VERIFIED_FAILED: "Failed"}.get(truth.state, "Partial")
@@ -516,7 +547,7 @@ def verification_label(truth: VerificationTruth) -> str:
     if truth.state == STATE_VERIFIED_PARTIAL:
         return "Partial (OpenShard observed some outcomes" + (f": {ratio})" if ratio else ")")
     if truth.state == STATE_AGENT_REPORTED_PASSED:
-        return "Not verified by OpenShard (agent reported " + (ratio or "passed") + ")"
+        return "Not verified by OpenShard (agent reported " + (replaced or ratio or "passed") + ")"
     if truth.state == STATE_AGENT_REPORTED_PARTIAL:
         return "Not verified by OpenShard (agent reported " + (ratio or "a partial result") + ")"
     if truth.state == STATE_AGENT_REPORTED_FAILED:
@@ -670,6 +701,7 @@ __all__ = [
     "integrity_label",
     "interpret_evidence",
     "interpret_receipt",
+    "replaced_failures_phrase",
     "verification_label",
     "verification_phrase",
 ]

@@ -192,6 +192,7 @@ from openshard.adapters.claude_git_outcome import (  # noqa: F401  (re-exported 
     _SHA_RE,
     _merge_git_outcome,
     _own_result_commit,
+    _recorded_start_branch,
     _reflog_created,
     _session_files_base,
     _session_line_counts,
@@ -1836,7 +1837,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "resumed_from_receipt_id": (
             capture.get("resumed_from_receipt_id") if isinstance(capture.get("resumed_from_receipt_id"), str) else None
         ),
-        "git_branch": entry.get("git_branch"),
+        "git_branch": _recorded_start_branch(entry, capture),
         "git_head_commit_hash": entry.get("git_head_commit_hash"),
         "git_dirty": entry.get("git_dirty"),
         "task": entry.get("task") if capture.get("task_source") == "first_user_prompt_excerpt" else None,

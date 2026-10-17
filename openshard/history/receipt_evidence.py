@@ -1120,6 +1120,15 @@ def cost_not_recorded_reason_value(entry: dict) -> str | None:
     return _reason_code(_dict(entry.get("capture")).get("cost_not_recorded_reason"))
 
 
+def git_files_unknown_reason_value(entry: dict) -> str | None:
+    """Why git could not say which files changed (``capture.git_files_unknown_reason``), as a reason code.
+
+    ``branch_switch_base_unknown``: the agent switched branch and git could
+    not place where its work on the final branch began. Local surfaces only.
+    """
+    return _reason_code(_dict(entry.get("capture")).get("git_files_unknown_reason"))
+
+
 def _reason_code(value: Any) -> str | None:
     return value if isinstance(value, str) and _REASON_CODE_RE.match(value) else None
 
@@ -1399,6 +1408,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "surface": surface_value,
         "tokens_not_recorded_reason": tokens_not_recorded_reason_value,
         "cost_not_recorded_reason": cost_not_recorded_reason_value,
+        "git_files_unknown_reason": git_files_unknown_reason_value,  # local only; never synced
         "commit": commit_value,
         "pr_url": pr_url_value,
         "content_hash": content_hash_value,
@@ -1429,6 +1439,7 @@ __all__ = [
     "surface_value",
     "content_hash_value",
     "cost_not_recorded_reason_value",
+    "git_files_unknown_reason_value",
     "tokens_not_recorded_reason_value",
     "execution_loop_block",
     "multi_agent_block",

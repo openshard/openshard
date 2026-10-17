@@ -75,6 +75,7 @@ FILES_BRANCH_SWITCH_UNKNOWN = "branch_switch_base_unknown"
 
 def _files_base_after_switch(
     repo_root: Path, start: str | None, start_branch: str | None, window: tuple[int, int] | None,
+    current: str | None,
 ) -> tuple[str | None, bool]:
     """``(base, switched)``: the commit the session's file diff starts from. Never raises.
 
@@ -84,9 +85,9 @@ def _files_base_after_switch(
     files that differ only between the two branches are never counted as
     this session's work. A switch git cannot place (no reflog, a detached
     HEAD, no move onto the final branch in the window) gives ``(None, True)``:
-    the git-observed file set is unknown, never a guess.
+    the git-observed file set is unknown, never a guess. *current* is
+    ``git rev-parse --abbrev-ref HEAD`` now (``HEAD`` when detached).
     """
-    current = (run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip() or None
     out = None
     if window is not None:
         out = run_git(repo_root, ["reflog", "show", "--date=unix", "--format=%H%x09%gd%x09%gs", "-n", "500", "HEAD"])
@@ -130,9 +131,14 @@ def _session_files_base(buf: dict, repo_root: Path, grace: int) -> tuple[str | N
     if started is not None and last is not None:
         window = (int(started.timestamp()), int(last.timestamp()) + grace)
     start_branch = buf.get("git_branch") if isinstance(buf.get("git_branch"), str) else None
-    switched_base, switched = _files_base_after_switch(repo_root, _sha_or_none(base), start_branch, window)
+    current = (run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip() or None
+    switched_base, switched = _files_base_after_switch(
+        repo_root, _sha_or_none(base), start_branch, window, current)
     buf.pop("files_base_commit", None)
     buf.pop("git_files_unknown_reason", None)
+    buf.pop("final_branch", None)
+    if switched:
+        buf["final_branch"] = _branch_name(current)  # None: the session ended on a detached HEAD
     if not switched:
         return (base if isinstance(base, str) else None), True
     if switched_base is None:
@@ -142,8 +148,38 @@ def _session_files_base(buf: dict, repo_root: Path, grace: int) -> tuple[str | N
     return switched_base, True
 
 
+def _branch_name(raw: str | None) -> str | None:
+    """*raw* (``rev-parse --abbrev-ref HEAD``) as ``collect_git_info`` stores it; None when detached."""
+    from openshard.analysis.repo_map import _BRANCH_CAP, _sanitize_meta
+
+    return _sanitize_meta(raw, cap=_BRANCH_CAP) if raw and raw != "HEAD" else None
+
+
+def _stamp_final_branch(entry: dict, buf: dict) -> None:
+    """After a branch switch, the Receipt's ``git_branch`` is the branch the session ended on.
+
+    That is the branch its files were counted on (``capture.files_base_commit``).
+    The branch it started on stays in local capture metadata
+    (``capture.start_branch``); Platform sync sends the Receipt projection,
+    never the raw capture block, so only the local record keeps it.
+    """
+    if "final_branch" not in buf:
+        return
+    final = buf.get("final_branch") if isinstance(buf.get("final_branch"), str) else None
+    start = buf.get("git_branch") if isinstance(buf.get("git_branch"), str) else None
+    entry["git_branch"] = final
+    if start != final:
+        entry["capture"]["start_branch"] = start
+
+
+def _recorded_start_branch(entry: dict, capture: dict) -> Any:
+    """The branch a recorded session started on: ``capture.start_branch`` after a switch, else ``git_branch``."""
+    return capture["start_branch"] if "start_branch" in capture else entry.get("git_branch")
+
+
 def _stamp_files_base(entry: dict, buf: dict) -> str | None:
     """Record the branch-switch file base (or why it is unknown) on *entry*; return the base."""
+    _stamp_final_branch(entry, buf)
     files_base = _sha_or_none(buf.get("files_base_commit"))
     if files_base is not None:
         # Files and lines count from where the session moved onto its final branch.
