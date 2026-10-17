@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from openshard.adapters.claude_transcript_usage import _parse_utc
 from openshard.util.git import run_git
 
 # The same value as ``claude_hooks.ATTR_GIT_OBSERVED`` (kept here to avoid an import cycle).
@@ -64,6 +65,92 @@ def _reflog_created(repo_root: Path) -> dict[str, int] | None:
         if sha and stamp and _REFLOG_CREATED_RE.match(parts[2]):
             created.setdefault(sha, int(stamp.group(1)))  # newest entry first
     return created
+
+
+_REFLOG_SWITCH_RE = re.compile(r"^checkout: moving from (\S+) to (\S+)$")
+
+# Why a Receipt's changed files are not taken from git (``capture.git_files_unknown_reason``).
+FILES_BRANCH_SWITCH_UNKNOWN = "branch_switch_base_unknown"
+
+
+def _files_base_after_switch(
+    repo_root: Path, start: str | None, start_branch: str | None, window: tuple[int, int] | None,
+) -> tuple[str | None, bool]:
+    """``(base, switched)``: the commit the session's file diff starts from. Never raises.
+
+    The start HEAD is the base unless the session ended on a branch it
+    switched to. Then the base is HEAD when the reflog first records the
+    move onto that branch inside the session *window* (unix seconds), so
+    files that differ only between the two branches are never counted as
+    this session's work. A switch git cannot place (no reflog, a detached
+    HEAD, no move onto the final branch in the window) gives ``(None, True)``:
+    the git-observed file set is unknown, never a guess.
+    """
+    current = (run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) or "").strip() or None
+    out = None
+    if window is not None:
+        out = run_git(repo_root, ["reflog", "show", "--date=unix", "--format=%H%x09%gd%x09%gs", "-n", "500", "HEAD"])
+    if not out or not out.strip():
+        # Reflog unknown: only a branch name that visibly changed is a switch.
+        if current and start_branch and current != start_branch:
+            return None, True
+        return start, False
+    lo, hi = window if window is not None else (0, 0)
+    moves: list[tuple[str, str, str]] = []  # (from, to, sha after the move), oldest first
+    for line in reversed(out.splitlines()):
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        sha = _sha_or_none(parts[0])
+        stamp = re.search(r"@\{(\d+)\}$", parts[1].strip())
+        match = _REFLOG_SWITCH_RE.match(parts[2].strip())
+        if sha and stamp and match and lo <= int(stamp.group(1)) <= hi and match.group(1) != match.group(2):
+            moves.append((match.group(1), match.group(2), sha))
+    if not moves:
+        return start, False
+    if current is not None and current != "HEAD" and current == moves[0][0]:
+        return start, False  # back on the branch the session started on
+    for _from, to, sha in moves:
+        if current is not None and current != "HEAD" and to == current:
+            return sha, True
+    return None, True
+
+
+def _session_files_base(buf: dict, repo_root: Path, grace: int) -> tuple[str | None, bool]:
+    """``(base, known)`` for the session's file diff; records a switch on *buf*. Never raises.
+
+    ``known`` False: the agent changed branch and the reflog cannot say where
+    the session's work on the final branch began, so the observed file set
+    is unknown (``git_files_unknown_reason``), never a guess.
+    """
+    base = buf.get("git_head_commit_hash")
+    started = _parse_utc(buf.get("started_at"))
+    last = _parse_utc(buf.get("last_activity_at")) or started
+    window = None
+    if started is not None and last is not None:
+        window = (int(started.timestamp()), int(last.timestamp()) + grace)
+    start_branch = buf.get("git_branch") if isinstance(buf.get("git_branch"), str) else None
+    switched_base, switched = _files_base_after_switch(repo_root, _sha_or_none(base), start_branch, window)
+    buf.pop("files_base_commit", None)
+    buf.pop("git_files_unknown_reason", None)
+    if not switched:
+        return (base if isinstance(base, str) else None), True
+    if switched_base is None:
+        buf["git_files_unknown_reason"] = FILES_BRANCH_SWITCH_UNKNOWN
+        return None, False
+    buf["files_base_commit"] = switched_base
+    return switched_base, True
+
+
+def _stamp_files_base(entry: dict, buf: dict) -> str | None:
+    """Record the branch-switch file base (or why it is unknown) on *entry*; return the base."""
+    files_base = _sha_or_none(buf.get("files_base_commit"))
+    if files_base is not None:
+        # Files and lines count from where the session moved onto its final branch.
+        entry["capture"]["files_base_commit"] = files_base
+    if buf.get("git_files_unknown_reason") == FILES_BRANCH_SWITCH_UNKNOWN:
+        entry["capture"]["git_files_unknown_reason"] = FILES_BRANCH_SWITCH_UNKNOWN
+    return files_base
 
 
 def _own_result_commit(repo_root: Path, commits: list[str], end: str) -> str | None:
