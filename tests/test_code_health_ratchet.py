@@ -133,7 +133,6 @@ COMPLEXITY_BUDGETS = {
     ("openshard/osn/roles.py", "RoleRun.from_usage"): 28,
     ("openshard/sync/client.py", "_flush_usage"): 28,
     ("openshard/evals/receipt_honesty.py", "check_rules"): 27,
-    ("openshard/cli/main.py", "verify"): 26,
     ("openshard/cli/main.py", "eval_report"): 26,
     ("openshard/learning/snapshot.py", "_read"): 26,
 }

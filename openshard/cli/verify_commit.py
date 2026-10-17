@@ -45,7 +45,11 @@ def run_verify_commit(entry: dict, loc, receipt_label: str, commit_ref: str, *, 
     from openshard.history.jsonl_store import LockTimeoutError
     from openshard.history.receipt_evidence import base_commit_value
     from openshard.verification import commit_run
-    from openshard.verification.post_session import display_line, summarize_attestation
+    from openshard.verification.post_session import (
+        display_line,
+        result_detail,
+        summarize_attestation,
+    )
 
     sha = _resolve_commit(loc.root, commit_ref)
     if sha is None:
@@ -93,7 +97,7 @@ def run_verify_commit(entry: dict, loc, receipt_label: str, commit_ref: str, *, 
     else:
         click.echo("")
         for result in run.results:
-            detail = f"exit {result.exit_code}" if result.exit_code is not None else result.note
+            detail = result_detail(result)
             click.echo(f"  {result.check.name}: {result.status}" + (f" ({detail})" if detail else ""))
         click.echo(f"\nRe-verified: {display_line(summary)}")
         click.echo("Recorded in .openshard/verifications.jsonl (evidence: directly_observed).")

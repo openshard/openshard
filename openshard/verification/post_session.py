@@ -32,7 +32,10 @@ Never manufactured
 ------------------
 Exit code 0 -> ``passed``; non-zero -> ``failed``. A check that timed out or
 could not start has no exit code: it is ``unknown`` with
-``check_not_completed``, never ``failed`` or ``passed``. A skipped check
+``check_not_completed``, never ``failed`` or ``passed``. A non-zero exit whose
+output shows the project could not be set up to run the check (a dependency
+or binary missing, the command not found; ``setup_failure.rerun_setup_failure``)
+is ``unknown`` too, with ``verifier_setup_failed`` and the reason. A skipped check
 (blocked, or needing approval that was not given) is ``skipped``. Nothing run
 at all -> ``not_run``. Command output is streamed to the terminal (or
 discarded under ``--json``) and never stored; the attestation carries only a
@@ -95,6 +98,8 @@ ATTESTATION_KINDS: frozenset[str] = frozenset({KIND_POST_SESSION, KIND_CI})
 MAX_EVIDENCE = 20  # newest attestations joined onto one receipt
 MAX_PLANNED_CHECKS = 8
 DEFAULT_TIMEOUT_SECONDS = 600.0
+# The project could not be set up to run a check (setup_failure.py uses the same token).
+REASON_VERIFIER_SETUP_FAILED = "verifier_setup_failed"
 
 ORIGIN_CONTRACT = "contract"  # the repository's configured verification contract
 ORIGIN_DETECTED = "detected"  # the test command OpenShard detects for the repository
@@ -151,6 +156,7 @@ class CheckRun:
     exit_code: int | None = None
     duration_seconds: float | None = None
     note: str = ""
+    setup_failed: bool = False  # the project could not be set up to run it; ``note`` says why
 
 
 @dataclass
@@ -409,6 +415,78 @@ def run_process_tree(argv: list[str], *, cwd: Path, timeout: float, check: bool 
     return proc
 
 
+OUTPUT_HEAD_BYTES = 16_000
+OUTPUT_TAIL_BYTES = 48_000
+
+
+def run_check_process(argv: list[str], *, cwd: Path, timeout: float, echo: bool,
+                      env: dict[str, str] | None = None) -> tuple[Any, str]:
+    """``run_process_tree`` with output read through a pipe: ``(process, bounded output)``.
+
+    Output is echoed to the terminal as it arrives when *echo*, and the first
+    ``OUTPUT_HEAD_BYTES`` and last ``OUTPUT_TAIL_BYTES`` are kept only so the
+    caller can tell "could not run" from "failed"; it is never stored.
+    Raises ``TimeoutExpired`` like ``run``.
+    """
+    import os
+    import sys
+    import threading
+
+    kwargs: dict[str, Any] = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "env": env}
+    if not echo:
+        kwargs["stdin"] = subprocess.DEVNULL
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+    else:
+        kwargs["start_new_session"] = True
+    head = bytearray()
+    tail = bytearray()
+    proc = subprocess.Popen(argv, cwd=cwd, **kwargs)  # noqa: S603 - argv list, no shell
+
+    def pump() -> None:
+        out = getattr(sys.stdout, "buffer", None)
+        if proc.stdout is None:
+            return
+        fd = proc.stdout.fileno()
+        try:
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    return
+                if echo:
+                    try:
+                        if out is not None:
+                            out.write(chunk)
+                        else:
+                            sys.stdout.write(chunk.decode("utf-8", "replace"))
+                        sys.stdout.flush()
+                    except (OSError, ValueError):
+                        pass
+                room = OUTPUT_HEAD_BYTES - len(head)
+                if room > 0:
+                    head.extend(chunk[:room])
+                    chunk = chunk[room:]
+                tail.extend(chunk)
+                if len(tail) > OUTPUT_TAIL_BYTES:
+                    del tail[: len(tail) - OUTPUT_TAIL_BYTES]
+        except (OSError, ValueError):
+            return
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        reader.join(timeout=5)
+        raise
+    # A process the check left running may hold the pipe open; never wait on it for long.
+    reader.join(timeout=10)
+    if not reader.is_alive() and proc.stdout is not None:
+        proc.stdout.close()
+    return proc, (bytes(head) + bytes(tail)).decode("utf-8", "replace")
+
+
 def run_checks(
     planned: list[PlannedCheck],
     repo_root: Path,
@@ -423,11 +501,12 @@ def run_checks(
     """Run each planned check that its safety class allows. Never raises.
 
     *env* adds variables to the inherited environment (an isolated copy's
-    ``PYTHONPATH``). A check runs in ``repo_root / check.cwd``.
+    ``PYTHONPATH``). A check runs in ``repo_root / check.cwd``. A custom
+    *runner* may return an object with a ``stdout`` string, which is read the
+    same way as a real check's output.
     """
     from openshard.verification.commit_checkout import resolve_tool
-
-    run = runner or run_process_tree
+    from openshard.verification.setup_failure import rerun_setup_failure, rerun_setup_reason
     results: list[CheckRun] = []
     for check in planned:
         if check.safety == CommandSafety.blocked.value:
@@ -451,8 +530,14 @@ def run_checks(
         }
         io["env"] = check_environment(env)
         started = time.monotonic()
+        output: str | None = None
         try:
-            proc = run(argv, cwd=cwd, timeout=timeout, check=False, **io)
+            if runner is None:
+                proc, output = run_check_process(argv, cwd=cwd, timeout=timeout, echo=stream, env=io["env"])
+            else:
+                proc = runner(argv, cwd=cwd, timeout=timeout, check=False, **io)
+                raw_out = getattr(proc, "stdout", None)
+                output = raw_out if isinstance(raw_out, str) else None
         except subprocess.TimeoutExpired:
             results.append(CheckRun(
                 check, CHECK_UNKNOWN, duration_seconds=round(time.monotonic() - started, 2),
@@ -466,6 +551,12 @@ def run_checks(
         duration = round(time.monotonic() - started, 2)
         if not isinstance(code, int) or isinstance(code, bool):
             results.append(CheckRun(check, CHECK_UNKNOWN, duration_seconds=duration, note="no exit code"))
+            continue
+        setup = rerun_setup_failure(code, output) if code != 0 else None
+        if setup is not None:
+            # The project could not be set up to run it: no verdict on the change.
+            results.append(CheckRun(check, CHECK_UNKNOWN, exit_code=code, duration_seconds=duration,
+                                    note=rerun_setup_reason(setup), setup_failed=True))
             continue
         results.append(CheckRun(
             check, CHECK_PASSED if code == 0 else CHECK_FAILED, exit_code=code, duration_seconds=duration,
@@ -520,6 +611,8 @@ def build_attestation(
         incomplete.append(REASON_ARTIFACT_NOT_BOUND)
     if any(r.status == CHECK_UNKNOWN for r in results):
         incomplete.append(REASON_CHECK_NOT_COMPLETED)
+    if any(r.setup_failed for r in results):
+        incomplete.append(REASON_VERIFIER_SETUP_FAILED)
     status = _commit_verdict(aggregate_status(checks) if checks else STATUS_NOT_RUN, results,
                              commit=commit, truncated=truncated, incomplete=incomplete)
     durations = [r.duration_seconds for r in results if r.duration_seconds is not None]
@@ -585,6 +678,13 @@ def _reason(results: list[CheckRun], bound: bool, before: TreeState) -> str:
     if not results:
         return "OpenShard found no approved check to run."
     ran = sum(1 for r in results if r.status in (CHECK_PASSED, CHECK_FAILED))
+    setup = next((r for r in results if r.setup_failed), None)
+    if setup is not None:
+        # The first such reason leads: it is why the outcome is unknown.
+        lead = setup.note.rstrip(".") + "."
+        if ran == 0:
+            return lead
+        return f"{lead} OpenShard read the exit codes of {ran} of {len(results)} check(s)."
     parts = [f"OpenShard ran {ran} of {len(results)} check(s) and read their exit codes"]
     if bound:
         parts.append(f"on clean commit {before.head[:12] if before.head else ''}")
@@ -708,6 +808,13 @@ def summarize_attestation(item: dict) -> dict:
     return summary
 
 
+def result_detail(result: CheckRun) -> str:
+    """The CLI's parenthetical for one check: its exit code, else its note; both when setup failed."""
+    if result.setup_failed:
+        return result.note + (f"; exit {result.exit_code}" if result.exit_code is not None else "")
+    return f"exit {result.exit_code}" if result.exit_code is not None else result.note
+
+
 def display_line(summary: dict) -> str:
     """``2/2 passed @ 1a2b3c4d5e6f (OpenShard re-run)`` -- one receipt row."""
     v = summary.get("verification") or {}
@@ -716,6 +823,8 @@ def display_line(summary: dict) -> str:
     passed = v.get("checks_passed") or 0
     if status == STATUS_NOT_RUN:
         text = "Nothing run"
+    elif status == "unknown" and REASON_VERIFIER_SETUP_FAILED in (v.get("incomplete_reasons") or []):
+        text = "Could not run (project setup failed)"
     elif status in ("passed", "failed", "partial") and attempted:
         text = f"{passed}/{attempted} passed"
         if status == "partial":
@@ -734,6 +843,7 @@ __all__ = [
     "KIND_POST_SESSION",
     "CheckRun",
     "PlannedCheck",
+    "REASON_VERIFIER_SETUP_FAILED",
     "TreeState",
     "attestations_path",
     "build_attestation",
@@ -744,6 +854,7 @@ __all__ = [
     "observed_check_commands",
     "plan_checks",
     "record_attestation",
+    "result_detail",
     "run_checks",
     "summarize_attestation",
     "tree_state",

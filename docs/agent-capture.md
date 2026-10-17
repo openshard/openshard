@@ -601,6 +601,12 @@ external agent completes
      needs_approval runs only with --approve, safe runs (argv, never a shell)
   -> OpenShard reads each exit code: 0 passed, non-zero failed; a timeout or a
      command that cannot start is unknown (check_not_completed)
+  -> a non-zero exit whose output shows the project could not be set up to
+     run the check is unknown too (verifier_setup_failed), with the reason:
+     an incomplete install (Electron's binary or a native module missing
+     because install scripts were skipped) always; a missing command, Python
+     module, npm script or package, or a runner killed by a signal, only when
+     no test results were reported. Once results are reported it stays failed
   -> one attestation appended to .openshard/verifications.jsonl
 ```
 

@@ -2380,6 +2380,7 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         display_line,
         plan_checks,
         record_attestation,
+        result_detail,
         run_checks,
         summarize_attestation,
         tree_state,
@@ -2472,7 +2473,7 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         return
     click.echo("")
     for result in results:
-        detail = f"exit {result.exit_code}" if result.exit_code is not None else result.note
+        detail = result_detail(result)
         click.echo(f"  {result.check.name}: {result.status}" + (f" ({detail})" if detail else ""))
     click.echo(f"\nRe-verified: {display_line(summary)}")
     if compare_base:
