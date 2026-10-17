@@ -35,7 +35,9 @@ could not start has no exit code: it is ``unknown`` with
 ``check_not_completed``, never ``failed`` or ``passed``. A non-zero exit whose
 output shows the project could not be set up to run the check (a dependency
 or binary missing, the command not found; ``setup_failure.rerun_setup_failure``)
-is ``unknown`` too, with ``verifier_setup_failed`` and the reason. A skipped check
+is ``unknown`` too, with ``verifier_setup_failed`` and the reason; when the
+runner had already reported every test passing, those counts are kept on the
+check as partial evidence (``reported_*``), and it is still ``unknown``. A skipped check
 (blocked, or needing approval that was not given) is ``skipped``. Nothing run
 at all -> ``not_run``. Command output is streamed to the terminal (or
 discarded under ``--json``) and never stored; the attestation carries only a
@@ -86,6 +88,7 @@ from openshard.verification.plan import (
     parse_command_to_argv,
     safe_check_label,
 )
+from openshard.verification.setup_failure import REPORTED_RUNNERS, ReportedTests, blocked_step
 
 ATTESTATIONS_FILENAME = "verifications.jsonl"
 ATTESTATION_VERSION = 1
@@ -157,6 +160,8 @@ class CheckRun:
     duration_seconds: float | None = None
     note: str = ""
     setup_failed: bool = False  # the project could not be set up to run it; ``note`` says why
+    # With ``setup_failed``: what the runner's own summary reported before setup failed (all passing).
+    reported: ReportedTests | None = None
 
 
 @dataclass
@@ -487,6 +492,20 @@ def run_check_process(argv: list[str], *, cwd: Path, timeout: float, echo: bool,
     return proc, (bytes(head) + bytes(tail)).decode("utf-8", "replace")
 
 
+def _setup_failed_run(check: PlannedCheck, code: int, duration: float, setup: str, output: str | None) -> CheckRun:
+    """An ``unknown`` check whose project could not be set up, keeping any all-passing test counts it reported."""
+    from openshard.verification.setup_failure import (
+        reported_test_results,
+        rerun_partial_reason,
+        rerun_setup_reason,
+    )
+
+    reported = reported_test_results(output)
+    note = rerun_partial_reason(reported, setup) if reported else rerun_setup_reason(setup)
+    return CheckRun(check, CHECK_UNKNOWN, exit_code=code, duration_seconds=duration, note=note,
+                    setup_failed=True, reported=reported)
+
+
 def run_checks(
     planned: list[PlannedCheck],
     repo_root: Path,
@@ -506,7 +525,7 @@ def run_checks(
     same way as a real check's output.
     """
     from openshard.verification.commit_checkout import resolve_tool
-    from openshard.verification.setup_failure import rerun_setup_failure, rerun_setup_reason
+    from openshard.verification.setup_failure import rerun_setup_failure
     results: list[CheckRun] = []
     for check in planned:
         if check.safety == CommandSafety.blocked.value:
@@ -555,8 +574,7 @@ def run_checks(
         setup = rerun_setup_failure(code, output) if code != 0 else None
         if setup is not None:
             # The project could not be set up to run it: no verdict on the change.
-            results.append(CheckRun(check, CHECK_UNKNOWN, exit_code=code, duration_seconds=duration,
-                                    note=rerun_setup_reason(setup), setup_failed=True))
+            results.append(_setup_failed_run(check, code, duration, setup, output))
             continue
         results.append(CheckRun(
             check, CHECK_PASSED if code == 0 else CHECK_FAILED, exit_code=code, duration_seconds=duration,
@@ -645,17 +663,40 @@ def build_attestation(
             "head": before.head, "dirty": before.dirty,
             "head_after": after.head, "dirty_after": after.dirty, "tracked_dirty_after": after.tracked_dirty,
         },
-        "checks": [
-            {"name": r.check.name, "origin": r.check.origin, "safety": r.check.safety, "note": r.note[:120],
-             **({"why": r.check.why[:200]} if r.check.why else {}),
-             **({"cwd": r.check.cwd} if r.check.cwd else {})}
-            for r in results
-        ],
+        "checks": [_check_row(r) for r in results],
         **({"commit": commit.lower()} if commit else {}),
         **({"checkout": checkout} if checkout else {}),
         "raw_output_stored": False,
         "verification": block,
     }
+
+
+def _check_row(r: CheckRun) -> dict:
+    """One attestation ``checks`` row: label, origin, safety, note, and any reported test counts."""
+    row: dict[str, Any] = {"name": r.check.name, "origin": r.check.origin, "safety": r.check.safety,
+                           "note": r.note[:200]}
+    if r.check.why:
+        row["why"] = r.check.why[:200]
+    if r.check.cwd:
+        row["cwd"] = r.check.cwd
+    if r.setup_failed and r.reported is not None:
+        # Counts from the runner's own summary, never its output; the check itself stays ``unknown``.
+        row.update(reported_runner=r.reported.runner, reported_passed=r.reported.passed,
+                   reported_failed=r.reported.failed, reported_skipped=r.reported.skipped)
+    return row
+
+
+def _reported_tests(item: dict) -> dict | None:
+    """The first re-run check's well-formed, all-passing ``reported_*`` counts, or None."""
+    rows = item.get("checks")
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or row.get("reported_runner") not in REPORTED_RUNNERS:
+            continue
+        counts = [n for n in (row.get(k) for k in ("reported_passed", "reported_failed", "reported_skipped"))
+                  if isinstance(n, int) and not isinstance(n, bool) and n >= 0]
+        if len(counts) == 3 and counts[0] > 0 and counts[1] == 0:
+            return {"runner": row["reported_runner"], "passed": counts[0], "failed": 0, "skipped": counts[2]}
+    return None
 
 
 def _commit_verdict(status: str, results: list[CheckRun], *, commit: str | None, truncated: bool,
@@ -805,6 +846,12 @@ def summarize_attestation(item: dict) -> dict:
             key: ci.get(key) if isinstance(ci.get(key), str) and _CI_TOKEN_RE.match(ci[key]) else None
             for key in ("provider", "binding", "outcome")
         }
+    elif ev.status == "unknown" and REASON_VERIFIER_SETUP_FAILED in ev.incomplete_reasons:
+        # Partial evidence beside an unknown outcome: never part of the verdict
+        # and not sent to the Platform (``sync/evidence.py`` projects named keys only).
+        reported = _reported_tests(item)
+        if reported is not None:
+            summary["reported_tests"] = reported
     return summary
 
 
@@ -813,6 +860,17 @@ def result_detail(result: CheckRun) -> str:
     if result.setup_failed:
         return result.note + (f"; exit {result.exit_code}" if result.exit_code is not None else "")
     return f"exit {result.exit_code}" if result.exit_code is not None else result.note
+
+
+def _setup_failed_text(reported: object, reason: object) -> str:
+    """``partial — 69/69 tests passed (vitest); Electron step couldn't run``, else the plain could-not-run text."""
+    if not isinstance(reported, dict):
+        return "Could not run (project setup failed)"
+    passed, failed, skipped = reported.get("passed"), reported.get("failed"), reported.get("skipped")
+    extra = f", {skipped} skipped" if skipped else ""
+    step = blocked_step(reason if isinstance(reason, str) else None)
+    return (f"partial — {passed}/{(passed or 0) + (failed or 0)} tests passed{extra} ({reported.get('runner')}); "
+            f"{step} couldn't run")
 
 
 def display_line(summary: dict) -> str:
@@ -824,7 +882,7 @@ def display_line(summary: dict) -> str:
     if status == STATUS_NOT_RUN:
         text = "Nothing run"
     elif status == "unknown" and REASON_VERIFIER_SETUP_FAILED in (v.get("incomplete_reasons") or []):
-        text = "Could not run (project setup failed)"
+        text = _setup_failed_text(summary.get("reported_tests"), v.get("reason"))
     elif status in ("passed", "failed", "partial") and attempted:
         text = f"{passed}/{attempted} passed"
         if status == "partial":

@@ -607,6 +607,10 @@ external agent completes
      because install scripts were skipped) always; a missing command, Python
      module, npm script or package, or a runner killed by a signal, only when
      no test results were reported. Once results are reported it stays failed
+  -> when such a check's output holds one runner summary (vitest, jest,
+     pytest, mocha, node --test) with every test passing, its counts are kept
+     on the check (reported_runner/passed/failed/skipped) as partial evidence;
+     the check is still unknown and the Receipt is never Verified by it
   -> one attestation appended to .openshard/verifications.jsonl
 ```
 

@@ -17,6 +17,7 @@ not matched here. The output is only inspected, never stored.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 KIND_MISSING_MODULE = "missing_module"
 KIND_COMMAND_NOT_FOUND = "command_not_found"
@@ -223,3 +224,107 @@ def rerun_setup_failure(exit_code: int | None, output: str | None) -> str | None
 def rerun_setup_reason(reason: str) -> str:
     """The receipt/CLI sentence for a re-run that could not set the project up."""
     return f"OpenShard couldn't set up the project to re-run the check: {reason}"
+
+
+# ---------------------------------------------------------------------------
+# Test results a re-run reported before its setup failed
+# ---------------------------------------------------------------------------
+#
+# ``vitest run && electron verify.cjs`` can report every test passing and then
+# stop because Electron's binary was never installed. The check stays
+# ``unknown`` (part of it never ran), but the runner's own summary is real
+# evidence and is kept beside it as counts. Only the existing output is read;
+# the command is never split or run differently. Counts are kept only when
+# exactly one summary is found, it reports at least one pass and nothing
+# failed: a failed test, suite, file, error or cancellation means no partial
+# result, and several summaries are never added up.
+
+
+@dataclass(frozen=True)
+class ReportedTests:
+    """What one test runner's summary said: counts only, never output."""
+
+    runner: str
+    passed: int
+    failed: int = 0
+    skipped: int = 0
+
+
+REPORTED_RUNNERS: frozenset[str] = frozenset({"vitest", "jest", "pytest", "mocha", "node --test"})
+
+_COUNT = re.compile(r"(\d+) (passed|failed|skipped|todo|errors?)\b")
+_VITEST_TESTS = re.compile(
+    r"^\s*Tests\s{2,}(?P<body>[^\n(]*\d+ (?:passed|failed|skipped)[^\n(]*)\(\d+\)\s*$", re.MULTILINE
+)
+_VITEST_BAD = re.compile(r"^\s*(?:Test Files\s{2,}[^\n]*\d+ failed|Errors\s{2,}\d+ errors?)", re.MULTILINE)
+_JEST_TESTS = re.compile(r"^\s*Tests:\s+(?P<body>[^\n]*\d+ total)\s*$", re.MULTILINE)
+_JEST_BAD = re.compile(r"^\s*Test Suites:\s+[^\n]*\d+ failed", re.MULTILINE)
+_PYTEST_FINAL = re.compile(
+    r"^(?:=+ )?(?P<body>\d+ (?:passed|failed|errors?|skipped)\b[^=\n]*?) in [\d.]+s(?: \([^)\n]*\))?(?: =+)?\s*$",
+    re.MULTILINE,
+)
+_MOCHA = re.compile(r"^\s*(?P<n>\d+) (?P<word>passing|failing|pending)\b", re.MULTILINE)
+_NODE_TEST = re.compile(r"^(?:#|ℹ)\s*(?P<word>pass|fail|cancelled|skipped)\s+(?P<n>\d+)\s*$", re.MULTILINE)
+
+
+def _counts(body: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for n, word in _COUNT.findall(body):
+        key = "error" if word.startswith("error") else word
+        out[key] = out.get(key, 0) + int(n)
+    return out
+
+
+def _summaries(text: str) -> list[ReportedTests | None]:
+    """Every runner summary in *text*; ``None`` stands for a suite- or file-level failure."""
+    found: list[ReportedTests | None] = []
+    for runner, pattern in (("vitest", _VITEST_TESTS), ("jest", _JEST_TESTS)):
+        for m in pattern.finditer(text):
+            c = _counts(m.group("body"))
+            found.append(ReportedTests(runner, c.get("passed", 0), c.get("failed", 0),
+                                       c.get("skipped", 0) + c.get("todo", 0)))
+    for m in _PYTEST_FINAL.finditer(text):
+        c = _counts(m.group("body"))
+        found.append(ReportedTests("pytest", c.get("passed", 0), c.get("failed", 0) + c.get("error", 0),
+                                   c.get("skipped", 0)))
+    mocha = {m.group("word"): int(m.group("n")) for m in _MOCHA.finditer(text)}
+    if "passing" in mocha or "failing" in mocha:
+        found.append(ReportedTests("mocha", mocha.get("passing", 0), mocha.get("failing", 0),
+                                   mocha.get("pending", 0)))
+    node = {m.group("word"): int(m.group("n")) for m in _NODE_TEST.finditer(text)}
+    if "pass" in node or "fail" in node:
+        found.append(ReportedTests("node --test", node.get("pass", 0),
+                                   node.get("fail", 0) + node.get("cancelled", 0), node.get("skipped", 0)))
+    if _VITEST_BAD.search(text) or _JEST_BAD.search(text):
+        found.append(None)
+    return found
+
+
+def reported_test_results(output: str | None) -> ReportedTests | None:
+    """The one all-passing runner summary in *output*, or ``None`` (none, several, or any failure)."""
+    found = _summaries(_scan_text(output))
+    if len(found) != 1 or found[0] is None:
+        return None
+    result = found[0]
+    return result if result.failed == 0 and result.passed > 0 else None
+
+
+def reported_tests_text(reported: ReportedTests) -> str:
+    """``69 / 69 passed (vitest)``; skipped tests are named, never counted as passes."""
+    skipped = f", {reported.skipped} skipped" if reported.skipped else ""
+    return f"{reported.passed} / {reported.passed + reported.failed} passed{skipped} ({reported.runner})"
+
+
+def rerun_partial_reason(reported: ReportedTests, reason: str) -> str:
+    """The receipt/CLI sentence for a re-run whose tests passed before its setup failed."""
+    return f"OpenShard re-ran the tests: {reported_tests_text(reported)}; then {reason}, so the full check couldn't run"
+
+
+def blocked_step(reason: str | None) -> str:
+    """The part of a check a setup failure stopped, for the one-line ``Re-verified:`` summary."""
+    text = reason or ""
+    if "Electron" in text:
+        return "Electron step"
+    if "native module" in text:
+        return "native module step"
+    return "rest of the check"
