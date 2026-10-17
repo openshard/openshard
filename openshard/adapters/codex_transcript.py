@@ -85,7 +85,7 @@ def read_codex_transcript_usage(path: Path, session_id: str) -> dict[str, Any] |
     session_seen = False
     models: list[str] = []
     provider: str | None = None
-    latest: dict[str, int] | None = None
+    latest: dict[str, int | None] | None = None
     complete = True
 
     try:
@@ -126,14 +126,16 @@ def read_codex_transcript_usage(path: Path, session_id: str) -> dict[str, Any] |
                     if input_total is None or output is None or cached is None or cached > input_total:
                         complete = False
                         continue
+                    # The counter has no cache-write field: writes are not
+                    # reported (None), never recorded as zero writes.
                     latest = {
                         "input": input_total - cached,
                         "output": output,
                         "cache_read": cached,
-                        "cache_creation": 0,
-                        "cache_creation_5m": 0,
-                        "cache_creation_1h": 0,
-                        "cache_creation_unsplit": 0,
+                        "cache_creation": None,
+                        "cache_creation_5m": None,
+                        "cache_creation_1h": None,
+                        "cache_creation_unsplit": None,
                     }
     except (OSError, ValueError):
         return None
