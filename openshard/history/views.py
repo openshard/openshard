@@ -173,6 +173,10 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
             "tokens_cache_read": receipt.tokens_cache_read,
             "tokens_cache_creation": receipt.tokens_cache_creation,
             "tokens_provenance": receipt.tokens_provenance,
+            # Why diff_added/diff_removed are null (hook capture); None when
+            # counted or not stated. Local only until the Platform accepts it
+            # (stripped in sync.envelope.receipt_payload).
+            "lines_not_recorded_reason": receipt.lines_not_recorded_reason,
             # Explicit run owner recorded by Core. Never inferred from organisation metadata.
             "owner": receipt.owner,
             # Canonical host/owner/repo (from the record's repo_identity field);

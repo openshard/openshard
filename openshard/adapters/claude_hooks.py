@@ -193,6 +193,7 @@ from openshard.adapters.claude_git_outcome import (  # noqa: F401  (re-exported 
     _merge_git_outcome,
     _own_result_commit,
     _reflog_created,
+    _session_line_counts,
     _sha_or_none,
     _stamp_git_outcome,
     _stored_git_outcome,
@@ -3054,6 +3055,28 @@ def _stamp_reported_counts(entry: dict, buf: dict, model_roles: dict[str, str] |
         entry["capture"]["permission_denied_count"] = permission_denied_count
 
 
+def _stamp_line_counts(
+    entry: dict, repo_root: Path, changed_files: list[dict], files_source: str, files_truncated: bool,
+) -> None:
+    """``lines_added`` / ``lines_removed`` between the session's base and own commit, or the reason they are unknown."""
+    from openshard.history.receipt_evidence import base_commit_value, commit_value
+
+    added: int | None
+    removed: int | None
+    reason: str | None
+    if files_source != "git_diff_inferred":
+        added, removed, reason = None, None, "git_diff_unavailable"
+    else:
+        paths = [f["path"] for f in changed_files if isinstance(f.get("path"), str)]
+        added, removed, reason = _session_line_counts(
+            repo_root, base_commit_value(entry), commit_value(entry), paths, truncated=files_truncated,
+        )
+    entry["lines_added"] = added
+    entry["lines_removed"] = removed
+    if reason is not None:
+        entry["capture"]["lines_not_recorded_reason"] = reason
+
+
 def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     """Build the coerced runs.jsonl record for a session's current state.
 
@@ -3348,7 +3371,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if buf.get("correlation_conflicts"):
         entry["capture"]["correlation_conflicts"] = _stored_count(buf["correlation_conflicts"])
     _stamp_git_outcome(entry, buf)
-    git_writes = [w for w in (buf.get("git_write_at") or []) if isinstance(w, str)]
+    _stamp_line_counts(entry, repo_root, changed_files, files_source, files_truncated)
+    git_writes =[w for w in (buf.get("git_write_at") or []) if isinstance(w, str)]
     if git_writes:
         entry["capture"]["git_write_at"] = git_writes[-_MAX_GIT_WRITES:]
     check_latest = buf.get("check_latest")

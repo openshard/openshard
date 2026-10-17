@@ -1157,6 +1157,19 @@ def commit_value(entry: dict) -> str | None:
     return value if _SHA_RE.match(value) else None
 
 
+def recorded_line_counts(entry: dict) -> tuple[int | None, int | None, str | None]:
+    """``(lines_added, lines_removed, lines_not_recorded_reason)`` the record holds.
+
+    Hook capture stores them from ``git diff --numstat`` between the session's
+    base and its own commit (``adapters/claude_git_outcome._session_line_counts``).
+    Both counts or neither: a missing or malformed count is unknown, never 0.
+    """
+    added, removed = entry.get("lines_added"), entry.get("lines_removed")
+    if all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in (added, removed)):
+        return added, removed, None
+    return None, None, _reason_code(_dict(entry.get("capture")).get("lines_not_recorded_reason"))
+
+
 def pr_url_value(entry: dict) -> str | None:
     """A pull request URL whose head the hosting provider reported as a session-created commit."""
     pr = _dict(entry.get("pull_request"))
@@ -1410,6 +1423,7 @@ __all__ = [
     "approval_detail_block",
     "base_commit_value",
     "commit_value",
+    "recorded_line_counts",
     "pr_url_value",
     "provider_value",
     "surface_value",

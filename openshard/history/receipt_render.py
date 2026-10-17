@@ -710,6 +710,15 @@ def _render_osn_compact_receipt(receipt: ShardReceipt) -> str:
     lines += ["", f"{_INDENT}RESULT", f"{_INDENT}{result_label}", f"{_INDENT}{receipt.human_summary or receipt.result}", _SEP]
     return "\n".join(lines)
 
+
+def lines_changed_display(receipt: ShardReceipt) -> str:
+    """``+N / −M`` when both counts were recorded, else ``not captured yet`` (unknown is never 0)."""
+    if receipt.diff_added is None or receipt.diff_removed is None:
+        return "not captured yet"
+    minus = "\u2212" if _UNICODE_OK else "-"
+    return f"+{receipt.diff_added} / {minus}{receipt.diff_removed}"
+
+
 def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     """Render a bordered, column-aligned RECEIPT block. Pure, no I/O."""
     evidence = receipt.recorded_evidence or {}
@@ -739,6 +748,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     if receipt.duration_seconds is not None:
         lines.append(_row("Duration", f"{receipt.duration_seconds:.1f}s"))
     lines.append(_row("Changed", changed_files_display(receipt)))
+    lines.append(_row("Lines changed", lines_changed_display(receipt), width=15))
     lines += excluded_changes_rows(receipt)
     if receipt.files_detail:
         lines.append(f"{_INDENT}Files")
