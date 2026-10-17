@@ -193,8 +193,10 @@ from openshard.adapters.claude_git_outcome import (  # noqa: F401  (re-exported 
     _merge_git_outcome,
     _own_result_commit,
     _reflog_created,
+    _session_files_base,
     _session_line_counts,
     _sha_or_none,
+    _stamp_files_base,
     _stamp_git_outcome,
     _stored_git_outcome,
 )
@@ -2631,7 +2633,9 @@ def _classify_changed_files(buf: dict, repo_root: Path, files: list[dict]) -> li
 def _git_changed_files(buf: dict, repo_root: Path) -> tuple[list[dict], str]:
     from openshard.adapters.claude_code_import import _parse_git_changed_files
 
-    base = buf.get("git_head_commit_hash")
+    base, known = _session_files_base(buf, repo_root, _SESSION_COMMIT_GRACE_SECONDS)
+    if not known:
+        return [], "not_available"  # branch switch git cannot place: git-observed set unknown
     files, source = _parse_git_changed_files(
         repo_root,
         base_ref=base if isinstance(base, str) and base else "HEAD",
@@ -3058,6 +3062,7 @@ def _stamp_reported_counts(entry: dict, buf: dict, model_roles: dict[str, str] |
 
 def _stamp_line_counts(
     entry: dict, repo_root: Path, changed_files: list[dict], files_source: str, files_truncated: bool,
+    base: str | None = None,
 ) -> None:
     """``lines_added`` / ``lines_removed`` between the session's base and own commit, or the reason they are unknown."""
     from openshard.history.receipt_evidence import base_commit_value, commit_value
@@ -3070,7 +3075,7 @@ def _stamp_line_counts(
     else:
         paths = [f["path"] for f in changed_files if isinstance(f.get("path"), str)]
         added, removed, reason = _session_line_counts(
-            repo_root, base_commit_value(entry), commit_value(entry), paths, truncated=files_truncated,
+            repo_root, base or base_commit_value(entry), commit_value(entry), paths, truncated=files_truncated,
         )
     entry["lines_added"] = added
     entry["lines_removed"] = removed
@@ -3372,7 +3377,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if buf.get("correlation_conflicts"):
         entry["capture"]["correlation_conflicts"] = _stored_count(buf["correlation_conflicts"])
     _stamp_git_outcome(entry, buf)
-    _stamp_line_counts(entry, repo_root, changed_files, files_source, files_truncated)
+    files_base = _stamp_files_base(entry, buf)  # set when the agent switched branch
+    _stamp_line_counts(entry, repo_root, changed_files, files_source, files_truncated, base=files_base)
     git_writes =[w for w in (buf.get("git_write_at") or []) if isinstance(w, str)]
     if git_writes:
         entry["capture"]["git_write_at"] = git_writes[-_MAX_GIT_WRITES:]
