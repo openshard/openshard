@@ -23,7 +23,7 @@ from datetime import datetime
 from openshard.history.locate import HistoryLocation
 from openshard.history.proof_signals import verification_status_from_receipt
 from openshard.history.query import HistoryPage, RecentShard, RelevantContext, RelevantMatch
-from openshard.history.receipt_render import _format_token_count
+from openshard.history.receipt_render import tokens_line
 from openshard.history.shard import (
     CAPTURE_FULL,
     CAPTURE_PARTIAL,
@@ -434,12 +434,7 @@ def render_stats(stats: HistoryStats, loc: HistoryLocation, *, limited_to: int |
     lines.append(_row("Cost", cost))
 
     if stats.tokens_shards:
-        tok = (
-            f"{_format_token_count(stats.tokens_input or 0)} input / "
-            f"{_format_token_count(stats.tokens_output or 0)} output"
-        )
-        if stats.tokens_cache_read:
-            tok += f" (+{_format_token_count(stats.tokens_cache_read)} cache read)"
+        tok = tokens_line(stats.tokens_input, stats.tokens_output, stats.tokens_cache_read, stats.tokens_cache_write)
         tok += f" {_EM} provider-reported for {stats.tokens_shards} {shard_word}"
     else:
         tok = "no provider-reported token counts"
