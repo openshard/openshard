@@ -114,7 +114,6 @@ from openshard.adapters.claude_hooks import (
     EVENT_SESSION_START,
     EVENT_USER_PROMPT_SUBMIT,
     HookPayload,
-    ReducedHookPayload,
     StatusPayload,
     _snapshot_baseline,
     _snapshot_start_head,
@@ -129,6 +128,7 @@ from openshard.adapters.claude_hooks import (
     resolve_repo_root,
     sessions_dir,
 )
+from openshard.adapters.claude_queue_lines import decode_queue_text, is_stop, plan_losses
 from openshard.history.capture_completeness import REASON_CORRUPT_QUEUED_EVENT
 from openshard.history.correlation import correlation_block, parse_correlation
 from openshard.history.task_identity import is_task_id
@@ -269,11 +269,12 @@ class _Timings:
 class _ReplayResult:
     """Outcome of replaying one queue file (see ``CaptureRecorder._replay_file``)."""
 
-    __slots__ = ("ok", "corrupt", "session")
+    __slots__ = ("ok", "corrupt", "session", "tail")
 
     def __init__(self, *, ok: bool) -> None:
         self.ok = ok
         self.corrupt = 0
+        self.tail: list[tuple[int, int]] = []  # losses still to report once the file settles: [(line, claim)]
         self.session: tuple[str, str] | None = None
 
 
@@ -312,6 +313,8 @@ class CaptureRecorder:
         self._session_workspaces = claude_workspace.SessionWorkspaces()
         # Sessions already known to this service (see _opens_session).
         self._known_sessions: set[str] = set()
+        # Corrupt queue lines already counted, per queue file (see _report_losses).
+        self._reported_losses: dict[str, set[tuple[int, int]]] = {}
         # Which project a credential belongs to and which checkout an event
         # touched (see claude_capture_routing).
         self._routing = CheckoutResolver(known_repos=self.known_repos)
@@ -920,22 +923,17 @@ class CaptureRecorder:
             # _schedule_retry) instead of being unlinked unconditionally.
             result = self._replay_file(root, path)
             if result.ok:
+                # Once the file is settled: losses no Stop carried go on the
+                # session's open record (session from a valid neighbour line,
+                # else from the queue-file stem).
+                self._report_losses(root, path, result.session, result.tail)
                 try:
                     path.unlink()
+                    self._reported_losses.pop(str(path), None)
                 except OSError:
                     needs_retry = True
             else:
                 needs_retry = True
-            if result.corrupt and result.ok:
-                # Only once the file is fully settled (so a retried file does
-                # not count its damage twice): make the loss visible on the
-                # session's record. The session comes from a valid neighbour
-                # line when there is one, else from the queue-file stem.
-                sid, agent = result.session or _session_from_stem(path)
-                if sid:
-                    apply_capture_loss(
-                        sid, root, kind=REASON_CORRUPT_QUEUED_EVENT, count=result.corrupt, agent=agent,
-                    )
         if needs_retry:
             self._schedule_retry(root, session_id)
 
@@ -945,40 +943,31 @@ class CaptureRecorder:
         ``ok`` is True only when no line hit a *transient* failure (those keep
         the file for retry). An undecodable or structurally unusable line is
         not transient: it is copied to the quarantine directory, counted in
-        ``corrupt_lines`` and reported in ``corrupt`` so the caller can mark
-        the session's capture incomplete. Valid neighbours are still applied.
+        ``corrupt_lines`` and reported in ``corrupt``. Valid neighbours are
+        still applied. The file is decoded first so a loss is staged on its
+        turn before that turn's ``Stop`` seals it (``claude_queue_lines``);
+        ``tail`` is what is left to report once the file settles.
         """
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return _ReplayResult(ok=False)
         result = _ReplayResult(ok=True)
-        for lineno, raw in enumerate(text.splitlines(), start=1):
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                line = json.loads(raw)
-            except ValueError:
-                self._quarantine(root, path, lineno, raw, "not valid JSON")
+        lines = decode_queue_text(text)
+        plan, memo = plan_losses(lines), self._reported_losses.setdefault(str(path), set())
+        carried: list[tuple[int, int]] = []
+        for index, item in enumerate(lines):
+            if item.corrupt is not None:
+                self._quarantine(root, path, item.lineno, item.raw, item.corrupt)
                 result.corrupt += 1
                 continue
-            if not isinstance(line, dict) or not isinstance(line.get("data"), dict):
-                self._quarantine(root, path, lineno, raw, "not a queue line object")
-                result.corrupt += 1
-                continue
-            dedup_id = line.get("id") if isinstance(line.get("id"), str) else None
-            at = line.get("at") if isinstance(line.get("at"), str) else None
-            kind = line.get("kind")
-            data = line["data"]
-            if kind == "hook":
-                reduced = ReducedHookPayload.from_dict(data)
-                if reduced is None:
-                    self._quarantine(root, path, lineno, raw, "unusable hook payload")
-                    result.corrupt += 1
-                    continue
+            if item.kind == "hook":
+                reduced = item.payload
                 result.session = (reduced.session_id, reduced.agent)
-                outcome = apply_reduced_hook(reduced, root, dedup_id=dedup_id, at=at)
+                if is_stop(item):
+                    self._report_losses(root, path, result.session, [(n, 1) for n in plan.before[index]] + carried)
+                    carried = []
+                outcome = apply_reduced_hook(reduced, root, dedup_id=item.dedup_id, at=item.at)
                 if outcome.action == "error":
                     with self._stats_lock:
                         self.stats["replay_errors"] = int(self.stats.get("replay_errors") or 0) + 1
@@ -988,24 +977,35 @@ class CaptureRecorder:
                     self._bump("duplicates")
                 else:
                     self._bump("replayed")
-            elif kind == "status":
+                if is_stop(item) and (outcome.action == "record_finalized" or (index, 0) in memo):
+                    memo.add((index, 0))  # this Stop closed its Receipt (remembered for a retry)
+                    carried = [(n, 2) for n in plan.carry[index]]  # so count the line on the next one too
+            else:
                 # Best-effort, non-critical metadata (documented throughout
                 # this capture path: the status line only ever supplements
                 # hook evidence, never replaces it) -- a failure here is not
                 # worth the same retry-forever treatment as a hook event.
-                status = StatusPayload.from_dict(data)
-                if status is None:
-                    self._quarantine(root, path, lineno, raw, "unusable status payload")
-                    result.corrupt += 1
-                    continue
+                status = item.payload
                 if result.session is None and isinstance(status.session_id, str):
                     result.session = (status.session_id, status.agent)
-                apply_status_payload(status, root, dedup_id=dedup_id, at=at)
+                apply_status_payload(status, root, dedup_id=item.dedup_id, at=item.at)
                 self._bump("replayed")
-            else:
-                self._quarantine(root, path, lineno, raw, "unknown line kind")
-                result.corrupt += 1
+        result.tail = [(n, 1) for n in plan.tail] + carried
         return result
+
+    def _report_losses(self, root: Path, path: Path, session: tuple[str, str] | None,
+                       keys: list[tuple[int, int]]) -> None:
+        """Stage the loss of queue lines *keys* (``(line, claim)``) on *session*, once per file.
+
+        Remembered per queue file, so a file retried after a transient failure
+        never counts the same line against the same Receipt twice.
+        """
+        reported = self._reported_losses.setdefault(str(path), set())
+        fresh = [k for k in keys if k not in reported]
+        sid, agent = session or _session_from_stem(path)
+        if fresh and sid:
+            apply_capture_loss(sid, root, kind=REASON_CORRUPT_QUEUED_EVENT, count=len(fresh), agent=agent)
+            reported.update(fresh)
 
     def _quarantine(self, root: Path, source: Path, lineno: int, raw: str, reason: str) -> None:
         """Preserve one undecodable queue line for diagnosis. Never raises.

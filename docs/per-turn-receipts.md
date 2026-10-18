@@ -157,6 +157,7 @@ session sends nothing until its turn seals.
 | A late or repeated `Stop` after a sealed turn | ignored (it can carry no work); no empty buffer is left behind |
 | `claude --resume` after the session ended | the next Receipt says `start_source: resume`, not `turn`, and stays in the session's Task |
 | Another Stop hook blocks and the agent continues | Claude's hooks are synchronous and ordered, so the next hook opens the next turn Receipt (no prompt; task text not captured) instead of being dropped |
+| Corrupt capture-queue line | the queue file is decoded before it is applied, so the loss is staged on the turn before its `Stop` seals it (`corrupt_queued_event`). A line between a `Stop` and the next prompt may belong to either turn: both Receipts say so. See `claude_queue_lines` |
 | Capture service down (inline hooks) | same sealing in the hook process; no PR lookup; no immediate sync (the next sync run picks it up) |
 | Hosted runtimes (`claude-code-web`, `cursor-cloud`) | unchanged: Stop seals with `session_end_not_observed` (logic moved into `claude_turn_receipts.close_turn`) |
 
