@@ -511,8 +511,14 @@ def env_cmd() -> None:
     default=None,
     help="Repository to configure Claude Code for (default: current directory).",
 )
+@click.option("--repo", "repo_level", is_flag=True, default=False,
+              help="Only write committable repository config so cloud agents pick OpenShard up (no credentials).")
+@click.option("--dry-run", is_flag=True, default=False, help="With --repo: print what would change; write nothing.")
+@click.option("--agents", default=None, help="With --repo: claude,cursor,copilot,openhands,devcontainer (default) "
+              "or devin,amp,replicas,boat (printed snippets).")
 @_telemetry_command("setup")
-def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path | None) -> None:
+def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path | None,
+              repo_level: bool, dry_run: bool, agents: str | None) -> None:
     """Set up OpenShard for this repository: the one command a new user needs.
 
     Detects the environment, configures Claude Code capture for this
@@ -524,6 +530,9 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
     """
     from openshard.config import onboarding as ob
 
+    if repo_level:
+        from openshard.adapters.repo_setup import run_cli
+        raise SystemExit(run_cli(repo_path, agents, dry_run, click.echo))
     if as_agent:
         # Machine-readable path: no interactive UI, no configuration writes.
         state = _current_state()
@@ -7635,15 +7644,15 @@ def _remote_setup_lines(agent: str, capture_url: str) -> list[str]:
     if agent in ("claude-code", "claude"):
         return common + [
             "  Claude Code cloud sessions load hooks from the repository's .claude/settings.json",
-            "  (single-repository sessions). Commit OpenShard's hooks there, or run",
+            "  (single-repository sessions). Commit them with `openshard setup --repo`, or run",
             "  `openshard setup --yes` in the setup script so they exist before Claude Code starts.",
             "  No session-end event is guaranteed when the VM is reclaimed: the capture then ends as Partial.",
         ]
     if agent == "cursor":
         return common + [
             "  Cursor cloud agents run command hooks from the repository's .cursor/hooks.json.",
-            "  Commit them with `openshard capture install cursor`. sessionStart/sessionEnd do not",
-            "  fire in cloud agents, so a capture ends as Partial unless a Receipt is delivered.",
+            "  Commit them with `openshard setup --repo`. sessionStart/sessionEnd may not fire in",
+            "  cloud agents; verify a first event. Without an end event a capture ends as Partial.",
         ]
     if agent == "codex":
         return common + [
