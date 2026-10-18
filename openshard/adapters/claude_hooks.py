@@ -1775,14 +1775,13 @@ def _apply_prompt(buf: dict, payload: ReducedHookPayload, repo_root: Path, now: 
     buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
     buf["first_prompt_at"] = buf.get("first_prompt_at") or now
     buf["task"] = buf.get("task") or payload.task_excerpt
+    created = buf.get("record") is None  # first prompt = real work: record it now, so an interrupted one leaves a trace
+    if created:
+        _ensure_record(buf, repo_root)
     _append_event(buf, event_type="session.activity", action="user prompt submitted", status="unknown",
                   evidence="directly_observed", occurred_at=now,
                   metadata={"hook": payload.event, "prompt_index": buf["prompt_count"]})
-    # First prompt = the session has real work: create the record now so
-    # even a session interrupted before any Stop leaves a trace.
-    created = buf.get("record") is None
-    if created:
-        _ensure_record(buf, repo_root)
+    turns.mark_opened(buf, repo_root)  # a turn's opening prompt names its Receipt (the open-turn signal)
     return ("first prompt: record created" if created else "prompt buffered"), created, False
 
 

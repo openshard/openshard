@@ -356,13 +356,14 @@ class TestRendering:
 
         return [build_shard_receipt(e, index=i) for i, e in enumerate(_entries(repo))]
 
-    def test_last_and_history_name_the_turn(self, repo, turn_flag):
+    def test_last_history_and_mcp_name_the_turn(self, repo, turn_flag):
         from openshard.cli.visibility import _history_row_lines
         from openshard.history.query import recent_shards
         from openshard.history.receipt_render import (
             render_compact_shard_receipt,
             render_full_shard_receipt,
         )
+        from openshard.history.views import receipt_to_dict
 
         _two_turns(repo)
         first, second = self._receipts(repo)
@@ -371,13 +372,30 @@ class TestRendering:
         assert f"  Turn        1 of session {key[:12]}" in render_full_shard_receipt(first).splitlines()
         rows = [line for item in recent_shards(limit=5, repo_path=repo).items for line in _history_row_lines(item)]
         assert any(f"Turn 2 of session {key[:12]}" in line for line in rows)
+        mcp = receipt_to_dict(second)  # the MCP get_receipt shape
+        assert mcp["turn"] == {"label": f"Turn 2 of session {key[:12]}", "turn_index": 2, "session_key": key,
+                               "previous_receipt_id": first.receipt_id}
+        assert "turn" not in receipt_to_dict(second, extended=True)  # history --json / sync: in ``session``
 
     def test_session_receipts_render_without_a_turn_row(self, repo, flag_off):
         from openshard.history.receipt_render import render_compact_shard_receipt
+        from openshard.history.views import receipt_to_dict
 
         _two_turns(repo, end=True)
         [receipt] = self._receipts(repo)
         assert not any(line.startswith("  Turn ") for line in render_compact_shard_receipt(receipt).splitlines())
+        assert "turn" not in receipt_to_dict(receipt)
+
+    def test_files_left_by_an_earlier_turn_are_not_counted_as_this_turns(self, repo, turn_flag):
+        from openshard.history.receipt_render import render_compact_shard_receipt
+
+        _two_turns(repo)
+        _hook(repo, "UserPromptSubmit", prompt="explain b")  # reads only; b.py is still uncommitted
+        _hook(repo, "Stop")
+        third = self._receipts(repo)[-1]
+        assert third.files_changed == 0
+        text = render_compact_shard_receipt(third)
+        assert "pre-existing (changed before the turn)" in text
 
 
 class TestPostSessionVerifyPerTurn:

@@ -960,7 +960,7 @@ def excluded_changes_rows(receipt: ShardReceipt) -> list[str]:
     other = changes.get("other_session_excluded") or 0
     # Label fits the receipt's 12-column label gutter; the value names the kind.
     if pre:
-        rows.append(_row("Excluded", f"{pre} pre-existing (changed before the session)"))
+        rows.append(_row("Excluded", f"{pre} pre-existing (changed before the {'turn' if ((receipt.recorded_evidence or {}).get('session') or {}).get('receipt_scope') == 'turn' else 'session'})"))
     if other:
         rows.append(_row("Excluded", f"{other} other-session (reported by another agent session)"))
     return rows
@@ -1054,9 +1054,9 @@ def build_shard_receipt(
         if diff_files:
             files_changed = len(diff_files)
         else:
-            # Records that list files but wrote zero counts (older OSN runs) still
-            # changed the files they list.
-            files_changed = sum(1 for f in _detail if isinstance(f, dict) and f.get("path"))
+            # Records that list files but wrote zero counts (older OSN runs) still changed the
+            # files they list -- except ones listed as not this run's (pre-existing, other session).
+            files_changed = sum(1 for f in _detail if isinstance(f, dict) and f.get("path") and f.get("attribution") not in _EXCLUDED_ATTRIBUTIONS)
 
     v_attempted = entry.get("verification_attempted")
     v_passed = entry.get("verification_passed")
