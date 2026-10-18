@@ -255,7 +255,7 @@ from openshard.verification.check_command import (
     queued_check_commands,
     shell_for_tool,
 )
-from openshard.verification.gaming_signals import stamp_gaming_signals
+from openshard.verification.gaming_signals import note_answer_read, stamp_gaming_signals
 
 # Claude Code identity constants (module names kept for callers/tests; values: capture_agents.py).
 EXECUTOR = CLAUDE_CODE_PROFILE.executor
@@ -359,6 +359,8 @@ ATTR_OTHER_SESSION = "other_session"
 _EXCLUDED_ATTRIBUTIONS = frozenset({ATTR_PRE_EXISTING, ATTR_OTHER_SESSION})
 # Claude Code's shell tools (``PowerShell`` on Windows; same hook contract as Bash).
 COMMAND_TOOLS: frozenset[str] = frozenset({"Bash", "PowerShell"})
+# Read: only the path, only for the gaming checks (never an Event, a counted call or a routed path).
+READ_TOOLS: frozenset[str] = frozenset({"Read"})
 # Agent-neutral tool classification carried on the reduced payload.
 TOOL_KIND_FILE = "file"
 TOOL_KIND_COMMAND = "command"
@@ -448,6 +450,7 @@ class HookPayload:
     prompt: str | None = None  # UserPromptSubmit
     tool_name: str | None = None  # PostToolUse / PostToolUseFailure
     file_path: str | None = None  # tool_input.file_path for file tools
+    read_path: str | None = None  # tool_input.file_path for Read: path only, kept off file_path
     command: str | None = None  # tool_input.command for Bash
     stop_hook_active: bool = False  # Stop
     # PR12 -- filled by the Codex / OpenCode translators, never by Claude Code:
@@ -679,7 +682,9 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
         reason=_str_or_none(data.get("reason"), 40) or _str_or_none(data.get("end_reason"), 40),
         prompt=prompt,
         tool_name=tool_name,
-        file_path=_str_or_none(tool_input.get("file_path") or tool_input.get("notebook_path"), 2_000),
+        file_path=None if tool_name in READ_TOOLS else
+        _str_or_none(tool_input.get("file_path") or tool_input.get("notebook_path"), 2_000),
+        read_path=_str_or_none(tool_input.get("file_path"), 2_000) if tool_name in READ_TOOLS else None,
         command=_str_or_none(tool_input.get("command")),
         stop_hook_active=bool(data.get("stop_hook_active")),
         # Claude Code documents PostToolUse as "runs immediately after a tool
@@ -1487,6 +1492,8 @@ def _classify_claude_tool(tool: str) -> str:
         return TOOL_KIND_FILE
     if tool in COMMAND_TOOLS:
         return TOOL_KIND_COMMAND
+    if tool in READ_TOOLS:
+        return TOOL_KIND_READ
     return TOOL_KIND_OTHER
 
 
@@ -1557,7 +1564,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
             reduced.git_write = bool(payload.command and _GIT_WRITE_RE.search(payload.command))
             reduced.herdr_delegated, reduced.herdr_terminals = _herdr_delegations(payload, reduced.command_outcome)
         elif kind == TOOL_KIND_READ:
-            reduced.file_target = _to_repo_relative(payload.file_path, repo_root)
+            reduced.file_target = _to_repo_relative(payload.file_path or payload.read_path, repo_root)
             reduced.file_dropped = reduced.file_target is None and bool(payload.file_path)
     elif payload.event == EVENT_PERMISSION_DENIED:
         reduced.tool_name = payload.tool_name or "unknown"
@@ -3712,6 +3719,11 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         buf["tool_call_count"] = int(buf.get("tool_call_count") or 0) + 1
         if failed:
             buf["tool_failure_count"] = int(buf.get("tool_failure_count") or 0) + 1
+        if tool in READ_TOOLS and payload.agent == AGENT_CLAUDE_CODE:
+            buf["read_call_count"] = int(buf.get("read_call_count") or 0) + 1  # see claude_hook_coverage
+            if not failed:
+                note_answer_read(buf, payload.file_target, repo_root)
+            return f"tool {tool} counted (path only, no Event)", False, False
         metadata: dict[str, Any] = {"hook": event, "tool": tool}
         for attr_key in _TOOL_ATTR_KEYS:  # agent-reported facts about this call, when supplied
             if attr_key in payload.attrs:

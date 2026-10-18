@@ -274,7 +274,8 @@ class TestBlockingPath:
         assert _wait_for(lambda: len(_lines(repo)) == 1)
         assert _lines(repo)[0]["task"] == "task"
 
-    def test_blocking_path_stays_within_budget(self, service, repo):
+    @pytest.mark.parametrize("tool", ["Bash", "Read"])
+    def test_blocking_path_stays_within_budget(self, service, repo, tool):
         # A regression guard for the whole point of the service: the part
         # Claude Code waits on must be a few milliseconds even while the
         # worker is folding in the background. Bounds are deliberately loose
@@ -303,7 +304,14 @@ class TestBlockingPath:
         for attempt in range(1, attempts + 1):
             roundtrips: list[float] = []
             for i in range(40):
-                raw = _payload("PostToolUse", repo, tool_name="Bash", tool_input={"command": f"echo {i}"})
+                if tool == "Read":
+                    # Read fires often and its payload carries the file's content
+                    # (never read by OpenShard): a large one must stay as cheap.
+                    raw = _payload("PostToolUse", repo, tool_name="Read",
+                                   tool_input={"file_path": str(repo / f"src/m{i}.py")},
+                                   tool_response={"type": "text", "file": {"content": "x = 1\n" * 30_000}})
+                else:
+                    raw = _payload("PostToolUse", repo, tool_name="Bash", tool_input={"command": f"echo {i}"})
                 t0 = time.perf_counter()
                 assert _post(service.port, raw, project_dir=str(repo))
                 roundtrips.append(time.perf_counter() - t0)

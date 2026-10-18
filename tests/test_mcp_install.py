@@ -634,10 +634,22 @@ class TestHookConfigShape(unittest.TestCase):
         # A tool missing from the matcher never reaches the adapter: Claude
         # Code on Windows runs shell commands through ``PowerShell``, and those
         # calls were silently absent from Receipts while the matcher said Bash.
-        from openshard.adapters.claude_hooks import COMMAND_TOOLS, FILE_TOOLS
+        from openshard.adapters.claude_hooks import COMMAND_TOOLS, FILE_TOOLS, READ_TOOLS
 
-        self.assertEqual(set(TOOL_MATCHER.split("|")), set(FILE_TOOLS | COMMAND_TOOLS))
+        self.assertEqual(set(TOOL_MATCHER.split("|")), set(FILE_TOOLS | COMMAND_TOOLS | READ_TOOLS))
         self.assertIn("PowerShell", TOOL_MATCHER.split("|"))
+        self.assertIn("Read", TOOL_MATCHER.split("|"))  # grader / answer-file reads (gaming checks)
+
+    def test_matcher_from_before_read_is_updated(self):
+        old = build_hook_config()
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            old[event][0]["matcher"] = "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell"
+        merged, changes = merge_openshard_hooks({"hooks": old})
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            self.assertEqual(changes[event], "updated")
+            self.assertEqual(merged["hooks"][event][0]["matcher"], TOOL_MATCHER)
+        self.assertEqual({e: c for e, c in changes.items() if c != "unchanged"},
+                         {"PostToolUse": "updated", "PostToolUseFailure": "updated"})
 
     def test_bash_only_matcher_from_an_older_install_is_updated(self):
         old = build_hook_config()
@@ -837,6 +849,22 @@ class TestInstallClaudeHooks(unittest.TestCase):
             self.assertEqual(again.status, "already_installed")
             self.assertEqual(path.read_text(encoding="utf-8"), before)
             self.assertEqual(path.stat().st_mtime_ns, mtime)
+
+    def test_setup_repairs_an_install_from_before_read_was_matched(self):
+        with CliRunner().isolated_filesystem() as tmp:
+            root = self._root(tmp)
+            with patch(f"{_HOOKS_MODULE}.subprocess.run", side_effect=_git_ignored_router()):
+                install_claude_hooks(repo_root=root)
+                path = root / SETTINGS_RELPATH
+                settings = json.loads(path.read_text(encoding="utf-8"))
+                for event in ("PostToolUse", "PostToolUseFailure"):
+                    settings["hooks"][event][0]["matcher"] = "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell"
+                path.write_text(json.dumps(settings), encoding="utf-8")
+                again = install_claude_hooks(repo_root=root)
+            self.assertEqual(again.status, "updated", again.message)
+            repaired = _read_settings(root)["hooks"]
+            for event in ("PostToolUse", "PostToolUseFailure"):
+                self.assertEqual(repaired[event][0]["matcher"], TOOL_MATCHER)
 
     def test_existing_unrelated_hooks_preserved(self):
         with CliRunner().isolated_filesystem() as tmp:

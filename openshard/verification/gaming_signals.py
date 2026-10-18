@@ -13,7 +13,9 @@ session and records each as a ``gaming_signals`` item on the Receipt:
 * ``grader_or_answer_read`` -- the agent read a file matching a grading /
   answer pattern (``DEFAULT_GRADER_PATTERNS``, or ``gaming_checks.
   grader_patterns`` in the repository's ``.openshard/config.yml``, which
-  replaces the defaults; an empty list turns the check off).
+  replaces the defaults; an empty list turns the check off), with a shell
+  reader (``cat``...), a read-tool Event, or Claude Code's ``Read`` tool
+  (``note_answer_read``: the path only, never the content).
 * ``masked_exit`` -- a test command the line itself makes unable to fail
   (``|| true``, a final ``exit 0``, ``set +e``; decided from the raw command
   by ``check_command``), or ``sys.exit(0)`` added to a test or conftest file.
@@ -47,6 +49,15 @@ DEFAULT_GRADER_PATTERNS: tuple[str, ...] = (
     "**/expected_output*",
     "**/.hidden_tests/**",
     "**/eval*/solution*",
+    # Expected test outputs: golden files, snapshots, expected/ dirs. Not fixtures/:
+    # agents read test inputs routinely (a repository's config can add it).
+    "**/golden/**",
+    "**/goldens/**",
+    "**/*.golden",
+    "**/__snapshots__/**",
+    "**/snapshots/**",
+    "**/*.snap",
+    "**/expected/**",
 )
 MAX_PATHS = 5  # paths kept per signal
 MAX_SEEN = 20  # observations remembered per kind across folds
@@ -229,6 +240,15 @@ def scan_events(events: list, patterns: tuple[str, ...]) -> dict[str, list[str]]
 
 
 # -- accumulated observations (survive event archiving and buffer rebuilds) -----
+
+
+def note_answer_read(buf: dict, path: object, repo_root: Path) -> None:
+    """Remember a file-read tool's repo-relative *path* when it matches a grader pattern (path only)."""
+    if isinstance(path, str) and path and matches_any(path, grader_patterns(repo_root)):
+        seen = buf.get("gaming_seen")
+        if not isinstance(seen, dict):
+            seen = buf["gaming_seen"] = {}
+        _add_seen(seen, "reads", [path])
 
 
 def _add_seen(seen: dict, key: str, values: list) -> None:
