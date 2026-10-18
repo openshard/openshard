@@ -499,12 +499,13 @@ class TestLifecycle:
         assert SID not in entry["shard_id"]
         assert entry["capture"]["session_id"] == SID
 
-    def test_full_session_yields_one_record_with_expected_events(self, repo: Path):
+    def test_full_session_yields_one_record_with_expected_events(self, repo: Path, receipt_scope: str):
         entry = _session(repo)
         assert "events" in entry
         types = [e["event_type"] for e in entry["events"]]
         assert types.count(EVENT_SESSION_STARTED) == 1
-        assert types.count(EVENT_RUN_COMPLETED) == 1
+        # A turn Receipt is sealed at its Stop and never claims the later session end.
+        assert types.count(EVENT_RUN_COMPLETED) == (1 if receipt_scope == "session" else 0)
         assert len(_events(entry, EVENT_TOOL_INVOKED)) == 3
         assert len(_events(entry, EVENT_FILE_CHANGED)) == 2
         assert all(e["source"] == SOURCE_CLAUDE_CODE_HOOKS for e in entry["events"])
@@ -519,6 +520,7 @@ class TestLifecycle:
             assert e["attempt_number"] == 1
             assert e["occurred_at"]
 
+    @pytest.mark.session_receipts("SessionEnd finalising the Receipt is session-scope only")
     def test_session_end_finalizes_and_removes_buffer(self, repo: Path):
         entry = _session(repo)
         assert entry["capture"]["status"] == "ended"
@@ -560,6 +562,7 @@ class TestLifecycle:
         assert "ignored" in out.detail
         assert _runs_lines(repo)[0]["events"] == before["events"]
 
+    @pytest.mark.session_receipts("a resume inside one open session Receipt; with turns the Stop already sealed it")
     def test_resume_before_end_adds_activity_event_and_stays_buffered(self, repo: Path):
         _session(repo, end=False)
         out = _run(repo, "SessionStart", source="resume")
@@ -584,7 +587,9 @@ class TestLifecycle:
         assert second["run_id"] != first["run_id"]
         assert second["receipt_id"] != first["receipt_id"]
 
-    def test_resume_after_end_opens_a_new_receipt_and_leaves_the_ended_one_unchanged(self, repo: Path):
+    def test_resume_after_end_opens_a_new_receipt_and_leaves_the_ended_one_unchanged(
+        self, repo: Path, receipt_scope: str,
+    ):
         ended = _session(repo)
         before = _raw(repo)
         out = _run(repo, "SessionStart", source="resume")
@@ -601,7 +606,11 @@ class TestLifecycle:
         assert second["capture"]["session_id"] == SID
         assert second["capture"]["start_source"] == "resume"
         assert second["capture"]["resumed_from_receipt_id"] == ended["receipt_id"]
-        assert second["capture"]["session_end_observed"] is True
+        # A turn Receipt is sealed at its Stop; the SessionEnd after it is not recorded on it.
+        assert second["capture"]["session_end_observed"] is (receipt_scope == "session")
+        if receipt_scope == "turn":
+            assert second["capture"]["turn_index"] == 2
+            assert second["task_id"] == ended["task_id"]
         assert second["capture"]["prompt_count"] == 1
         assert second["task"] == "Now add subtraction"
         acts = [e["action"] for e in _events(second, EVENT_SESSION_ACTIVITY)]
@@ -646,10 +655,10 @@ class TestLifecycle:
         assert lines[0]["capture"]["session_id"] == SID
         assert lines[1]["capture"]["session_id"] == SID2
 
-    def test_stop_hook_active_still_snapshots_without_error(self, repo: Path):
+    def test_stop_hook_active_still_snapshots_without_error(self, repo: Path, receipt_scope: str):
         _run(repo, "UserPromptSubmit", prompt="task")
         out = _run(repo, "Stop", stop_hook_active=True)
-        assert out.action == "record_updated"
+        assert out.action == ("record_updated" if receipt_scope == "session" else "record_finalized")
 
 
 # ---------------------------------------------------------------------------
@@ -1016,13 +1025,18 @@ class TestPrivacy:
 
 
 class TestRobustness:
-    def test_interrupted_session_keeps_last_snapshot_honestly(self, repo: Path):
+    def test_interrupted_session_keeps_last_snapshot_honestly(self, repo: Path, receipt_scope: str):
         entry = _session(repo, end=False)
         assert entry["capture"]["session_end_observed"] is False
-        assert entry["capture"]["status"] == "in_progress"
         assert _events(entry, EVENT_RUN_COMPLETED) == []
         assert len(_events(entry, EVENT_TOOL_INVOKED)) == 3  # folded at Stop
-        assert buffer_path(repo.resolve(), SID).exists()
+        if receipt_scope == "session":
+            assert entry["capture"]["status"] == "in_progress"
+            assert buffer_path(repo.resolve(), SID).exists()
+        else:  # the turn completed and is sealed; the session end is still not claimed
+            assert entry["capture"]["status"] == "turn_completed"
+            assert entry["capture"]["turn_sealed_at"]
+            assert not buffer_path(repo.resolve(), SID).exists()
 
     def test_tool_hooks_snapshot_periodically_without_stop(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")  # snapshots at record creation
@@ -1051,7 +1065,7 @@ class TestRobustness:
         _run(repo, "SessionEnd", reason="prompt_input_exit")
         assert len(_runs_lines(repo)) == 1
 
-    def test_late_stop_after_session_end_never_mutates_the_ended_receipt(self, repo: Path):
+    def test_late_stop_after_session_end_never_mutates_the_ended_receipt(self, repo: Path, receipt_scope: str):
         entry = _session(repo)
         before = _raw(repo)
         out = _run(repo, "Stop")  # a background Stop finishing after SessionEnd
@@ -1125,8 +1139,14 @@ class TestRobustness:
         assert len(raw) == 3
         assert json.loads(raw[2])["capture"]["session_id"] == SID
 
-    def test_stale_buffer_swept_on_next_session_start(self, repo: Path):
-        _session(repo, end=False)
+    def test_stale_buffer_swept_on_next_session_start(self, repo: Path, receipt_scope: str):
+        if receipt_scope == "session":
+            _session(repo, end=False)
+        else:  # a sealed turn leaves no buffer: the turn still open (no Stop) is what goes stale
+            _run(repo, "SessionStart", source="startup")
+            _run(repo, "UserPromptSubmit", prompt="Add a calculator module with unit tests")
+            _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ls"}, tool_response={})
+            _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ls"}, tool_response={})
         path = buffer_path(repo.resolve(), SID)
         buf = json.loads(path.read_text(encoding="utf-8"))
         buf["last_activity_at"] = "2000-01-01T00:00:00Z"
@@ -1140,7 +1160,7 @@ class TestRobustness:
         assert lines[0]["capture"]["session_end_observed"] is False
         assert any(e["event_id"] == "recovered-evt" for e in lines[0]["events"])
 
-    def test_an_idle_sealed_receipt_says_so_and_resumed_work_is_not_idle(self, repo: Path):
+    def test_an_idle_sealed_receipt_says_so_and_resumed_work_is_not_idle(self, repo: Path, receipt_scope: str):
         # Seen live: a checkout left for an hour read "in progress (no turn completed yet)".
         _run(repo, "UserPromptSubmit", prompt="task")
         _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ls"}, tool_response={})
@@ -1162,7 +1182,8 @@ class TestRobustness:
         first, resumed = _runs_lines(repo)
         assert first["receipt_id"] == sealed["receipt_id"] and first["capture"]["status"] == "idle"
         assert resumed["capture"]["resumed_from_receipt_id"] == sealed["receipt_id"]
-        assert resumed["capture"]["status"] == "in_progress"
+        # Its own Stop seals a turn Receipt; a session Receipt stays open.
+        assert resumed["capture"]["status"] == ("in_progress" if receipt_scope == "session" else "turn_completed")
         assert "idle_sealed_at" not in resumed["capture"]
         assert "session_idle_sealed" not in [r["kind"] for r in resumed["capture"]["completeness"]["reasons"]]
 
@@ -1310,6 +1331,7 @@ class TestTaskCompletion:
         receipt = build_shard_receipt(entry)
         assert receipt.task_completion == "In progress"
 
+    @pytest.mark.session_receipts("SessionEnd updating an open session Receipt; a turn Receipt is sealed at Stop")
     def test_session_end_metadata_arrives_later_without_changing_task_status(self, repo: Path):
         entry = _session(repo, end=False)
         assert entry["capture"]["task_status"] == "turn_completed"
@@ -1318,13 +1340,15 @@ class TestTaskCompletion:
         assert after["capture"]["task_status"] == "turn_completed"
         assert after["capture"]["session_end_observed"] is True
 
-    def test_repeated_stop_is_idempotent_on_task_status(self, repo: Path):
+    def test_repeated_stop_is_idempotent_on_task_status(self, repo: Path, receipt_scope: str):
         _run(repo, "UserPromptSubmit", prompt="task")
         _run(repo, "Stop")
         _run(repo, "Stop")
-        entry = _runs_lines(repo)[0]
+        lines = _runs_lines(repo)
+        assert len(lines) == 1  # a repeated Stop with no work opens no turn Receipt
+        entry = lines[0]
         assert entry["capture"]["task_status"] == "turn_completed"
-        assert entry["capture"]["turn_count"] == 2
+        assert entry["capture"]["turn_count"] == (2 if receipt_scope == "session" else 1)
 
     def test_checks_still_not_run_when_turn_completed(self, repo: Path):
         entry = _session(repo, with_tools=False, end=False)
@@ -1558,6 +1582,7 @@ class TestSessionGitOutcome:
         assert entry["session_commits"]["shas"] == []
         assert _projected(entry)["commit"] is None
 
+    @pytest.mark.session_receipts("idle-sweeps a session Receipt left open after its Stop")
     def test_a_manual_commit_after_the_session_went_idle_is_not_the_sessions(self, repo: Path):
         self._commit_mid_session(repo)
         self._shift_buffer_back(repo, 3 * 3600)  # the session's activity was hours ago
@@ -1570,14 +1595,17 @@ class TestSessionGitOutcome:
         assert _head(repo) not in entry["session_commits"]["shas"]
         assert _projected(entry)["commit"] is None
 
-    def test_session_created_commit_is_the_projected_commit(self, repo: Path):
+    def test_session_created_commit_is_the_projected_commit(self, repo: Path, receipt_scope: str):
         start = _head(repo)
         head = self._commit_mid_session(repo)
         stopped = _runs_lines(repo)[0]
-        # Not on an ordinary turn: the git outcome is a finalisation step only.
-        assert "git_end_head" not in stopped and _projected(stopped)["commit"] is None
+        if receipt_scope == "session":
+            # Not on an ordinary turn: the git outcome is a finalisation step only.
+            assert "git_end_head" not in stopped and _projected(stopped)["commit"] is None
         _run(repo, "SessionEnd", reason="prompt_input_exit")
         entry = _runs_lines(repo)[0]
+        if receipt_scope == "turn":  # the turn's Stop is its finalisation; the SessionEnd changes nothing
+            assert entry == stopped
         assert entry["git_head_commit_hash"] == start
         assert entry["git_end_head"] == head
         assert entry["session_commits"] == {"source": "git_observed", "shas": [head], "truncated": False}
@@ -1693,6 +1721,7 @@ class TestSessionGitOutcome:
         assert len(calls) == 1
         assert _runs_lines(repo)[0]["pull_request"]["number"] == 401
 
+    @pytest.mark.session_receipts("retries the PR lookup on later Stops of one open Receipt; a sealed turn is immutable")
     def test_service_stop_retries_the_pr_lookup_until_found(self, repo: Path, monkeypatch):
         calls = self._service_mode(monkeypatch, [None, 402])
         head = self._commit_mid_session(repo)
@@ -1703,6 +1732,7 @@ class TestSessionGitOutcome:
         entry = _runs_lines(repo)[0]
         assert entry["pull_request"]["number"] == 402 and entry["pull_request"]["head"] == head
 
+    @pytest.mark.session_receipts("SessionEnd re-finalising an outcome stored at an earlier Stop")
     def test_finalize_with_git_failing_keeps_the_stored_outcome(self, repo: Path, monkeypatch):
         self._service_mode(monkeypatch, [401])
         head = self._commit_mid_session(repo)
@@ -1728,6 +1758,7 @@ class TestSessionGitOutcome:
         assert ch._merge_git_outcome(None, stored) == stored
         assert ch._merge_git_outcome(None, None) is None
 
+    @pytest.mark.session_receipts("an ordinary Stop; a turn's Stop is its finalisation and takes the git outcome by design")
     def test_inline_stop_runs_no_git_outcome(self, repo: Path, monkeypatch):
         monkeypatch.setattr(ch, "_PR_LOOKUP_ENABLED", False)  # an in-process hook, not the service
         _run(repo, "SessionStart", source="startup")
@@ -1737,10 +1768,21 @@ class TestSessionGitOutcome:
         _run(repo, "Stop")
         assert "git_end_head" not in _runs_lines(repo)[0]
 
-    def test_unavailable_git_outcome_is_a_recorded_reason(self, repo: Path, monkeypatch):
-        self._commit_mid_session(repo)  # inline: nothing stored before the end
-        monkeypatch.setattr(ch, "run_git", lambda *a, **k: None)
-        _run(repo, "SessionEnd", reason="prompt_input_exit")
+    def test_unavailable_git_outcome_is_a_recorded_reason(self, repo: Path, monkeypatch, receipt_scope: str):
+        if receipt_scope == "session":
+            self._commit_mid_session(repo)  # inline: nothing stored before the end
+            monkeypatch.setattr(ch, "run_git", lambda *a, **k: None)
+            _run(repo, "SessionEnd", reason="prompt_input_exit")
+        else:  # the turn's Stop is its finalisation: git fails as it seals
+            _run(repo, "SessionStart", source="startup")
+            _run(repo, "UserPromptSubmit", prompt="add feature and commit")
+            (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+            _git(repo, "add", "feature.py")
+            _git(repo, "commit", "-q", "-m", "feature")
+            _run(repo, "PostToolUse", tool_name="Bash",
+                 tool_input={"command": "git add feature.py && git commit -m feature"})
+            monkeypatch.setattr(ch, "run_git", lambda *a, **k: None)
+            _run(repo, "Stop")
         entry = _runs_lines(repo)[0]
         assert "git_end_head" not in entry and "session_commits" not in entry
         completeness = entry["capture"]["completeness"]
@@ -1800,6 +1842,7 @@ class TestModelTokenCostCapture:
         assert entry["execution_model"] == "claude-sonnet-5"
         assert entry["capture"]["model_source"] == "status_line"
 
+    @pytest.mark.session_receipts("a model switch between two Stops of one Receipt; with turns each Stop seals its own")
     def test_model_switch_is_not_flattened_to_one_model(self, repo: Path):
         _run(repo, "UserPromptSubmit", prompt="task")
         _status(repo, model_id="claude-sonnet-5")
@@ -1894,6 +1937,7 @@ class TestModelTokenCostCapture:
         _run(repo, "Stop", transcript_path=str(transcript))
         assert _runs_lines(repo)[0]["completion_tokens"] == 16
 
+    @pytest.mark.session_receipts("transcript offsets carried across Stops of one Receipt")
     def test_a_message_split_across_two_reads_counts_once_even_after_eviction(self, repo: Path, monkeypatch):
         monkeypatch.setattr(ctu, "_TRANSCRIPT_RECENT_IDS", 1)
         transcript = _transcript(repo, [_assistant_line("m1", output_tokens=4)])  # m1's first line
@@ -1907,6 +1951,7 @@ class TestModelTokenCostCapture:
         _run(repo, "Stop", transcript_path=str(transcript))
         assert _runs_lines(repo)[0]["completion_tokens"] == 7  # m1 once (latest usage) + m2
 
+    @pytest.mark.session_receipts("transcript offsets carried across Stops of one Receipt")
     def test_a_replaced_longer_transcript_is_read_from_the_start(self, repo: Path):
         transcript = _transcript(repo, [_assistant_line("a", output_tokens=3)])
         _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
@@ -1937,6 +1982,7 @@ class TestModelTokenCostCapture:
         _run(repo, "Stop", transcript_path=str(rogue))
         assert "completion_tokens" not in _runs_lines(repo)[0]
 
+    @pytest.mark.session_receipts("reads the open buffer after a Stop; a sealed turn drops it")
     def test_transcript_is_read_incrementally_across_folds(self, repo: Path):
         transcript = _transcript(repo, [_assistant_line("m1", output_tokens=10)])
         _run(repo, "UserPromptSubmit", prompt="task", transcript_path=str(transcript))
@@ -2431,12 +2477,13 @@ class TestConcurrentHookActivity:
         entry = json.loads(raw[0])
         assert entry["capture"]["tool_call_count"] == n  # every call counted, none lost
 
-    def test_rapid_repeated_stop_does_not_explode_record_count(self, repo: Path):
+    def test_rapid_repeated_stop_does_not_explode_record_count(self, repo: Path, receipt_scope: str):
         _run(repo, "UserPromptSubmit", prompt="task")
         for _ in range(15):
             _run(repo, "Stop")
         assert len(_runs_lines(repo)) == 1
-        assert _runs_lines(repo)[0]["capture"]["turn_count"] == 15
+        # Turns: the first Stop seals the turn; the later ones have no work and record nothing.
+        assert _runs_lines(repo)[0]["capture"]["turn_count"] == (15 if receipt_scope == "session" else 1)
 
 
 def test_subagent_usage_models_reach_receipt_stages_once(repo):

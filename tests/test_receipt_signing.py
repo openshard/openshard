@@ -258,7 +258,7 @@ def test_live_hook_record_is_sealed_at_session_end(history):
     assert _statement(envelope)["predicate"]["seal_reason"] == "session_ended"
 
 
-def test_real_hook_session_is_sealed_once_at_session_end(tmp_path):
+def test_real_hook_session_is_sealed_once_at_session_end(tmp_path, receipt_scope):
     from openshard.adapters.claude_hooks import handle_hook
     from tests.capture_fixtures import _make_repo
 
@@ -272,10 +272,15 @@ def test_real_hook_session_is_sealed_once_at_session_end(tmp_path):
 
     for event in ("SessionStart", "UserPromptSubmit", "Stop"):
         fire(event)
-    assert _envelopes(history) == [], "a live session is not sealed at Stop"
+    if receipt_scope == "session":
+        assert _envelopes(history) == [], "a live session is not sealed at Stop"
+    else:  # a completed turn is final: sealed at its Stop, and the SessionEnd seals nothing more
+        [at_stop] = _envelopes(history)
+        assert _statement(at_stop)["predicate"]["seal_reason"] == "turn_completed"
     fire("SessionEnd")
     [envelope] = _envelopes(history)
-    assert _statement(envelope)["predicate"]["seal_reason"] == "session_ended"
+    assert _statement(envelope)["predicate"]["seal_reason"] == (
+        "session_ended" if receipt_scope == "session" else "turn_completed")
     [entry] = load_history(history / "runs.jsonl", coerce=False)
     assert check_tamper(history, entry["receipt_id"]).verdict == rs.VERDICT_VERIFIED
 

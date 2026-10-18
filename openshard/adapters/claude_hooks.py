@@ -2199,13 +2199,13 @@ _LATE_HOOK_GRACE_SECONDS = 60
 
 def _late_hook_for_ended(persisted: dict, first_hook: str, now: str | None) -> bool:
     """True for a non-opening hook arriving within the grace period after *persisted* ended."""
-    if first_hook in _SEGMENT_OPENING_EVENTS or turns.is_turn_sealed(persisted.get("capture")):
+    if first_hook in _SEGMENT_OPENING_EVENTS or turns.continues_after_seal(persisted.get("capture"), first_hook):
         return False  # after a sealed turn, Claude's ordered hooks are the agent continuing
     raw_capture = persisted.get("capture")
     capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
     at = _parse_utc(now) if now else None
     age = _seconds_since(capture.get("last_activity_at"), at)
-    return age is not None and age < _LATE_HOOK_GRACE_SECONDS
+    return turns.closes_after_seal(capture, first_hook) or (age is not None and age < _LATE_HOOK_GRACE_SECONDS)
 
 
 def _load_or_create_buffer(
@@ -3603,7 +3603,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         source = payload.source or "unknown"
         if source == "compact":
             return "compaction ignored", False, False
-        if not buf.get("start_source"):
+        if not buf.get("start_source") or turns.restarted(buf):  # a restart after a sealed turn is no next turn
             buf["start_source"] = source
         if source == "resume":
             _append_event(

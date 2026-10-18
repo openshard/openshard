@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from openshard.adapters import claude_capture_client as client
 from openshard.adapters import claude_capture_service as svc
 from openshard.history.capture_completeness import (
@@ -47,7 +49,14 @@ def _write_queue(repo: Path, text: str, key: str = SID) -> Path:
 
 
 class TestCorruptQueueLines:
-    def test_corrupt_line_is_quarantined_counted_and_marks_capture_incomplete(self, service, repo):
+    @pytest.mark.parametrize("receipt_scope", [
+        pytest.param("turn", marks=pytest.mark.xfail(strict=True, reason=(
+            "bug: the service reports a corrupt line's loss after replaying the whole queue file; when that "
+            "file held the turn's Stop, the turn is already sealed, so its Receipt says complete and the loss "
+            "is staged on the next segment instead"))),
+        "session",
+    ], indirect=True)
+    def test_corrupt_line_is_quarantined_counted_and_marks_capture_incomplete(self, service, repo, receipt_scope):
         _write_queue(
             repo,
             _queue_line("ok-1", "UserPromptSubmit", task_excerpt="fine") + "\n"

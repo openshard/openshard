@@ -52,6 +52,7 @@ GROUPING_SESSION = "session"
 _ON = frozenset({"1", "on", "true", "yes"})
 _OFF = frozenset({"0", "off", "false", "no"})
 _STOP = "Stop"
+_SESSION_END = "SessionEnd"
 _CLOUD_TURN_SURFACES = frozenset({("cursor", "cursor-cloud"), ("claude_code", "claude-code-web")})
 
 
@@ -139,6 +140,31 @@ def is_turn_sealed(capture: object) -> bool:
     )
 
 
+def continues_after_seal(capture: object, first_hook: str) -> bool:
+    """True when *first_hook* after a sealed turn is the agent continuing: it opens the next turn at once."""
+    return is_turn_sealed(capture) and first_hook != _STOP
+
+
+def closes_after_seal(capture: object, first_hook: str) -> bool:
+    """True for a ``Stop`` after a sealed turn: ignored, it opens no segment.
+
+    A segment a Stop opens holds no work; right after a sealed turn that Stop
+    is late or repeated (for example after the ``SessionEnd`` the sealed turn
+    could not record), and its segment would only be an empty buffer left
+    behind until the idle sweep.
+    """
+    return is_turn_sealed(capture) and first_hook == _STOP
+
+
+def restarted(buf: dict) -> bool:
+    """True when a ``SessionStart`` reaches a segment opened as the next turn before any work.
+
+    The agent process started again (``claude --resume`` after the session
+    ended): the segment is a resume, not turn N+1 of a running session.
+    """
+    return buf.get("start_source") == START_SOURCE_TURN and not buf.get("record")
+
+
 def close_turn(payload: Any, buf: dict, repo_root: Path, *, now: str, has_activity: bool) -> tuple[bool, bool]:
     """Decide whether this hook closes the Receipt: ``(cloud_turn_closed, turn_sealed)``.
 
@@ -203,10 +229,23 @@ def inherit(buf: dict, persisted: Mapping[str, Any], *, same_receipt: bool) -> N
             buf["turn_sealed_at"] = capture["turn_sealed_at"]
         return
     buf["turn_index"] = index + 1
+    if _opened_by(buf) == _SESSION_END:
+        # The SessionEnd that ends the chat after its last sealed turn: this segment
+        # holds no work and is dropped at once; never stream its opening event to
+        # remote capture as a session that started.
+        buf["remote_spooled"] = len(buf.get("events") or [])
     if is_turn_sealed(capture) and capture.get("session_end_observed") is not True:
         buf["start_source"] = START_SOURCE_TURN  # the previous turn completed; the session did not end
     if task_id is not None:
         buf["turn_task_id"] = task_id
+
+
+def _opened_by(buf: dict) -> object:
+    """The hook that opened *buf* (recorded on its ``session.started`` event)."""
+    events = buf.get("events") or []
+    first = events[0] if events and isinstance(events[0], dict) else {}
+    metadata = first.get("metadata")
+    return metadata.get("hook") if isinstance(metadata, dict) else None
 
 
 def stamp(entry: dict, buf: dict, repo_root: Path) -> None:

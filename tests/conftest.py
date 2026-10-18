@@ -203,17 +203,32 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
     yield
 
 
-@pytest.fixture(autouse=True)
-def _session_receipts_unless_asked(monkeypatch):
-    """Claude Code capture tests written for one Receipt per session keep testing that path.
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "session_receipts(reason): pin a Claude Code capture test to the opt-out "
+        "(OPENSHARD_TURN_RECEIPTS=off, one Receipt per session); give the reason.",
+    )
 
-    Per-turn Receipts are the default (docs/per-turn-receipts.md); the opt-out
-    keeps session Receipts, and this suite's session-scope tests are its
-    regression set. Turn tests set ``OPENSHARD_TURN_RECEIPTS`` themselves
-    (``tests/test_turn_receipts.py``, ``tests/test_turn_signal.py``), and
-    ``test_on_by_default`` removes it to exercise the default.
+
+@pytest.fixture(autouse=True)
+def _turn_receipts_default(monkeypatch):
+    """Per-turn Receipts are the default (docs/per-turn-receipts.md); this suite is being migrated to it.
+
+    Until the remaining capture files are migrated, every test still starts on
+    the opt-out (one Receipt per session). A migrated test that must hold in
+    both modes requests ``receipt_scope``; one about the legacy session Receipt
+    says so with ``@pytest.mark.session_receipts("why")``. Turn tests set
+    ``OPENSHARD_TURN_RECEIPTS`` themselves (``tests/test_turn_receipts.py``).
     """
     monkeypatch.setenv("OPENSHARD_TURN_RECEIPTS", "off")
+
+
+@pytest.fixture(params=["turn", "session"])
+def receipt_scope(request, monkeypatch) -> str:
+    """Run a test once with per-turn Receipts (the default) and once opted out."""
+    monkeypatch.setenv("OPENSHARD_TURN_RECEIPTS", "on" if request.param == "turn" else "off")
+    return str(request.param)
 
 
 @pytest.fixture(autouse=True)

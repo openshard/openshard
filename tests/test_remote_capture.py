@@ -302,12 +302,18 @@ class TestHookPath:
         assert state["repos"] == [str(repo)]
         assert state.get("deliver") is True  # sync eligibility still waits for end or quiescence
 
-    def test_session_end_is_one_more_event_and_asks_for_the_receipt_to_be_delivered(self, attached, repo):
+    def test_session_end_is_one_more_event_and_asks_for_the_receipt_to_be_delivered(
+        self, attached, repo, receipt_scope,
+    ):
         _work(repo, tool_calls=1)
         _hook(repo, "Stop")
+        sealed, _ = spool.pending(None, CAPTURE_ID)
         _hook(repo, "SessionEnd", reason="exit")
         events, state = spool.pending(None, CAPTURE_ID)
-        assert events[-1]["event_type"] == "run.completed" and events[-1]["metadata"]["reason"] == "exit"
+        if receipt_scope == "session":
+            assert events[-1]["event_type"] == "run.completed" and events[-1]["metadata"]["reason"] == "exit"
+        else:  # the turn was sealed at its Stop; the SessionEnd after it streams nothing (no phantom segment)
+            assert events == sealed and "run.completed" not in [e["event_type"] for e in events]
         assert state["deliver"] is True
 
     def test_changed_files_are_streamed_as_git_observed_events(self, attached, repo):

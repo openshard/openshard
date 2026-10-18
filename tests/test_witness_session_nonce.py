@@ -124,17 +124,22 @@ class TestSessionNonce:
         nonces = {e["metadata"]["session_nonce"] for e in firsts}
         assert len(firsts) == 2 and len(nonces) == 2
 
-    def test_survives_a_lost_buffer_and_a_resumed_segment(self, attached, repo):
+    def test_survives_a_lost_buffer_and_a_resumed_segment(self, attached, repo, receipt_scope):
         _work(repo, tool_calls=1)
         _hook(repo, "Stop")
         nonce = recorded_session_nonce(_entries(repo)[-1])
-        # The buffer is gone (restart): it is rebuilt from the record, not re-minted.
-        buffer_path(repo, SID).unlink()
+        if receipt_scope == "session":
+            # The buffer is gone (restart): it is rebuilt from the record, not re-minted.
+            buffer_path(repo, SID).unlink()
+        else:  # the sealed turn dropped its buffer: the next turn's segment carries the nonce on
+            assert not buffer_path(repo, SID).exists()
         _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ls"})
         _hook(repo, "Stop")
         assert recorded_session_nonce(_entries(repo)[-1]) == nonce
-        # A rebuilt buffer re-spools its Events under their own ids (the Platform de-duplicates).
-        assert len({e["event_id"] for e in _nonce_events(spool.pending(None, CAPTURE_ID)[0])}) == 1
+        # A rebuilt buffer re-spools its Events under their own ids (the Platform de-duplicates);
+        # each turn's segment opens with its own event.
+        assert len({e["event_id"] for e in _nonce_events(spool.pending(None, CAPTURE_ID)[0])}) == (
+            1 if receipt_scope == "session" else 2)
         # The session ends; ``--resume`` opens a new Receipt segment of the same agent session.
         _hook(repo, "SessionEnd", reason="exit")
         _hook(repo, "SessionStart", source="resume")
@@ -146,6 +151,7 @@ class TestSessionNonce:
         assert recorded_session_nonce(resumed) == nonce
         assert {e["metadata"]["session_nonce"] for e in _nonce_events(spool.pending(None, CAPTURE_ID)[0])} == {nonce}
 
+    @pytest.mark.session_receipts("a pre-nonce record predates turn Receipts, so it is always a session Receipt")
     def test_a_record_without_one_stays_without_one(self, attached, repo):
         _work(repo, tool_calls=1)
         _hook(repo, "Stop")

@@ -215,7 +215,7 @@ class TestEligibility:
 
 
 class TestEnvelope:
-    def test_real_hook_record_becomes_a_contract_exact_envelope(self, repo):
+    def test_real_hook_record_becomes_a_contract_exact_envelope(self, repo, receipt_scope):
         _session(repo, _sid(1))
         entries = _entries(repo)
         assert len(entries) == 1
@@ -223,7 +223,11 @@ class TestEnvelope:
         assert doc["contract"] == "openshard.receipt-sync" and doc["contract_version"] == "1"
         assert doc["source"] == {"product": "openshard-core", "version": "0.4.5", "receipt_schema_version": "1.2"}
         receipt = doc["receipt"]
-        assert set(receipt) - OPTIONAL_RECEIPT_KEYS == CONTRACT_RECEIPT_KEYS
+        optional = set(OPTIONAL_RECEIPT_KEYS)
+        if receipt_scope == "turn":  # Platform #243: a turn's session-grouped task_id is labelled
+            assert receipt["task_grouping"] == "session" and receipt["task_id"] == entries[0]["task_id"]
+            optional.add("task_grouping")
+        assert set(receipt) - optional == CONTRACT_RECEIPT_KEYS
         assert is_receipt_id(receipt["receipt_id"]) and receipt["receipt_id"] == entries[0]["receipt_id"]
         assert receipt["shard_id"].startswith("shard-") and receipt["agent"]
         assert receipt["created_at"].endswith("Z")
@@ -252,7 +256,7 @@ class TestEnvelope:
         assert envelope.payload_hash(receipt) == envelope.payload_hash(dict(reversed(list(receipt.items()))))
         assert envelope.payload_hash(receipt).startswith("sha256:")
 
-    def test_explicit_task_id_is_transported_unchanged_and_legacy_is_null(self, repo):
+    def test_explicit_task_id_is_transported_unchanged_and_legacy_is_null(self, repo, receipt_scope):
         from openshard.history.task_identity import ensure_task_id, new_task_id
 
         _session(repo, _sid(1))  # hook-captured: no task_id was declared
@@ -262,7 +266,10 @@ class TestEnvelope:
         ensure_task_id(entry, tid)
         legacy = envelope.build_envelope(_entries(repo)[0], 0, core_version="x")["receipt"]
         explicit = envelope.build_envelope(entry, 1, core_version="x")["receipt"]
-        assert legacy["task_id"] is None
+        if receipt_scope == "session":
+            assert legacy["task_id"] is None
+        else:  # a turn carries its session's grouping, minted at capture and labelled, never a declaration
+            assert legacy["task_id"] == _entries(repo)[0]["task_id"] and legacy.pop("task_grouping") == "session"
         assert explicit["task_id"] == tid  # exactly as stored: never normalised or minted here
         assert set(legacy) - OPTIONAL_RECEIPT_KEYS == set(explicit) - OPTIONAL_RECEIPT_KEYS == CONTRACT_RECEIPT_KEYS
 
@@ -547,6 +554,7 @@ class TestFlush:
         assert "config.yml" in (client.flush(repo, env=env).stopped or "")
         assert client.status(repo, env=env)["disabled"]
 
+    @pytest.mark.session_receipts("session quiescence; a sealed turn syncs at once (test_turn_receipts.py)")
     def test_open_session_waits_until_it_ends(self, repo, env, link, recording):
         _session(repo, _sid(1), end=False)
         waiting = client.flush(repo, env=env)
@@ -602,7 +610,7 @@ class TestFlush:
         assert client.flush(repo, env=env).sent == 0  # stays stale, still not resent
 
     def test_resuming_a_synced_session_syncs_a_new_receipt_and_never_stales_the_first(
-        self, repo, env, link, recording,
+        self, repo, env, link, recording, receipt_scope,
     ):
         # The audited failure: a session ended, its Receipt synced, then the
         # same Claude session id was resumed and later hooks mutated it.

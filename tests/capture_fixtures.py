@@ -139,6 +139,12 @@ def _lines(repo: Path) -> list[dict]:
     return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
 
 
+def _sealed(entry: dict | None) -> bool:
+    """A final record: its session ended, or (per-turn Receipts, the default) its turn was sealed at the Stop."""
+    capture = (entry or {}).get("capture") or {}
+    return capture.get("session_end_observed") is True or isinstance(capture.get("turn_sealed_at"), str)
+
+
 def _first_line(repo: Path) -> dict | None:
     """The first record, or None -- a single read, unlike ``_lines(repo)[0]``.
 
