@@ -131,6 +131,12 @@ class CheckCommand:
     # a final ``exit 0``, ``set +e`` before it): one of EXIT_MASKS. An
     # observation about the command text, never a verdict.
     exit_masked: str | None = None
+    # True for a pytest run whose exit status is hidden only by a pipe or a
+    # later statement, on a line where every other command is a setup step
+    # or a line filter that cannot write a summary line of its own (see
+    # ``_summary_readable``): pytest's own summary line in the output is then
+    # its outcome (``pytest_summary_outcome``).
+    summary_readable: bool = False
 
     @property
     def is_check(self) -> bool:
@@ -202,7 +208,8 @@ def _classify(command: str | None, *, depth: int, shell: str = SHELL_POSIX) -> l
                 outer, outer_failure = _position_powershell(statements, flat, si, ci)
             else:
                 outer, outer_failure = _position(statements, si, ci)
-            if outer is None and (simple.in_block or _block_depth(text[:simple.start], shell) > 0):
+            blocked = outer is None and (simple.in_block or _block_depth(text[:simple.start], shell) > 0)
+            if blocked:
                 outer, outer_failure = UNATTRIBUTED_NOT_LAST, None
             script = _shell_script(simple.words) if depth < 2 else None
             if script is not None:
@@ -217,8 +224,125 @@ def _classify(command: str | None, *, depth: int, shell: str = SHELL_POSIX) -> l
             if kind != KIND_OTHER:
                 suite = _suite(simple.words) if kind == KIND_TEST and not moves_dir else None
                 out.append(CheckCommand(kind, _display(simple.words), outer, outer_failure, suite,
-                                        _exit_mask(statements, si, ci, shell)))
+                                        _exit_mask(statements, si, ci, shell),
+                                        not blocked and _summary_readable(statements, si, ci, outer, depth)))
     return out
+
+
+# Line filters that may sit after pytest in its own pipeline: they pass on
+# some of pytest's stdout lines and cannot write a summary line pytest did
+# not print. Their arguments are checked too: ``tail -c`` could cut a line
+# to a passing-looking tail and ``tail old.log`` would read a stale file;
+# grep (``-o``), sed and awk can rewrite a line and are never filters here.
+_LINE_FILTERS = frozenset({"tail", "head", "tee", "select-object", "select", "out-string"})
+_LINE_COUNT_RE = re.compile(r"^(?:-\d+|-n[+-]?\d+|--lines=[+-]?\d+|-[qs]|--quiet|--silent)$")
+_SELECT_ARG_RE = re.compile(r"^(?:-(?:last|first|skip)|\d+)$", re.IGNORECASE)
+# Steps that may follow pytest's statement without printing anything.
+_SILENT_AFTER = frozenset({"cd", "pushd", "popd", "set-location", "sl", "true", ":"})
+
+
+def _summary_readable(
+    statements: list[list[_Simple]], si: int, ci: int, outer: str | None, depth: int,
+) -> bool:
+    """Whether pytest's own summary line in the output may stand for its hidden exit status.
+
+    Only for a pytest run hidden by a pipe or a later statement (never
+    ``||``, a background ``&`` or a block), on a line where every command
+    before pytest is a setup step, every command after it in its pipeline is
+    a line filter of its output (``_filter_ok``), and every later statement
+    is a silent directory change.
+    """
+    if depth or outer not in (UNATTRIBUTED_PIPED, UNATTRIBUTED_NOT_LAST):
+        return False
+    statement = statements[si]
+    if not _is_pytest(statement[ci].words) or any(s.op_after in ("||", "&") for s in statement):
+        return False
+    for sj, other in enumerate(statements):
+        for cj, simple in enumerate(other):
+            if (sj, cj) == (si, ci):
+                continue
+            if simple.in_block:
+                return False
+            if (sj, cj) < (si, ci):
+                if not _is_setup(simple.words):
+                    return False
+            elif sj == si:
+                if statement[cj - 1].op_after != "|" or not _filter_ok(simple.words):
+                    return False
+            elif _program(simple.words[0]) not in _SILENT_AFTER:
+                return False
+    return True
+
+
+def _filter_ok(words: list[str]) -> bool:
+    head, args = _program(words[0]), words[1:]
+    if head in ("tail", "head"):
+        i = 0
+        while i < len(args):
+            if args[i] in ("-n", "--lines") and i + 1 < len(args) and re.match(r"^[+-]?\d+$", args[i + 1]):
+                i += 2
+                continue
+            if not _LINE_COUNT_RE.match(args[i]):
+                return False
+            i += 1
+        return True
+    if head == "tee":
+        return True  # writes copies to its files; passes every line on unchanged
+    if head in ("select-object", "select"):
+        return all(_SELECT_ARG_RE.match(a) for a in args)
+    if head == "out-string":
+        return not args
+    return False
+
+
+def _is_pytest(words: list[str]) -> bool:
+    if not words:
+        return False
+    head, rest = _program(words[0]), words[1:]
+    if head in ("pytest", "py.test"):
+        return True
+    return head in _PYTHONS and len(rest) >= 2 and rest[0] == "-m" and rest[1].lower() == "pytest"
+
+
+# pytest's final summary line: ``==== 3 failed, 507 passed in 12.31s ====``
+# (or, with ``-q``, the same without the ``=`` padding). Only the counts are
+# read; nothing else of the output is kept.
+_PYTEST_SUMMARY_RE = re.compile(
+    r"^=*\s*(?P<counts>(?:\d+ (?:passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?|rerun)"
+    r"(?:, )?)+|no tests ran) in \d+(?:\.\d+)?s(?: \([0-9:.]+\))?\s*=*$"
+)
+_PYTEST_COUNT_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?|rerun)")
+_PYTEST_INTERRUPTED_RE = re.compile(r"KeyboardInterrupt|!!+ .*[Ii]nterrupted")
+_SUMMARY_TAIL_CHARS = 8_000
+_SUMMARY_TAIL_LINES = 40
+
+
+def pytest_summary_outcome(output: object) -> str | None:
+    """``passed`` / ``failed`` from pytest's last summary line in *output*, else None.
+
+    Read the way pytest sets its exit status: any failed test or error ->
+    ``failed``; ``no tests ran`` -> ``failed`` (pytest exits 5); otherwise a
+    line of passed/skipped/xfailed counts -> ``passed``. No summary line, or
+    an interrupted run (pytest prints a summary of what ran before the
+    interrupt), -> None: unknown, never a guessed pass. Only the last
+    ``_SUMMARY_TAIL_CHARS`` characters are scanned.
+    """
+    if not isinstance(output, str) or not output:
+        return None
+    lines = output[-_SUMMARY_TAIL_CHARS:].splitlines()[-_SUMMARY_TAIL_LINES:]
+    if any(_PYTEST_INTERRUPTED_RE.search(line) for line in lines):
+        return None
+    for line in reversed(lines):
+        match = _PYTEST_SUMMARY_RE.match(line.strip())
+        if not match:
+            continue
+        counts = {word.rstrip("s") if word.startswith(("error", "warning")) else word: int(n)
+                  for n, word in _PYTEST_COUNT_RE.findall(match.group("counts"))}
+        if match.group("counts") == "no tests ran" or counts.get("failed") or counts.get("error"):
+            return "failed"
+        ran = sum(counts.get(k, 0) for k in ("passed", "skipped", "xfailed", "xpassed"))
+        return "passed" if ran else "failed"  # only deselected: pytest exits 5
+    return None
 
 
 # How a command line can make its own check unable to fail (see _exit_mask).
@@ -600,7 +724,9 @@ def _parse(command: str) -> list[list[_Simple]]:
             j = i + 1
             buf: list[str] = []
             while j < n and command[j] != '"':
-                if command[j] in "\\`" and j + 1 < n:
+                # POSIX: inside double quotes a backslash escapes only these;
+                # elsewhere (``"C:\\My Proj\\python.exe"``) it is kept.
+                if j + 1 < n and (command[j] == "`" or (command[j] == "\\" and command[j + 1] in '"\\$`\n')):
                     j += 1
                 buf.append(command[j])
                 j += 1
@@ -979,6 +1105,7 @@ MAX_CHECKS_PER_COMMAND = 10
 
 def check_command_items(
     command: str | None, name_of, *, shell: str = SHELL_POSIX, context: str | None = None,
+    test_summary: str | None = None,
 ) -> list[dict]:
     """The queue form of *command*'s checks: ``{"kind", "name", "unattributed", "failure_unattributed"}``.
 
@@ -986,6 +1113,8 @@ def check_command_items(
     (the caller's scrubber); the raw command never leaves this call. With a
     *context* (the reported working directory) a test-runner check also
     carries ``suite`` (``suite_key``: a hash of the directory, never its text).
+    *test_summary* is ``pytest_summary_outcome`` of the command's reported
+    output; a ``summary_readable`` check carries it as ``summary_outcome``.
     """
     items: list[dict] = []
     for c in classify_check_commands(command, shell=shell)[:MAX_CHECKS_PER_COMMAND]:
@@ -996,6 +1125,8 @@ def check_command_items(
             item["suite"] = key
         if c.exit_masked and c.kind == KIND_TEST:
             item["exit_masked"] = c.exit_masked
+        if c.summary_readable and test_summary in ("passed", "failed"):
+            item["summary_outcome"] = test_summary
         items.append(item)
     return items
 
@@ -1019,11 +1150,24 @@ def queued_check_commands(value: object) -> list[dict] | None:
             clean["suite"] = item["suite"]
         if item.get("exit_masked") in EXIT_MASKS:
             clean["exit_masked"] = item["exit_masked"]
+        if item.get("summary_outcome") in ("passed", "failed"):
+            clean["summary_outcome"] = item["summary_outcome"]
         out.append(clean)
     return out
 
 
 def item_outcome(item: dict, command_outcome: str) -> tuple[str, str | None]:
-    """``(status, reason)`` for one queued check item given the command's outcome."""
+    """``(status, reason)`` for one queued check item given the command's outcome.
+
+    A pytest run whose exit status a pipe or a later statement hid takes its
+    outcome from its own summary line (``summary_outcome``) once the command
+    completed: a failed summary always, a passed one only when the whole
+    command also succeeded. Otherwise it stays unknown.
+    """
     check = CheckCommand(item["kind"], None, item.get("unattributed"), item.get("failure_unattributed"))
-    return check_outcome(check, command_outcome), unattributed_reason(check, command_outcome)
+    status, reason = check_outcome(check, command_outcome), unattributed_reason(check, command_outcome)
+    summary = item.get("summary_outcome")
+    if status == "unknown" and reason in (UNATTRIBUTED_PIPED, UNATTRIBUTED_NOT_LAST):
+        if summary == "failed" or (summary == "passed" and command_outcome == "passed"):
+            return summary, None
+    return status, reason

@@ -205,6 +205,7 @@ from openshard.adapters.claude_git_outcome import (  # noqa: F401  (re-exported 
 from openshard.adapters.claude_hook_checks import (
     MAX_BUFFERED_CHECKS,
     MAX_CHECK_KEYS,
+    claude_test_summary,
     hook_verification,
     record_checks,
 )
@@ -476,6 +477,9 @@ class HookPayload:
     # ``agent_reported``.
     command_outcome: str | None = None
     command_exit_code: int | None = None
+    # ``passed`` / ``failed`` from pytest's summary line in the shell output
+    # (see claude_hook_checks.claude_test_summary); never the output itself.
+    test_summary: str | None = None
     # Declared launch context (``OPENSHARD_TASK_ID``): set only by the capture
     # client / service from the launch environment or the dedicated capture
     # header -- never by a translator, never read out of the agent's own
@@ -632,8 +636,10 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     ``last_assistant_message`` and every other field are never read; for a
     shell tool only the documented outcome markers are (see
     ``_claude_command_outcome``: two booleans in ``tool_response``, the
-    ``Exit code N`` first line of ``error``, ``is_interrupt``) -- never
-    command output or the rest of the error text.
+    ``Exit code N`` first line of ``error``, ``is_interrupt``) -- and, for a
+    command naming pytest, the outcome of pytest's summary line at the end of
+    its output (``claude_test_summary``). No command output or error text is
+    kept.
     """
     if is_grok_build_document(data):
         return None  # Grok Build reaching Claude hooks through its compat layer: never a Claude Code record
@@ -660,8 +666,10 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     tool_name = _str_or_none(data.get("tool_name"), 80)
     command_outcome: str | None = None
     command_exit_code: int | None = None
+    test_summary: str | None = None
     if tool_name in COMMAND_TOOLS:
         command_outcome, command_exit_code = _claude_command_outcome(event, data, tool_input)
+        test_summary = claude_test_summary(event, data, tool_input)
 
     return HookPayload(
         event=event,
@@ -680,6 +688,7 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
         tool_success=True if event == EVENT_POST_TOOL_USE else None,
         command_outcome=command_outcome,
         command_exit_code=command_exit_code,
+        test_summary=test_summary,
         transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id),
         model_id=_sanitize_model_id(_str_or_none(
             data.get("model") if event == EVENT_SESSION_START else
@@ -1541,7 +1550,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
                 reduced.command_key = key  # only check-shaped commands need one (see _record_check)
                 reduced.check_commands = check_command_items(
                     payload.command, lambda seg, k: _check_name(tool, seg, k), shell=shell_for_tool(tool),
-                    context=payload.cwd)
+                    context=payload.cwd, test_summary=payload.test_summary)
             reduced.command_outcome = _command_outcome_or_none(payload.command_outcome)
             reduced.command_exit_code = _exit_code_or_none(payload.command_exit_code)
             reduced.command_safety = classify_command_text(payload.command)

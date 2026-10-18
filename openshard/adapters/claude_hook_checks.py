@@ -10,9 +10,14 @@ from per-check attribution.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-from openshard.verification.check_command import item_outcome, suite_supersedes
+from openshard.verification.check_command import (
+    item_outcome,
+    pytest_summary_outcome,
+    suite_supersedes,
+)
 from openshard.verification.gaming_signals import note_masked_check
 
 MAX_BUFFERED_CHECKS = 20
@@ -23,6 +28,26 @@ def _stored_count(raw: object) -> int:
 
 
 MAX_CHECK_KEYS = 100  # distinct check commands whose latest outcome is tracked
+
+
+def claude_test_summary(event: str, data: Mapping[str, Any], tool_input: Mapping[str, Any]) -> str | None:
+    """pytest's summary-line outcome from a Claude shell call's reported output, else None.
+
+    Only for a command that names pytest; only the tail of ``stdout``
+    (``PostToolUse``) or ``error`` (``PostToolUseFailure``, which carries the
+    output after its exit line) is scanned, and only the outcome word is kept.
+    """
+    command = tool_input.get("command")
+    if not isinstance(command, str) or "pytest" not in command:
+        return None
+    if event == "PostToolUse":
+        response = data.get("tool_response")
+        output = response.get("stdout") if isinstance(response, Mapping) else None
+    elif event == "PostToolUseFailure":
+        output = data.get("error")
+    else:
+        return None
+    return pytest_summary_outcome(output)
 
 
 def record_checks(buf: dict, payload: Any, action: str, outcome: str, at: str) -> None:
@@ -39,8 +64,11 @@ def record_checks(buf: dict, payload: Any, action: str, outcome: str, at: str) -
     for index, item in enumerate(items):
         status, reason = item_outcome(item, outcome)
         key = payload.command_key if len(items) == 1 or not payload.command_key else f"{payload.command_key[:14]}{index:02d}"
+        # An outcome read off pytest's summary line has no exit code of its own
+        # (the command's belongs to the program after it).
+        own_exit = status != "unknown" and not (item.get("unattributed") and item.get("summary_outcome"))
         _record_check(buf, item["name"], item["kind"], status=status, at=at,
-                      exit_code=payload.command_exit_code if status != "unknown" else None,
+                      exit_code=payload.command_exit_code if own_exit else None,
                       key=key, unattributed=reason, suite=item.get("suite"))
         note_masked_check(buf, item["name"], item.get("exit_masked"))  # a test line that cannot fail
 
