@@ -17,15 +17,20 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import jsonschema
 import pytest
 from click.testing import CliRunner
 
 from openshard.adapters.claude_hooks import handle_claude_hook, handle_hook
 from openshard.history.receipt_identity import is_receipt_id
 from openshard.history.store import amend_latest_record, load_history
+from openshard.history.verification import VerificationCheck, parse_verification_block
 from openshard.sync import client, config, envelope, outbox, transport
 from openshard.sync.transport import SendResult
+from openshard.verification import post_session as ps
+from openshard.verification.setup_failure import ReportedTests
 from tests.capture_fixtures import _git, _make_repo
+from tests.test_verification_sync import _agent_session, _envelope, _rerun
 
 ENDPOINT = "https://platform.example.test"
 ORG = "0f1e2d3c-4b5a-4697-8877-665544332211"
@@ -54,6 +59,8 @@ CONTRACT_RECEIPT_KEYS = frozenset({
     # OSN control evidence (optional; null for records that predate it):
     "agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot", "organisation_policy",
 })
+# Optional keys Core sends only when it recorded them (Platform #230); absent means unknown.
+OPTIONAL_RECEIPT_KEYS = frozenset({"lines_not_recorded_reason", "rates"})
 FORBIDDEN_KEYS = {"prompt", "transcript", "stdout", "stderr", "diff", "patch", "agent_notes", "run_timeline",
                   "timeline", "env", "environment", "api_key", "password"}
 
@@ -216,7 +223,7 @@ class TestEnvelope:
         assert doc["contract"] == "openshard.receipt-sync" and doc["contract_version"] == "1"
         assert doc["source"] == {"product": "openshard-core", "version": "0.4.5", "receipt_schema_version": "1.2"}
         receipt = doc["receipt"]
-        assert set(receipt) == CONTRACT_RECEIPT_KEYS
+        assert set(receipt) - OPTIONAL_RECEIPT_KEYS == CONTRACT_RECEIPT_KEYS
         assert is_receipt_id(receipt["receipt_id"]) and receipt["receipt_id"] == entries[0]["receipt_id"]
         assert receipt["shard_id"].startswith("shard-") and receipt["agent"]
         assert receipt["created_at"].endswith("Z")
@@ -257,7 +264,7 @@ class TestEnvelope:
         explicit = envelope.build_envelope(entry, 1, core_version="x")["receipt"]
         assert legacy["task_id"] is None
         assert explicit["task_id"] == tid  # exactly as stored: never normalised or minted here
-        assert set(legacy) == set(explicit) == CONTRACT_RECEIPT_KEYS
+        assert set(legacy) - OPTIONAL_RECEIPT_KEYS == set(explicit) - OPTIONAL_RECEIPT_KEYS == CONTRACT_RECEIPT_KEYS
 
     def test_schema_version_is_the_records_own(self):
         entry = {"receipt_id": "rcpt_" + "c" * 32, "timestamp": "2026-09-16T09:12:03Z", "task": "t", "agent": "codex"}
@@ -737,3 +744,195 @@ class TestCli:
         out = self._run(["--help"], repo, monkeypatch)
         integrations = out.output.split("Integrations:", 1)[1].split("Advanced:", 1)[0]
         assert "sync" in integrations
+
+# ---------------------------------------------------------------------------
+# Evidence fields the Platform accepts since Platform #230: sent exactly, and
+# only when recorded (validated against the vendored Platform JSON schemas;
+# an unknown value is omitted, never sent as 0 or "").
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures" / "platform"
+RECEIPT_SCHEMA = json.loads((FIXTURES / "receipt-sync-envelope.v1.json").read_text(encoding="utf-8"))
+EVIDENCE_SCHEMA = json.loads((FIXTURES / "verification-evidence-envelope.v1.json").read_text(encoding="utf-8"))
+RATE_KEYS = {"model", "input_per_mtok", "output_per_mtok", "cache_read_per_mtok", "cache_write_5m_per_mtok",
+             "cache_write_1h_per_mtok", "currency", "source", "as_of"}
+NONCE = "abcdefghijklmnopqrstuvwxyz"
+SHA = "7239828109a4f27f672ea34006149bfac9b5e803"
+
+
+@pytest.fixture
+def plain_repo(tmp_path: Path) -> Path:
+    root = _make_repo(tmp_path / "plain")
+    _git(root, "remote", "add", "origin", "https://github.com/openshard/widget.git")
+    return root
+
+
+def _valid(schema: dict, doc: dict) -> None:
+    errors = [f"{list(e.path)}: {e.message}" for e in jsonschema.Draft202012Validator(schema).iter_errors(doc)]
+    assert not errors, errors[:3]
+
+
+def _entry(**extra) -> dict:
+    return {"receipt_id": "rcpt_" + "d" * 32, "timestamp": "2026-10-01T09:00:00Z", "task": "t",
+            "agent": "codex", "schema_version": "1.2", **extra}
+
+
+def _receipt(entry: dict) -> dict:
+    doc = envelope.build_envelope(entry, 0, core_version="9.9.9")
+    _valid(RECEIPT_SCHEMA, doc)
+    return doc["receipt"]
+
+
+def _keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {k for v in value.values() for k in _keys(v)}
+    if isinstance(value, list):
+        return {k for v in value for k in _keys(v)}
+    return set()
+
+
+class TestReceiptFields:
+    def test_hook_session_sends_task_source_and_line_reason_against_the_new_schema(self, plain_repo):
+        entry = _agent_session(plain_repo)
+        receipt = _receipt(entry)
+        assert receipt["session"]["task_source"] == "first_user_prompt_excerpt"
+        reason = (entry.get("capture") or {}).get("lines_not_recorded_reason")
+        assert receipt.get("lines_not_recorded_reason") == reason
+        assert ("lines_not_recorded_reason" in receipt) is bool(reason)
+        # The prompt text is the task, never a new field's value.
+        assert "fix it and run the tests" not in json.dumps({k: receipt.get(k) for k in ("session", "rates")})
+
+    def test_session_nonce_is_sent_when_recorded_and_absent_otherwise(self):
+        capture = {"session_end_observed": True, "started_at": "2026-10-01T09:00:00Z"}
+        started = {"event_type": "session.started", "metadata": {"session_nonce": NONCE}}
+        assert _receipt(_entry(capture=capture, events=[started]))["session"]["session_nonce"] == NONCE
+        session = _receipt(_entry(capture=capture))["session"]
+        assert "session_nonce" not in session and "task_source" not in session
+
+    def test_hook_config_hash_is_sent_when_recorded_and_well_formed(self):
+        digest = "sha256:" + "0123456789abcdef" * 4
+        capture = {"session_end_observed": True, "hook_config_hash": digest}
+        assert _receipt(_entry(capture=capture))["session"]["hook_config_hash"] == digest
+        for bad in ("sha256:short", "md5:" + "0" * 64, 7):
+            session = _receipt(_entry(capture={**capture, "hook_config_hash": bad}))["session"]
+            assert "hook_config_hash" not in session
+
+    def test_unrecognised_task_source_is_omitted(self):
+        capture = {"session_end_observed": True, "task_source": "made_up"}
+        assert "task_source" not in _receipt(_entry(capture=capture))["session"]
+
+    def test_unknown_fields_are_omitted_not_zeroed(self):
+        receipt = _receipt(_entry())
+        for key in ("lines_not_recorded_reason", "rates", "billing_basis"):
+            assert key not in receipt, key
+
+
+class TestRates:
+    def test_single_model_list_rate_estimate_sends_its_dated_rate(self):
+        entry = _entry(model="gpt-5.4", execution_model="gpt-5.4", tokens_provenance="provider_reported",
+                       prompt_tokens=1000, completion_tokens=100, cache_read_tokens=0)
+        receipt = _receipt(entry)
+        assert receipt["cost_provenance"] == "official_rate_estimate"
+        (rate,) = receipt["rates"]
+        assert set(rate) <= RATE_KEYS and "output" not in _keys(receipt)
+        assert rate["model"] == "gpt-5.4" and rate["currency"] == "USD" and rate["as_of"]
+        assert rate["input_per_mtok"] == 2.50 and rate["output_per_mtok"] == 15.0
+        assert "cache_write_5m_per_mtok" not in rate  # no published rate: unknown, never 0
+
+    def test_per_model_transcript_estimate_sends_one_rate_per_priced_model(self):
+        usage = {"claude-fable-5": {"input": 10, "output": 5, "cache_read": 0},
+                 "gpt-5.4": {"input": 3, "output": 1}, "gpt-5.4-mini": {"input": 0, "output": 0}}
+        entry = _entry(estimated_cost=0.01, cost_provenance="official_rate_estimate",
+                       capture={"session_end_observed": True, "usage_by_model": usage})
+        rates = _receipt(entry)["rates"]
+        assert [r["model"] for r in rates] == ["claude-fable-5", "gpt-5.4"]  # no usage: not priced
+        assert rates[0]["cache_write_5m_per_mtok"] == 12.50 and rates[0]["cache_write_1h_per_mtok"] == 20.0
+
+    @pytest.mark.parametrize("extra", [
+        {"estimated_cost": 0.5, "cost_provenance": "provider_reported", "model": "gpt-5.4",
+         "execution_model": "gpt-5.4"},  # reported cost: no rate was used
+        {"model": "no-such-model", "execution_model": "no-such-model", "tokens_provenance": "provider_reported",
+         "prompt_tokens": 10, "completion_tokens": 1},  # unknown model: cost unknown
+        {"estimated_cost": 0.5, "cost_provenance": "official_rate_estimate"},  # model not known
+    ])
+    def test_no_rates_unless_the_cost_was_priced_from_the_table(self, extra):
+        assert "rates" not in _receipt(_entry(**extra))
+
+
+class TestCheckFields:
+    CHECK = ps.PlannedCheck(name="npm test", argv=["npm", "test"], kind="test", origin="contract",
+                            safety="safe", reason="")
+
+    def _block(self, *runs: ps.CheckRun) -> dict:
+        tree = ps.TreeState(head=SHA, dirty=False, tracked_dirty=False)
+        at = "2026-10-01T09:00:00Z"
+        return ps.build_attestation(None, list(runs), before=tree, after=tree, started_at=at, completed_at=at)
+
+    def test_setup_failed_check_carries_reported_counts_and_stays_unknown(self):
+        run = ps.CheckRun(self.CHECK, "unknown", exit_code=1, duration_seconds=4.2, note="setup",
+                          setup_failed=True, reported=ReportedTests("vitest", 12, 0, 1),
+                          started_at="2026-10-01T08:59:55Z")
+        (check,) = self._block(run)["verification"]["checks"]
+        assert check == {"name": "npm test", "kind": "test", "status": "unknown", "exit_code": 1,
+                         "setup_failed": True, "reported_runner": "vitest", "reported_passed": 12,
+                         "reported_failed": 0, "reported_skipped": 1, "duration_seconds": 4.2,
+                         "started_at": "2026-10-01T08:59:55Z"}
+        # It survives the round trip every reader (receipt join, evidence upload) takes.
+        assert parse_verification_block(self._block(run)["verification"]).to_dict()["checks"] == [check]
+
+    def test_ordinary_check_sends_timing_but_no_setup_flag(self):
+        run = ps.CheckRun(self.CHECK, "passed", exit_code=0, duration_seconds=1.0)
+        (check,) = self._block(run)["verification"]["checks"]
+        assert check["duration_seconds"] == 1.0
+        assert not {"setup_failed", "reported_runner", "started_at"} & set(check)
+
+    @pytest.mark.parametrize("raw", [
+        {"status": "failed", "setup_failed": True},  # setup failure is never a verdict
+        {"status": "unknown", "reported_runner": "vitest", "reported_passed": 3, "reported_failed": 0,
+         "reported_skipped": 0},  # counts without setup_failed
+        {"status": "unknown", "setup_failed": True, "reported_passed": 3, "reported_failed": 0,
+         "reported_skipped": 0},  # counts without a runner
+        {"status": "unknown", "setup_failed": True, "reported_runner": "rspec", "reported_passed": 3,
+         "reported_failed": 0, "reported_skipped": 0},  # runner outside the contract
+    ])
+    def test_contract_rules_hold_for_any_stored_block(self, raw):
+        block = {"version": 1, "status": "unknown", "source": "directly_observed",
+                 "observation_mode": "openshard_executed", "checks": [{"name": "t", "kind": "test", **raw}]}
+        (check,) = parse_verification_block(block).to_dict()["checks"]
+        assert not any(k.startswith("reported_") for k in check)
+        if raw["status"] != "unknown":
+            assert "setup_failed" not in check
+
+    def test_to_dict_never_pairs_setup_failed_with_a_verdict(self):
+        check = VerificationCheck(name="t", status="passed", setup_failed=True, reported_runner="jest",
+                                  reported_passed=1, reported_failed=0, reported_skipped=0)
+        assert set(check.to_dict()) == {"name", "kind", "status", "exit_code"}
+
+    def test_run_checks_stamps_start_time_and_keeps_output_out(self):
+        class Proc:
+            returncode = 0
+            stdout = "SECRET-OUTPUT 3 passed in 0.1s"
+
+        (run,) = ps.run_checks([self.CHECK], Path("."), stream=False, runner=lambda *a, **k: Proc())
+        assert run.started_at and run.started_at.endswith("Z")
+        att = self._block(run)
+        assert att["verification"]["checks"][0]["started_at"] == run.started_at
+        assert "SECRET-OUTPUT" not in json.dumps(att)
+
+    def test_verification_evidence_upload_carries_the_fields(self, plain_repo):
+        entry = _agent_session(plain_repo)
+        _rerun(plain_repo, entry)
+        atts = ps.load_attestations(plain_repo / ".openshard")
+        run = ps.CheckRun(self.CHECK, "passed", exit_code=0, duration_seconds=2.5,
+                          started_at="2026-10-01T08:59:55Z")
+        tree = ps.TreeState(head=SHA, dirty=False, tracked_dirty=False)
+        att = ps.build_attestation(entry, [run], before=tree, after=tree, started_at="2026-10-01T09:00:00Z",
+                                   completed_at="2026-10-01T09:00:00Z")
+        ps.record_attestation(plain_repo, att)
+        assert len(ps.load_attestations(plain_repo / ".openshard")) == len(atts) + 1
+        doc = _envelope(plain_repo)
+        assert doc is not None
+        _valid(EVIDENCE_SCHEMA, doc)
+        checks = doc["evidence"][-1]["verification"]["checks"]
+        assert checks[0]["duration_seconds"] == 2.5 and checks[0]["started_at"] == "2026-10-01T08:59:55Z"
+        assert load_history(plain_repo / RUNS, coerce=False)[-1]["receipt_id"] == doc["receipt_id"]

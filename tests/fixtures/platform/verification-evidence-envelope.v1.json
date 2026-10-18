@@ -1,0 +1,762 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openshard.dev/schemas/verification-evidence-envelope.v1.json",
+  "title": "OpenShard verification evidence envelope v1",
+  "description": "Later verification evidence for a synced Receipt, sent from OpenShard Core to the Platform. See docs/architecture/verification-evidence-contract.md.",
+  "type": "object",
+  "properties": {
+    "contract": {
+      "type": "string",
+      "const": "openshard.verification-evidence"
+    },
+    "contract_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "product": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "version": {
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "product",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^rcpt_[0-9a-f]{32}$",
+      "description": "Globally unique receipt identity minted by Core at record creation. Hosted idempotency key."
+    },
+    "evidence": {
+      "minItems": 1,
+      "maxItems": 20,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "attestation_id": {
+            "type": "string",
+            "pattern": "^vat_[0-9a-f]{32}$",
+            "description": "Minted once by Core when the attestation was recorded. Hosted idempotency key within a Receipt."
+          },
+          "created_at": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T[0-9:.]+(?:Z|[+-]\\d{2}:?\\d{2})?$",
+            "description": "When Core recorded the attestation."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "post_session_verification",
+              "ci_verification"
+            ]
+          },
+          "verification": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "number",
+                "const": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "passed",
+                  "failed",
+                  "partial",
+                  "not_run",
+                  "unknown"
+                ]
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "agent_reported",
+                      "directly_observed",
+                      "git_verified",
+                      "independently_verified"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "observation_mode": {
+                "type": "string",
+                "enum": [
+                  "openshard_executed",
+                  "hook_tool_event",
+                  "agent_claim",
+                  "ci_report",
+                  "not_observable",
+                  "legacy_boolean",
+                  "none",
+                  "imported_transcript"
+                ]
+              },
+              "checks_attempted": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "checks_passed": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "checks_failed": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "checks_skipped": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "checks": {
+                "default": [],
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120,
+                      "description": "Short, secret-scrubbed check name. Never argv or output."
+                    },
+                    "kind": {
+                      "default": "other",
+                      "type": "string",
+                      "enum": [
+                        "test",
+                        "lint",
+                        "typecheck",
+                        "build",
+                        "review",
+                        "other"
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "passed",
+                        "failed",
+                        "skipped",
+                        "unknown"
+                      ]
+                    },
+                    "exit_code": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": -9007199254740991,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "setup_failed": {
+                      "description": "OpenShard could not set the project up to run this check. The check's own status stays unknown.",
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "reported_runner": {
+                      "description": "With setup_failed: the runner whose own summary line the counts come from. Never its output.",
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "vitest",
+                            "jest",
+                            "pytest",
+                            "mocha",
+                            "node --test"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reported_passed": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reported_failed": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reported_skipped": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "duration_seconds": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "started_at": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 64,
+                          "pattern": "^\\d{4}-\\d{2}-\\d{2}T[0-9:.]+(?:Z|[+-]\\d{2}:?\\d{2})?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "started_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T[0-9:.]+(?:Z|[+-]\\d{2}:?\\d{2})?$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "completed_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T[0-9:.]+(?:Z|[+-]\\d{2}:?\\d{2})?$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "duration_seconds": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "exit_code": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "artifact_sha": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[0-9a-f]{7,64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 300
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "complete": {
+                "default": true,
+                "type": "boolean"
+              },
+              "incomplete_reasons": {
+                "default": [],
+                "maxItems": 8,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[a-z_]{1,64}$"
+                }
+              },
+              "derived": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "version",
+              "status",
+              "observation_mode"
+            ],
+            "additionalProperties": false
+          },
+          "ci": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z_]{1,48}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "binding": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z_]{1,48}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "outcome": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z_]{1,48}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "attestation_id",
+          "created_at",
+          "kind",
+          "verification"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "state": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "verified_passed",
+            "verified_failed",
+            "verified_partial",
+            "agent_reported_passed",
+            "agent_reported_failed",
+            "agent_reported_partial",
+            "attempted_unverified",
+            "manual_review",
+            "skipped",
+            "not_run",
+            "not_observed"
+          ]
+        },
+        "authority": {
+          "type": "string",
+          "enum": [
+            "agent_reported",
+            "directly_observed",
+            "git_verified",
+            "independently_verified",
+            "none"
+          ]
+        },
+        "effective_status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "partial",
+            "skipped",
+            "manual_review",
+            "not_run",
+            "unknown"
+          ]
+        },
+        "basis": {
+          "type": "string",
+          "enum": [
+            "session",
+            "post_session",
+            "ci",
+            "none"
+          ]
+        },
+        "session_status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "passed",
+                "failed",
+                "partial",
+                "not_run",
+                "unknown"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_source": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "agent_reported",
+                "directly_observed",
+                "git_verified",
+                "independently_verified"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_status": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "passed",
+                "failed",
+                "partial",
+                "not_run",
+                "unknown"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "claim_source": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "agent_reported",
+                "directly_observed",
+                "git_verified",
+                "independently_verified"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifact_sha": {
+          "description": "The commit the current evidence is bound to; null when it is not bound to one.",
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{7,64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checks_passed": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checks_failed": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checks_attempted": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failed_checks": {
+          "default": [],
+          "maxItems": 5,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "history": {
+          "default": [],
+          "maxItems": 21,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "session",
+                  "rerun",
+                  "ci"
+                ]
+              },
+              "at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T[0-9:.]+(?:Z|[+-]\\d{2}:?\\d{2})?$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "agent_reported",
+                      "directly_observed",
+                      "git_verified",
+                      "independently_verified"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "passed",
+                      "failed",
+                      "partial",
+                      "not_run",
+                      "unknown"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "checks_passed": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "checks_failed": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "checks_attempted": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "artifact_sha": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[0-9a-f]{7,64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "version",
+        "state",
+        "authority",
+        "effective_status",
+        "basis"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "contract",
+    "contract_version",
+    "source",
+    "receipt_id",
+    "evidence",
+    "state"
+  ],
+  "additionalProperties": false
+}

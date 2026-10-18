@@ -245,3 +245,22 @@ def single_pricing_model(entry: dict) -> str | None:
         if isinstance(value, str) and value and value.lower() not in {"unknown", "not recorded"}:
             return value
     return None
+
+
+def priced_models(entry: dict) -> list[str] | None:
+    """The models a list-rate estimate for *entry* is priced for, or None when unclear.
+
+    Capture's per-model usage (Claude Code transcript) when recorded -- every
+    model with usage -- else the run's one unambiguous model, as the estimate
+    paths use them. Whether the cost came from this table is the caller's check.
+    """
+    capture = entry.get("capture")
+    by_model = capture.get("usage_by_model") if isinstance(capture, dict) else None
+    if isinstance(by_model, dict):
+        return [
+            m for m, row in by_model.items()
+            if isinstance(m, str) and isinstance(row, dict)
+            and any(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in row.values())
+        ] or None
+    model = single_pricing_model(entry)
+    return [model] if model else None

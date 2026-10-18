@@ -108,8 +108,8 @@ class TestHookCapture:
         assert receipt_to_dict(receipt, extended=True)["lines_not_recorded_reason"] == LINES_BINARY_FILE
         payload = receipt_payload(entry, 0)
         assert payload["diff_added"] is None and payload["diff_removed"] is None
-        # Not in the Platform contract yet: never sent.
-        assert "lines_not_recorded_reason" not in payload
+        # Sent as recorded (Platform #230); a counted run sends no reason at all.
+        assert payload["lines_not_recorded_reason"] == LINES_BINARY_FILE
 
     def test_no_commit_records_unknown(self, repo):
         _start(repo)

@@ -156,9 +156,34 @@ class VerificationCheck:
     status: str = CHECK_UNKNOWN
     kind: str = "other"
     exit_code: int | None = None
+    # Recorded only by ``openshard verify`` re-runs; None (omitted) means not recorded.
+    # ``setup_failed`` is only ever True: the project could not be set up to run
+    # the check, so the check's own status stays ``unknown``. ``reported_*`` are
+    # the runner's own summary counts, kept only alongside ``setup_failed``.
+    setup_failed: bool | None = None
+    reported_runner: str | None = None
+    reported_passed: int | None = None
+    reported_failed: int | None = None
+    reported_skipped: int | None = None
+    duration_seconds: float | None = None
+    started_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "kind": self.kind, "status": self.status, "exit_code": self.exit_code}
+        out: dict[str, Any] = {"name": self.name, "kind": self.kind, "status": self.status, "exit_code": self.exit_code}
+        # Additive and omitted when unknown, so older blocks keep their exact shape.
+        # setup_failed only with status unknown; reported_* only as a complete set
+        # beside setup_failed (the Platform refuses anything else).
+        if self.setup_failed is True and self.status == CHECK_UNKNOWN:
+            out["setup_failed"] = True
+            counts = (self.reported_passed, self.reported_failed, self.reported_skipped)
+            if self.reported_runner is not None and all(_count_or_none(n) is not None for n in counts):
+                out.update(reported_runner=self.reported_runner, reported_passed=counts[0],
+                           reported_failed=counts[1], reported_skipped=counts[2])
+        if _duration(self.duration_seconds) is not None:
+            out["duration_seconds"] = self.duration_seconds
+        if _stamp(self.started_at) is not None:
+            out["started_at"] = self.started_at
+        return out
 
 
 @dataclass
@@ -263,6 +288,17 @@ def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _count_or_none(value: object) -> int | None:
+    n = _int_or_none(value)
+    return n if n is not None and n >= 0 else None
+
+
+def _reported_runner(value: object) -> str | None:
+    from openshard.verification.setup_failure import REPORTED_RUNNERS
+
+    return value if isinstance(value, str) and value in REPORTED_RUNNERS else None
+
+
 def aggregate_status(checks: list[VerificationCheck]) -> str:
     """Overall status from per-check outcomes. A failure is never hidden."""
     if not checks:
@@ -297,7 +333,16 @@ def _parse_check(raw: object) -> VerificationCheck | None:
     # is never dropped for its name (its outcome still counts).
     name = _check_name_text(raw["name"]) or "check (name redacted)"
     kind = raw.get("kind") if raw.get("kind") in CHECK_KINDS else "other"
-    return VerificationCheck(name=name, status=str(status), kind=str(kind), exit_code=_int_or_none(raw.get("exit_code")))
+    check = VerificationCheck(name=name, status=str(status), kind=str(kind), exit_code=_int_or_none(raw.get("exit_code")),
+                              duration_seconds=_duration(raw.get("duration_seconds")),
+                              started_at=_stamp(raw.get("started_at")))
+    if raw.get("setup_failed") is True and check.status == CHECK_UNKNOWN:
+        check.setup_failed = True
+        check.reported_runner = _reported_runner(raw.get("reported_runner"))
+        check.reported_passed = _count_or_none(raw.get("reported_passed"))
+        check.reported_failed = _count_or_none(raw.get("reported_failed"))
+        check.reported_skipped = _count_or_none(raw.get("reported_skipped"))
+    return check
 
 
 # ---------------------------------------------------------------------------
