@@ -42,12 +42,13 @@ BROAD_EXCEPT_CEILING = 5
 
 # Units already over a ceiling, at the size measured when the ratchet landed
 # (main at fd70787a, 2026-10-12). Capture service and hook module budgets include the capture-root repair (#528)
-# and the queued start-HEAD fix (#527): 1642 and 4945 lines respectively.
+# and the queued start-HEAD fix (#527): 1642 and 4945 lines respectively. The hook
+# module's budget was later lowered to 4411 when its constants moved to claude_hook_constants.py.
 # Shrink the numbers; delete an entry once its
 # unit is under the ceiling.
 MODULE_LINE_BUDGETS = {
     "openshard/cli/main.py": 8454,
-    "openshard/adapters/claude_hooks.py": 4556,
+    "openshard/adapters/claude_hooks.py": 4411,
     "openshard/native/context.py": 3742,
     "openshard/history/shard_contract.py": 1807,
     "openshard/run/pipeline.py": 2827,
