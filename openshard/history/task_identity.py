@@ -33,6 +33,16 @@ dedicated helper, but it must only be called from an explicit
 task-creation path (``openshard task new``) -- never from a fold, replay,
 import or attempt-linking path.
 
+Session grouping of per-turn Receipts (flagged)
+-----------------------------------------------
+The one exception to "never mints outside ``openshard task new``": with
+per-turn Receipts on (``adapters/claude_turn_receipts.py``), the first turn of
+an undeclared Claude Code session mints a ``task_id`` at its Receipt's creation
+and the session's later turns inherit it. It is labelled
+``capture.task_grouping: session`` (a declaration is ``explicit``), comes from
+the observed agent session id only, and is not sent to the Platform as a
+declared task (``sync/envelope.receipt_payload``).
+
 Old records
 -----------
 Records written before ``task_id`` existed simply have no ``task_id``

@@ -173,6 +173,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from openshard.adapters import claude_session_fidelity as fidelity
+from openshard.adapters import claude_turn_receipts as turns
 from openshard.adapters.agent_env import PROVIDER_SOURCE_AGENT_ENV, claude_agent_env
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
 from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
@@ -2135,7 +2136,7 @@ def _entry_ended(entry: dict) -> bool:
         return False
     completeness = capture.get("completeness")
     reasons = completeness.get("reasons", []) if isinstance(completeness, dict) else []
-    return capture.get("session_end_observed") is True or any(
+    return capture.get("session_end_observed") is True or turns.is_turn_sealed(capture) or any(
         isinstance(reason, dict) and reason.get("kind") == REASON_SESSION_END_NOT_OBSERVED
         for reason in reasons
     )
@@ -2178,6 +2179,7 @@ def _resumed_segment(
     raw_capture = persisted.get("capture")
     capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
     buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
+    turns.inherit(buf, persisted, same_receipt=False)
     return buf
 
 
@@ -2190,8 +2192,8 @@ _LATE_HOOK_GRACE_SECONDS = 60
 
 def _late_hook_for_ended(persisted: dict, first_hook: str, now: str | None) -> bool:
     """True for a non-opening hook arriving within the grace period after *persisted* ended."""
-    if first_hook in _SEGMENT_OPENING_EVENTS:
-        return False
+    if first_hook in _SEGMENT_OPENING_EVENTS or turns.is_turn_sealed(persisted.get("capture")):
+        return False  # after a sealed turn, Claude's ordered hooks are the agent continuing
     raw_capture = persisted.get("capture")
     capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
     at = _parse_utc(now) if now else None
@@ -2224,6 +2226,7 @@ def _load_or_create_buffer(
             )
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
+            turns.inherit(rebuilt, persisted, same_receipt=True)
             return rebuilt
     return _new_buffer(
         session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline, start_head=start_head,
@@ -3355,6 +3358,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
     _stamp_task_context(entry, buf)
+    turns.stamp(entry, buf, repo_root)  # per-turn Receipts (flag): turn facts and session grouping
     stamp_record_correlation(entry, buf.get("correlation"), buf.get("herdr_delegated"), buf.get("herdr_terminals"))
     _stamp_cloud_session(entry, buf)
     if buf.get("correlation_conflicts"):
@@ -4055,19 +4059,12 @@ def apply_reduced_hook(
                 return HookOutcome(event=payload.event, action="ignored", session_id=payload.session_id,
                                    repo_root=repo_root, detail="duplicate event id")
             detail, should_fold, should_delete = _apply(payload, buf, repo_root, now=now)
-            cloud_turn_closed = (
-                payload.event == EVENT_STOP
-                and (payload.agent, os.environ.get("OPENSHARD_CONNECTED_SURFACE")) in {
-                    ("cursor", "cursor-cloud"), ("claude_code", "claude-code-web"),
-                }
+            # A hosted runtime's Stop (no SessionEnd may follow), or a turn-scoped
+            # Receipt's Stop: seal this Receipt now; the next hook opens the next one.
+            cloud_turn_closed, turn_sealed = turns.close_turn(
+                payload, buf, repo_root, now=now, has_activity=should_fold,  # a Stop folds only with work
             )
-            if cloud_turn_closed:
-                # Hosted runtimes may reclaim their VM after Stop without SessionEnd.
-                # Seal this observed turn now, without manufacturing a session end.
-                losses = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict)]
-                if not any(r.get("kind") == REASON_SESSION_END_NOT_OBSERVED for r in losses):
-                    losses.append(make_reason(REASON_SESSION_END_NOT_OBSERVED))
-                buf["capture_losses"] = losses
+            if cloud_turn_closed or turn_sealed:
                 should_fold, should_delete = True, True
             _mark_applied(buf, dedup_id)
             remote_events = _remote_capture_new_events(buf)
@@ -4084,10 +4081,13 @@ def apply_reduced_hook(
                 should_fold, should_delete = True, True
             entry: dict | None = None
             outcome = ""
-            if should_fold and payload.event == EVENT_STOP and not buf.get("ended"):
+            if should_fold and payload.event == EVENT_STOP and not buf.get("ended") and not turn_sealed:
                 _refresh_git_outcome_on_stop(buf, repo_root)
             if should_fold:
-                entry, outcome = _fold(buf, repo_root, finalize=bool(buf.get("ended")) or cloud_turn_closed)
+                finalize = bool(buf.get("ended") or cloud_turn_closed or turn_sealed)
+                entry, outcome = _fold(buf, repo_root, finalize=finalize)
+                if turn_sealed:
+                    turns.after_seal()
             if should_delete:
                 try:
                     if path.exists():
