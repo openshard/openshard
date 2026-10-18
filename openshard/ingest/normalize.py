@@ -186,7 +186,7 @@ def normalize(parsed: ParsedSession, repo_root: Path, source_sha256: str) -> His
     f["approval_policy"] = _fact(scrub_label(parsed.approval_policy, 60), T, parsed.approval_ref)
     # Neither Claude Code nor Codex history records individual approval decisions.
     f["approvals"] = unknown_fact()
-    f["cost"] = unknown_fact()  # historical cost is not produced in v1 (see §15.5)
+    f["cost"] = unknown_fact()  # historical cost is not produced (see §3)
     f["final_message"] = _fact(scrub_free_text(parsed.final_message, MESSAGE_CAP, repo_root),
                                EVIDENCE_AGENT_REPORTED, parsed.final_message_ref)
     f["pr"] = _fact(scrub_label(parsed.pr_url, 200), T, parsed.pr_ref)

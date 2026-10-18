@@ -1548,10 +1548,9 @@ Receipt never claims more than its evidence supports.
   missing or stale credential; `capture status` shows refused and
   quarantined counts. Telemetry `capture.service` gains two bounded
   counters, `rejected` and `corrupt_lines`.
-- `docs/architecture.md`, `docs/architecture/V044_RECEIPT_INTEGRITY_AUDIT.md`,
-  `docs/architecture/POST_V044_CORE_CLEANUP.md`; rewritten `SECURITY.md`
-  and `CONTRIBUTING.md`; trust-boundary, attribution and completeness
-  sections in `docs/agent-capture.md`.
+- `docs/architecture.md`; rewritten `SECURITY.md` and `CONTRIBUTING.md`;
+  trust-boundary, attribution and completeness sections in
+  `docs/agent-capture.md`.
 
 ### Fixed
 

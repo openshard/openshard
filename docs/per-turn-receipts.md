@@ -1,18 +1,9 @@
 # Per-turn Receipts (Claude Code first)
 
-Status: **on by default** from v0.5.0. Opt out with
+On by default. Opt out with
 `OPENSHARD_TURN_RECEIPTS=off` in the capture service's environment, or
 `turn_receipts: false` in `.openshard/config.yml` (the environment wins).
 A session already open when Core is upgraded keeps its session Receipt.
-
-## Problem
-
-Today one agent session is one Receipt: one `runs.jsonl` line, upserted at
-every `Stop` and synced only after `SessionEnd` or an hour idle
-(`sync/envelope.eligibility`). A chat kept open all day shows nothing on the
-Platform until evening, and every task done in it is lumped into one Receipt.
-Hosted Receipts are immutable, so the session Receipt cannot be sent early
-and corrected later.
 
 ## Model
 
@@ -50,8 +41,6 @@ Task (task_id)           the job; may span prompts, sessions, agents, days
    every later turn of the same agent session inherits it:
    `task_grouping: session`. This is a grouping OpenShard made from the
    session id it observed, never a declaration; that is why it is labelled.
-3. Not yet: same branch across sessions joins the Task; the PR links a
-   branch's Receipts. When unsure, a new Task. See Still open.
 
 `history/task_identity.py` keeps its rule that `task_id` is never inferred from
 prompts, timing or repository state; the session grouping is the one stated
@@ -83,12 +72,11 @@ Amendments chain re-seals exactly as today. The parity test keeps
 while the session is open. In the capture service the seal calls
 `sync.client.request_sync()`, which wakes the background sync loop at once
 (polling at 250 ms) instead of waiting for its 5-minute tick. The in-progress
-turn stays "still in progress". Measured locally only in tests; the target is
-"hosted within seconds".
+turn stays "still in progress".
 
 ## Platform contract
 
-Platform #243 accepts the turn fields (all optional, nullable). For a turn
+The Platform accepts the turn fields (all optional, nullable). For a turn
 Receipt Core sends:
 
 * `task_id` with `task_grouping`: `session` for a Task OpenShard grouped from
@@ -140,7 +128,7 @@ session sends nothing until its turn seals.
 | Case | Result |
 |---|---|
 | Turn never completes (crash, terminal closed, no `Stop`) | the open turn is swept after an hour idle exactly like a session today: `session_end_not_observed`, sealed `idle_swept`, synced |
-| `SessionEnd` after the last sealed turn | ignored; no empty Receipt. The session end is not recorded on any turn (Still open) |
+| `SessionEnd` after the last sealed turn | ignored; no empty Receipt. The session end is not recorded on any turn |
 | Another Stop hook blocks and the agent continues | Claude's hooks are synchronous and ordered, so the next hook opens the next turn Receipt (no prompt; task text not captured) instead of being dropped |
 | Capture service down (inline hooks) | same sealing in the hook process; no PR lookup; no immediate sync (the next sync run picks it up) |
 | Hosted runtimes (`claude-code-web`, `cursor-cloud`) | unchanged: Stop seals with `session_end_not_observed` (logic moved into `claude_turn_receipts.close_turn`) |
@@ -155,33 +143,12 @@ command output. The new fields are an enum, an integer, a timestamp and an id.
 * Opening a turn costs one `_new_buffer` (git branch/HEAD/dirty and a bounded
   baseline snapshot) in the capture worker, never on the hook's blocking path.
 * The transcript is re-read from the start for each turn (the per-turn reader
-  starts with fresh offsets). Fine for normal chats; long ones should carry
-  offsets forward (Still open).
+  starts with fresh offsets). Fine for normal chats.
 * No new `runs.jsonl` rewrite: one append per turn and the existing upsert at
-  the seal. The O(n) upsert itself is being fixed separately
-  (`core-history-append`); this change adds no full-file rewrite.
+  the seal.
 * Sync wake reads `runs.jsonl` and the outbox once per seal.
 
 ## Other agents
 
-* **Codex**: has `UserPromptSubmit`/`Stop`; usage is a cumulative counter, so
-  a turn needs the existing `codex_usage_baseline` delta at each turn start.
-* **Cursor**: `beforeSubmitPrompt`/`stop`; usage comes from the Cursor API by
-  generation id, so a turn maps to one generation.
-* **OpenCode**: `chat.message` / `session.idle` (idle is not a completed turn).
-* **Antigravity, Hermes, Grok Build**: no reliable turn boundary yet.
-
-`turn_scoped` returns false for every agent except Claude Code.
-
-## Still open
-
-1. Branch grouping across chats (`task_grouping: branch`: same repository and
-   branch within 24 h joins the Task; once the branch has a PR, the PR is
-   authoritative). Needs a cross-session lookup on the capture path and a PR
-   rule; not in v0.5.0.
-2. Record the session end as session-level evidence for the last turn.
-3. Carry transcript offsets across turns.
-4. Codex, Cursor and OpenCode turn boundaries.
-5. Remote capture links at most 10 Receipts per capture (`spool.MAX_LINKS`,
-   Platform `receiptsPerCapture`); turns after the tenth stream Events that
-   name their Receipt but get no link.
+Per-turn Receipts apply to Claude Code only (`turn_scoped` returns false for
+every other agent). Other agents keep one Receipt per session.

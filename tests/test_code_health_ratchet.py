@@ -201,7 +201,7 @@ def test_no_module_grows_past_its_budget(health) -> None:
             over.append(f"{module}: {lines} lines > {budget}")
     _fail(
         "Modules grew past their budget. Extract a cohesive piece into its own module "
-        "before adding to these (see docs/architecture/CODE_HEALTH_BASELINE.md):",
+        "before adding to these (python scripts/code_health.py prints the report):",
         over,
     )
 

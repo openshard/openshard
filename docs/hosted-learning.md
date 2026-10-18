@@ -18,4 +18,4 @@ The server scans at most 200 recent Receipts for this exact repository and a 90-
 
 The native response contains bounded advisory context and supporting Receipt IDs. After successful stdout delivery, a private bounded session sidecar records the handoff. A later ordinary capture in the same current segment can include this evidence. Receipt pages show hosted history and links to supporting Receipts. Model consumption and changed behaviour remain unestablished.
 
-This feature does not repair missing provider telemetry or reconstruct historical cloud usage. Actual Scribe/Tether export coverage, whole-task billing and further runtime integrations remain separate acceptance work.
+This feature does not repair missing provider telemetry or reconstruct historical cloud usage.
