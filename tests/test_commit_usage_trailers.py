@@ -8,17 +8,20 @@ import shlex
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import yaml
 from click.testing import CliRunner
 
+from openshard.adapters import commit_usage_trailers
 from openshard.cli.usage_cmd import usage_group
 from openshard.models.pricing import estimate_usage_cost
 
 SESSION = "11111111-2222-3333-4444-555555555555"
 OLD = "2026-01-01T00:00:00+00:00"
+CLAIMED_AT = datetime(2026, 2, 1, 0, 0, 30, tzinfo=UTC)  # when a claim is made, unless a test moves it
 
 
 def _msg(mid: str, at: str, *, model: str = "claude-opus-5-5", i: int = 1, o: int = 10, cr: int = 100,
@@ -50,6 +53,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SESSION)
+    monkeypatch.setattr(commit_usage_trailers, "_now", lambda: CLAIMED_AT)
     return root
 
 
@@ -82,7 +86,7 @@ def _sub(tmp_path: Path, name: str) -> Path:
 def test_unidentified_caller_gets_session_window_usage_once_per_message(repo, tmp_path):
     main = _transcript(tmp_path)
     _write(main, [
-        _msg("m_before", "2025-12-31T00:00:00Z", i=999),  # before the last commit: not this commit's
+        _msg("m_before", "2025-12-31T00:00:00Z", i=995),  # before HEAD's commit but never claimed: counted
         _msg("m1", "2026-02-01T00:00:00Z", o=5),
         _msg("m1", "2026-02-01T00:00:01Z", o=10),  # the same streamed message re-reported: last line wins
         _msg("m2", "2026-02-01T00:01:00Z", cw=40, cw1h=30),
@@ -96,10 +100,10 @@ def test_unidentified_caller_gets_session_window_usage_once_per_message(repo, tm
     assert result.output.splitlines() == [
         "Openshard-Model: claude-opus-5-5",
         "Openshard-Usage-Scope: session-window",
-        "Openshard-Tokens-Input: 4",
-        "Openshard-Tokens-Output: 30",
-        "Openshard-Tokens-Cache-Read: 300",
-        "Openshard-Tokens-Cache-Creation: 80",
+        "Openshard-Tokens-Input: 999",
+        "Openshard-Tokens-Output: 40",
+        "Openshard-Tokens-Cache-Read: 400",
+        "Openshard-Tokens-Cache-Creation: 100",
         "Openshard-Tokens-Cache-Creation-1h: 30",
     ]
 
@@ -111,11 +115,75 @@ def test_committing_subagent_gets_only_its_own_transcript(repo, tmp_path):
     result = _run()
     assert result.exit_code == 0, result.output
     assert "Openshard-Usage-Scope: agent" in result.output and "Openshard-Tokens-Output: 7" in result.output
-    # The other agents' usage is still theirs: a later session-window commit gets it, never "me1" again.
+    # The other agents' usage is still theirs: their own commit gets it, never "me1" again.
     _commit(repo)
     _write(_sub(tmp_path, "me"), [_result()], mode="a")
+    _write(_sub(tmp_path, "other"), [_open_call("openshard usage trailers", "toolu_2")], mode="a")
     rest = _run()
-    assert "Openshard-Usage-Scope: session-window" in rest.output and "Openshard-Tokens-Output: 1500" in rest.output
+    assert "Openshard-Usage-Scope: agent" in rest.output and "Openshard-Tokens-Output: 500" in rest.output
+
+
+def _rebase_onto_newer_main(repo: Path, monkeypatch) -> None:
+    """The agent's branch rebased onto a main commit made long after the agent started."""
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "agent"], check=True)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-"], check=True)
+    for key in ("GIT_COMMITTER_DATE", "GIT_AUTHOR_DATE"):
+        monkeypatch.setenv(key, "2026-06-01T00:00:00+00:00")
+    _commit(repo)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "agent"], check=True)
+    subprocess.run(["git", "-C", str(repo), "rebase", "-q", "-"], check=True, capture_output=True)
+
+
+def test_rebase_before_the_first_commit_does_not_shrink_the_agents_count(repo, tmp_path, monkeypatch):
+    # The bug: with no claim yet the window started at HEAD's commit time, so after a rebase onto a newer
+    # main commit the agent's earlier work fell outside it and an undercount was labelled exact.
+    _write(_transcript(tmp_path), [_msg("main1", "2026-02-01T00:00:00Z", o=1000)])
+    _write(_sub(tmp_path, "me"), [_msg("me1", "2026-02-01T00:00:00Z", o=2000), _msg("me2", "2026-05-01T00:00:00Z", o=453),
+                                   _msg("me3", "2026-06-02T00:00:00Z", o=1)])
+    _rebase_onto_newer_main(repo, monkeypatch)
+    _write(_sub(tmp_path, "me"), [_open_call(f"cd {repo} && git commit -F m")], mode="a")
+    result = _run()
+    assert result.exit_code == 0, result.output
+    assert "Openshard-Usage-Scope: agent" in result.output and "Openshard-Tokens-Output: 2454" in result.output
+    # --since is still an explicit override.
+    assert "Openshard-Tokens-Output: 1\n" in _run("--since", "HEAD").output
+
+
+def test_second_commit_counts_only_the_agents_new_messages(repo, tmp_path, monkeypatch):
+    _write(_transcript(tmp_path), [])
+    me = _sub(tmp_path, "me")
+    _write(me, [_msg("me1", "2026-02-01T00:00:00Z", o=2000), _open_call("openshard usage trailers")])
+    assert "Openshard-Tokens-Output: 2000" in _run().output
+    _commit(repo)
+    _write(me, [_result(), _msg("me2", "2026-02-01T00:05:00Z", o=6)], mode="a")
+    _rebase_onto_newer_main(repo, monkeypatch)  # a merge or rebase between commits changes nothing either
+    _write(me, [_open_call("openshard usage trailers", "toolu_2")], mode="a")
+    second = _run()
+    assert "Openshard-Usage-Scope: agent" in second.output and "Openshard-Tokens-Output: 6\n" in second.output
+
+
+def test_main_thread_and_subagent_each_claim_only_their_own_transcript(repo, tmp_path):
+    main, sub = _transcript(tmp_path), _sub(tmp_path, "s")
+    _write(main, [_msg("main1", "2026-02-01T00:00:00Z", o=11), _open_call("openshard usage trailers")])
+    _write(sub, [_msg("s1", "2026-02-01T00:00:00Z", o=22)])
+    assert "Openshard-Usage-Scope: agent" in (first := _run()).output and "Openshard-Tokens-Output: 11\n" in first.output
+    _commit(repo)
+    _write(main, [_result()], mode="a")
+    _write(sub, [_open_call("openshard usage trailers", "toolu_2")], mode="a")
+    assert "Openshard-Usage-Scope: agent" in (second := _run()).output and "Openshard-Tokens-Output: 22\n" in second.output
+
+
+def test_session_window_starts_at_the_sessions_latest_landed_claim(repo, tmp_path, monkeypatch):
+    main, sub = _transcript(tmp_path), _sub(tmp_path, "s")
+    _write(main, [_msg("m1", "2026-02-01T00:00:00Z", o=1)])
+    _write(sub, [_msg("s_old", "2026-01-15T00:00:00Z", o=100)])
+    assert "Openshard-Tokens-Output: 101" in _run().output  # first window: the whole unclaimed session
+    _commit(repo)
+    _rebase_onto_newer_main(repo, monkeypatch)  # HEAD's time is not where the next window starts
+    _write(sub, [_msg("s_late", "2026-02-01T00:00:10Z", o=1000), _msg("s_new", "2026-02-01T00:01:00Z", o=5)], mode="a")
+    _write(main, [_msg("m2", "2026-02-01T00:02:00Z", o=7)], mode="a")
+    window = _run()  # s_late predates the landed claim (00:00:30): outside the window, still s's to claim
+    assert "Openshard-Usage-Scope: session-window" in window.output and "Openshard-Tokens-Output: 12\n" in window.output
 
 
 def test_parallel_callers_are_told_apart_by_the_repository_they_name(repo, tmp_path):
@@ -179,6 +247,11 @@ def test_append_to_replaces_the_declared_model_and_keeps_other_trailers(repo, tm
                    "Co-Authored-By: Claude <noreply@anthropic.com>\n", encoding="utf-8")
     result = _run("--append-to", str(msg))
     assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    cost = estimate_usage_cost("claude-opus-5-5", input_tokens=1, output_tokens=10, cache_read_tokens=100,
+                               cache_write_tokens=10, cache_write_1h_tokens=30)
+    assert cost is not None
+    assert result.stderr == f"Added usage trailers: scope session-window, 151 tokens, ~${cost.usd:.4f} list-rate est.\n"
     text = msg.read_text(encoding="utf-8")
     assert text.startswith("Did a thing\n\nOpenshard-Agent: Claude Code\n")
     assert "claude-opus-5.5" not in text and text.count("Openshard-Model:") == 1
