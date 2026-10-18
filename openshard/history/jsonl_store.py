@@ -24,6 +24,15 @@ Helpers exposed:
 All derive the same lock path from the data file, so an append, an upsert, an
 amend and a rewrite of the same history file mutually exclude.
 
+An upsert never rewrites the whole file when it does not have to. A replaced
+line is overwritten where it is, in its own bytes, when the new record fits
+(it is padded with spaces, which every JSON reader ignores); a live Receipt
+in ``runs.jsonl`` is written with spare room so its later updates fit. The
+overwrite is journaled in ``<file>.redo`` first, and the next locked access
+redoes a write a crash interrupted. Only a record that outgrew its line is
+placed by the crash-safe whole-file rewrite. Line order, and so every
+record's history position, never changes.
+
 After a write to a ``runs.jsonl`` returns, the written record is handed to
 ``history.receipt_signing.seal_after_write`` (it seals only records that
 stopped changing; ``write_jsonl`` rewrites are never sealed).
@@ -31,15 +40,19 @@ stopped changing; ``write_jsonl`` rewrites are never sealed).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
+from typing import overload
 
 if sys.platform == "win32":
     import msvcrt
@@ -241,16 +254,25 @@ def history_file_lock(path: Path, *, timeout: float | None = None) -> Iterator[N
     on expiry instead of blocking forever; ``None`` (default) preserves the
     original unbounded-blocking behavior.
     """
-    with _file_lock(_lock_path_for(Path(path)), timeout=timeout):
+    with _locked(Path(path), timeout=timeout):
         yield
 
 
-def _atomic_replace(path: Path, blob: str) -> None:
+@contextmanager
+def _locked(path: Path, *, timeout: float | None = None) -> Iterator[None]:
+    """The sidecar lock for *path*, with any interrupted in-place write redone first."""
+    with _file_lock(_lock_path_for(path), timeout=timeout):
+        _redo_interrupted_write(path)
+        yield
+
+
+def _atomic_replace(path: Path, blob: str | bytes) -> None:
     """Write *blob* to a sibling temp file, fsync, then rename over *path*."""
     tmp = path.with_name(path.name + ".tmp")
     try:
-        with tmp.open("w", encoding="utf-8") as fh:
-            fh.write(blob)
+        with tmp.open("wb") as fh:
+            # A str is written as text mode would write it (os.linesep line ends).
+            fh.write(blob if isinstance(blob, bytes) else blob.replace("\n", os.linesep).encode("utf-8"))
             fh.flush()
             os.fsync(fh.fileno())
         replace_with_retry(tmp, path)
@@ -327,111 +349,360 @@ def _seal_on_write(extract: Callable[[tuple, dict, object], object], *, amendmen
     return decorate
 
 
+# ---------------------------------------------------------------------------
+# Upsert: find the line, then overwrite it where it is when the record fits
+# ---------------------------------------------------------------------------
+
+_REDO_SUFFIX = ".redo"
+# Spare room given to a live Receipt's line: as much again as the record, at
+# least this many bytes, so its next updates are overwrites, not rewrites.
+_MIN_HEADROOM_BYTES = 1024
+# Keys remembered per history file; the oldest is forgotten first.
+_MAX_INDEXED_KEYS = 256
+_PLAIN_KEY = re.compile(r"[A-Za-z0-9_-]+")
+_EOL = os.linesep.encode("ascii")  # what text-mode writes (append_jsonl's line end)
+
+# Where a keyed record's line was, per history file, valid only while the
+# file is exactly as this process last left it ((dev, ino, size, mtime_ns)).
+# Read and written only under that file's lock.
+_line_index: dict[str, tuple[tuple[int, int, int, int], dict[str, tuple[int, int]]]] = {}
+
+
+@dataclass
+class _Line:
+    offset: int
+    raw: bytes
+    record: dict
+
+
+class _LinesUnderLock(Sequence[str]):
+    """The file's raw lines exactly as a text-mode read gives them, read on first use.
+
+    A builder that only needs the matched record never pays for reading the
+    whole history; one that inspects the lines sees the state under the lock.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lines: list[str] | None = None
+
+    def _all(self) -> list[str]:
+        if self._lines is None:
+            self._lines = []
+            if self._path.exists():
+                with self._path.open("r", encoding="utf-8") as fh:
+                    self._lines = fh.read().splitlines(keepends=True)
+        return self._lines
+
+    def __len__(self) -> int:
+        return len(self._all())
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._all())
+
+    @overload
+    def __getitem__(self, index: int) -> str: ...
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[str]: ...
+    def __getitem__(self, index: int | slice) -> str | Sequence[str]:
+        return self._all()[index]
+
+
+def _signature(st: os.stat_result) -> tuple[int, int, int, int]:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _parse_line(raw: bytes) -> dict | None:
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:  # malformed JSON or undecodable bytes: not a record
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _remember(
+    path: Path, key: str | None, offset: int, length: int, *, keep: bool, moved: int = 0,
+) -> None:
+    """Record where *key*'s line is, against the file as it is now (under the lock).
+
+    *moved* is how far the lines after *offset* moved (a line rewritten at a
+    new length); with *keep*, the other remembered lines are moved with them.
+    """
+    try:
+        signature = _signature(path.stat())
+    except OSError:
+        _line_index.pop(str(path), None)
+        return
+    known = _line_index.get(str(path))
+    lines = dict(known[1]) if keep and known is not None else {}
+    if moved:
+        lines = {k: (o + moved if o > offset else o, n) for k, (o, n) in lines.items() if o != offset}
+    if key is not None:
+        lines.pop(key, None)
+        lines[key] = (offset, length)
+        while len(lines) > _MAX_INDEXED_KEYS:
+            del lines[next(iter(lines))]
+    _line_index[str(path)] = (signature, lines)
+
+
+def _indexed_line(fh, st: os.stat_result, path: Path, key: str, match: Callable[[dict], bool]) -> _Line | None:
+    """The remembered line for *key*, if the file is unchanged and it still matches."""
+    known = _line_index.get(str(path))
+    if known is None or known[0] != _signature(st) or key not in known[1]:
+        return None
+    offset, length = known[1][key]
+    fh.seek(max(offset - 1, 0))
+    chunk = fh.read(length + (1 if offset else 0))
+    raw = chunk[1:] if offset else chunk
+    if (offset and chunk[:1] != b"\n") or len(raw) != length:
+        return None
+    record = _parse_line(raw)
+    return _Line(offset, raw, record) if record is not None and match(record) else None
+
+
+def _scan(data: bytes, match: Callable[[dict], bool], key: str | None) -> _Line | None:
+    """The first line whose record satisfies *match*.
+
+    With *key*, only lines holding its JSON encoding are parsed: a caller
+    passes a key only when every line that can match contains it (a record's
+    ``receipt_id``, as ``json.dumps`` writes it).
+    """
+    if key is None:
+        offset = 0
+        for raw in data.splitlines(keepends=True):
+            record = _parse_line(raw)
+            if record is not None and match(record):
+                return _Line(offset, raw, record)
+            offset += len(raw)
+        return None
+    needle = json.dumps(key).encode("utf-8")
+    at = data.find(needle)
+    while at != -1:
+        start = data.rfind(b"\n", 0, at) + 1
+        end = data.find(b"\n", at)
+        end = len(data) if end == -1 else end + 1
+        record = _parse_line(data[start:end])
+        if record is not None and match(record):
+            return _Line(start, data[start:end], record)
+        at = data.find(needle, end)
+    return None
+
+
+def _find_line(path: Path, match: Callable[[dict], bool], key: str | None) -> tuple[_Line | None, bytes | None]:
+    """The matched line (and the whole file, when it had to be read). Lock held."""
+    try:
+        fh = path.open("rb")
+    except FileNotFoundError:
+        return None, None
+    with fh:
+        st = os.fstat(fh.fileno())
+        if key is not None:
+            hit = _indexed_line(fh, st, path, key, match)
+            if hit is not None:
+                return hit, None
+        fh.seek(0)
+        data = fh.read()
+    found = _scan(data, match, key)
+    if found is None and key is not None and not _PLAIN_KEY.fullmatch(key):
+        # Before an append, make sure no line matches that the key search
+        # missed (a writer that escaped the key differently, e.g. "\/"): one
+        # full parse, so a miss never becomes a duplicate. A key of letters,
+        # digits, "_" and "-" (a receipt id) has one JSON spelling.
+        found = _scan(data, match, None)
+    known = _line_index.get(str(path))
+    unchanged = known is not None and known[0] == _signature(st)  # its other entries still hold
+    if found is not None:
+        _remember(path, key, found.offset, len(found.raw), keep=unchanged)
+    else:
+        _remember(path, None, 0, 0, keep=unchanged)
+    return found, data
+
+
+def _still_changing(path: Path, record: dict) -> bool:
+    """True for a live Receipt in a ``runs.jsonl`` (one that is not yet sealable)."""
+    if path.name != "runs.jsonl":
+        return False
+    from openshard.history.receipt_signing import seal_point, stored_receipt_id
+
+    return stored_receipt_id(record) is not None and seal_point(record) is None
+
+
+def _line_bytes(path: Path, record: dict, serialized: bytes) -> bytes:
+    """The line to place for *record*: a still-changing Receipt gets spare room."""
+    headroom = max(_MIN_HEADROOM_BYTES, len(serialized)) if _still_changing(path, record) else 0
+    return serialized + b" " * headroom + _EOL
+
+
+def _redo_path(path: Path) -> Path:
+    return path.with_name(path.name + _REDO_SUFFIX)
+
+
+def _write_durably(fh, data: bytes) -> None:
+    fh.write(data)
+    fh.flush()
+    os.fsync(fh.fileno())
+
+
+def _overwrite_line(path: Path, offset: int, payload: bytes) -> None:
+    """Overwrite one line's bytes in place, journaled first so a crash is redone.
+
+    *payload* has exactly the old line's length and ends its line, so no other
+    byte of the file moves or changes.
+    """
+    st = path.stat()
+    header = json.dumps({
+        "offset": offset, "length": len(payload), "dev": st.st_dev, "ino": st.st_ino,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }).encode("ascii")
+    redo = _redo_path(path)
+    with redo.open("wb") as fh:
+        _write_durably(fh, header + b"\n" + payload)
+    with path.open("r+b") as fh:
+        fh.seek(offset)
+        _write_durably(fh, payload)
+    redo.unlink()
+
+
+def _redo_interrupted_write(path: Path) -> None:
+    """Finish an in-place overwrite a crash interrupted (lock held). Cheap when none.
+
+    The journal is applied only when it is whole (its digest matches) and the
+    file is still the one it was written for, with a line boundary on both
+    sides of the slot; otherwise the file was never touched or has since been
+    replaced, and the journal is dropped.
+    """
+    redo = _redo_path(path)
+    try:
+        blob = redo.read_bytes()
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    head, _, payload = blob.partition(b"\n")
+    try:
+        meta = json.loads(head)
+        offset, length = int(meta["offset"]), int(meta["length"])
+        whole = len(payload) == length and hashlib.sha256(payload).hexdigest() == meta["sha256"]
+    except (ValueError, KeyError, TypeError):
+        whole = False
+    if whole:
+        try:
+            with path.open("r+b") as fh:
+                st = os.fstat(fh.fileno())
+                fh.seek(max(offset - 1, 0))
+                around = fh.read(length + (1 if offset else 0))
+                if ((st.st_dev, st.st_ino) == (meta["dev"], meta["ino"]) and len(around) == length + (1 if offset else 0)
+                        and around.endswith(b"\n") and (offset == 0 or around[:1] == b"\n")):
+                    fh.seek(offset)
+                    _write_durably(fh, payload)
+        except FileNotFoundError:
+            pass
+    redo.unlink(missing_ok=True)
+
+
+def _upsert_locked(
+    path: Path,
+    build: Callable[[Sequence[str], dict | None], dict],
+    match: Callable[[dict], bool],
+    key: str | None,
+    serialized: bytes | None = None,
+) -> tuple[dict, str]:
+    """The upsert itself; the caller holds the lock (see :func:`upsert_jsonl_with`)."""
+    found, data = _find_line(path, match, key)
+    record = build(_LinesUnderLock(path), found.record if found is not None else None)
+    new = serialized if serialized is not None else json.dumps(record).encode("utf-8")
+    if found is not None:
+        end = len(found.raw) - (2 if found.raw.endswith(b"\r\n") else 1)
+        # Only a live Receipt keeps a lot of spare room; a record that stopped
+        # changing gives it back (one rewrite per Receipt), so it is not kept.
+        slack_allowed = end if _still_changing(path, record) else _MIN_HEADROOM_BYTES
+        if found.raw.endswith(b"\n") and len(new) <= end and end - len(new) <= slack_allowed:
+            # Fits: overwrite in place, padded to the old length.
+            _overwrite_line(path, found.offset, new + b" " * (end - len(new)) + found.raw[end:])
+            _remember(path, key, found.offset, len(found.raw), keep=True)
+            return record, "replaced"
+        if data is None:
+            data = path.read_bytes()
+        line = _line_bytes(path, record, new)
+        _atomic_replace(path, data[:found.offset] + line + data[found.offset + len(found.raw):])
+        _remember(path, key, found.offset, len(line), keep=True, moved=len(line) - len(found.raw))
+        return record, "replaced"
+    line = _line_bytes(path, record, new)
+    torn = _last_line_unterminated(path)
+    with path.open("ab") as fh:
+        if torn:
+            fh.write(_EOL)
+        offset = fh.tell()
+        _write_durably(fh, line)
+    _remember(path, key, offset, len(line), keep=True)
+    return record, "appended"
+
+
 @_learning_update
 @_seal_on_write(lambda args, kwargs, result: args[0] if args else kwargs.get("record"))
 def upsert_jsonl(
-    path: Path, record: dict, match: Callable[[dict], bool], *, timeout: float | None = None
+    path: Path,
+    record: dict,
+    match: Callable[[dict], bool],
+    *,
+    timeout: float | None = None,
+    key: str | None = None,
 ) -> str:
     """Replace the first record satisfying *match* with *record*, else append it.
 
     Returns ``"replaced"`` or ``"appended"``. Lines that are blank, malformed,
-    or do not match are preserved verbatim -- this never re-serializes or
-    re-coerces any record other than the one being written. A replace is a
-    crash-safe temp+rename rewrite; an append is a plain locked append. Both
-    happen under the same sidecar lock as :func:`append_jsonl`, and the whole
-    read-decide-write sequence is one critical section, so two concurrent
-    upserts for the same key can never both append.
+    or do not match are preserved byte-for-byte -- this never re-serializes or
+    re-coerces any record other than the one being written, and never moves a
+    line. A replace overwrites the line in place when the record fits it
+    (journaled, see the module docstring), else is a crash-safe temp+rename
+    rewrite; an append is a plain locked append. All happen under the same
+    sidecar lock as :func:`append_jsonl`, and the whole read-decide-write
+    sequence is one critical section, so two concurrent upserts for the same
+    key can never both append.
+
+    *key*, when given, is a string whose JSON encoding every line that can
+    satisfy *match* contains (a record's ``receipt_id``): the line is then
+    found without parsing the rest of the history, and remembered.
 
     ``timeout`` bounds the lock wait (see :func:`history_file_lock`); raises
     :class:`LockTimeoutError` on expiry instead of blocking forever.
     """
     path = Path(path)
-    line = json.dumps(record) + "\n"  # serialize BEFORE locking
+    serialized = json.dumps(record).encode("utf-8")  # serialize BEFORE locking
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(_lock_path_for(path), timeout=timeout):
-        existing: list[str] = []
-        if path.exists():
-            with path.open("r", encoding="utf-8") as fh:
-                existing = fh.read().splitlines(keepends=True)
-        for i, raw in enumerate(existing):
-            stripped = raw.strip()
-            if not stripped:
-                continue
-            try:
-                parsed = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict) and match(parsed):
-                existing[i] = line
-                _atomic_replace(path, "".join(existing))
-                return "replaced"
-        with path.open("a", encoding="utf-8") as fh:
-            if existing and not existing[-1].endswith("\n"):
-                fh.write("\n")
-            fh.write(line)
-            fh.flush()
-            os.fsync(fh.fileno())
-        return "appended"
+    with _locked(path, timeout=timeout):
+        return _upsert_locked(path, lambda _lines, _matched: record, match, key, serialized)[1]
 
 
 @_learning_update
 @_seal_on_write(lambda args, kwargs, result: result[0] if isinstance(result, tuple) else None)
 def upsert_jsonl_with(
     path: Path,
-    build: Callable[[list[str], dict | None], dict],
+    build: Callable[[Sequence[str], dict | None], dict],
     match: Callable[[dict], bool],
     *,
     timeout: float | None = None,
+    key: str | None = None,
 ) -> tuple[dict, str]:
     """Build and upsert one record while holding the history lock.
 
-    This is the position-dependent counterpart to upsert_jsonl. The current
-    raw lines are read under the lock and the first parsed record satisfying
-    match is passed to build(existing_lines, matched_record). The builder
+    This is the position-dependent counterpart to upsert_jsonl. The first
+    parsed record satisfying match is found under the lock and passed to
+    build(existing_lines, matched_record), where existing_lines are the
+    current raw lines (read only if the builder uses them). The builder
     therefore sees the exact history state that will be written and can safely
     finalize an identity derived from history position.
 
     Returns (record_as_written, "replaced"|"appended"). Blank, malformed and
     unrelated lines are preserved byte-for-byte. The builder runs under the
     lock, so it must stay cheap and must not re-enter this module on path.
+    *key* is as for :func:`upsert_jsonl`.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(_lock_path_for(path), timeout=timeout):
-        existing: list[str] = []
-        if path.exists():
-            with path.open("r", encoding="utf-8") as fh:
-                existing = fh.read().splitlines(keepends=True)
-
-        matched_index: int | None = None
-        matched_record: dict | None = None
-        for i, raw in enumerate(existing):
-            stripped = raw.strip()
-            if not stripped:
-                continue
-            try:
-                parsed = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict) and match(parsed):
-                matched_index = i
-                matched_record = parsed
-                break
-
-        record = build(existing, matched_record)
-        line = json.dumps(record) + "\n"
-        if matched_index is not None:
-            existing[matched_index] = line
-            _atomic_replace(path, "".join(existing))
-            return record, "replaced"
-
-        with path.open("a", encoding="utf-8") as fh:
-            if existing and not existing[-1].endswith("\n"):
-                fh.write("\n")
-            fh.write(line)
-            fh.flush()
-            os.fsync(fh.fileno())
-        return record, "appended"
+    with _locked(path, timeout=timeout):
+        return _upsert_locked(path, build, match, key)
 
 
 @_learning_update
@@ -459,7 +730,7 @@ def amend_last_jsonl(
     path = Path(path)
     if not path.exists():
         return None  # nothing to amend; take no lock and create no directory
-    with _file_lock(_lock_path_for(path), timeout=timeout):
+    with _locked(path, timeout=timeout):
         if not path.exists():
             return None
         with path.open("r", encoding="utf-8") as fh:
@@ -508,7 +779,7 @@ def append_jsonl(path: Path, record: dict) -> None:
     path = Path(path)
     line = json.dumps(record) + "\n"  # serialize BEFORE locking / opening
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(_lock_path_for(path)):
+    with _locked(path):
         torn = _last_line_unterminated(path)
         with path.open("a", encoding="utf-8") as fh:
             if torn:
@@ -534,7 +805,7 @@ def append_jsonl_with(path: Path, build: Callable[[list[str]], dict]) -> dict:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(_lock_path_for(path)):
+    with _locked(path):
         existing: list[str] = []
         if path.exists():
             with path.open("r", encoding="utf-8") as fh:
@@ -562,5 +833,5 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
     path = Path(path)
     blob = "".join(json.dumps(r) + "\n" for r in records)  # serialize BEFORE locking
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(_lock_path_for(path)):
+    with _locked(path):
         _atomic_replace(path, blob)  # atomic rename over target

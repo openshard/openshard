@@ -166,7 +166,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -2314,7 +2314,7 @@ def _ensure_record(buf: dict, repo_root: Path) -> None:
 def _finalize_hook_shard_id(
     entry: dict,
     buf: dict,
-    existing_lines: list[str],
+    existing_lines: Sequence[str],
     matched_record: dict | None,
 ) -> dict:
     """Finalize a hook record history-position Shard id under the runs lock.
@@ -3504,6 +3504,7 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
         lambda lines, matched: _finalize_hook_shard_id(entry, buf, lines, matched),
         match,
         timeout=_LOCK_TIMEOUT_SECONDS,
+        key=receipt_id if isinstance(receipt_id, str) and receipt_id else None,
     )
     buf["last_fold_at"] = _now()
     return entry, outcome
