@@ -61,6 +61,16 @@ recorded as ``EVIDENCE_DECLARED`` launch context; what the hooks then
 observe stays what it always was. See :func:`launch_task_id` and
 ``adapters/claude_hooks._bind_task_context``.
 
+Declared parent task (``OPENSHARD_PARENT_TASK_ID``)
+---------------------------------------------------
+A launcher that starts work as part of a larger task may also declare that
+task's id in ``OPENSHARD_PARENT_TASK_ID``. It follows the same rules as
+``OPENSHARD_TASK_ID``: a well-formed ``task_`` + UUIDv7 or nothing, never
+guessed, repaired or reconstructed. It is stored as ``parent_task_id`` in the
+record's declared ``correlation`` block (``history/correlation.py``), so it
+travels the same launch-context path and keeps ``evidence: declared``. See
+:func:`launch_parent_task_id` and ``history/task_edges.py``.
+
 No retroactive assignment (v0.5.0 Platform/Sync constraint)
 -------------------------------------------------------------
 ``task_id`` must be established before or at the creation of the work that
@@ -89,6 +99,8 @@ TASK_ID_PREFIX = "task_"
 # header is how it reaches the capture service, separately from (and never
 # read out of) the agent's own payload.
 TASK_ID_ENV = "OPENSHARD_TASK_ID"
+# The task this work belongs under, declared the same way (see module docstring).
+PARENT_TASK_ID_ENV = "OPENSHARD_PARENT_TASK_ID"
 TASK_CONTEXT_SOURCE_LAUNCH_ENV = "launch_environment"
 # Evidence label of the declaration itself: stated by the launcher, neither
 # observed by a hook nor reported by the agent nor verified by OpenShard.
@@ -169,6 +181,20 @@ def launch_task_id(env: Mapping[str, str] | None = None) -> str | None:
     source = os.environ if env is None else env
     try:
         value = source.get(TASK_ID_ENV)
+    except Exception:
+        return None
+    return value if is_task_id(value) else None
+
+
+def launch_parent_task_id(env: Mapping[str, str] | None = None) -> str | None:
+    """The well-formed task id declared in *env*'s ``OPENSHARD_PARENT_TASK_ID``, or None.
+
+    Same rules as :func:`launch_task_id`: unset, empty and malformed values
+    read as "no declaration". Never raises.
+    """
+    source = os.environ if env is None else env
+    try:
+        value = source.get(PARENT_TASK_ID_ENV)
     except Exception:
         return None
     return value if is_task_id(value) else None

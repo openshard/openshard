@@ -225,6 +225,7 @@ from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-expo
     read_transcript_usage,
 )
 from openshard.adapters.claude_workspace import note_usage_owner
+from openshard.history import task_edges
 from openshard.history.capture_completeness import (
     REASON_GIT_OUTCOME_UNAVAILABLE,
     REASON_SESSION_END_NOT_OBSERVED,
@@ -703,6 +704,7 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
         effort_level=_effort_level(data.get("effort", {}).get("level"))
         if isinstance(data.get("effort"), dict) else None,
         permission_mode=_permission_mode(data.get("permission_mode")),
+        attrs=task_edges.claude_subagent_attrs(event, data),
     )
 
 
@@ -1888,7 +1890,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         "idle_count": int(capture.get("idle_count") or 0),
         "invocation_count": int(capture.get("invocation_count") or 0),
         "permission_denied_count": int(capture.get("permission_denied_count") or 0),
-        "subagents": _stored_counts(capture.get("subagents"), ("started", "stopped", "failed")),
+        "subagents": task_edges.restore_subagents(capture),
         "approvals": _stored_counts(capture.get("approvals"), ("requested", "granted", "denied", "unanswered")),
         "last_invoked_model": (
             entry.get("execution_model") if entry.get("execution_model") not in (None, "unknown") else None
@@ -3382,6 +3384,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             # Delegation / approval-gate facts the agent reported (Hermes);
             # absent for agents whose hooks expose none.
             entry["capture"][count_key] = {n: int(raw_counts.get(n) or 0) for n in count_names}
+    task_edges.stamp_subagent_edges(entry, buf)
     if isinstance(buf.get("resumed_from_receipt_id"), str):
         # This receipt continues an agent session whose earlier receipt had
         # already ended (see _resumed_segment); that receipt is left as it was.
@@ -3800,6 +3803,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         counts["started" if started else "stopped"] = int(counts.get("started" if started else "stopped") or 0) + 1
         if failed_child:
             counts["failed"] = int(counts.get("failed") or 0) + 1
+        task_edges.note_subagent(counts, payload.attrs, started=started)
         meta: dict[str, Any] = {"hook": event}
         for attr_key in _SUBAGENT_ATTR_KEYS:
             if attr_key in payload.attrs:

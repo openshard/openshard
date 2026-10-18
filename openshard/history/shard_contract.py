@@ -20,6 +20,7 @@ from openshard.history.shard import (
     derive_shard_identity,
 )
 from openshard.history.shard_hash import integrity_as_stored, verify_shard_hash
+from openshard.history.task_edges import task_edges_block
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
 from openshard.history.usage_evidence import effective_usage
@@ -1567,13 +1568,11 @@ def build_shard_receipt(
         capture_completeness=_capture_completeness_val,
         integrity=_integrity_val,
         integrity_status=_integrity_status_val,
-        post_session_verification=(
-            post_session_verification if isinstance(post_session_verification, dict) else None
-        ),
+        post_session_verification=post_session_verification if isinstance(post_session_verification, dict) else None,
         changes=_changes_summary(_changes_block),
         agent_reported_in_git=_g if isinstance(_g := (_changes_block or {}).get("agent_reported_in_git"), int) and _g > 0 else 0,
         files_excluded=_files_excluded,
-        recorded_evidence={**project_entry_evidence(entry), "gaming_signals": gaming_signals_block(entry)},
+        recorded_evidence={**project_entry_evidence(entry), "gaming_signals": gaming_signals_block(entry), "task_edges": task_edges_block(entry)},
         usage=effective_usage(entry, _own_usage_attestations(entry, usage_attestations)),
         shard=build_shard(
             entry,

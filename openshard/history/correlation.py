@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from openshard.history.receipt_evidence import unsafe_text
+from openshard.history.task_identity import is_task_id, launch_parent_task_id
 
 CONTEXT_ENV = "OPENSHARD_CORRELATION_CONTEXT"
 MAX_CONTEXT_BYTES = 8192
@@ -44,6 +45,9 @@ def correlation_block(value: object) -> dict | None:
         clean = identifier(value.get(key))
         if clean is not None:
             result[key] = clean
+    parent_task = value.get("parent_task_id")
+    if is_task_id(parent_task):  # declared only; validated exactly like task_id, never repaired
+        result["parent_task_id"] = parent_task
     traceparent = value.get("traceparent")
     match = _TRACE.fullmatch(traceparent) if isinstance(traceparent, str) else None
     if match and int(match[1], 16) and int(match[2], 16):
@@ -84,10 +88,14 @@ def launch_correlation(env: Mapping[str, str] | None = None) -> dict | None:
     """Explicit launch context, filled in with the Herdr pane when run inside one.
 
     ``OPENSHARD_CORRELATION_CONTEXT`` always wins: Herdr only supplies a
-    missing ``source`` and appends its ids while the 16-id cap has room.
+    missing ``source`` and appends its ids while the 16-id cap has room. A
+    well-formed ``OPENSHARD_PARENT_TASK_ID`` sets ``parent_task_id``.
     """
     mapping = os.environ if env is None else env
     explicit = parse_correlation(mapping.get(CONTEXT_ENV))
+    parent_task = launch_parent_task_id(mapping)
+    if parent_task is not None:
+        explicit = correlation_block({**(explicit or {}), "parent_task_id": parent_task})
     try:
         from openshard.util import herdr
 
