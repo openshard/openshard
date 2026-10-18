@@ -86,6 +86,8 @@ openshard verify --dry-run                         # Show which checks would run
 openshard verify --from-observed --approve         # Also re-run the agent's observed checks; allow needs-approval commands
 openshard verify --strict                          # Same, but exit 1 when a check failed and 2 when a planned check could not run
 openshard verify --ci                              # Attach the GitHub check-run verdict for this Shard's exact commit (independent evidence; needs gh)
+openshard verdict --commit <sha> --json            # Verified / failed / unknown for one commit, from recorded evidence (exit 0/1/2; 3 error; docs/verdict.md)
+openshard verdict --task <task_id> --json          # Same for a task: its latest Receipt decides
 openshard remote create --agent codex              # Open a hosted remote capture for a cloud agent environment; prints its short-lived token (trusted machine)
 openshard remote attach                            # In the environment: attach to the capture named by $OPENSHARD_REMOTE_CAPTURE_URL / $OPENSHARD_REMOTE_TOKEN
 openshard remote status | flush | detach           # What is attached and queued; send now; forget
