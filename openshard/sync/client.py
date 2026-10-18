@@ -37,6 +37,7 @@ from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.shard_hash import stored_shard_hash
 from openshard.history.store import load_history
 from openshard.sync import outbox as _outbox
+from openshard.sync import seal as _seal
 from openshard.sync import transport as _transport
 from openshard.sync.config import PlatformLink, resolve_link, sync_disabled
 from openshard.sync.envelope import (
@@ -249,6 +250,9 @@ class FlushReport:
     # outbox state), so a fixed Core sends them; the flush moves on to the rest.
     unbuildable: int = 0
     unbuildable_receipts: list[dict[str, str]] = field(default_factory=list)
+    # Seal v2: Receipts sent with the install's seal, and what registering its key answered.
+    sealed: int = 0
+    signing_key: str | None = None
 
     def note_unbuildable(self, receipt_id: str | None, exc: BaseException) -> None:
         self.unbuildable += 1
@@ -325,7 +329,21 @@ def flush(
             except Exception as exc:  # one malformed record must not block every later Receipt
                 report.note_unbuildable(candidate.receipt_id, exc)
                 continue
+            decision = _seal.seal_for(root, candidate.receipt_id, stored_shard_hash(candidate.entry), envelope["receipt"])
+            if decision.status == _seal.DEFERRED:
+                continue  # it changed since discovery (or the sidecar was busy): the next flush sends it
+            if decision.seal is not None:
+                envelope["seal"] = decision.seal
+                report.sealed += 1
+                if report.signing_key is None:
+                    report.signing_key = _seal.register_key(sender, decision.seal)
             result = sender.send(envelope)
+            if "seal" in envelope and _seal.rejected_for_seal(result):
+                # A Platform that predates seal v2 rejects the unknown key; the
+                # receipt itself is what must not be lost, so send it unsigned.
+                envelope.pop("seal")
+                report.sealed -= 1
+                result = sender.send(envelope)
             report.sent += 1
             previous = records.get(candidate.receipt_id)
             if result.accepted:

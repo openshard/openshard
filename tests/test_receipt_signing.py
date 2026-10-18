@@ -596,10 +596,16 @@ def test_sync_payload_is_identical_with_and_without_a_seal(history, monkeypatch)
 
 
 def test_sync_code_never_reads_the_sidecar():
+    """Sync asks for one seal through ``seal_for_sync`` (seal v2, sync/seal.py) and nothing else."""
     sync_dir = Path(rs.__file__).resolve().parents[1] / "sync"
     for module in sync_dir.rglob("*.py"):
         text = module.read_text(encoding="utf-8")
-        assert rs.SIDECAR_FILENAME not in text and "receipt_signing" not in text, module
+        assert rs.SIDECAR_FILENAME not in text and "read_sidecar" not in text, module
+        if module.name != "seal.py":
+            assert "receipt_signing" not in text, module
+    seal_module = (sync_dir / "seal.py").read_text(encoding="utf-8")
+    assert "from openshard.history.receipt_signing import seal_for_sync\n" in seal_module
+    assert seal_module.count("receipt_signing") == 1
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX path separator check")

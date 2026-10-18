@@ -64,7 +64,23 @@
             {
               "type": "string",
               "pattern": "^task_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-              "description": "Explicit engineering-task identity minted by Core (openshard task new). Stored as sent; never inferred."
+              "description": "Engineering-task identity minted by Core. Explicit (openshard task new) unless task_grouping says Core grouped it from the session. Stored as sent; never inferred."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_grouping": {
+          "description": "How Core arrived at task_id: explicit (declared), session (grouped from the observed session) or branch. Absent: explicit.",
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "explicit",
+                "session",
+                "branch"
+              ]
             },
             {
               "type": "null"
@@ -2602,6 +2618,47 @@
                       "type": "null"
                     }
                   ]
+                },
+                "receipt_scope": {
+                  "description": "turn: this Receipt covers one prompt -> completed turn; session: the whole session segment.",
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "turn",
+                        "session"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "turn_index": {
+                  "description": "Which turn of the session this Receipt covers; Core counts from 1.",
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "previous_receipt_id": {
+                  "description": "The Receipt of the session's previous turn (Core capture.resumed_from_receipt_id).",
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^rcpt_[0-9a-f]{32}$",
+                      "description": "Globally unique receipt identity minted by Core at record creation. Hosted idempotency key."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
               },
               "additionalProperties": false
@@ -4436,6 +4493,90 @@
         "shard_id",
         "created_at",
         "agent"
+      ],
+      "additionalProperties": false
+    },
+    "seal": {
+      "description": "Optional install seal (Core seal v2) over this exact receipt. Absent from Core before seal v2 and from unsigned Receipts.",
+      "type": "object",
+      "properties": {
+        "envelope": {
+          "type": "object",
+          "properties": {
+            "payloadType": {
+              "type": "string",
+              "const": "application/vnd.in-toto+json"
+            },
+            "payload": {
+              "type": "string",
+              "maxLength": 16384,
+              "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+              "description": "The in-toto Statement bytes, standard base64."
+            },
+            "signatures": {
+              "minItems": 1,
+              "maxItems": 4,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "keyid": {
+                    "type": "string",
+                    "pattern": "^ed25519:[0-9a-f]{64}$"
+                  },
+                  "sig": {
+                    "type": "string",
+                    "minLength": 88,
+                    "maxLength": 88,
+                    "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+                    "description": "64-byte Ed25519 signature over DSSE PAE."
+                  }
+                },
+                "required": [
+                  "keyid",
+                  "sig"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "payloadType",
+            "payload",
+            "signatures"
+          ],
+          "additionalProperties": false
+        },
+        "public_key": {
+          "type": "object",
+          "properties": {
+            "algorithm": {
+              "type": "string",
+              "const": "ed25519"
+            },
+            "keyid": {
+              "type": "string",
+              "pattern": "^ed25519:[0-9a-f]{64}$"
+            },
+            "public_key": {
+              "type": "string",
+              "minLength": 44,
+              "maxLength": 44,
+              "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+              "description": "The raw 32-byte Ed25519 public key, standard base64."
+            }
+          },
+          "required": [
+            "algorithm",
+            "keyid",
+            "public_key"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "envelope",
+        "public_key"
       ],
       "additionalProperties": false
     }

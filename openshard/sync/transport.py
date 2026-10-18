@@ -118,12 +118,18 @@ class RecordingPlatformTransport:
         self.usage_results = list(usage_results or [SendResult(KIND_CREATED, 201)])
         self.usage_envelopes: list[dict] = []
         self._usage_calls = 0
+        self.key_result = SendResult(KIND_CREATED, 201)
+        self.registered_keys: list[dict] = []
 
     def send_evidence(self, receipt_id: str, envelope: dict) -> SendResult:
         self.evidence_envelopes.append(json.loads(json.dumps(envelope)))
         result = self.evidence_results[min(self._evidence_calls, len(self.evidence_results) - 1)]
         self._evidence_calls += 1
         return result
+
+    def register_signing_key(self, public_key: dict) -> SendResult:
+        self.registered_keys.append(dict(public_key))
+        return self.key_result
 
     def send_usage(self, receipt_id: str, envelope: dict) -> SendResult:
         self.usage_envelopes.append(json.loads(json.dumps(envelope)))
@@ -203,6 +209,11 @@ class HttpsPlatformTransport:
 
         url = f"{self.url}/{urllib.parse.quote(receipt_id, safe='')}/usage-evidence"
         return self._post(url, envelope, classify_evidence_status)
+
+    def register_signing_key(self, public_key: dict) -> SendResult:
+        """Register this install's public key (seal v2). A Platform without the route is ``unsupported``."""
+        base = self.url[: -len("/receipts")] if self.url.endswith("/receipts") else self.url
+        return self._post(f"{base}/signing-keys", public_key, classify_evidence_status)
 
     def _post(self, url: str, envelope: dict, classify: Any) -> SendResult:
         import urllib.error
