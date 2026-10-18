@@ -409,7 +409,10 @@ def _send_batch(
     last_seq = events[-1]["seq"]
     if result.accepted:
         spool.acknowledge(env, capture_id, last_seq, sent=len(events))
-        _keep_witness(env, capture_id, wire_witness(result.details))
+        witness = wire_witness(result.details)
+        _keep_witness(env, capture_id, witness)
+        if witness is not None:  # only a returned acknowledgement makes these Events witnessed
+            _note_witnessed(env, capture_id, events)
         report.events_sent += len(events)
         return "ok"
     if result.kind == "unauthorized":
@@ -488,6 +491,14 @@ def _keep_witness(env: dict | os._Environ | None, capture_id: str, witness: dict
             return
         spool.update_state(env, capture_id, witness={**witness, "acknowledged_at": spool.now_stamp()})
     except OSError:  # TimeoutError (the spool lock) is an OSError too
+        return
+
+
+def _note_witnessed(env: dict | os._Environ | None, capture_id: str, events: list[dict]) -> None:
+    """Bookkeeping only, like ``_keep_witness``: a failed write leaves Events un-witnessed locally."""
+    try:
+        spool.record_witnessed(env, capture_id, [e.get("event_id") for e in events])
+    except OSError:
         return
 
 

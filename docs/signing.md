@@ -104,6 +104,13 @@ What Core does:
 
   Only an acknowledgement the Platform actually returned counts. Events
   that were sent without one leave the witness unknown, never assumed.
+- **Per Receipt.** `openshard last --json` / `--full` and
+  `openshard history --json` add `capture_witness` for each Receipt:
+  `platform` once at least one of its Events was in a batch the Platform
+  acknowledged with a witness block, with `events_witnessed` of
+  `events_in_receipt`; otherwise `self_held` (no counts). It is read from
+  the spool (`witnessed.jsonl` beside it), never stored in the Receipt or
+  sealed, and not sent with sync.
 
 Capture never waits for the witness: hooks append to the local spool and
 return, sending happens off the hook path, and a failure there never fails

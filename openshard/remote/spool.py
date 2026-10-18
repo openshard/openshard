@@ -17,6 +17,9 @@ Layout (``<OPENSHARD_HOME>/remote-capture/``):
 ``state.json``    ``collector_id`` (this spool's identity), ``next_seq``,
                   ``acked_seq``, the Receipt identities to link, the
                   repositories seen, and the retry/backoff bookkeeping.
+``witnessed.jsonl`` the ``event_id`` of every Event in a batch the Platform
+                  accepted *with* a witness acknowledgement, one line per
+                  batch (``remote/witness.py`` reads it per Receipt).
 
 Manual remote capture uses the root journal. Persistent connected sessions
 each use ``sessions/<hashed-capture-id>/`` so concurrent and offline sessions
@@ -47,6 +50,7 @@ from openshard.safety.sanitize import is_absolute_path
 SPOOL_DIRNAME = "remote-capture"
 SPOOL_FILENAME = "spool.jsonl"
 STATE_FILENAME = "state.json"
+WITNESSED_FILENAME = "witnessed.jsonl"
 # Internal selector, never a credential or transmitted field.
 _SCOPE_ENV = "OPENSHARD_REMOTE_SPOOL_SCOPE"
 _SCOPE_RE = re.compile(r"^connected-[0-9a-f]{32}$")
@@ -259,10 +263,11 @@ def _state_for(env: dict | os._Environ | None, capture_id: str) -> dict[str, Any
     """The state for *capture_id*; a spool left by another capture is discarded, never resent elsewhere."""
     state = _read_state(env)
     if state is None or state.get("capture_id") != capture_id:
-        try:
-            _spool_path(env).unlink()
-        except OSError:
-            pass
+        for stale in (_spool_path(env), spool_dir(env) / WITNESSED_FILENAME):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
         state = _new_state(capture_id)
         _write_state(env, state)
     return state
@@ -415,6 +420,44 @@ def acknowledge(
         return state
 
 
+def record_witnessed(env: dict | os._Environ | None, capture_id: str, event_ids: list[object]) -> None:
+    """Remember the Events of one batch the Platform acknowledged with a witness block.
+
+    Bounded by :data:`MAX_SPOOLED_EVENTS` per capture; past it nothing more is
+    remembered, so a count read from this file can only be low, never high.
+    """
+    env = session_env(env, capture_id)
+    ids = [i for i in event_ids if isinstance(i, str) and _EVENT_ID_RE.match(i)]
+    with _lock(env):
+        state = _state_for(env, capture_id)
+        room = MAX_SPOOLED_EVENTS - int(state.get("witnessed_ids") or 0)
+        ids = ids[: max(room, 0)]
+        if not ids:
+            return
+        with (spool_dir(env) / WITNESSED_FILENAME).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ids": ids}, separators=(",", ":")) + "\n")
+        state["witnessed_ids"] = int(state.get("witnessed_ids") or 0) + len(ids)
+        _write_state(env, state)
+
+
+def witnessed_ids(env: dict | os._Environ | None = None) -> set[str]:
+    """Every ``event_id`` this spool recorded as witnessed (no lock, read-only). Never raises."""
+    out: set[str] = set()
+    try:
+        text = (spool_dir(env) / WITNESSED_FILENAME).read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        ids = item.get("ids") if isinstance(item, dict) else None
+        if isinstance(ids, list):
+            out.update(i for i in ids if isinstance(i, str))
+    return out
+
+
 __all__ = [
     "BATCH_EVENTS",
     "MAX_SPOOLED_EVENTS",
@@ -424,8 +467,10 @@ __all__ = [
     "pending",
     "pending_count",
     "read_state",
+    "record_witnessed",
     "spool_dir",
     "update_state",
     "wire_event",
     "wire_link",
+    "witnessed_ids",
 ]
