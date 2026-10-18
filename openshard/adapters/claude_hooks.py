@@ -2096,24 +2096,14 @@ def _find_persisted_entry(repo_root: Path, session_id: str, executor: str = EXEC
     A resumed session can have several receipts (one per segment, see
     ``_resumed_segment``); the last one written is the live candidate.
     """
-    path = repo_root / ".openshard" / "runs.jsonl"
-    if not path.exists():
-        return None
-    found: dict | None = None
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(d, dict) and _is_session_entry(d, session_id, executor):
-                found = d
+    from openshard.history.jsonl_store import find_last_record
+
+    try:  # read from the end; only lines holding the session id are parsed
+        found = find_last_record(repo_root / ".openshard" / "runs.jsonl",
+                                 lambda d: _is_session_entry(d, session_id, executor), key=session_id)
     except OSError:
         return None
-    return found
+    return found[1] if found is not None else None
 
 
 CLOUD_SESSION_NAMESPACE = "claude.cloud_session"
@@ -2279,12 +2269,10 @@ def _load_buffer_light(repo_root: Path, session_id: str, agent: str = AGENT_CLAU
 
 
 def _count_history_lines(repo_root: Path) -> int | None:
-    runs_path = repo_root / ".openshard" / "runs.jsonl"
+    from openshard.history.jsonl_store import count_lines
+
     try:
-        if not runs_path.exists():
-            return 0
-        with runs_path.open(encoding="utf-8") as fh:
-            return sum(1 for _ in fh)
+        return count_lines(repo_root / ".openshard" / "runs.jsonl")
     except Exception:
         return None
 
@@ -2345,26 +2333,19 @@ def _finalize_hook_shard_id(
     record already holds. If the id changes, the buffer, embedded Events and
     content hash are all updated together before the record is written.
     """
+    from openshard.history.jsonl_store import holds_value, line_count
     from openshard.history.shard_contract import _make_shard_id
     from openshard.history.shard_hash import SHARD_HASH_FIELD, compute_shard_hash
 
     persisted = matched_record.get("shard_id") if isinstance(matched_record, dict) else None
     if isinstance(persisted, str) and persisted:
         final_id = persisted
-    else:
-        taken: set[str] = set()
-        for raw in existing_lines:
-            try:
-                parsed = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(parsed, dict) and isinstance(parsed.get("shard_id"), str):
-                taken.add(parsed["shard_id"])
+    else:  # byte scans, so a new Receipt does not parse the whole history
         raw_timestamp = entry.get("timestamp")
         timestamp = raw_timestamp if isinstance(raw_timestamp, str) else _now()
-        index = len(existing_lines)
+        index = line_count(existing_lines)
         final_id = _make_shard_id(timestamp, index)
-        while final_id in taken:
+        while holds_value(existing_lines, "shard_id", final_id):
             index += 1
             final_id = _make_shard_id(timestamp, index)
 
