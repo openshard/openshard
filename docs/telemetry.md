@@ -16,8 +16,6 @@ The short version:
   agent receives it in the JSON result and is told to show it to its owner.
 - It is off the moment you say so (`openshard telemetry off`), and always
   off in CI, under `DO_NOT_TRACK`, or with `OPENSHARD_TELEMETRY=off`.
-- Richer development data is a separate, future level and is off. Nothing
-  in this version can turn it on.
 - `openshard telemetry sample` shows you the exact events waiting to leave
   your machine, verbatim.
 
@@ -142,14 +140,11 @@ set, or with `OPENSHARD_TELEMETRY=off` leaves the preference `unset` and
 telemetry off: a CI runner or an opted-out shell seeing the notice is not a person
 opting in.
 
-### Richer development data
+### Reserved `richer` field
 
-`telemetry.json` also has a `richer` field, reserved for a future, separate
-"share richer development data" level. It is always `off`: no command,
-environment variable, config key or hand edit of the file can turn it on in
-this version, and the event names reserved for that level are rejected by
-the schema. When it exists it will be its own opt-in, never folded into the
-basic default.
+`telemetry.json` also has a `richer` field. It is reserved and always `off`:
+no command, environment variable, config key or hand edit of the file can turn
+it on.
 
 ### Turning it off
 
@@ -213,6 +208,5 @@ Adding an event type or property is a deliberate change: add it to
 `openshard/telemetry/schema.py`, bump `SCHEMA_VERSION` if the envelope
 changes, and update the tables on this page in the same change. The names
 under `RESERVED_EVENT_TYPES` (`attempt.outcome`, `context.retrieval.outcome`,
-`developer.correction`, `agent.handoff`) belong to a future, separate,
-off-by-default "richer development data" preference and are rejected by the
+`developer.correction`, `agent.handoff`) are reserved and rejected by the
 current schema.

@@ -1,8 +1,7 @@
 # Routing architecture
 
-How OpenShard decides which model runs a step, why permanent model tiers are no
-longer routing authority, how new models enter and get promoted, and what the
-deterministic policy does today.
+How OpenShard decides which model runs a step, how new models enter and get
+promoted, and what the deterministic policy does.
 
 Related: `docs/architecture/adaptive-routing.md` (the V1 shadow pipeline and
 its Receipt block), `docs/osn-run.md` (where routing is applied).
@@ -19,7 +18,7 @@ Live model catalog                      models/catalog.py (registry + provider d
   -> independent verification            history/verification.py
   -> Receipt                             routing_provenance / adaptive_routing blocks
   -> observed outcome history            routing/adaptive/outcome.py, stats routing
-  -> future routing decisions            routing/adaptive/history_evidence.py
+  -> gated history evidence             routing/adaptive/history_evidence.py
 ```
 
 ## Four kinds of data, kept apart
@@ -41,27 +40,6 @@ existing configs, and as an ordering hint of last resort. They are not routing
 authority: no requirement class may require a tier or role string, and the
 requirement ranking reads them only after facts, promotion state and evidence.
 
-## Why static tiers stopped being authoritative
-
-Model releases now arrive faster than OpenShard releases. A registry that says
-`z-ai/glm-5.1` *is* "mid" and `deepseek/deepseek-v4-flash` *is* "cheap"
-freezes a judgement made in April into every run in September, while the
-provider list already shows GLM 5.2 / 5.3, DeepSeek V4.1 Flash, Claude Sonnet 5
-and Opus 5.5, Kimi K3 and others. Worse, two curated ids
-(`minimax/m2.7`, `anthropic/claude-opus-4.8-fast`) were never listed by the
-provider at all, and one of them was the default for the `complex` role. A
-tier string cannot notice any of that.
-
-So the design is now:
-
-* facts come from the provider and refresh without a release;
-* a model's *route into routing* is a **promotion state** derived from facts and
-  an explicit curation or configuration act, not a quality label;
-* a requirement class describes the **work of the step** and is resolved against
-  the current eligible pool;
-* the stable (capability-off) behaviour is left untouched so nothing changes for
-  public users until the Platform capability applies.
-
 ## Promotion states (`models/promotion.py`)
 
 | State | How a model gets there | May be selected by |
@@ -79,11 +57,8 @@ list proves nothing), and a `retired` state wins over any dogfood naming.
 
 ### How a new model enters and is promoted
 
-Current provider-listed models such as `z-ai/glm-5.3`,
-`z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash` should enter through
-discovery and dogfood evidence, not by being added to the curated public
-roster. This is deliberate: newer does not mean better, so promotion still
-waits for verified Openshard outcomes and eval evidence.
+A new model enters through discovery and dogfood evidence, not by being added
+to the curated public roster. Promotion waits for verified outcomes.
 
 1. **Discovery.** `openshard models sync-openrouter` (or any catalog command
    with a stale cache) refreshes the provider list. The model is now
@@ -156,12 +131,9 @@ along `ESCALATION_TARGET` (`fast_control -> routine_coding -> deep_reasoning`;
 8. `price`: current output price, cheapest first;
 9. model id.
 
-There is no aggregate "quality score". The first version uses ordered rules
-because every rule can be named in a Receipt; a numeric combination would
-have to be justified with data OpenShard does not have yet. Price is neither
-first nor alone: requirements, evidence, promotion and supersession all come
-before it, and the target metric is **cost per independently verified
-successful task**, not token price.
+There is no aggregate "quality score": every rule is ordered and named in the
+Receipt. Price is neither first nor alone: requirements, evidence, promotion
+and supersession all come before it.
 
 ## Routing V2: trajectory-aware, deterministic (`routing/adaptive/policy_v2.py`)
 
@@ -177,8 +149,8 @@ honestly observe (`routing/adaptive/step_types.py`):
 
 Inspection and verification are OpenShard's own work, not model calls, and are
 not routed. Planning and review stages exist in `openshard run`, which still
-runs legacy routing and records only a shadow decision, so those step names
-are not claimed yet.
+runs legacy routing and records only a shadow decision, so those steps are
+not routed by V2.
 
 The policy, in order:
 
@@ -222,8 +194,7 @@ meaningful evidence. Cost per verified success is reported only when every
 verified outcome in the sample has a known cost. Otherwise the decision
 records `history_evidence.used: false` with the reason
 (`no_history`, `insufficient_observed_data`,
-`too_few_candidates_with_evidence`). Today this is almost always the case,
-and the Receipt says so.
+`too_few_candidates_with_evidence`).
 
 ### What the Receipt answers
 
@@ -254,24 +225,6 @@ nothing until the next run. Nothing is read until a feature asks (an explicit
 Platform that just failed, and offline or unconfirmed still means every
 capability is off.
 
-### Toward a learned router
-
-A learned router is a third `RoutingPolicy` over the same structured inputs:
-`RoutingContext` (step, class, attempt, tried models, observed failure,
-spend) and per-candidate facts and evidence. It replaces the ordering in
-`rank_for_requirement`; everything around it (eligibility, explicit choices,
-budget and evidence rules, the "only from the eligible set" contract that
-`decide_route` enforces, the Receipt) stays. It is not trained yet because
-the data is not there: history has hundreds of runs but few with
-independently observed verification, and none yet with V2 decisions recorded
-beside outcomes. The data needed first, all of which V2 now records: per
-step, the context, the eligible set and rejections, the ranking components,
-the chosen model and promotion state, the observed verification result and
-source, the cost, and whether a re-route or escalation followed. Once
-`openshard stats routing` shows meaningful coverage per (class, model,
-harness), the policy can be evaluated offline against those records before
-it is allowed to choose.
-
 ## What remains for compatibility
 
 * `MODEL_CHEAP` / `MODEL_MAIN` / `MODEL_STRONG` / `MODEL_ESCALATE` /
@@ -296,21 +249,3 @@ it is allowed to choose.
   and, within one family, supersedes its older sibling among equally promoted
   models; it never jumps a promotion state on its own.
 * Curated `cost_class` as the price signal when the provider reports a price.
-
-## Stale defaults, concretely
-
-* `minimax/m2.7` (never listed): curated `deprecated`; `complex` selects the
-  curated long-context model.
-* `anthropic/claude-opus-4.8-fast` (not listed): moved to `watchlist`; it
-  cannot be verified against a provider and is not a default.
-* `z-ai/glm-5.1`, `deepseek/deepseek-v4-flash`, `anthropic/claude-opus-4.7`,
-  `moonshotai/kimi-k2.5`: still listed and current, so they remain the stable
-  public defaults. Their successors (GLM 5.2 / 5.3, DeepSeek V4.1 Flash, Opus
-  5 / 5.5, Kimi K2.6 / K3) are in the catalog as `eligible_for_shadow`, appear
-  as shadow / promotion candidates, and can be named as dogfood candidates
-  today. Promoting one to the public default is a curation act after observed
-  evidence, not a version-number comparison.
-* Guard tests (`tests/test_routing_dynamic_candidates.py`) run every class
-  against a checked-in real provider snapshot and fail if a default is
-  `retired` or `unlisted`, or if any stable / validated id is missing from the
-  provider list.

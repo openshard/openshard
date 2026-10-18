@@ -143,6 +143,3 @@ the test until it is deleted, so a fixed boundary cannot regress.
 * `docs/platform-sync.md` — what hosted Receipt history sends, when, and
   how it fails.
 * `SECURITY.md` — what is in and out of scope, and how to report.
-* `docs/architecture/V044_RECEIPT_INTEGRITY_AUDIT.md` and
-  `docs/architecture/POST_V044_CORE_CLEANUP.md` — the v0.4.4 audit and
-  the next bounded cleanup.
