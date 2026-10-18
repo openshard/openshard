@@ -14,8 +14,8 @@ observed, but only if somebody runs it. With
 
 in ``.openshard/config.yml`` the capture path starts it when a session's
 Receipt is finalised (a session-end event, or the stale sweep closing a
-session that never sent one), and for a per-turn Receipt when its turn
-completed having changed files.
+session that never sent one), and for per-turn Receipts once their Task
+settles (``settle.py``).
 
 What it will and will not do
 ----------------------------
@@ -222,20 +222,26 @@ def schedule_for_receipt(repo_root: Path, entry: dict | None, *, finalized: bool
 
     A Receipt that names its resulting commit gets commit verification at a
     completed turn and at session end. Only a Receipt *without* a commit gets
-    the opt-in working-tree run: at session end, or for a per-turn Receipt
-    when its turn sealed having changed files (a turn that changed nothing
-    has nothing new to re-run). For a Receipt with a commit that unbound run
-    would only add a weaker, later result.
+    the opt-in working-tree run: at session end, or for per-turn Receipts once
+    their Task settles (``verification/settle.py``: no new prompt for the
+    settle period after a turn that changed files, or the branch changed).
+    For a Receipt with a commit that unbound run would only add a weaker,
+    later result.
     """
     try:
         if not isinstance(entry, dict) or not (finalized or turn_ended):
             return False
         from openshard.history.receipt_evidence import commit_value
+        from openshard.verification import settle
 
-        if commit_value(entry):
-            return schedule_commit_verify(repo_root, entry)
-        if _is_sealed_turn(entry):  # finalized at its Stop: re-run only a turn that changed files
-            return sealed_turn_changed_files(entry) and schedule_post_session_verify(repo_root, entry)
+        settle.run_due_all(lambda: [repo_root])  # inline hooks have no timer: settle quiet sessions at any later seal
+        has_commit = bool(commit_value(entry))
+        settled_now = _is_sealed_turn(entry) and auto_verify_enabled(repo_root) and settle.note_sealed_turn(
+            repo_root, entry, has_commit=has_commit)
+        if has_commit:
+            return schedule_commit_verify(repo_root, entry) or settled_now
+        if _is_sealed_turn(entry):  # a turn is re-run when its Task settles, not at its Stop
+            return settled_now
         return finalized and schedule_post_session_verify(repo_root, entry)
     except Exception:
         return False

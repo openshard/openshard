@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -691,11 +692,16 @@ class TestAutoPostSessionVerify:
             (repo / "fix.py").write_text("x = 1\n", encoding="utf-8")
             calls.insert(0, ("PostToolUse", {"tool_name": "Write", "tool_input": {"file_path": str(repo / "fix.py")}}))
         entry = _claude_session(repo, *calls)
-        assert len(attempts) == 1
         if receipt_scope == "session":
+            assert len(attempts) == 1
             assert entry["capture"]["session_end_observed"] is True
         else:
+            assert attempts == []  # a turn's re-run waits for its Task to settle (verification/settle.py)
             assert entry["capture"]["status"] == "turn_completed"
+            from openshard.verification import settle
+
+            assert settle.run_due(repo, now=time.time() + 601) == 0  # the spawn failed: nothing started
+            assert len(attempts) == 1
 
 
 # ---------------------------------------------------------------------------

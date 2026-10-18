@@ -2186,7 +2186,7 @@ def _resumed_segment(
     raw_capture = persisted.get("capture")
     capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
     buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
-    turns.inherit(buf, persisted, same_receipt=False)
+    turns.inherit(buf, persisted, same_receipt=False, repo_root=repo_root)
     return buf
 
 
