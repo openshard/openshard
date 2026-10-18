@@ -2214,6 +2214,7 @@ def last(more: bool, full: bool, as_json: bool):
     recorded, and costs are always labelled as estimates.
     """
     from openshard.cli.visibility import no_history_lines, repo_note_lines
+    from openshard.remote.witness import witness_for_entry, witness_line  # never stored
 
     loc = _locate_history()
     log_path = loc.runs_path
@@ -2267,6 +2268,7 @@ def last(more: bool, full: bool, as_json: bool):
             post_session_verification=_post,
             usage=receipt.usage,
             signature_status=_rv.signature_status(log_path, entry, len(entries) - 1),
+            capture_witness=witness_for_entry(entry),
             **_content_hash_fields(entry),
         )
         click.echo(json.dumps(payload, indent=2))
@@ -2292,6 +2294,8 @@ def last(more: bool, full: bool, as_json: bool):
         signature=signature_label(signature_status(log_path, entries[-1], len(entries) - 1)),
     )
     _echo_verification_view(entries[-1], len(entries) - 1, _post_verification)
+    if full:
+        click.echo(f"\nCapture witness: {witness_line(witness_for_entry(entries[-1]))}")
     if _post_verification is not None and _post_verification.get("verification") is not None:
         from openshard.verification.post_session import display_line
 
@@ -2588,9 +2592,11 @@ def history_cmd(limit: int, repo_filter: str | None, as_json: bool) -> None:
 
     if as_json:
         from openshard.history.receipt_verify import attach_signature_status
+        from openshard.remote.witness import attach_capture_witness
 
         body = history_json_body(page, loc)
         attach_signature_status(body["shards"], loc.runs_path)
+        attach_capture_witness(body["shards"], _load_run_entries(loc.runs_path) if loc.runs_path.exists() else [])
         click.echo(json.dumps(_machine_envelope("history", "ok" if page.items else "not_found", **body), indent=2))
         return
     if not page.items:
