@@ -34,9 +34,15 @@ Reasons (``kind`` values) and what produces them:
   when it was finalised, so the commit is unknown -- never "no commit".
 * ``integration_limitation`` -- the agent integration cannot deliver a
   kind of evidence at all (documented per agent).
+* ``tool_calls_without_hook`` -- successful tool calls the session's own
+  transcript shows outnumber the tool hooks that arrived (Claude Code hooks
+  fail open; ``adapters/claude_hook_coverage.py``).
+* ``hook_events_stopped`` -- the transcript continued well after the last
+  hook arrived; ``detail`` gives both times.
 
 Nothing here infers a loss: every reason is backed by a counter the
-capture path incremented when it happened. There is no score.
+capture path incremented when it happened, or by the agent's own transcript
+showing work the hook stream lacks. There is no score.
 """
 
 from __future__ import annotations
@@ -67,7 +73,11 @@ REASON_GIT_OUTCOME_UNAVAILABLE = "git_outcome_unavailable"
 REASON_UNPARSED_SOURCE_RECORDS = "unparsed_source_records"
 # A buffer idle for an hour was sealed without a session end (the session may have continued).
 REASON_SESSION_IDLE_SEALED = "session_idle_sealed"
+# Silent hooks: the agent's transcript shows work no hook delivered.
+REASON_TOOL_CALLS_WITHOUT_HOOK = "tool_calls_without_hook"
+REASON_HOOK_EVENTS_STOPPED = "hook_events_stopped"
 VALID_REASONS = frozenset({
+    REASON_TOOL_CALLS_WITHOUT_HOOK, REASON_HOOK_EVENTS_STOPPED,
     REASON_SESSION_IDLE_SEALED,
     REASON_CORRUPT_QUEUED_EVENT, REASON_DROPPED_HOOK_EVENTS,
     REASON_SESSION_END_NOT_OBSERVED, REASON_INTEGRATION_LIMITATION,
@@ -96,6 +106,10 @@ def reason_detail(kind: str, count: int) -> str:
         return "end-of-session git state (commits, pull request) could not be read"
     if kind == REASON_SESSION_IDLE_SEALED:
         return "sealed after an hour without activity; no session end was observed"
+    if kind == REASON_TOOL_CALLS_WITHOUT_HOOK:
+        return f"{count} {_plural(count, 'tool call', 'tool calls')} in the transcript reached no hook"
+    if kind == REASON_HOOK_EVENTS_STOPPED:
+        return "hooks stopped arriving while the session continued"
     if kind == REASON_UNPARSED_SOURCE_RECORDS:
         return f"{count} source {_plural(count, 'record', 'records')} could not be parsed"
     return kind

@@ -7129,6 +7129,8 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     history_writable = check_history_writable(base_dir)
     claude_dict = claude_status.to_dict()
     claude_dict["history_writable"] = history_writable
+    from openshard.adapters import claude_hook_health as _hook_health
+    claude_dict["hook_health"] = hook_health = _hook_health.check_claude_hooks(root)
     state["claude_code"] = claude_dict
     # PR12: Codex / OpenCode are reported independently -- none of the
     # three agents is required for OpenShard to be "ready"; each is ready
@@ -7164,8 +7166,10 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
         click.echo(f"    {prov:<12} {'yes' if present else 'no'}")
     _echo_warnings_next_steps(state)
 
-    hooks_ok = bool(claude_status.hook_events_installed) and not claude_status.hook_events_missing
-    hooks_detail = claude_status.hooks_settings_error or "not configured"
+    # Claude Code hooks fail open: installed hooks that are switched off or
+    # point at a missing command capture nothing, so they are not "ok".
+    hooks_ok = bool(claude_status.hook_events_installed) and not claude_status.hook_events_missing and not hook_health.get("blocked")
+    hooks_detail = claude_status.hooks_settings_error or hook_health.get("blocked") or "not configured"
     if hooks_ok and claude_status.hooks_need_upgrade:
         hooks_ok = False
         if claude_status.hooks_auth_state in ("missing", "stale"):
@@ -7199,6 +7203,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
         ("Claude Code", claude_status.claude_cli.available, "CLI not found on PATH"),
         ("MCP", claude_status.mcp_configured, claude_status.mcp_detail),
         ("Auto-capture hooks", hooks_ok, hooks_detail),
+        *_hook_health.doctor_rows(hook_health),
         ("Capture service", service_ok, service_detail),
         (
             "Receipt enrichment",
@@ -7249,14 +7254,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
             "Auto-capture hooks" if key in ("codex", "cursor", "antigravity", "hermes", "grok_build")
             else "Capture plugin"
         )
-        cli_detail = {
-            "cursor": "not found on PATH (`cursor` / `cursor-agent`); `openshard capture install cursor` still works",
-            "antigravity": (
-                "not found on PATH (`agy` / `antigravity`); `openshard capture install antigravity` still works"
-            ),
-            "grok_build": "not found on PATH (`grok`); `openshard capture install grok-build` still works",
-            "hermes": "not found on PATH (`hermes`); `openshard capture install hermes` still works",
-        }.get(key, "CLI not found on PATH")
+        cli_detail = _AGENT_CLI_MISSING_DETAIL.get(key, "CLI not found on PATH")
         integration_ok = status.configured
         integration_detail = status.detail
         if status.state == "openshard" and status.capture_port_mismatch:
@@ -7309,6 +7307,14 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
         )
     click.echo("")
 
+
+# What doctor says when an agent's CLI is not on PATH (Claude Code has its own line).
+_AGENT_CLI_MISSING_DETAIL: dict[str, str] = {
+    "cursor": "not found on PATH (`cursor` / `cursor-agent`); `openshard capture install cursor` still works",
+    "antigravity": "not found on PATH (`agy` / `antigravity`); `openshard capture install antigravity` still works",
+    "grok_build": "not found on PATH (`grok`); `openshard capture install grok-build` still works",
+    "hermes": "not found on PATH (`hermes`); `openshard capture install hermes` still works",
+}
 
 # Why a configured integration may still deliver nothing, per agent: the
 # detail doctor shows next to a red "Capture verified" line.
