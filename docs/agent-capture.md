@@ -1353,15 +1353,26 @@ Openshard-Cost-USD: 0.1234
 
 Claude Code cloud sessions do not add these themselves. Before committing, the
 agent runs `openshard usage trailers --append-to <message-file>` (or prints the
-lines with `openshard usage trailers`). It reads the session's transcripts
-(`$CLAUDE_CODE_SESSION_ID` under `~/.claude/projects`, subagent transcripts in
-`<session>/subagents/` included) and writes `Openshard-Model` plus the token
-trailers for the usage since the previous commit, replacing any declared
-`Openshard-Model`. Each message is claimed by one commit only (state in
-`~/.openshard/usage-trailers/<session>.json`, shared by every worktree); a
-commit that never lands releases its claim. When usage cannot be stated
-exactly (no transcript, nothing new, malformed counters, several models,
-surcharged requests) it prints nothing and exits 1. In a throwaway cloud clone
+lines with `openshard usage trailers`). It writes `Openshard-Model`,
+`Openshard-Usage-Scope` and the token trailers for the usage since the previous
+commit, replacing any declared `Openshard-Model`.
+
+- `Openshard-Usage-Scope: agent`: only the committing agent's own transcript.
+  Claude Code gives commands no agent id, but each transcript (main thread
+  `<session>.jsonl`, subagents `<session>/subagents/agent-<id>.jsonl`) records
+  the Bash call it is waiting on before the command runs; the caller is the one
+  whose open call is this command or `git commit`, narrowed by the repository
+  and message-file paths when several agents commit at once.
+- `Openshard-Usage-Scope: session-window`: the caller could not be told apart,
+  so every transcript of the session since the last commit is counted. It may
+  include parallel agents' work.
+
+Each message is claimed by one commit only (locked state in
+`~/.openshard/usage-trailers/<session>.json`, shared by every agent and
+worktree); a commit that never lands releases its claim. When no true number
+exists (no transcript, nothing new, malformed counters, several models,
+surcharged requests) it prints nothing and exits 1. Do not copy token trailers
+into a PR body: a squash-merge commit would read them again. In a throwaway cloud clone
 a hook can do it for every commit:
 
 ```sh

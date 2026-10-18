@@ -236,6 +236,7 @@ jobs:
             tokens_cache_read=$(metadata_value "Openshard-Tokens-Cache-Read")
             tokens_cache_creation=$(metadata_value "Openshard-Tokens-Cache-Creation")
             tokens_cache_creation_1h=$(metadata_value "Openshard-Tokens-Cache-Creation-1h")
+            usage_scope=$(metadata_value "Openshard-Usage-Scope")
 
             [[ -n "$owner" ]] || owner=$(jq -r '.commit.author.name // empty' <<<"$commit")
             unattributed=false
@@ -287,6 +288,10 @@ jobs:
                 cost="$estimated_cost"
                 cost_provenance="official_rate_estimate"
                 cost_is_estimate=true
+                if [[ "$usage_scope" == "session-window" ]]; then
+                  # The Platform cannot label this yet: say it here until it can.
+                  echo "::notice::Cost for $sha covers the Claude session's usage since its last commit and may include parallel agents' work (Openshard-Usage-Scope: session-window)."
+                fi
               fi
             fi
             [[ -n "$cost_provenance" ]] || cost_provenance="not_exposed_by_cloud_runtime"

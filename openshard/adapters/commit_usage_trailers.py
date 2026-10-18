@@ -1,21 +1,35 @@
-"""``Openshard-Tokens-*`` commit trailers from a Claude Code session's own transcripts.
+"""``Openshard-Tokens-*`` commit trailers from the committing agent's own Claude Code transcript.
 
 Cloud-agent commits get their Receipt from the GitHub workflow after the
 push, and that workflow can only price what the commit message carries. This
-module reads the committing session's transcripts (the main ``<session>.jsonl``
-plus its ``subagents/*.jsonl``, through ``claude_transcript_usage``) and turns
-the usage not yet claimed by an earlier commit into trailer lines.
+module turns the usage of the agent that is committing, not yet claimed by
+an earlier commit, into trailer lines.
 
-Usage is attributed once. A per-session state file under the OpenShard home
-(``usage-trailers/<session>.json``, so every worktree and repository the
-session commits from shares it) keeps the message ids already claimed. The
-ids of the latest call stay *pending* until ``HEAD`` moves in the repository
-they were printed for: a commit that never landed releases them, a landed one
-makes them permanent. Without a state the window starts at ``HEAD``'s commit
-time (usage before the last commit belongs to it), or at ``--since``.
+Which agent: a Claude Code session keeps the main thread in
+``<session>.jsonl`` and each subagent in ``<session>/subagents/agent-<id>.jsonl``,
+and exposes no agent id to the commands it runs (``$CLAUDE_CODE_SESSION_ID``
+is the session's, in subagents too). But each transcript records the Bash
+call its agent is waiting on before the command runs, so the caller is the
+one transcript whose open Bash call is this command (``usage trailers``, or
+``git commit`` for a hook). Several such transcripts (parallel agents
+committing at the same moment) are narrowed by the repository and message
+file paths named in the command. Only that transcript is counted: other
+agents' work is theirs to claim.
 
-When usage cannot be stated exactly -- no transcript, no new usage, malformed
-or capped counters, more than one model, surcharged requests -- no trailer is
+Usage is attributed once. A locked state file per session under the
+OpenShard home (``usage-trailers/<session>.json``, shared by every agent,
+worktree and repository) keeps the message ids already claimed. The ids of the latest call stay *pending* until ``HEAD`` moves in
+the repository they were printed for: a commit that never landed releases
+them, a landed one makes them permanent. Without a state the window starts at
+``HEAD``'s commit time (usage before the last commit belongs to it), or at
+``--since``.
+
+When the caller cannot be told apart, every transcript of the session is
+counted instead and labelled ``Openshard-Usage-Scope: session-window`` (usage
+since the last commit, which may include parallel agents' work); an exact
+caller is ``agent``. Claims are session-wide, so the two never count one
+message twice. When no true number exists -- no new usage, malformed or
+capped counters, several models, surcharged requests -- no trailer is
 produced (never a zero) and :class:`UsageUnavailable` says why.
 """
 from __future__ import annotations
@@ -24,7 +38,8 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -36,7 +51,11 @@ from openshard.adapters.claude_transcript_usage import (
 )
 
 SESSION_ENV = "CLAUDE_CODE_SESSION_ID"
-MAX_SUBAGENT_FILES = 500
+_TAIL_BYTES = 512 * 1024  # the open Bash call is among the last records
+_CALL_MARKERS = ("usage trailers", "git commit")
+SCOPE_KEY = "Openshard-Usage-Scope"
+SCOPE_AGENT = "agent"  # the committing agent's own transcript
+SCOPE_SESSION = "session-window"  # every transcript of the session: may include parallel agents' work
 TRAILER_KEYS = (
     ("input", "Openshard-Tokens-Input"),
     ("output", "Openshard-Tokens-Output"),
@@ -77,12 +96,19 @@ def resolve_since(repo: Path, value: str) -> str:
     return _utc(datetime.fromisoformat(stamp))
 
 
-def session_transcript(session_id: str | None, transcript: Path | None) -> tuple[str, Path]:
-    """The session id and its main transcript, from ``--transcript`` or ``$CLAUDE_CODE_SESSION_ID``."""
+def session_transcript(session_id: str | None, transcript: Path | None) -> tuple[str, Path, bool]:
+    """The session id, a transcript, and whether it was named explicitly (``--transcript``).
+
+    Without ``--transcript`` the transcript is the session's main file, found
+    from ``$CLAUDE_CODE_SESSION_ID``; :func:`caller_transcript` then picks
+    the committing agent's file among it and its subagents.
+    """
     if transcript is not None:
         if not transcript.is_file():
             raise UsageUnavailable(f"Transcript {transcript} does not exist.")
-        session_id = session_id or transcript.stem
+        if not session_id:
+            parent = transcript.resolve().parent
+            session_id = parent.parent.name if parent.name == "subagents" else transcript.stem
         mains = [transcript]
     else:
         session_id = session_id or os.environ.get(SESSION_ENV, "").strip() or None
@@ -97,30 +123,72 @@ def session_transcript(session_id: str | None, transcript: Path | None) -> tuple
             raise UsageUnavailable(f"Session {session_id} has {len(mains)} transcripts; pass the right one with --transcript.")
     if not _SESSION_RE.match(session_id):
         raise UsageUnavailable("The Claude Code session id is malformed.")
-    return session_id, mains[0]
+    return session_id, mains[0], transcript is not None
 
 
-def _files(main: Path, since: str | None) -> list[Path]:
-    """*main* plus every subagent transcript written to at or after *since* (older ones cannot hold its usage)."""
-    floor = datetime.fromisoformat(since.replace("Z", "+00:00")).timestamp() if since else None
+def open_bash_commands(file: Path) -> list[str]:
+    """Bash commands *file*'s agent has called and not yet had a result for (read from its tail)."""
+    try:
+        with file.open("rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - _TAIL_BYTES))
+            chunk = fh.read()
+    except OSError:
+        return []
+    lines = chunk.splitlines()
+    if size > _TAIL_BYTES:
+        lines = lines[1:]  # the first line may be cut
+    open_calls: dict[str, str] = {}
+    for raw in lines:
+        if b"tool_use" not in raw and b"tool_result" not in raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        content = (rec.get("message") or {}).get("content") if isinstance(rec, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") == "Bash" and isinstance(block.get("id"), str):
+                command = (block.get("input") or {}).get("command")
+                if isinstance(command, str):
+                    open_calls[block["id"]] = command
+            elif block.get("type") == "tool_result":
+                open_calls.pop(str(block.get("tool_use_id")), None)
+    return list(open_calls.values())
+
+
+def _session_files(main: Path) -> list[Path]:
     sub = main.with_suffix("") / "subagents"
-    children = sorted(p for p in sub.glob("*.jsonl") if p.is_file()) if sub.is_dir() else []
-    children = [p for p in children if floor is None or p.stat().st_mtime >= floor - 1]
-    if len(children) > MAX_SUBAGENT_FILES:
-        raise UsageUnavailable(f"More than {MAX_SUBAGENT_FILES} subagent transcripts in the window; usage is not complete.")
-    return [main, *children]
+    return [main, *sorted(p for p in sub.glob("*.jsonl") if p.is_file())] if sub.is_dir() else [main]
 
 
-def read_usage(main: Path, since: str | None, exclude: set[str]) -> tuple[dict | None, list[str]]:
+def caller_transcript(main: Path, hints: tuple[str, ...] = ()) -> Path | None:
+    """The transcript (main thread or one subagent) of the agent running this command, or None.
+
+    The candidate is a transcript whose open Bash call runs this command or
+    ``git commit``. Several are narrowed to those whose call names every
+    *hint* (the repository and message-file paths). Anything but exactly one
+    is None: the caller cannot be told apart, never guessed.
+    """
+    found = [(f, cmds) for f in _session_files(main)
+             if (cmds := [c for c in open_bash_commands(f) if any(m in c for m in _CALL_MARKERS)])]
+    if len(found) > 1 and hints:
+        found = [(f, cmds) for f, cmds in found if any(all(h in c for h in hints) for c in cmds)]
+    return found[0][0] if len(found) == 1 else None
+
+
+def read_usage(files: list[Path], since: str | None, exclude: set[str]) -> tuple[dict | None, list[str]]:
     """Summed usage of messages at or after *since* not in *exclude*, and the message ids counted.
 
-    Claimed ids seed the reader's de-duplication memory, so a claimed message
-    is skipped in the main transcript and in every subagent transcript alike.
+    Claimed ids seed the reader's de-duplication memory, so a claimed
+    message is skipped; a message in several files counts once.
     """
     state = _new_transcript_state(since)
     state["closed_ids"] = list(exclude)
-    if not _read_transcript_increment(state, _files(main, since)):
-        raise UsageUnavailable(f"Transcript {main.name} could not be read.")
+    if not _read_transcript_increment(state, files):
+        raise UsageUnavailable(f"Transcript {files[0].name} could not be read.")
     if state.get("invalid_usage") or state.get("capped"):
         raise UsageUnavailable("The transcript's usage is incomplete (malformed or capped counters).")
     ids = [i for i in state["closed_ids"] if i not in exclude]
@@ -128,10 +196,15 @@ def read_usage(main: Path, since: str | None, exclude: set[str]) -> tuple[dict |
     return _summarise_transcript_state(state), ids
 
 
-def trailer_lines(summary: dict | None) -> list[str]:
-    """``Openshard-Model`` and ``Openshard-Tokens-*`` lines for one summary, or :class:`UsageUnavailable`."""
+def trailer_lines(summary: dict | None, scope: str = SCOPE_AGENT) -> list[str]:
+    """``Openshard-Model``, ``Openshard-Usage-Scope`` and ``Openshard-Tokens-*`` lines, or :class:`UsageUnavailable`.
+
+    Refused only when no number would be true: no usage, incomplete
+    counters, or usage the workflow would price wrongly (several models, an
+    unnamed model, requests billed above list rates).
+    """
     if not summary:
-        raise UsageUnavailable("No new usage in this session since the previous commit.")
+        raise UsageUnavailable("No new usage since the previous commit.")
     if not summary.get("complete"):
         raise UsageUnavailable("The transcript's usage is incomplete (malformed or capped counters).")
     if summary.get("surcharged"):
@@ -143,7 +216,7 @@ def trailer_lines(summary: dict | None) -> list[str]:
     model, usage = next(iter(models.items()))
     if model == "unknown":
         raise UsageUnavailable("The transcript does not name the model that produced this usage.")
-    lines = [f"Openshard-Model: {model}"]
+    lines = [f"Openshard-Model: {model}", f"{SCOPE_KEY}: {scope}"]
     for field, key in TRAILER_KEYS:
         value = usage.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -159,6 +232,23 @@ def _state_path(session_id: str) -> Path:
     return Path(openshard_home()) / "usage-trailers" / f"{session_id}.json"
 
 
+@contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Serialise parallel agents of one session on its state file (no lock where ``fcntl`` is missing)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_suffix(".lock"), "a+") as fh:
+        try:
+            import fcntl
+        except ImportError:  # Windows: cloud sessions run on Linux
+            yield
+            return
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def _load_state(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -166,21 +256,24 @@ def _load_state(path: Path) -> dict:
         return {}
     except (OSError, ValueError) as exc:
         raise UsageUnavailable(f"Attribution state {path} is unreadable; usage could be counted twice.") from exc
-    if not isinstance(data, dict) or not isinstance(data.get("attributed", []), list):
+    if not (isinstance(data, dict) and isinstance(data.get("attributed", []), list)
+            and isinstance(data.get("pending", {}), dict) and isinstance(data.get("since", {}), dict)):
         raise UsageUnavailable(f"Attribution state {path} is malformed; usage could be counted twice.")
     return data
 
 
-def _settle_pending(state: dict) -> None:
-    """Pending ids become attributed once ``HEAD`` moved in their repository; otherwise they are released."""
-    pending = state.pop("pending", None)
-    if not isinstance(pending, dict):
-        return
-    repo = pending.get("repo")
-    head_now = _git(Path(repo), "rev-parse", "HEAD") if isinstance(repo, str) and Path(repo).is_dir() else None
-    if head_now is not None and head_now == pending.get("head"):
-        return  # that commit never landed: its usage is still unclaimed
-    state["attributed"] = [*state.get("attributed", []), *(pending.get("ids") or [])]
+def _settle_pending(state: dict, own: str) -> None:
+    """A claim whose ``HEAD`` moved is permanent. One that did not is released when it is this caller's
+    (it is asking again) and kept otherwise: another agent may be about to commit it."""
+    for key, claim in list(state.get("pending", {}).items()):
+        repo = claim.get("repo") if isinstance(claim, dict) else None
+        head_now = _git(Path(repo), "rev-parse", "HEAD") if isinstance(repo, str) and Path(repo).is_dir() else None
+        if head_now is not None and head_now == claim.get("head"):
+            if key == own:
+                del state["pending"][key]
+            continue
+        state["attributed"] = [*state.get("attributed", []), *((claim or {}).get("ids") or [])]
+        del state["pending"][key]
 
 
 def usage_trailers(
@@ -190,35 +283,45 @@ def usage_trailers(
     transcript: Path | None = None,
     since: str | None = None,
     record: bool = True,
+    hints: tuple[str, ...] = (),
     deliver: Callable[[list[str]], None] | None = None,
 ) -> list[str]:
     """Trailer lines for the usage this commit has not had claimed by an earlier one.
 
-    *deliver* (when given) receives the lines before they are claimed; if it
-    raises, nothing is claimed.
+    The committing agent's own transcript when it can be identified
+    (``Openshard-Usage-Scope: agent``); otherwise every transcript of the
+    session (``session-window``: usage since the last commit, which may
+    include parallel agents' work). *deliver* (when given) receives the lines
+    before they are claimed; if it raises, nothing is claimed.
     """
-    session_id, main = session_transcript(session_id, transcript)
+    session_id, main, explicit = session_transcript(session_id, transcript)
     toplevel = _git(repo, "rev-parse", "--show-toplevel")
     if toplevel is None:
         raise UsageUnavailable(f"{repo} is not inside a Git repository.")
+    caller = main if explicit else caller_transcript(main, (toplevel, *hints))
+    scope, files, key = ((SCOPE_AGENT, [caller], caller.stem) if caller is not None
+                         else (SCOPE_SESSION, _session_files(main), "session"))
     head = _git(repo, "rev-parse", "HEAD")
     path = _state_path(session_id)
-    state = _load_state(path)
-    _settle_pending(state)
-    floor = resolve_since(repo, since) if since else state.get("since")
-    if floor is None and head is not None:
-        floor = resolve_since(repo, head)
-    summary, ids = read_usage(main, floor, set(state.get("attributed", [])))
-    lines = trailer_lines(summary)
-    if deliver is not None:
-        deliver(lines)
-    if record:
-        state.update(version=1, session=session_id, since=state.get("since") or floor,
-                     pending={"repo": toplevel, "head": head, "ids": ids})
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
-        os.replace(tmp, path)
+    with _locked(path):
+        state = _load_state(path)
+        _settle_pending(state, key)
+        floor = resolve_since(repo, since) if since else state.get("since", {}).get(key)
+        if floor is None and head is not None:
+            floor = resolve_since(repo, head)
+        claimed = {*state.get("attributed", []),
+                   *(i for c in state.get("pending", {}).values() for i in (c.get("ids") or []))}
+        summary, ids = read_usage(files, floor, claimed)
+        lines = trailer_lines(summary, scope)
+        if deliver is not None:
+            deliver(lines)
+        if record:
+            state.setdefault("since", {}).setdefault(key, floor)
+            state.setdefault("pending", {})[key] = {"repo": toplevel, "head": head, "ids": ids}
+            state.update(version=2, session=session_id)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state), encoding="utf-8")
+            os.replace(tmp, path)
     return lines
 
 

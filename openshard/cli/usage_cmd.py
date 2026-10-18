@@ -131,7 +131,7 @@ def usage_show(receipt_ref: str | None, as_json: bool) -> None:
 @click.option("--since", default=None, metavar="COMMIT|TIME",
               help="Start of the window for the first call (default: HEAD's commit time).")
 @click.option("--transcript", type=click.Path(path_type=Path), default=None,
-              help="Main session transcript (default: $CLAUDE_CODE_SESSION_ID under ~/.claude/projects).")
+              help="The committing agent's transcript (default: found from $CLAUDE_CODE_SESSION_ID).")
 @click.option("--session", "session_id", default=None, help="Claude Code session id (default: $CLAUDE_CODE_SESSION_ID).")
 @click.option("--append-to", "msg_file", type=click.Path(path_type=Path, dir_okay=False), default=None,
               help="Add the trailers to this commit message file instead of printing them.")
@@ -139,9 +139,10 @@ def usage_show(receipt_ref: str | None, as_json: bool) -> None:
 @click.pass_context
 def usage_trailers_cmd(ctx: click.Context, since: str | None, transcript: Path | None, session_id: str | None,
                        msg_file: Path | None, no_record: bool) -> None:
-    """Openshard-Tokens-* commit trailers for this Claude Code session's usage since its last commit.
+    """Openshard-Tokens-* commit trailers for the committing agent's usage since its last commit.
 
-    Each message's usage is claimed by one commit only. When usage cannot be
+    Counts only the transcript of the agent running this (main thread or one
+    subagent); each message is claimed by one commit only. When usage cannot be
     stated exactly, nothing is printed and the exit code is 1.
     """
     from openshard.adapters.commit_usage_trailers import (
@@ -158,7 +159,7 @@ def usage_trailers_cmd(ctx: click.Context, since: str | None, transcript: Path |
 
     try:
         usage_trailers(Path.cwd(), session_id=session_id, transcript=transcript, since=since,
-                       record=not no_record, deliver=deliver)
+                       record=not no_record, hints=(str(msg_file),) if msg_file else (), deliver=deliver)
     except UsageUnavailable as exc:
         click.echo(f"No usage trailers: {exc} Usage stays unknown.", err=True)
         ctx.exit(_EXIT_REFUSED)

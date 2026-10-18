@@ -65,7 +65,21 @@ def _commit(repo: Path) -> None:
     subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "work"], check=True)
 
 
-def test_sums_main_and_subagent_transcripts_once_per_message(repo, tmp_path):
+def _open_call(command: str, call_id: str = "toolu_1", at: str = "2026-02-01T00:09:00Z") -> dict:
+    """The Bash call an agent is waiting on, as Claude Code records it before the command runs."""
+    return {"type": "assistant", "timestamp": at, "message": {"id": f"msg_{call_id}", "model": "claude-opus-5-5", "content": [
+        {"type": "tool_use", "id": call_id, "name": "Bash", "input": {"command": command}}]}}
+
+
+def _result(call_id: str = "toolu_1") -> dict:
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": call_id, "content": "ok"}]}}
+
+
+def _sub(tmp_path: Path, name: str) -> Path:
+    return _transcript(tmp_path).with_suffix("") / "subagents" / f"agent-{name}.jsonl"
+
+
+def test_unidentified_caller_gets_session_window_usage_once_per_message(repo, tmp_path):
     main = _transcript(tmp_path)
     _write(main, [
         _msg("m_before", "2025-12-31T00:00:00Z", i=999),  # before the last commit: not this commit's
@@ -74,18 +88,52 @@ def test_sums_main_and_subagent_transcripts_once_per_message(repo, tmp_path):
         _msg("m2", "2026-02-01T00:01:00Z", cw=40, cw1h=30),
         _msg("syn", "2026-02-01T00:02:00Z", model="<synthetic>", i=0, o=0, cr=0, cw=0),
     ])
-    sub = main.with_suffix("") / "subagents" / "agent-abc.jsonl"
-    _write(sub, [_msg("s1", "2026-02-01T00:03:00Z", i=2), _msg("m2", "2026-02-01T00:01:00Z", cw=40, cw1h=30)])
+    # No transcript has this call open (e.g. a background run), so the caller cannot be told apart.
+    _write(_sub(tmp_path, "abc"), [_msg("s1", "2026-02-01T00:03:00Z", i=2), _msg("m2", "2026-02-01T00:01:00Z", cw=40, cw1h=30),
+                                    _open_call("git status"), _result()])
     result = _run()
     assert result.exit_code == 0, result.output
     assert result.output.splitlines() == [
         "Openshard-Model: claude-opus-5-5",
+        "Openshard-Usage-Scope: session-window",
         "Openshard-Tokens-Input: 4",
         "Openshard-Tokens-Output: 30",
         "Openshard-Tokens-Cache-Read: 300",
         "Openshard-Tokens-Cache-Creation: 80",
         "Openshard-Tokens-Cache-Creation-1h: 30",
     ]
+
+
+def test_committing_subagent_gets_only_its_own_transcript(repo, tmp_path):
+    _write(_transcript(tmp_path), [_msg("main1", "2026-02-01T00:00:00Z", o=1000)])
+    _write(_sub(tmp_path, "other"), [_msg("o1", "2026-02-01T00:00:00Z", o=500)])
+    _write(_sub(tmp_path, "me"), [_msg("me1", "2026-02-01T00:00:00Z", o=7), _open_call("cd x && openshard usage trailers")])
+    result = _run()
+    assert result.exit_code == 0, result.output
+    assert "Openshard-Usage-Scope: agent" in result.output and "Openshard-Tokens-Output: 7" in result.output
+    # The other agents' usage is still theirs: a later session-window commit gets it, never "me1" again.
+    _commit(repo)
+    _write(_sub(tmp_path, "me"), [_result()], mode="a")
+    rest = _run()
+    assert "Openshard-Usage-Scope: session-window" in rest.output and "Openshard-Tokens-Output: 1500" in rest.output
+
+
+def test_parallel_callers_are_told_apart_by_the_repository_they_name(repo, tmp_path):
+    _write(_transcript(tmp_path), [])
+    _write(_sub(tmp_path, "a"), [_msg("a1", "2026-02-01T00:00:00Z", o=3), _open_call(f"cd {repo} && git commit -F m")])
+    _write(_sub(tmp_path, "b"), [_msg("b1", "2026-02-01T00:00:00Z", o=4), _open_call("cd /elsewhere && git commit -F m")])
+    result = _run()
+    assert "Openshard-Usage-Scope: agent" in result.output and "Openshard-Tokens-Output: 3" in result.output
+
+
+def test_another_agents_open_claim_is_not_counted_again(repo, tmp_path):
+    _write(_transcript(tmp_path), [])
+    _write(_sub(tmp_path, "a"), [_msg("a1", "2026-02-01T00:00:00Z", o=3), _open_call("openshard usage trailers")])
+    _write(_sub(tmp_path, "b"), [_msg("b1", "2026-02-01T00:00:00Z", o=4)])
+    assert "Openshard-Tokens-Output: 3" in _run().output  # a claims; its commit has not landed yet
+    _write(_sub(tmp_path, "a"), [_result()], mode="a")
+    window = _run()  # nobody identifiable now: session window, without a's pending claim
+    assert "Openshard-Usage-Scope: session-window" in window.output and "Openshard-Tokens-Output: 4" in window.output
 
 
 def test_landed_commit_keeps_its_usage_and_the_next_one_gets_only_new_usage(repo, tmp_path):
@@ -134,6 +182,7 @@ def test_append_to_replaces_the_declared_model_and_keeps_other_trailers(repo, tm
     text = msg.read_text(encoding="utf-8")
     assert text.startswith("Did a thing\n\nOpenshard-Agent: Claude Code\n")
     assert "claude-opus-5.5" not in text and text.count("Openshard-Model:") == 1
+    assert "Openshard-Usage-Scope: session-window\n" in text
     assert "Co-Authored-By: Claude" in text and "Openshard-Tokens-Cache-Creation-1h: 30\n" in text
     assert "\n\n" not in text.split("\n\n", 1)[1]  # one trailer block
 
@@ -148,15 +197,16 @@ def test_workflow_prices_the_printed_trailers(repo, tmp_path):
     assert printed.exit_code == 0
     script = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/openshard-cloud-receipts.yml").read_text())
     run = next(s["run"] for s in script["jobs"]["capture"]["steps"] if s.get("name") == "Verify and create hosted Receipts")
-    reads = re.search(r"^ *metadata_value\(\) \{.*?^ *tokens_cache_creation_1h=.*?$", run, re.S | re.M)
+    reads = re.search(r"^ *metadata_value\(\) \{.*?^ *usage_scope=.*?$", run, re.S | re.M)
     estimate = re.search(r"^ *cost_provenance=\"\"\n.*?^ *\[\[ -n \"\$cost_provenance\" \]\].*?$", run, re.S | re.M)
     assert reads is not None and estimate is not None
-    command = (f"set -uo pipefail\npr_body=''\nmessage={shlex.quote('Work' + chr(10) + chr(10) + printed.output)}\n"
+    command = (f"set -uo pipefail\nsha=abc\npr_body=''\nmessage={shlex.quote('Work' + chr(10) + chr(10) + printed.output)}\n"
                f"{reads.group(0)}\n{estimate.group(0)}\n"
                'printf "%s|%s|%s|%s" "$model" "$tokens_cache_creation" "$cost" "$cost_provenance"')
     env = {**os.environ, "PATH": os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", "")}
     out = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True, env=env).stdout
-    model, creation, cost, provenance = out.split("|")
+    assert "may include parallel agents' work (Openshard-Usage-Scope: session-window)" in out
+    model, creation, cost, provenance = out.splitlines()[-1].split("|")
     expected = estimate_usage_cost("claude-opus-5-5", input_tokens=1000, output_tokens=2000, cache_read_tokens=30000,
                                    cache_write_tokens=3000, cache_write_1h_tokens=1000)
     assert expected is not None
