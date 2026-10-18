@@ -1365,7 +1365,8 @@ commit, replacing any declared `Openshard-Model`.
   and message-file paths when several agents commit at once.
 - `Openshard-Usage-Scope: session-window`: the caller could not be told apart,
   so every transcript of the session since the last commit is counted. It may
-  include parallel agents' work.
+  include parallel agents' work, and its Receipt cost is recorded with
+  `cost_provenance: official_rate_estimate_session_window`.
 
 Each message is claimed by one commit only (locked state in
 `~/.openshard/usage-trailers/<session>.json`, shared by every agent and

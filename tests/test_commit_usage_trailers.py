@@ -191,10 +191,14 @@ BASH = shutil.which("bash")
 
 
 @pytest.mark.skipif(os.environ.get("GITHUB_ACTIONS") != "true" and BASH is None, reason="requires bash")
-def test_workflow_prices_the_printed_trailers(repo, tmp_path):
-    _write(_transcript(tmp_path), [_msg("m1", "2026-02-01T00:00:00Z", i=1000, o=2000, cr=30000, cw=4000, cw1h=1000)])
+@pytest.mark.parametrize("caller_known,provenance_expected", [
+    (True, "official_rate_estimate"), (False, "official_rate_estimate_session_window")])
+def test_workflow_prices_the_printed_trailers(repo, tmp_path, caller_known, provenance_expected):
+    records = [_msg("m1", "2026-02-01T00:00:00Z", i=1000, o=2000, cr=30000, cw=4000, cw1h=1000)]
+    _write(_transcript(tmp_path), records + ([_open_call("openshard usage trailers")] if caller_known else []))
     printed = _run()
     assert printed.exit_code == 0
+    assert f"Openshard-Usage-Scope: {'agent' if caller_known else 'session-window'}" in printed.output
     script = yaml.safe_load((Path(__file__).parents[1] / ".github/workflows/openshard-cloud-receipts.yml").read_text())
     run = next(s["run"] for s in script["jobs"]["capture"]["steps"] if s.get("name") == "Verify and create hosted Receipts")
     reads = re.search(r"^ *metadata_value\(\) \{.*?^ *usage_scope=.*?$", run, re.S | re.M)
@@ -205,10 +209,10 @@ def test_workflow_prices_the_printed_trailers(repo, tmp_path):
                'printf "%s|%s|%s|%s" "$model" "$tokens_cache_creation" "$cost" "$cost_provenance"')
     env = {**os.environ, "PATH": os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", "")}
     out = subprocess.run([str(BASH), "-c", command], text=True, capture_output=True, check=True, env=env).stdout
-    assert "may include parallel agents' work (Openshard-Usage-Scope: session-window)" in out
+    assert ("may include parallel agents' work (Openshard-Usage-Scope: session-window)" in out) is not caller_known
     model, creation, cost, provenance = out.splitlines()[-1].split("|")
     expected = estimate_usage_cost("claude-opus-5-5", input_tokens=1000, output_tokens=2000, cache_read_tokens=30000,
                                    cache_write_tokens=3000, cache_write_1h_tokens=1000)
     assert expected is not None
-    assert (model, creation, provenance) == ("claude-opus-5-5", "4000", "official_rate_estimate")
+    assert (model, creation, provenance) == ("claude-opus-5-5", "4000", provenance_expected)
     assert float(cost) == pytest.approx(expected.usd)

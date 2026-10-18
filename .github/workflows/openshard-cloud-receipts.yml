@@ -289,7 +289,8 @@ jobs:
                 cost_provenance="official_rate_estimate"
                 cost_is_estimate=true
                 if [[ "$usage_scope" == "session-window" ]]; then
-                  # The Platform cannot label this yet: say it here until it can.
+                  # Not this commit's own usage: the Platform labels this provenance.
+                  cost_provenance="official_rate_estimate_session_window"
                   echo "::notice::Cost for $sha covers the Claude session's usage since its last commit and may include parallel agents' work (Openshard-Usage-Scope: session-window)."
                 fi
               fi
