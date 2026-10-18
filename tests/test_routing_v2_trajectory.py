@@ -646,6 +646,12 @@ def _cli_repo(tmp_path, monkeypatch, platform, keys):
 
 def _invoke(monkeypatch, fp, *extra, max_attempts="3"):
     monkeypatch.setattr("openshard.cli.osn_cmd._resolve_provider", lambda n, m: ("openrouter", fp))
+    # The learning-snapshot read is bounded by a 25 ms wall-clock budget. On a
+    # loaded machine it can run out, and routing then truthfully reports
+    # history_timeout and ranks by price (acme/cheap-1) instead of using the
+    # known-empty history (acme/mid-1). These tests are about routing, not the
+    # budget, so give the read room; the read itself still runs for real.
+    monkeypatch.setattr("openshard.learning.snapshot.lookup_budget_ms", lambda config: 10_000.0)
     return CliRunner().invoke(cli, [
         "osn", "run", TASK, "--verify-cmd",
         f'"{PY}" -c "import sys; c=open(\'out.txt\').read(); print(c); sys.exit(0 if c==\'ok\' else 1)"',
