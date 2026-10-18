@@ -242,17 +242,24 @@ machine, `openshard sync` sends copies of this repository's Receipts to an
 Openshard Platform organisation:
 
 ```bash
-openshard connect --endpoint <url> --org <org-id>
+openshard login
 openshard sync now
 openshard sync status
 ```
 
-`openshard connect` stores the link, checks that the Platform accepts the
+`openshard login` is the easiest path: it shows a short code, opens the
+Platform's approval page, and once an organisation owner or admin approves
+it, stores the organisation key and then does everything `openshard connect`
+does. Nothing to copy. It talks to `https://api.openshard.dev` unless you
+pass `--endpoint`; use `--no-browser` on a machine without one.
+
+With an API key instead, `openshard connect --endpoint <url> --org <org-id>`
+stores the link, checks that the Platform accepts the
 key for that organisation, and runs the same agent setup as `openshard
 setup`, so it is also the one command to run on a fresh machine.
 `openshard sync connect` still stores the link on its own.
 
-Sync is off until you run `connect`, sends only the same bounded fields
+Sync is off until you run `login` or `connect`, sends only the same bounded fields
 `openshard history --json` already prints (no prompts, transcripts, diffs,
 or file contents), and is retry-safe and idempotent: replaying `sync now`
 never duplicates a Receipt. See [Platform sync](docs/platform-sync.md) for

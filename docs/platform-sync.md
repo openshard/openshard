@@ -14,7 +14,8 @@ The short version:
   transcripts, diffs, command output, agent notes, environment values or
   absolute paths. Hook-captured Receipts carry no folder name either; the
   repository is named by its canonical `repo_identity` (`host/owner/repo`).
-- Nothing is sent until `openshard sync connect` has stored a link, and
+- Nothing is sent until `openshard login`, `openshard connect` or
+  `openshard sync connect` has stored a link, and
   `OPENSHARD_PLATFORM_SYNC=off` or `platform: {sync: false}` in a
   repository's `.openshard/config.yml` stops it at any time.
 - Sending is idempotent and retry-safe. `openshard sync now` can be run
@@ -24,6 +25,7 @@ The short version:
 
 | Command | What it does |
 | --- | --- |
+| `openshard login [--endpoint URL] [--no-browser] [--json]` | The easiest path: approve this computer in the browser, no key to copy. Asks `<endpoint>/v1/auth/device/code` for a short code (sends the client name, Openshard version and this computer's name, and says so), prints it with the approval URL and opens the browser unless `--no-browser` or there is no display. Polls `<endpoint>/v1/auth/device/token` at the Platform's interval (5 s longer after each `slow_down`) until an owner or admin approves or denies it or the code expires (10 minutes). The Platform mints an organisation API key only when an approved code is collected, so a cancelled login leaves no key behind. The key is stored with the same write as `sync connect` and is never printed; then it does what `connect` does. Default endpoint: the linked one, else `https://api.openshard.dev`. |
 | `openshard connect --endpoint URL --org UUID [--api-key osk_...]` | The one-command path to a first Receipt: stores the link exactly as `sync connect` does, verifies it with one authenticated read of `<endpoint>/v1/orgs/<org>/capabilities` (reports `verified`, or the 401/403/404/unreachable reason), then configures agent capture exactly as `openshard setup` does and says what to do next. Run with no options to re-check the stored link; sends nothing. |
 | `openshard sync connect --endpoint URL --org UUID [--api-key osk_...]` | Stores the link in `~/.openshard/platform.json` (mode 0600; `OPENSHARD_HOME` applies). Prompts for the key without echo when omitted. Never writes into a repository. |
 | `openshard sync status [--json]` | Where Receipts go, and for this repository: synced, pending, still-in-progress, changed-locally, conflict and rejected counts. The key is shown as its public prefix only. |

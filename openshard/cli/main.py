@@ -183,7 +183,7 @@ def _telemetry_status_for_agents() -> dict:
 
 
 _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
-    ("Getting Started", ("connect", "setup", "doctor")),
+    ("Getting Started", ("login", "connect", "setup", "doctor")),
     ("Receipts", ("last", "history", "usage", "report", "context", "learn", "insights")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
     ("Integrations", ("mcp", "capture", "sync", "remote", "import", "ingest", "wrap", "adapters", "telemetry")),
@@ -783,12 +783,9 @@ def connect_cmd(endpoint: str | None, organisation_id: str | None, api_key: str 
     already stored (or OPENSHARD_PLATFORM_* variables) and leaves agents that
     are already configured untouched. Nothing is sent by this command.
     """
-    from openshard.adapters.claude_setup import run_setup
-    from openshard.sync import transport as sync_transport
-    from openshard.sync.capabilities import check_link
-    from openshard.sync.config import SOURCE_ENV, resolve_link
+    from openshard.sync.config import resolve_link
 
-    # 1. The link: store a new one, or reuse what is already there.
+    # The link: store a new one, or reuse what is already there.
     stored = False
     if endpoint is not None or organisation_id is not None:
         if endpoint is None or organisation_id is None:
@@ -807,12 +804,23 @@ def connect_cmd(endpoint: str | None, organisation_id: str | None, api_key: str 
                 "(you will be asked for the API key without echo)."
             )
 
-    # 2. Verify it with the same authenticated read receipt sync uses.
+    _finish_connect(link, stored, repo_path=repo_path, as_json=as_json)
+
+
+def _finish_connect(link, stored: bool, *, repo_path: Path | None, as_json: bool,
+                    command: str = "connect", extra: dict | None = None) -> None:
+    """Verify a link and set up agent capture: what `connect` and `login` do once a link exists."""
+    from openshard.adapters.claude_setup import run_setup
+    from openshard.sync import transport as sync_transport
+    from openshard.sync.capabilities import check_link
+    from openshard.sync.config import SOURCE_ENV
+
+    # Verify it with the same authenticated read receipt sync uses.
     check = check_link(link)
     if check.ok:
         sync_transport.clear_backoff()  # a link that works now deserves a fresh attempt
 
-    # 3. Agent capture, through the same installers and the same post-setup
+    # Agent capture, through the same installers and the same post-setup
     #    lifecycle as `openshard setup` (telemetry notice/consent and the
     #    setup.completed event). The provider onboarding wizard stays with
     #    `openshard setup`: this command only connects and captures.
@@ -823,7 +831,7 @@ def connect_cmd(endpoint: str | None, organisation_id: str | None, api_key: str 
     next_steps = _connect_next_steps(link, check, result)
     if as_json:
         click.echo(json.dumps(_machine_envelope(
-            "connect", "ok" if ready else "incomplete",
+            command, "ok" if ready else "incomplete",
             warnings=list(result.next_steps),
             connected=check.ok,
             link={**link.to_public_dict(), "stored_now": stored},
@@ -831,6 +839,7 @@ def connect_cmd(endpoint: str | None, organisation_id: str | None, api_key: str 
             setup=result.to_dict(),
             telemetry=_telemetry_status_for_agents(),
             next_steps=next_steps,
+            **(extra or {}),
         ), indent=2))
     else:
         _render_connect_result(link, stored, check, result, next_steps, source_env=(link.source == SOURCE_ENV))
@@ -8373,6 +8382,7 @@ from openshard.cli.import_cmd import import_group  # noqa: E402
 from openshard.cli.ingest import ingest_group  # noqa: E402
 from openshard.cli.insights_cmd import insights_group  # noqa: E402
 from openshard.cli.learn_cmd import learn_group  # noqa: E402
+from openshard.cli.login_cmd import login_cmd  # noqa: E402
 from openshard.cli.osn_cmd import osn_group  # noqa: E402
 from openshard.cli.usage_cmd import usage_group  # noqa: E402
 
@@ -8382,6 +8392,7 @@ cli.add_command(insights_group)
 cli.add_command(osn_group)
 cli.add_command(learn_group)
 cli.add_command(usage_group)
+cli.add_command(login_cmd)
 
 from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
 
