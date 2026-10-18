@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -628,6 +629,29 @@ def flush_repos(
     return reports
 
 
+# Set by ``request_sync`` (a per-turn Receipt was sealed in this process) to
+# end the current wait early; the loop still flushes at most once per wake.
+_SYNC_REQUESTED = threading.Event()
+_WAKE_POLL_SECONDS = 0.25
+
+
+def request_sync() -> None:
+    """Ask ``sync_periodically`` in this process to flush now instead of at its next tick."""
+    _SYNC_REQUESTED.set()
+
+
+def _next_tick(stop: threading.Event, interval: float) -> bool:
+    """Wait for the next flush: *interval*, or sooner on ``request_sync``. False once *stop* is set."""
+    deadline = time.monotonic() + interval
+    while not stop.wait(max(0.0, min(_WAKE_POLL_SECONDS, deadline - time.monotonic()))):
+        if _SYNC_REQUESTED.is_set():
+            _SYNC_REQUESTED.clear()
+            return True
+        if time.monotonic() >= deadline:
+            return True
+    return False
+
+
 def sync_periodically(
     stop: threading.Event,
     *,
@@ -642,7 +666,7 @@ def sync_periodically(
     file and the loop goes back to waiting.
     """
     env = os.environ if env is None else env
-    while not stop.wait(interval):
+    while _next_tick(stop, interval):
         if resolve_link(env) is None:
             continue
         try:

@@ -13,9 +13,9 @@ eligible for sync (``sync.envelope.eligibility``; mirrored by
 :func:`seal_point` because the evidence core may not import delivery code,
 and a parity test keeps the two equal): a one-shot record (``import``,
 ``wrap``, native runs) when written, a hook-captured record at session end
-or at the idle sweep. An amendment to a sealed record (``note``,
-``feedback``, or an ``openshard verify`` attestation that changes the
-projection) writes a new seal with
+or at the idle sweep, a per-turn hook Receipt when its turn completed. An
+amendment to a sealed record (``note``, ``feedback``, or an ``openshard
+verify`` attestation that changes the projection) writes a new seal with
 ``seal_reason: amended`` whose ``previous_record_digest`` is the sha256 of
 the previous seal's Statement bytes, so the seals of one Receipt form a
 chain. A record that was never sealed (written before signing shipped, or
@@ -80,6 +80,7 @@ COVERAGE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 SEAL_CREATED = "created"
 SEAL_SESSION_ENDED = "session_ended"
 SEAL_IDLE_SWEPT = "idle_swept"
+SEAL_TURN_COMPLETED = "turn_completed"  # a per-turn Receipt (docs/per-turn-receipts.md)
 SEAL_AMENDED = "amended"
 
 # Same threshold as sync.envelope.QUIESCENT_SECONDS and the capture idle sweep.
@@ -158,6 +159,8 @@ def seal_point(entry: dict, *, now: datetime.datetime | None = None) -> str | No
         return SEAL_CREATED
     if capture.get("session_end_observed") is True or capture.get("status") == "ended":
         return SEAL_SESSION_ENDED
+    if capture.get("receipt_scope") == "turn" and isinstance(capture.get("turn_sealed_at"), str):
+        return SEAL_TURN_COMPLETED
     completeness = capture.get("completeness")
     reasons = completeness.get("reasons", []) if isinstance(completeness, dict) else []
     if any(isinstance(r, dict) and r.get("kind") == "session_end_not_observed" for r in reasons):

@@ -127,7 +127,6 @@ COMPLEXITY_BUDGETS = {
     ("openshard/models/advisory.py", "recommend_models"): 29,
     ("openshard/native/context.py", "build_native_run_trust_score"): 29,
     ("openshard/osn/model_provider.py", "build_turn_prompt"): 29,
-    ("openshard/adapters/claude_hooks.py", "apply_reduced_hook"): 28,
     ("openshard/cli/main.py", "remote_status"): 28,
     ("openshard/cli/osn_cmd.py", "_resolve_workers.workers_hook"): 28,
     ("openshard/osn/roles.py", "RoleRun.from_usage"): 28,

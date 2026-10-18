@@ -172,7 +172,7 @@ non-Python verifier must reproduce; RFC 8785 (JCS) would be hash v2.
     "receipt_id": "<receipt_id>",
     "shard_id": "<shard_id>",
     "sealed_at": "<UTC ISO-8601, local clock>",
-    "seal_reason": "created | session_ended | idle_swept | amended",
+    "seal_reason": "created | session_ended | idle_swept | turn_completed | amended",
     "previous_record_digest": "<sha256 hex of the previous seal, or null>",
     "core_version": "0.5.0",
     "covers": ["record_content"],

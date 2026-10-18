@@ -44,6 +44,7 @@ REASON_NO_RECEIPT_ID = "no_receipt_id"
 REASON_SESSION_IN_PROGRESS = "session_in_progress"
 REASON_SESSION_ENDED = "session_ended"
 REASON_SESSION_QUIESCENT = "session_quiescent"
+REASON_TURN_SEALED = "turn_sealed"
 REASON_RECORD_COMPLETE = "record_complete"
 
 # Platform receipt-sync ``session.task_source`` values (Platform #230).
@@ -78,6 +79,9 @@ def eligibility(entry: dict, *, now: datetime | None = None) -> Eligibility:
         return Eligibility(True, REASON_RECORD_COMPLETE)
     if capture.get("session_end_observed") is True or capture.get("status") == "ended":
         return Eligibility(True, REASON_SESSION_ENDED)
+    if capture.get("receipt_scope") == "turn" and isinstance(capture.get("turn_sealed_at"), str):
+        # A per-turn Receipt (docs/per-turn-receipts.md) is final once its turn completed.
+        return Eligibility(True, REASON_TURN_SEALED)
     completeness = capture.get("completeness")
     reasons = completeness.get("reasons", []) if isinstance(completeness, dict) else []
     if any(isinstance(r, dict) and r.get("kind") == "session_end_not_observed" for r in reasons):
@@ -114,6 +118,12 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
         digest = capture.get("hook_config_hash")
         if isinstance(digest, str) and _HOOK_CONFIG_HASH_RE.match(digest):
             session["hook_config_hash"] = digest
+    if isinstance(capture, dict) and capture.get("task_grouping") == "session":
+        # The contract's task_id is an explicit declaration. A Task OpenShard
+        # grouped from the observed session id stays local until the Platform
+        # accepts ``task_grouping`` (docs/per-turn-receipts.md); the session
+        # key already relates the turns.
+        payload["task_id"] = None
     if not multi_agent:
         payload.pop("multi_agent", None)
     return payload
