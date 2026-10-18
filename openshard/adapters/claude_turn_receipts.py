@@ -36,9 +36,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from openshard.adapters import claude_cross_checkout as cross_checkout
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.history.capture_completeness import REASON_SESSION_END_NOT_OBSERVED, make_reason
-from openshard.history.task_identity import new_task_id, stored_task_id
+from openshard.history.task_identity import stored_task_id
 
 _RECEIPT_ID_RE = re.compile(r"^rcpt_[0-9a-f]{32}$")
 
@@ -351,7 +352,7 @@ def stamp(entry: dict, buf: dict, repo_root: Path) -> None:
         return
     task_id = buf.get("turn_task_id")
     if stored_task_id({"task_id": task_id}) is None:
-        task_id = buf["turn_task_id"] = new_task_id()
+        task_id = buf["turn_task_id"] = cross_checkout.task_for(buf)  # the session's Task in another checkout, else new
     entry["task_id"] = task_id
     capture["task_grouping"] = GROUPING_SESSION
 

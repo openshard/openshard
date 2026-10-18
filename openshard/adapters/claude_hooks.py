@@ -225,7 +225,7 @@ from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-expo
     _valid_transcript_path,
     read_transcript_usage,
 )
-from openshard.adapters.claude_workspace import note_usage_owner
+from openshard.adapters.claude_workspace import note_usage_owner, usage_since
 from openshard.history import task_edges
 from openshard.history.capture_completeness import (
     REASON_GIT_OUTCOME_UNAVAILABLE,
@@ -954,7 +954,7 @@ def _transcript_usage(buf: dict) -> dict | None:
     if raw is None:
         return cached
     try:
-        since = buf.get("started_at")
+        since = usage_since(buf)  # a turn Receipt first opened mid-session counts its own turn only
         state = buf.get("transcript_state")
         if not isinstance(state, dict) or state.get("since") != since or not isinstance(state.get("files"), dict):
             state = _new_transcript_state(since)

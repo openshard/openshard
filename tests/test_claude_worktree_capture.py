@@ -145,16 +145,6 @@ def _ended(repo: Path, count: int = 1) -> bool:
     return len(receipts) == count and all(_sealed(r) for r in receipts)
 
 
-# Per-turn Receipts (the default) across checkouts: see the turn branches of the tests that use it.
-_TURN_USAGE_BUG = pytest.mark.parametrize("receipt_scope", [
-    pytest.param("turn", marks=pytest.mark.xfail(strict=True, reason=(
-        "bug: with per-turn Receipts a turn worked only in another checkout has no Receipt in the usage-owning "
-        "checkout, so its usage is counted nowhere (its own Receipt says it was attributed elsewhere), and that "
-        "checkout mints its own task_id (even within one turn) instead of sharing the session's"))),
-    "session",
-], indirect=True)
-
-
 def _turn_totals(*receipts: dict) -> tuple[int, int]:
     """The session's usage summed over every Receipt (each turn counted once, wherever it ran)."""
     return (sum(r.get("prompt_tokens") or 0 for r in receipts), sum(r.get("completion_tokens") or 0 for r in receipts))
@@ -235,7 +225,6 @@ def test_work_in_a_linked_worktree_is_attributed_to_the_worktree(repos, receipt_
         assert receipt["executor"] == "claude_code_hooks"
 
 
-@_TURN_USAGE_BUG
 def test_usage_is_counted_once_when_turns_move_between_checkouts(repos, receipt_scope):
     """Seen live: a session's four Receipts summed to 129% of its transcript's tokens.
 
@@ -277,7 +266,11 @@ def test_usage_is_counted_once_when_turns_move_between_checkouts(repos, receipt_
         first, third = _receipts(platform)
         (second,) = _receipts(wt)
         assert _turn_totals(first, second, third) == (1110, 111)  # every turn's usage, each once
+        # Each turn on its own Receipt: no Receipt counts another turn, none says "elsewhere" falsely.
+        assert [(r["prompt_tokens"], r["completion_tokens"]) for r in (first, second, third)] == [(100, 10), (1000, 100), (10, 1)]
+        assert not any(r["capture"].get("tokens_not_recorded_reason") for r in (first, second, third))
         assert len({first["task_id"], second["task_id"], third["task_id"]}) == 1  # one session, one Task
+        assert {r["capture"]["task_grouping"] for r in (first, second, third)} == {"session"}
         assert _changed(second) == {"parser.py"}
         return
     (project_receipt,) = _receipts(platform)
@@ -348,6 +341,8 @@ def test_two_worktrees_in_one_turn_share_the_task_and_count_usage_once(repos, re
     assert wt_receipt["prompt_tokens"] == 300
     assert "prompt_tokens" not in core_receipt
     assert core_receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
+    if receipt_scope == "turn":  # one turn in two checkouts: one Task, not one per checkout
+        assert wt_receipt["task_id"] == core_receipt["task_id"]
     # The project itself was never touched this turn; it only saw the session start.
     project = _receipts(platform)
     assert all(_changed(r) == set() and r["capture"]["prompt_count"] == 0 for r in project)
@@ -371,6 +366,7 @@ def test_a_worktree_first_opened_by_a_notification_turn_keeps_the_users_task(rep
         time.sleep(1.1)
         claude.send("UserPromptSubmit", prompt="<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
                                                "</task-notification>")
+        claude.reply(input_tokens=100, output_tokens=10)
         claude.edit(wt / "parser.py", "PARSED = True\n", cwd=wt)
         claude.send("Stop", cwd=wt)
         claude.send("SessionEnd", cwd=wt, reason="other")
@@ -384,6 +380,59 @@ def test_a_worktree_first_opened_by_a_notification_turn_keeps_the_users_task(rep
     assert worktree_receipt["capture"]["task_source"] == "first_user_prompt_excerpt"
     assert "task-notification" not in json.dumps(worktree_receipt)
     assert _changed(worktree_receipt) == {"parser.py"}
+    # The notification turn's usage is counted once, wherever a Receipt holds it: the project's
+    # session Receipt, or (per-turn) the worktree's, the only Receipt that turn has.
+    assert _turn_totals(project_receipt, worktree_receipt) == (400, 40)
+    elsewhere = worktree_receipt["capture"].get("tokens_not_recorded_reason")
+    assert elsewhere == (ws.USAGE_ELSEWHERE_REASON if receipt_scope == "session" else None)
+    if receipt_scope == "turn":
+        assert worktree_receipt["task_id"] == project_receipt["task_id"]
+
+
+def test_notification_turns_across_checkouts_count_every_turn_once(repos, receipt_scope):
+    """A notification turn opens no Receipt where it only arrived: its buffer stays open into the next turn.
+
+    Per-turn: turn 2 worked only in the worktree (its usage is there), turn 3 did
+    no work anywhere (it rolls into the project's next Receipt, as without
+    worktrees), turn 4 is the project's. The project's buffer, opened by the
+    notification of turn 2, must neither count turn 2 again nor be told its
+    usage is elsewhere for good.
+    """
+    platform, wt = repos["platform"], repos["wt"]
+    note = "<task-notification>\n<task-id>b{}</task-id>\n<status>completed</status>\n</task-notification>"
+    service = _Service({**os.environ})
+    try:
+        claude = _Claude(platform, service.port)
+        claude.start()
+        claude.send("UserPromptSubmit", prompt="Fix the parser")
+        claude.reply(input_tokens=300, output_tokens=30)
+        claude.edit(platform / "notes.md", "plan\n")
+        claude.send("Stop")
+        time.sleep(1.1)
+        claude.send("UserPromptSubmit", prompt=note.format(1))
+        claude.reply(input_tokens=100, output_tokens=10)
+        claude.edit(wt / "parser.py", "PARSED = True\n", cwd=wt)
+        claude.send("Stop", cwd=wt)
+        time.sleep(1.1)
+        claude.send("UserPromptSubmit", prompt=note.format(2))
+        claude.reply(input_tokens=5000, output_tokens=500)
+        claude.send("Stop")
+        time.sleep(1.1)
+        claude.send("UserPromptSubmit", prompt="Now finish in the project")
+        claude.reply(input_tokens=20000, output_tokens=2000)
+        claude.edit(platform / "notes.md", "done\n")
+        claude.send("Stop")
+        claude.send("SessionEnd", reason="other")
+        assert _wait_for(lambda: _ended(wt) and _ended(platform, 1 if receipt_scope == "session" else 2))
+    finally:
+        service.stop()
+    receipts = _receipts(platform) + _receipts(wt)
+    assert _turn_totals(*receipts) == (25400, 2540)
+    if receipt_scope == "turn":
+        first, last, worktree = receipts
+        assert (first["prompt_tokens"], worktree["prompt_tokens"], last["prompt_tokens"]) == (300, 100, 25000)
+        assert not any(r["capture"].get("tokens_not_recorded_reason") for r in receipts)
+        assert len({r["task_id"] for r in receipts}) == 1
 
 
 def test_a_shell_write_after_a_prompt_from_an_unopened_checkout_counts_as_the_sessions_work(repos, receipt_scope):
@@ -444,7 +493,6 @@ def test_a_service_restart_mid_session_keeps_recording_into_the_worktree(repos, 
         assert worktree_receipt["capture"]["status"] == "turn_completed"
 
 
-@_TURN_USAGE_BUG
 def test_a_restarted_service_keeps_the_session_usage_on_the_same_receipt(repos, receipt_scope):
     platform, wt = repos["platform"], repos["wt"]
     env = {**os.environ}
@@ -476,6 +524,8 @@ def test_a_restarted_service_keeps_the_session_usage_on_the_same_receipt(repos, 
     (worktree_receipt,) = _receipts(wt)
     if receipt_scope == "turn":  # turn 1 in the project, turn 2 in the worktree after the restart
         assert _turn_totals(project_receipt, worktree_receipt) == (1100, 110)
+        assert worktree_receipt["prompt_tokens"] == 1000  # the restarted service's turn, on its only Receipt
+        assert "tokens_not_recorded_reason" not in worktree_receipt["capture"]
         assert worktree_receipt["task_id"] == project_receipt["task_id"]
         assert not list(platform.rglob("*.usage-owner")) and not list(wt.rglob("*.usage-owner"))
         return
@@ -690,3 +740,30 @@ def test_the_worktree_receipt_is_not_written_into_the_project(repos, receipt_sco
     for receipt in _receipts(platform):
         assert "only.py" not in {f["path"] for f in receipt["files_detail"]}
         assert receipt["capture"]["tool_call_count"] == 0
+
+
+def test_a_routed_turn_buffer_shares_the_sessions_task_until_one_ends(tmp_path, monkeypatch):
+    """The session's Task is shared by routed buffers only; a Task that ended mints the session's next one."""
+    from openshard.adapters import claude_cross_checkout as cross
+
+    monkeypatch.setenv("OPENSHARD_HOME", str(tmp_path / "home"))
+    routed = {"session_id": SID, cross.ATTR: True}
+    first = cross.task_for(dict(routed))
+    assert cross.task_for(dict(routed)) == first  # another checkout, same session: same Task
+    assert cross.task_for({"session_id": SID}) != first  # not routed by the service: its own, as before
+    after = cross.task_for({**routed, "previous_task_ended": "branch_changed"})
+    assert after != first and cross.task_for(dict(routed)) == after
+    assert cross.task_for({"session_id": SID2, cross.ATTR: True}) not in (first, after)
+    # Kept beside the service's state, hashed, never in a repository.
+    assert all(SID not in p.name for p in (tmp_path / "home").rglob("*.task"))
+
+
+def test_a_turn_usage_window_only_ever_narrows_to_the_turn():
+    from openshard.adapters import claude_cross_checkout as cross
+
+    buf = {"started_at": "2026-10-18T10:00:00Z", "receipt_scope": "turn"}
+    cross.note(buf, {cross.SINCE_ATTR: "2026-10-18T10:05:00Z"})
+    cross.note(buf, {cross.SINCE_ATTR: "2026-10-18T10:01:00Z"})  # never moves back
+    assert cross.usage_since(buf) == "2026-10-18T10:05:00Z"
+    assert cross.usage_since({**buf, "receipt_scope": "session"}) == "2026-10-18T10:00:00Z"
+    assert cross.usage_since({**buf, cross.SINCE_ATTR: "2026-10-18T09:00:00Z"}) == "2026-10-18T10:00:00Z"

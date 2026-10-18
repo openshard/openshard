@@ -41,6 +41,10 @@ Task (task_id)           the job; may span prompts, sessions, agents, days
    every later turn of the same agent session inherits it:
    `task_grouping: session`. This is a grouping OpenShard made from the
    session id it observed, never a declaration; that is why it is labelled.
+   A session the capture service routes across checkouts (a linked worktree,
+   another repository) keeps one Task: a checkout's first turn Receipt takes
+   the session's current `task_id` (kept under `<OPENSHARD_HOME>/claude-session-tasks/`,
+   hashed session id, pruned after a week unused) instead of minting its own.
 3. A Task ends when the branch changes: a turn that starts on a different
    branch than the previous turn started on (the agent switched during that
    turn, or someone switched between turns) mints a new `task_id`. Unknown
@@ -64,7 +68,7 @@ exception and is always labelled.
 |---|---|---|
 | Files changed | yes | git diff between the turn-start baseline and turn end; files already dirty at the turn start are `pre_existing` unless changed again |
 | Commits | yes | `session_commits` from the turn-start HEAD to the turn-end HEAD, same corroboration rules |
-| Usage / cost | yes | transcript messages timestamped at or after the turn start (`_transcript_usage`, `since = started_at`) |
+| Usage / cost | yes | transcript messages timestamped at or after the turn start (`_transcript_usage`, `since = started_at`, or the turn's prompt time for a checkout first opened mid-session). Across checkouts each turn's usage is on the Receipt of the first checkout the turn did work in; the others say `workspace_usage_attributed_to_other_repository` |
 | Checks | yes | check commands observed in that turn |
 | Independent re-runs | yes | a turn with a resulting commit gets commit verification; with `post_session_verify: safe`, the working-tree run starts once the Task settles (see Settle check). Results attach as evidence, never rewrite |
 | Session end | session-level | no turn Receipt claims it; see Failure modes |
