@@ -1731,7 +1731,7 @@ def metrics():
 
 def _render_log_entry(
     entry: dict, detail: str, index: int | None = None, *, post_session_verification: dict | None = None,
-    usage_attestations: list[dict] | None = None,
+    usage_attestations: list[dict] | None = None, signature: str | None = None,
 ) -> None:
     """Render a stored run log entry at the requested detail level.
 
@@ -1843,6 +1843,7 @@ def _render_log_entry(
         from openshard.history.receipt_render import (
             render_compact_shard_receipt,
             render_full_shard_receipt,
+            with_signature_row,
         )
         from openshard.history.shard_contract import build_shard_receipt
         _shard = build_shard_receipt(
@@ -1850,7 +1851,7 @@ def _render_log_entry(
             usage_attestations=usage_attestations,
         )
         click.echo("")
-        click.echo(render_compact_shard_receipt(_shard))
+        click.echo(with_signature_row(render_compact_shard_receipt(_shard), signature))
         click.echo("")
         click.echo(render_full_shard_receipt(_shard, detail=detail))
         from openshard.history.routing_truth import (
@@ -2088,14 +2089,14 @@ def _render_log_entry(
 
     # Compact RECEIPT — default view only, appears before Time/Cost footer
     if detail == "default":
-        from openshard.history.receipt_render import render_compact_shard_receipt
+        from openshard.history import receipt_render as _rr
         from openshard.history.shard_contract import build_shard_receipt
         _shard = build_shard_receipt(
             entry, index, post_session_verification=post_session_verification,
             usage_attestations=usage_attestations,
         )
         click.echo("")
-        click.echo(render_compact_shard_receipt(_shard))
+        click.echo(_rr.with_signature_row(_rr.render_compact_shard_receipt(_shard), signature))
 
         # One compact proof-quality line, derived from the Shard Proof Contract.
         from openshard.history.shard_quality import build_shard_quality_summary
@@ -2256,9 +2257,12 @@ def last(more: bool, full: bool, as_json: bool):
     for line in repo_note_lines(loc):
         click.echo(line)
     _post_verification = _post_session_verification_for(entries[-1], log_path)
+    from openshard.history.receipt_signing import signature_label, signature_status
+
     _render_log_entry(
         entries[-1], detail, index=len(entries) - 1, post_session_verification=_post_verification,
         usage_attestations=_usage_attestations_for(entries[-1], log_path),
+        signature=signature_label(signature_status(log_path, entries[-1], len(entries) - 1)),
     )
     _echo_verification_view(entries[-1], len(entries) - 1, _post_verification)
     if _post_verification is not None and _post_verification.get("verification") is not None:

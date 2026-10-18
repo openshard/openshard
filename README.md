@@ -129,6 +129,8 @@ Receipts can also carry a content fingerprint. Openshard can use that fingerprin
 
 This is an integrity check on the receipt itself. It is not a claim that the underlying code is correct.
 
+Each finished receipt is also sealed with an Ed25519 key kept on your machine (`~/.openshard/keys/`), so a sealed receipt can't be changed afterwards without its seal showing it, by anyone who does not have that key. The limit, stated plainly: a coding agent running as your OS user can read that key and seal a forged record, and a seal does not make anything the agent said true. Signing is on by default; set `OPENSHARD_RECEIPT_SIGNING=off` to turn it off. See [Signed Receipts](docs/signing.md).
+
 ---
 
 ## Supported coding agents
@@ -334,7 +336,7 @@ Openshard is licensed under Apache-2.0.
 - [What is a Receipt?](docs/what-is-a-shard.md)
 - [Architecture](docs/architecture.md)
 - [Platform sync](docs/platform-sync.md)
-- [Signed Receipts (proposal)](docs/signing.md)
+- [Signed Receipts](docs/signing.md)
 - [CLI reference](docs/cli-reference.md)
 - [Telemetry](docs/telemetry.md)
 - [Changelog](CHANGELOG.md)
