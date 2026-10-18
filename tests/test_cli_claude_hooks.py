@@ -114,7 +114,7 @@ class TestProtocol:
 
 
 class TestEndToEnd:
-    def test_session_recorded_through_cli(self, repo: Path):
+    def test_session_recorded_through_cli(self, repo: Path, receipt_scope: str):
         assert _invoke(repo, _payload("SessionStart", repo, source="startup")).exit_code == 0
         assert _invoke(repo, _payload("UserPromptSubmit", repo, prompt="Add a greeting helper")).exit_code == 0
         (repo / "greet.py").write_text("def hi():\n    return 'hi'\n", encoding="utf-8")
@@ -131,7 +131,10 @@ class TestEndToEnd:
         assert entry["executor"] == "claude_code_hooks"
         assert entry["task"] == "Add a greeting helper"
         assert [f["path"] for f in entry["files_detail"]] == ["greet.py"]
-        assert entry["capture"]["session_end_observed"] is True
+        if receipt_scope == "session":
+            assert entry["capture"]["session_end_observed"] is True
+        else:  # sealed at the Stop; the SessionEnd after it adds nothing
+            assert entry["capture"]["status"] == "turn_completed" and entry["capture"]["turn_index"] == 1
         raw = (repo / ".openshard" / "runs.jsonl").read_text(encoding="utf-8")
         assert "RAW" not in raw
         assert str(repo) not in raw
@@ -156,12 +159,18 @@ class TestEndToEnd:
         ctx = relevant_context("improve the greeting helper", repo_path=repo)
         assert len(ctx.matches) == 1
 
-    def test_repeated_invocation_is_idempotent_on_record_count(self, repo: Path):
+    def test_repeated_invocation_is_idempotent_on_record_count(self, repo: Path, receipt_scope: str):
         for _ in range(3):
             _invoke(repo, _payload("UserPromptSubmit", repo, prompt="task"))
             _invoke(repo, _payload("Stop", repo))
-        assert len(_lines(repo)) == 1
-        assert _lines(repo)[0]["capture"]["prompt_count"] == 3
+        lines = _lines(repo)
+        if receipt_scope == "session":
+            assert len(lines) == 1
+            assert lines[0]["capture"]["prompt_count"] == 3
+        else:  # one Receipt per prompt -> Stop turn, all in the session's one Task
+            assert [e["capture"]["turn_index"] for e in lines] == [1, 2, 3]
+            assert [e["capture"]["prompt_count"] for e in lines] == [1, 1, 1]
+            assert len({e["receipt_id"] for e in lines}) == 3 and len({e["task_id"] for e in lines}) == 1
 
 
 def _status_json(repo: Path, **fields) -> str:

@@ -221,16 +221,21 @@ def test_no_readable_transcript_means_no_judgement(repo):
     assert entry["capture"]["completeness"] == {"status": "complete", "reasons": []}
 
 
-def test_buffer_keeps_no_transcript_content(repo):
+def test_buffer_keeps_no_transcript_content(repo, receipt_scope):
     transcript = _start(repo)
     transcript.tool("Bash", _now())
     _tool_hook(repo, "Bash")
     from openshard.adapters import claude_hooks as ch
 
-    raw = (ch.sessions_dir(repo) / f"{SID}.json").read_text(encoding="utf-8")
+    path = ch.sessions_dir(repo) / f"{SID}.json"
+    raws = [path.read_text(encoding="utf-8")]
     _run(repo, "Stop", stop_hook_active=False)
-    raw = (ch.sessions_dir(repo) / f"{SID}.json").read_text(encoding="utf-8")
-    assert "SECRET INPUT" not in raw and "RAW TOOL OUTPUT" not in raw and "RAW ASSISTANT TEXT" not in raw
+    if receipt_scope == "session":  # a sealed turn drops its buffer at the Stop
+        raws.append(path.read_text(encoding="utf-8"))
+    else:
+        assert not path.exists()
+    for raw in raws:
+        assert "SECRET INPUT" not in raw and "RAW TOOL OUTPUT" not in raw and "RAW ASSISTANT TEXT" not in raw
     assert "hook_coverage" not in json.dumps(_entry(repo))
 
 

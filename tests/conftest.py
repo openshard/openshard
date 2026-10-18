@@ -212,16 +212,16 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def _turn_receipts_default(monkeypatch):
-    """Per-turn Receipts are the default (docs/per-turn-receipts.md); this suite is being migrated to it.
+def _turn_receipts_default(request, monkeypatch):
+    """Claude Code capture tests see the default: per-turn Receipts (docs/per-turn-receipts.md).
 
-    Until the remaining capture files are migrated, every test still starts on
-    the opt-out (one Receipt per session). A migrated test that must hold in
-    both modes requests ``receipt_scope``; one about the legacy session Receipt
-    says so with ``@pytest.mark.session_receipts("why")``. Turn tests set
-    ``OPENSHARD_TURN_RECEIPTS`` themselves (``tests/test_turn_receipts.py``).
+    The developer's own ``OPENSHARD_TURN_RECEIPTS`` never leaks in. A test about
+    the legacy session Receipt says so with ``@pytest.mark.session_receipts("why")``;
+    a test that must hold in both modes requests ``receipt_scope``.
     """
-    monkeypatch.setenv("OPENSHARD_TURN_RECEIPTS", "off")
+    monkeypatch.delenv("OPENSHARD_TURN_RECEIPTS", raising=False)
+    if request.node.get_closest_marker("session_receipts") is not None:
+        monkeypatch.setenv("OPENSHARD_TURN_RECEIPTS", "off")
 
 
 @pytest.fixture(params=["turn", "session"])

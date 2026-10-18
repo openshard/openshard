@@ -38,7 +38,7 @@ from openshard.history.event import (
 )
 from openshard.history.query import get_receipt, list_shards, relevant_context, search_history
 from openshard.history.shard import ORIGIN_EXTERNAL_OBSERVED
-from tests.capture_fixtures import _make_repo
+from tests.capture_fixtures import _make_repo, _sealed
 
 CLAUDE_SID = "11111111-1111-4111-8111-111111111111"
 CODEX_SID = "22222222-2222-4222-8222-222222222222"
@@ -366,7 +366,7 @@ def _wait_for(predicate, timeout: float = 30.0) -> bool:
 
 
 class TestSharedService:
-    def test_three_agents_one_service_one_history(self, service, repo):
+    def test_three_agents_one_service_one_history(self, service, repo, receipt_scope):
         port = service.server.port
         (repo / "auth.py").write_text("x = 1\n", encoding="utf-8")
         for d in claude_docs(repo):
@@ -378,8 +378,8 @@ class TestSharedService:
         # Three sessions fold in the background (each fold runs git); on a
         # contended box that can take well over a minute, so the wait is
         # generous -- correctness, not latency, is what this test checks.
-        assert _wait_for(lambda: len(_lines(repo)) == 3 and all(e["capture"]["session_end_observed"]
-                                                                 for e in _lines(repo)), timeout=180)
+        # Final: ended, or (Claude Code with per-turn Receipts, the default) sealed at its Stop.
+        assert _wait_for(lambda: len(_lines(repo)) == 3 and all(_sealed(e) for e in _lines(repo)), timeout=180)
         assert service.server.recorder.wait_idle(60)
         stats = client.health(port)["stats"]
         assert stats["queued"] == 17

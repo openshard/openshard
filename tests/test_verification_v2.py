@@ -366,6 +366,7 @@ class TestBackwardCompatibility:
         bad = ReducedHookPayload.from_dict({**base, "command_outcome": "maybe", "command_exit_code": True})
         assert bad is not None and bad.command_outcome is None and bad.command_exit_code is None
 
+    @pytest.mark.session_receipts("rebuilds a buffer from a legacy unsealed session record")
     def test_v047_record_rebuilds_a_buffer_and_keeps_its_check(self, repo):
         path = repo / ".openshard" / "runs.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)

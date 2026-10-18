@@ -50,6 +50,7 @@ from openshard.history.shard import derive_shard_identity
 from openshard.history.task_identity import (
     EVIDENCE_DECLARED,
     TASK_ID_ENV,
+    is_task_id,
     launch_task_id,
     new_task_id,
 )
@@ -58,6 +59,7 @@ from tests.capture_fixtures import (
     _auth_headers,
     _lines,
     _make_repo,
+    _sealed,
     _session_dir,
     _status_payload,
     _wait_for,
@@ -175,10 +177,21 @@ def _drive_http(
         assert (status, body) == (200, b"{}")
 
 
+def _assert_undeclared(entry: dict, receipt_scope: str) -> None:
+    """No declaration was bound. A Claude turn Receipt carries its session's own grouping, labelled as such."""
+    assert "task_context" not in entry["capture"]
+    if receipt_scope == "turn" and entry.get("executor") == CLAUDE_EXECUTOR:
+        assert entry["capture"]["receipt_scope"] == "turn"
+        assert entry["capture"]["task_grouping"] == "session"  # grouped from the observed session, never declared
+        assert is_task_id(entry["task_id"]) and entry["task_id"] not in (TASK_A, TASK_B)
+    else:
+        assert "task_id" not in entry
+
+
 def _wait_ended(service, repo: Path, count: int = 1) -> list[dict]:
     def _done() -> bool:
         lines = _lines(repo)
-        return len(lines) == count and all(e["capture"]["session_end_observed"] for e in lines)
+        return len(lines) == count and all(_sealed(e) for e in lines)
 
     assert _wait_for(_done, timeout=120)
     assert service.server.recorder.wait_idle(60)
@@ -302,21 +315,22 @@ class TestCommandClientForwarding:
         assert entry["task_id"] == TASK_A
         assert entry["capture"]["task_context"]["evidence"] == EVIDENCE_DECLARED
 
-    def test_in_process_fallback_ignores_a_malformed_environment_value(self, repo, tmp_path):
+    def test_in_process_fallback_ignores_a_malformed_environment_value(self, repo, tmp_path, receipt_scope):
         env = _client_env(
             tmp_path, OPENSHARD_CAPTURE_DISABLE="1", CLAUDE_PROJECT_DIR=str(repo), **{TASK_ID_ENV: "task_bogus"},
         )
         for doc in _claude_docs(repo, SID1):
             client.run_hook_via_service(io.BytesIO(json.dumps(doc).encode()), env=env)
-        entry = _entry(repo, SID1)
-        assert "task_id" not in entry and "task_context" not in entry["capture"]
+        _assert_undeclared(_entry(repo, SID1), receipt_scope)
 
     @pytest.mark.parametrize("entrypoint", ["handle", "stream"])
     @pytest.mark.parametrize(
         ("declared", "expected"),
         [(TASK_A, TASK_A), ("task_bogus", None), (None, None)],
     )
-    def test_legacy_synchronous_entrypoints_read_launch_context(self, repo, entrypoint, declared, expected):
+    def test_legacy_synchronous_entrypoints_read_launch_context(
+        self, repo, entrypoint, declared, expected, receipt_scope,
+    ):
         env = {"CLAUDE_PROJECT_DIR": str(repo)}
         if declared is not None:
             env[TASK_ID_ENV] = declared
@@ -326,8 +340,10 @@ class TestCommandClientForwarding:
             else:
                 ch.run_hook_from_stream(io.BytesIO(json.dumps(doc).encode()), env=env)
         entry = _entry(repo, SID1)
-        assert entry.get("task_id") == expected
-        assert ("task_context" in entry["capture"]) is (expected is not None)
+        if expected is None:
+            _assert_undeclared(entry, receipt_scope)
+        else:
+            assert entry["task_id"] == expected and "task_context" in entry["capture"]
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +401,7 @@ class TestClaudeHttpHookInstall:
 
 
 class TestServiceFlow:
-    def test_header_declaration_lands_on_the_receipt(self, service, repo):
+    def test_header_declaration_lands_on_the_receipt(self, service, repo, receipt_scope):
         _drive_http(service, repo, _claude_docs(repo, SID1), TASK_A)
         (entry,) = _wait_ended(service, repo)
         assert entry["task_id"] == TASK_A
@@ -396,7 +412,7 @@ class TestServiceFlow:
         assert "task_context_conflicts" not in entry["capture"]
         assert get_receipt(entry["shard_id"], repo_path=repo).task_id == TASK_A
 
-    def test_client_post_hook_task_id_argument_uses_the_same_header(self, service, repo):
+    def test_client_post_hook_task_id_argument_uses_the_same_header(self, service, repo, receipt_scope):
         for doc in _claude_docs(repo, SID1):
             assert client.post_hook(
                 service.port, json.dumps(doc).encode(), project_dir=str(repo), task_id=TASK_A,
@@ -404,23 +420,23 @@ class TestServiceFlow:
         (entry,) = _wait_ended(service, repo)
         assert entry["task_id"] == TASK_A
 
-    def test_no_header_keeps_the_legacy_record_shape(self, service, repo):
+    def test_no_header_keeps_the_legacy_record_shape(self, service, repo, receipt_scope):
         _drive_http(service, repo, _claude_docs(repo, SID1), None)
         (entry,) = _wait_ended(service, repo)
-        assert "task_id" not in entry
-        assert "task_context" not in entry["capture"] and "task_context_conflicts" not in entry["capture"]
+        _assert_undeclared(entry, receipt_scope)
+        assert "task_context_conflicts" not in entry["capture"]
 
-    def test_malformed_headers_never_bind_never_reject_and_still_record(self, service, repo):
+    def test_malformed_headers_never_bind_never_reject_and_still_record(self, service, repo, receipt_scope):
         sids = [f"aaaaaaaa-0000-4000-8000-{i:012d}" for i in range(len(HTTP_MALFORMED_IDS))]
         for sid, value in zip(sids, HTTP_MALFORMED_IDS, strict=True):
             _drive_http(service, repo, _claude_docs(repo, sid), value)
         entries = _wait_ended(service, repo, count=len(sids))
         assert {e["capture"]["session_id"] for e in entries} == set(sids)
         for entry in entries:
-            assert "task_id" not in entry and "task_context" not in entry["capture"]
+            _assert_undeclared(entry, receipt_scope)
             assert "task_context_conflicts" not in entry["capture"]
 
-    def test_repeated_header_is_ambiguous_and_never_binds(self, service, repo):
+    def test_repeated_header_is_ambiguous_and_never_binds(self, service, repo, receipt_scope):
         headers = dict(_auth_headers(str(repo)))
         lines = [f"{k}: {v}" for k, v in headers.items()]
         lines += [f"{client.TASK_ID_HEADER}: {TASK_A}", f"{client.TASK_ID_HEADER}: {TASK_A}"]
@@ -437,7 +453,7 @@ class TestServiceFlow:
                     chunks.append(chunk)
             assert b" 200 " in b"".join(chunks).split(b"\r\n", 1)[0]
         (entry,) = _wait_ended(service, repo)
-        assert "task_id" not in entry
+        _assert_undeclared(entry, receipt_scope)
 
     def test_unauthenticated_request_with_a_valid_header_records_nothing(self, service, repo):
         doc = _claude_docs(repo, SID1)[1]
@@ -448,17 +464,17 @@ class TestServiceFlow:
         assert status == 401
         assert not list(_session_dir(repo).glob("*.queue*.jsonl")) and not _lines(repo)
 
-    def test_body_fields_are_never_task_context(self, service, repo):
+    def test_body_fields_are_never_task_context(self, service, repo, receipt_scope):
         docs = [
             {**d, "task_id": TASK_A, TASK_ID_ENV: TASK_A, "metadata": {"task_id": TASK_A}}
             for d in _claude_docs(repo, SID1)
         ]
         _drive_http(service, repo, docs, None)
         (entry,) = _wait_ended(service, repo)
-        assert "task_id" not in entry and "task_context" not in entry["capture"]
+        _assert_undeclared(entry, receipt_scope)
         assert TASK_A not in (repo / ".openshard" / "runs.jsonl").read_text(encoding="utf-8")
 
-    def test_conflicting_header_keeps_the_first_and_still_answers_200(self, service, repo):
+    def test_conflicting_header_keeps_the_first_and_still_answers_200(self, service, repo, receipt_scope):
         docs = _claude_docs(repo, SID1)
         _drive_http(service, repo, docs[:2], TASK_A)
         snapshot: list[dict] = []
@@ -474,11 +490,12 @@ class TestServiceFlow:
         (entry,) = _wait_ended(service, repo)
         assert entry["task_id"] == TASK_A
         assert entry["capture"]["task_context"] == first["capture"]["task_context"]
-        assert entry["capture"]["task_context_conflicts"] == 2  # Stop + SessionEnd
+        # Stop + SessionEnd; a turn Receipt is sealed at the Stop, so the SessionEnd adds nothing to it.
+        assert entry["capture"]["task_context_conflicts"] == (2 if receipt_scope == "session" else 1)
         assert (entry["receipt_id"], entry["shard_id"], entry["run_id"]) == (
             first["receipt_id"], first["shard_id"], first["run_id"])
 
-    def test_status_pings_are_not_a_declaration_channel(self, service, repo):
+    def test_status_pings_are_not_a_declaration_channel(self, service, repo, receipt_scope):
         _drive_http(service, repo, _claude_docs(repo, SID1), TASK_A)
         _wait_ended(service, repo)
         headers = {**_auth_headers(str(repo)), client.TASK_ID_HEADER: TASK_B}
@@ -504,7 +521,7 @@ class TestServiceFlow:
         assert all("task_id" not in ln["data"] for ln in queued[1:])  # legacy shape: key absent
         assert TASK_B not in json.dumps(queued)
 
-    def test_sessions_of_two_agents_sharing_one_id_stay_separate_receipts(self, service, repo):
+    def test_sessions_of_two_agents_sharing_one_id_stay_separate_receipts(self, service, repo, receipt_scope):
         _drive_http(service, repo, _claude_docs(repo, SID1), TASK_A)
         _drive_http(service, repo, _claude_docs(repo, SID2), TASK_A)
         _drive_http(service, repo, _codex_docs(repo, SID3), TASK_A, path=client.CODEX_HOOK_PATH)
@@ -667,14 +684,18 @@ class TestBufferAndFold:
         assert entry == ended
         assert entry["task_id"] == TASK_A and "task_context_conflicts" not in entry["capture"]
 
-    def test_late_declaration_is_never_retroactive(self, repo):
+    def test_late_declaration_is_never_retroactive(self, repo, receipt_scope):
         docs = _claude_docs(repo, SID1)
         _drive_claude(repo, docs[:3])  # record exists, no declaration
-        assert "task_id" not in _entry(repo, SID1)
+        before = _entry(repo, SID1)
+        _assert_undeclared(before, receipt_scope)
         handle_hook(docs[2], env=_claude_env(repo), task_id=TASK_A)  # a late Stop that carries one
         entry = _entry(repo, SID1)
-        assert "task_id" not in entry and "task_context" not in entry["capture"]
-        assert entry["capture"]["task_context_conflicts"] == 1
+        _assert_undeclared(entry, receipt_scope)
+        if receipt_scope == "session":
+            assert entry["capture"]["task_context_conflicts"] == 1
+        else:  # the turn was sealed at its Stop: the late one cannot reach it
+            assert entry == before
 
     def test_first_valid_declaration_binds_after_a_malformed_one(self, repo):
         docs = _claude_docs(repo, SID1)
@@ -714,12 +735,17 @@ class TestBufferAndFold:
         assert rebuilt["task_id"] == TASK_A
         assert "task_context" not in rebuilt["capture"]
 
-    def test_undeclared_and_declared_records_differ_only_by_the_declaration(self, repo, tmp_path):
+    def test_undeclared_and_declared_records_differ_only_by_the_declaration(self, repo, tmp_path, receipt_scope):
         other = _make_repo(tmp_path / "second repo")
         _drive_claude(repo, _claude_docs(repo, SID1), TASK_A)
         _drive_claude(other, _claude_docs(other, SID1), None)
         declared, legacy = _entry(repo, SID1), _entry(other, SID1)
-        assert set(declared) - set(legacy) == {"task_id"}
+        _assert_undeclared(legacy, receipt_scope)
+        if receipt_scope == "turn":  # both carry a task_id: one declared (explicit), one the session's grouping
+            assert declared["capture"]["task_grouping"] == "explicit" and declared["task_id"] == TASK_A
+            assert set(declared) == set(legacy)
+        else:
+            assert set(declared) - set(legacy) == {"task_id"}
         assert set(legacy) - set(declared) == set()
         assert set(declared["capture"]) - set(legacy["capture"]) == {"task_context"}
         assert derive_shard_identity(declared) == derive_shard_identity(legacy)
@@ -792,7 +818,7 @@ class TestEvidenceAndCorrelation:
 
 
 class TestPrivacy:
-    def test_only_the_opaque_id_and_concise_provenance_are_added(self, service, repo):
+    def test_only_the_opaque_id_and_concise_provenance_are_added(self, service, repo, receipt_scope):
         secret = "sk-ant-api03-SECRETSECRET12345678901234567890"
         docs = [
             {**d, "transcript_path": "/home/user/.claude/projects/x/transcript.jsonl",
@@ -822,7 +848,7 @@ class TestPrivacy:
 
 
 class TestSyncCompatibility:
-    def test_task_id_crosses_the_sync_projection_without_changing_the_contract(self, repo, tmp_path):
+    def test_task_id_crosses_the_sync_projection_without_changing_the_contract(self, repo, tmp_path, receipt_scope):
         other = _make_repo(tmp_path / "legacy repo")
         _drive_claude(repo, _claude_docs(repo, SID1), TASK_A)
         _drive_claude(other, _claude_docs(other, SID1), None)
@@ -830,16 +856,22 @@ class TestSyncCompatibility:
 
         wire = receipt_payload(declared, 0)
         baseline = receipt_payload(legacy, 0)
-        assert wire["task_id"] == TASK_A and baseline["task_id"] is None
+        assert wire["task_id"] == TASK_A
+        if receipt_scope == "turn":  # the undeclared turn sends its session grouping, labelled; the declared one explicit
+            assert baseline["task_id"] == legacy["task_id"] and baseline["task_grouping"] == "session"
+            assert wire["task_grouping"] == "explicit"
+        else:
+            assert baseline["task_id"] is None
         assert set(wire) == set(baseline)  # no key the Platform contract does not already define
         envelope = build_envelope(declared, 0, core_version="test")
         assert envelope["receipt"]["task_id"] == TASK_A
         assert envelope["source"]["receipt_schema_version"] == declared["schema_version"]
         assert eligibility(declared).eligible and eligibility(legacy).eligible
 
-    def test_an_in_progress_declared_session_still_waits_for_quiescence(self, repo):
+    def test_an_in_progress_declared_session_still_waits_for_quiescence(self, repo, receipt_scope):
         docs = _claude_docs(repo, SID1)
-        _drive_claude(repo, docs[:3], TASK_A)  # no SessionEnd yet
+        # No SessionEnd yet; with turns, no Stop either (a sealed turn is final and syncs at once).
+        _drive_claude(repo, docs[:3] if receipt_scope == "session" else docs[:2], TASK_A)
         entry = _entry(repo, SID1)
         assert entry["task_id"] == TASK_A
         assert not eligibility(entry).eligible  # correlation never bypasses the sync quiescence rule
