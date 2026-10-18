@@ -186,6 +186,17 @@ def failed_activity_rows(receipt: ShardReceipt) -> list[str]:
         rows.append(f"{_INDENT}  +{len(failed) - _MAX_FAILED_ACTIVITY_ROWS} more")
     return rows
 
+def watch_rows(receipt: ShardReceipt) -> list[str]:
+    """The ``Watch`` rows: gaming-check observations (verification/gaming_signals), one per signal.
+
+    Shown only when there is something to watch. Plain observations of what
+    the session did; they never change the verdict and never say why.
+    """
+    signals = (receipt.recorded_evidence or {}).get("gaming_signals") or []
+    messages = [s["message"] for s in signals if isinstance(s, dict) and isinstance(s.get("message"), str)]
+    return [_row("Watch" if i == 0 else "", m) for i, m in enumerate(messages)]
+
+
 _EVIDENCE_DISPLAY: dict[str, str] = {
     "directly_observed": "Directly observed",
     "agent_reported": "Agent reported",
@@ -807,6 +818,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         if _failed_rows:
             lines.append(f"{_INDENT}Failed")
             lines.extend(_failed_rows)
+    lines += watch_rows(receipt)
     lines += [
         _row("Checks", checks_label(receipt)),
         _row("Verified", verified_label(receipt)),

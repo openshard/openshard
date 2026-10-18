@@ -41,6 +41,7 @@ from openshard.history.receipt_evidence import (
     recorded_session_nonce,
     session_nonce_or_none,
 )
+from openshard.verification.gaming_signals import rebuilt_seen
 
 PROMPT_SOURCE_AGENT_NOTIFICATION = "agent_notification"
 _NOTIFICATION_PREFIXES = ("<task-notification>", "<agent-message ", "<agent-message>", "<teammate-message")
@@ -158,6 +159,7 @@ def rebuilt_counters(capture: dict) -> dict[str, Any]:
         "archived_events": capture.get("hook_events_archived"),
         "event_log": capture.get("event_log"),
         "hook_config_hash": capture.get("hook_config_hash"),
+        "gaming_seen": rebuilt_seen(capture),  # gaming-check observations (verification/gaming_signals)
     }
 
 
