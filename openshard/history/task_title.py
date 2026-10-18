@@ -115,7 +115,7 @@ _RE_TRAILING_CONNECTIVE = re.compile(
     re.I,
 )
 _RE_CLAUSE_BREAK = re.compile(
-    r",\s+|\s+(?:so that|because|since|but|which|while|without|and then|then|when|"
+    r"[,:]\s+|\s+(?:so that|because|since|but|which|while|without|and then|then|when|"
     r"whenever|if|unless|until|after|before|as soon as|so)\s+",
     re.I,
 )
@@ -195,11 +195,38 @@ def _nominal_to_imperative(s: str) -> str:
     return " ".join(p for p in parts if p)
 
 
+def _fits(text: str) -> bool:
+    return len(text) <= TITLE_MAX_CHARS and len(text.split()) <= TITLE_MAX_WORDS
+
+
+def _clause_head(title: str) -> str | None:
+    """The longest opening clause that fits the budget, or ``None``.
+
+    A comma does not end the clause on its own: "Find one small, real
+    improvement in this repo: a bug, ..." keeps "Find one small, real
+    improvement in this repo" rather than stopping at "Find one small".
+    A colon or a conjunction ("because", "when", ...) ends the search.
+    """
+    best: str | None = None
+    for m in _RE_CLAUSE_BREAK.finditer(title):
+        head = title[: m.start()]
+        if not _fits(head):
+            break
+        if len(head.split()) >= 3:
+            best = head
+        if not m.group().lstrip().startswith(","):
+            break
+    return best
+
+
 def _clamp(title: str) -> str:
     """Cut at a clause break, then to the word/char budget, at a word boundary."""
-    if len(title) > TITLE_MAX_CHARS or len(title.split()) > TITLE_MAX_WORDS:
-        head = _RE_CLAUSE_BREAK.split(title, maxsplit=1)[0]
-        if len(head.split()) >= 3:
+    if not _fits(title):
+        head = _clause_head(title)
+        if head is None:
+            first = _RE_CLAUSE_BREAK.split(title, maxsplit=1)[0]
+            head = first if len(first.split()) >= 3 else None
+        if head is not None:
             title = head
     words = title.split()[:TITLE_MAX_WORDS]
     while words and len(" ".join(words)) > TITLE_MAX_CHARS:

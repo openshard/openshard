@@ -115,6 +115,30 @@ def test_very_long_task_is_bounded_at_a_word() -> None:
     _assert_clean(title)
 
 
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [
+        # A comma between adjectives is not the end of the task (real receipt rcpt_aad90e48...).
+        (
+            "Find one small, real improvement in this repo: a bug, a confusing error message, "
+            "a missing test, or a doc gap. Make the change, run the tests.",
+            "Find one small, real improvement in this repo",
+        ),
+        # The longest opening run of comma clauses that fits is kept.
+        (
+            "Add retries, timeouts, and logging to the sync client, plus docs for every option we expose to users",
+            "Add retries, timeouts, and logging to sync client",
+        ),
+        # A conjunction still ends the clause, even after a comma.
+        ("Fix the flaky test, then update the changelog and bump the version number for the next release", "Fix flaky test"),
+    ],
+)
+def test_long_task_is_not_cut_at_the_first_comma(task: str, expected: str) -> None:
+    title = derive_task_title(task)
+    assert title == expected
+    _assert_clean(title)
+
+
 def test_single_run_on_sentence_is_bounded() -> None:
     task = " ".join(["update"] + [f"module{i}" for i in range(80)])
     _assert_clean(derive_task_title(task))
