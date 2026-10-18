@@ -170,6 +170,7 @@ class TreeState:
     head: str | None
     dirty: bool | None  # tracked or untracked changes; None: git could not tell
     tracked_dirty: bool | None = None  # tracked changes only
+    tree: str | None = None  # HEAD's tree object id (what a clean checkout at HEAD contains)
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +361,21 @@ def tree_state(repo_root: Path) -> TreeState:
         lines = [ln for ln in status.splitlines() if ln.strip() and ".openshard/" not in ln.replace("\\", "/")]
         dirty = bool(lines)
         tracked_dirty = any(not ln.startswith("??") for ln in lines)
-    return TreeState(head=head_sha, dirty=dirty, tracked_dirty=tracked_dirty)
+    return TreeState(head=head_sha, dirty=dirty, tracked_dirty=tracked_dirty,
+                     tree=commit_tree(repo_root, head_sha) if head_sha else None)
+
+
+def commit_tree(repo_root: Path, sha: str) -> str | None:
+    """The tree object id of commit *sha*, or None when git cannot tell.
+
+    Two commits with the same tree have identical content, so evidence bound
+    to one also describes the other (a squash merge, a rebased or amended
+    commit); lookups that use this say so (``match: tree``).
+    """
+    from openshard.util.git import run_git
+
+    out = (run_git(repo_root, ["rev-parse", "--verify", "--quiet", f"{sha}^{{tree}}"]) or "").strip().lower()
+    return out if re.fullmatch(r"[0-9a-f]{40,64}", out) else None
 
 
 def check_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -668,6 +683,8 @@ def build_attestation(
         },
         "checks": [_check_row(r) for r in results],
         **({"commit": commit.lower()} if commit else {}),
+        # The tree of the bound commit, so the result still names the content after a squash or rewrite.
+        **({"tree_oid": before.tree} if bound and before.tree else {}),
         **({"checkout": checkout} if checkout else {}),
         "raw_output_stored": False,
         "verification": block,
@@ -931,6 +948,7 @@ __all__ = [
     "TreeState",
     "attestations_path",
     "build_attestation",
+    "commit_tree",
     "display_line",
     "evidence_for_entry",
     "latest_for_entry",

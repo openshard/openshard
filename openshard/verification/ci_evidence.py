@@ -337,6 +337,7 @@ def build_ci_attestation(
     *,
     created_at: str,
     pr_head: str | None = None,
+    tree_oid: str | None = None,
 ) -> dict | None:
     """One ``verifications.jsonl`` line for a CI verdict, or None when nothing was concluded."""
     if result.outcome not in RECORDED_OUTCOMES or target.sha is None or result.sha != target.sha:
@@ -379,6 +380,8 @@ def build_ci_attestation(
             # None: no pull request known. False: the PR has moved past this commit.
             "pr_head_matches": (pr_head == target.sha) if pr_head else None,
         },
+        # The tree of that commit (see post_session.commit_tree); absent when git could not tell.
+        **({"tree_oid": tree_oid} if tree_oid else {}),
         "raw_output_stored": False,
         "verification": block,
     }

@@ -40,7 +40,9 @@ def _answer(commit_ref: str | None, task_ref: str | None) -> dict:
         sha = _resolve_commit(loc.root, commit_ref)
         if sha is None:
             return verdict.error(kind, ident, f"{commit_ref!r} is not a commit in this repository.")
-        return verdict.commit_verdict(sha, attestations)
+        from openshard.verification.post_session import commit_tree
+
+        return verdict.commit_verdict(sha, attestations, tree_oid=commit_tree(loc.root, sha))
     entries = load_history(loc.runs_path, coerce=False) if loc.runs_path.exists() else []
     return verdict.task_verdict(
         ident, entries, attestations,
