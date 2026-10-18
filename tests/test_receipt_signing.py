@@ -209,10 +209,12 @@ def test_one_shot_record_is_sealed_when_written(history):
         "digest": {"sha256": entry["content_hash"].split(":", 1)[1]},
     }
     assert statement["subject"][1]["name"] == f"projection:{entry['receipt_id']}"
-    assert predicate["seal_version"] == "1"
+    # New seals are seal v2 (docs/receipt-seal-v2.md); v1 seals still verify.
+    assert statement["subject"][2]["name"] == f"record_fields:{entry['receipt_id']}"
+    assert predicate["seal_version"] == "2"
     assert predicate["seal_reason"] == "created"
     assert predicate["previous_record_digest"] is None
-    assert predicate["covers"] == ["record_content"]
+    assert predicate["covers"] == ["record_content", "record_fields", "synced_receipt"]
     assert predicate["does_not_cover"] == [
         "agent_claims", "verification_outcome", "capture_completeness", "sealed_at",
     ]

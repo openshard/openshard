@@ -6,7 +6,11 @@ Signing Phase 1 implemented. The per-install key and sealing
 the offline check, bundles and `signature_status`
 (`history/receipt_verify.py`); `openshard verify --signature`,
 `openshard keys` and the `doctor` block (`cli/signing_cmd.py`).
-Phases 2 and 3 are not started.
+New seals are seal v2 ([receipt-seal-v2.md](receipt-seal-v2.md)): the
+same envelope with field commitments and, on a seal made by sync, a digest
+of the exact hosted receipt, so the Platform copy can be checked against
+the install's key (pulled into v0.5.0 from Phase 2). v1 seals keep
+verifying. Phase 3 is not started.
 
 **The limit, stated plainly:** a seal made with this machine's key proves
 only that the record is unchanged since it was sealed with this machine's
@@ -126,10 +130,10 @@ hashes; no code, diffs, prompts, transcripts or output).
   party can check. No Platform change: signatures live in a sidecar file
   and are not sent, because the Platform contract is closed and rejects
   unknown keys.
-- **Phase 2 (after v0.5.0):** `openshard sync connect` registers the
-  install's public key and sync sends the envelope next to the Receipt.
-  The hosted service checks it alongside its witness (which ships in
-  v0.5.0, above; see "What is open and what is hosted").
+- **Phase 2:** sync registers the install's public key and sends the
+  envelope next to the Receipt; the hosted service checks it alongside its
+  witness. Seal v2 brings this into v0.5.0 (receipt-seal-v2.md, "Rollout").
+  The server counter-signature on ingest stays after v0.5.0.
 - **Phase 3 (later):** optional Sigstore signing in CI
   (`pip install openshard[sigstore]`), producing a Sigstore bundle over the
   same Statement.
@@ -155,7 +159,9 @@ decimal byte counts. No JSON canonicalisation is needed for the envelope
 itself, so non-Python verifiers need only stock DSSE.
 
 The record digest relies on Python's `json.dumps` rules, which a
-non-Python verifier must reproduce; RFC 8785 (JCS) would be hash v2.
+non-Python verifier must reproduce. Seal v2 keeps these two digests as they
+are and adds subjects digested with RFC 8785 (JCS), which TypeScript can
+reproduce byte for byte (receipt-seal-v2.md).
 
 ### Statement (payload)
 

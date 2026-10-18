@@ -377,7 +377,9 @@ def test_verify_signature_json_shape(repo):
     sig = body["signature"]
     assert sig["verdict_rules"] == "1" and sig["source"] == "local" and sig["signature_checked"] is True
     assert (sig["record_check"], sig["projection_check"]) == ("matches", "matches")
-    assert sig["bound_by_signature"] == ["record digest", "projection digest", "receipt id", "shard id"]
+    assert sig["bound_by_signature"] == ["record digest", "projection digest", "receipt id", "shard id",
+                                         "record field commitments"]
+    assert sig["seal_version"] == "2" and sig["sync_sealed"] is False
     assert "sealed_at (local clock)" in sig["claimed_not_proven"]
     assert sig["not_proven"] == ["agent_claims", "verification_outcome", "capture_completeness"]
     assert sig["keyid"].startswith("ed25519:") and len(sig["chain"]) == 1
