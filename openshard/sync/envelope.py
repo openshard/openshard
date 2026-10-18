@@ -125,6 +125,13 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
         # ``session`` (OpenShard grouped a session's turns; never a declaration).
         # Sent only with the task_id it labels; absent means explicit.
         payload["task_grouping"] = capture["task_grouping"]
+    correlation = payload.get("correlation")
+    if isinstance(correlation, dict) and "parent_task_id" in correlation:
+        # A declared parent task (history/task_edges.py) is local until the
+        # Platform contract defines it; the rest of the block is unchanged.
+        correlation.pop("parent_task_id")
+        if set(correlation) <= {"evidence"}:
+            payload.pop("correlation")
     if not multi_agent:
         payload.pop("multi_agent", None)
     return payload

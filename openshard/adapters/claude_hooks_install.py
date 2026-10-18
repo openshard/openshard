@@ -102,6 +102,9 @@ HOOK_SPECS: tuple[HookSpec, ...] = (
     HookSpec("UserPromptSubmit", None, 5, TRANSPORT_HTTP),
     HookSpec("PostToolUse", TOOL_MATCHER, 5, TRANSPORT_HTTP),
     HookSpec("PostToolUseFailure", TOOL_MATCHER, 5, TRANSPORT_HTTP),
+    # Subagent ids only (agent-reported child edges, history/task_edges.py).
+    HookSpec("SubagentStart", None, 5, TRANSPORT_HTTP),
+    HookSpec("SubagentStop", None, 5, TRANSPORT_HTTP),
     HookSpec("Stop", None, 5, TRANSPORT_HTTP),
     HookSpec("SessionEnd", None, 5, TRANSPORT_HTTP),
 )

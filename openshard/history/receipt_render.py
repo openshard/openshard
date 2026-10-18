@@ -257,6 +257,13 @@ def turn_rows(receipt: ShardReceipt) -> list[str]:
     return [_row("Turn", label.removeprefix("Turn "))] if label else []
 
 
+def task_edge_rows(receipt: ShardReceipt) -> list[str]:
+    """The declared parent task and the subagents the agent reported (history/task_edges.py)."""
+    from openshard.history.task_edges import task_edge_lines
+
+    return [_row(label, value) for label, value in task_edge_lines((receipt.recorded_evidence or {}).get("task_edges"))]
+
+
 def _capture_rows(receipt: ShardReceipt) -> list[str]:
     """The compact ``Capture`` / ``Gaps`` rows.
 
@@ -1424,7 +1431,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append(_row("Receipt ID", receipt.receipt_id))
     if receipt.task_id:
         lines.append(_row("Task ID", receipt.task_id))
-    lines += turn_rows(receipt) + [_row("Shard ID", receipt.shard_id)]
+    lines += turn_rows(receipt) + task_edge_rows(receipt) + [_row("Shard ID", receipt.shard_id)]
     lines.append(_row("Created", _fmt_timestamp(receipt.created_at)))
     lines.append(_row("Integrity", receipt.integrity))
     if receipt.integrity_status != "missing":

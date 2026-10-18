@@ -2240,7 +2240,7 @@ def last(more: bool, full: bool, as_json: bool):
         )
         payload = _machine_envelope(
             "last", "ok", shard_id=receipt.shard_id, receipt_id=receipt.receipt_id,
-            task_id=receipt.task_id,
+            task_id=receipt.task_id, task_edges=(receipt.recorded_evidence or {}).get("task_edges"),
             repo=loc.to_dict(),
             run=_export_run_entry(entry, include_timeline=True, receipt=receipt),
             trust={
