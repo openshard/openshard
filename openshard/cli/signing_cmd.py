@@ -73,6 +73,9 @@ def _invalid_words(r) -> str:
         "chain_broken": "seal chain broken: " + "; ".join(r.chain_problems),
         "key_revoked": f"sealed by {_short(r.keyid)} after that key was revoked ({r.revoked_at})",
         "receipt_id_mismatch": "the seal is for a different receipt",
+        "malformed_statement": "the latest seal is malformed",
+        "synced_receipt_changed": "the hosted receipt differs from the sealed copy",
+        "reveal_mismatch": "a revealed field does not match what was sealed",
     }
     if r.reason.startswith("earlier_seal_"):
         return f"an earlier seal does not verify ({r.reason[len('earlier_seal_'):].replace('_', ' ')})"
@@ -100,6 +103,15 @@ def _detail_lines(r) -> list[str]:
         reasons = ", ".join(str(s.get("seal_reason")) for s in r.chain)
         many = f"{len(r.chain)} seals, each linked to the one before" if len(r.chain) > 1 else "1 seal"
         lines.append(_row("Chain", f"{many} ({reasons})"))
+    if r.seal_version == "2" and r.signature_checked and r.verdict != "not_signed":
+        hosted = "; it also names the receipt copy sent to the Platform" if r.sync_sealed else ""
+        lines.append(_row("Fields", "every stored field is committed with a salt kept on the sealing machine, "
+                                    "so one can be revealed later without the rest" + hosted))
+    for item in r.reveals:
+        check = item.get("check")
+        lines.append(_row("Revealed", f"{item.get('field')}: " + (
+            "matches its sealed commitment" if check == "matches"
+            else f"does not match what was sealed ({str(check).replace('_', ' ')})")))
     return lines
 
 
@@ -174,7 +186,7 @@ def _write_bundle(path: str, bundle: dict, as_json: bool) -> None:
 
 
 def run_verify_signature(*, receipt_ref: str | None, bundle_file: str | None, bundle_out: str | None,
-                         include_record: bool, as_json: bool, strict: bool) -> None:
+                         include_record: bool, as_json: bool, strict: bool, reveal: tuple[str, ...] = ()) -> None:
     """``openshard verify --signature``: check seals offline; run nothing."""
     from openshard.cli.main import _machine_envelope
     from openshard.history import receipt_verify as rv
@@ -194,14 +206,18 @@ def run_verify_signature(*, receipt_ref: str | None, bundle_file: str | None, bu
         if bundle_out:
             if not result.chain:
                 _fail(as_json, "not_signed", f"Receipt {result.receipt_id} has no seal; a bundle would prove nothing.")
-            bundle = rv.build_bundle(loc.runs_path, entry, index, include_record=include_record)
+            try:
+                bundle = rv.build_bundle(loc.runs_path, entry, index, include_record=include_record, reveal=reveal)
+            except rv.BundleError as exc:
+                _fail(as_json, "error", f"Could not reveal: {exc}")
             _write_bundle(bundle_out, bundle, as_json)
             bundle_note = _row("Bundle", (
                 f"written to {bundle_out}: {len(bundle['seals'])} seal line(s), {len(bundle['public_keys'])} "
                 "public key(s) and the receipt view as `openshard history --json` shows it, which includes the "
                 "task text, file names, repository and branch; "
                 + ("the full record is included" if include_record
-                   else "the full record is not included (add --include-record)")))
+                   else "the full record is not included (add --include-record)")
+                + (f"; revealed with their salts: {', '.join(dict.fromkeys(reveal))}" if reveal else "")))
     code = (rv.STRICT_EXIT_CODES if strict else rv.EXIT_CODES)[result.verdict]
     if as_json:
         click.echo(json.dumps(_machine_envelope(
@@ -233,11 +249,11 @@ def signature_mode(command):
     """
     @functools.wraps(command)
     def wrapped(*args, signature: bool = False, bundle_file: str | None = None, bundle_out: str | None = None,
-                include_record: bool = False, **kwargs):
-        if not (signature or bundle_file or bundle_out or include_record):
+                include_record: bool = False, reveal: tuple[str, ...] = (), **kwargs):
+        if not (signature or bundle_file or bundle_out or include_record or reveal):
             return command(*args, **kwargs)
         if not signature:
-            raise click.UsageError("--file, --bundle and --include-record need --signature")
+            raise click.UsageError("--file, --bundle, --include-record and --reveal need --signature")
         clashes = [flag for name, flag in _RUN_MODES if kwargs.get(name)]
         if clashes:
             raise click.UsageError(f"--signature runs nothing; it cannot be combined with {', '.join(clashes)}")
@@ -245,13 +261,19 @@ def signature_mode(command):
             raise click.UsageError("--file checks a bundle; it cannot be combined with --receipt or --bundle")
         if include_record and not bundle_out:
             raise click.UsageError("--include-record needs --bundle")
+        if reveal and not bundle_out:
+            raise click.UsageError("--reveal needs --bundle")
         return run_verify_signature(receipt_ref=kwargs.get("receipt_ref"), bundle_file=bundle_file,
                                     bundle_out=bundle_out, include_record=include_record,
-                                    as_json=bool(kwargs.get("as_json")), strict=bool(kwargs.get("strict")))
+                                    as_json=bool(kwargs.get("as_json")), strict=bool(kwargs.get("strict")),
+                                    reveal=tuple(reveal))
 
     wrapped.__dict__.pop("__click_params__", None)
     wrapped.__click_params__ = list(getattr(command, "__click_params__", []))  # type: ignore[attr-defined]
     for decorate in (
+        click.option("--reveal", "reveal", multiple=True, metavar="FIELD",
+                     help="With --bundle: disclose one stored field of the record, with its salt, so anyone "
+                          "can check it against the seal's commitment (seal v2). Repeatable."),
         click.option("--include-record", is_flag=True, default=False,
                      help="With --bundle: also put the full record, every field as stored, in the bundle."),
         click.option("--bundle", "bundle_out", default=None, metavar="OUT.json",

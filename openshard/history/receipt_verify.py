@@ -18,7 +18,9 @@ returns exactly one verdict under verdict rules v1, first match wins:
                          seal matches the content, every key is trusted.
 
 A verdict binds only what the Statement names: the record digest, the
-projection digest, the receipt and shard ids. ``sealed_at``, the seal
+projection digest, the receipt and shard ids, and for seal v2
+(docs/receipt-seal-v2.md) the record field commitments and, on a seal made
+by sync, the digest of the hosted receipt. ``sealed_at``, the seal
 reason and the Core version are signed but self-asserted. Nothing here says
 whether the agent's claims are true, whether checks passed, or whether
 capture was complete; and a coding agent running as the same OS user can
@@ -32,6 +34,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from openshard.history import receipt_keys as rk
+from openshard.history import receipt_seal_v2 as v2
 from openshard.history import receipt_signing as rs
 from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.shard_hash import verify_shard_hash
@@ -46,6 +49,8 @@ EXIT_CODES = {rs.VERDICT_VERIFIED: 0, rs.VERDICT_NOT_SIGNED: 0, rs.VERDICT_UNKNO
 STRICT_EXIT_CODES = {**EXIT_CODES, rs.VERDICT_NOT_SIGNED: 2, rs.VERDICT_UNKNOWN_KEY: 2}
 
 BOUND = ("record digest", "projection digest", "receipt id", "shard id")
+BOUND_V2 = ("record field commitments",)
+BOUND_SYNC = ("hosted receipt digest",)
 CLAIMED = ("sealed_at (local clock)", "seal reason", "Core version")
 
 
@@ -78,11 +83,17 @@ class SignatureVerdict:
     revoked_at: str | None = None
     chain: list[dict] = field(default_factory=list)
     chain_problems: list[str] = field(default_factory=list)
+    seal_version: str | None = None
+    sync_sealed: bool = False  # the latest seal names the hosted receipt (seal v2 ``sync:`` subject)
+    reveals: list[dict] = field(default_factory=list)  # [{"field", "check"}], bundles only
 
     def to_dict(self) -> dict:
         body = asdict(self)
         body["verdict_rules"] = rs.VERDICT_RULES_VERSION
-        body["bound_by_signature"] = list(BOUND) if self.signature_checked else []
+        bound = list(BOUND)
+        if self.seal_version == v2.SEAL_VERSION:
+            bound += list(BOUND_V2) + (list(BOUND_SYNC) if self.sync_sealed else [])
+        body["bound_by_signature"] = bound if self.signature_checked else []
         body["claimed_not_proven"] = list(CLAIMED) if self.signature_checked else []
         body["not_proven"] = ["agent_claims", "verification_outcome", "capture_completeness"]
         return body
@@ -182,6 +193,8 @@ def evaluate(
     rid = receipt_id or rs._statement_receipt_id(statement)
     out.sealed_record_sha256 = rs._subject_digest(statement, f"record:{rid}")
     out.sealed_projection_sha256 = rs._subject_digest(statement, f"projection:{rid}")
+    out.seal_version = str(predicate.get("seal_version")) if predicate.get("seal_version") else None
+    out.sync_sealed = rs._subject_digest(statement, v2.sync_subject(str(rid))) is not None
     out.signature_checked = all(c.verdict != rs.VERDICT_KEY_UNAVAILABLE for c in checks)
     _decide(out, checks, latest_is_seal=latest is seals[-1], latest=latest, ring=ring)
     return out
@@ -289,12 +302,15 @@ def attach_signature_status(rows: list[dict], runs_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_bundle(runs_path: Path, stored_entry: dict, index: int, *, include_record: bool) -> dict:
+def build_bundle(runs_path: Path, stored_entry: dict, index: int, *, include_record: bool,
+                 reveal: tuple[str, ...] = ()) -> dict:
     """A file a third party can check offline: this Receipt's sidecar lines, the
     public keys of its seals and the projection (the ``history --json`` row).
     The projection is sealed whole, so it cannot be trimmed: it carries the
     task text, file names, repository and branch. The full record only with
-    *include_record*."""
+    *include_record*; one stored field, with its salt, for each name in
+    *reveal* (seal v2), checked against the latest seal's commitments.
+    Raises :class:`BundleError` when a field cannot be revealed."""
     history_dir = Path(runs_path).parent
     receipt_id = stored_receipt_id(stored_entry)
     if receipt_id is None:
@@ -315,7 +331,34 @@ def build_bundle(runs_path: Path, stored_entry: dict, index: int, *, include_rec
     }
     if include_record:
         bundle["record"] = stored_entry
+    if reveal:
+        latest = lines[-1] if lines else None
+        decoded = rs.envelope_payload(latest) if latest is not None and rs.is_envelope(latest) else None
+        if decoded is None:
+            raise BundleError("the latest change to this receipt is not sealed; nothing can be revealed")
+        try:
+            bundle["reveals"] = [v2.build_reveal(history_dir, statement_bytes=decoded[0], receipt_id=receipt_id,
+                                                 entry=stored_entry, name=name) for name in dict.fromkeys(reveal)]
+        except v2.RevealError as exc:
+            raise BundleError(str(exc)) from exc
     return bundle
+
+
+def _check_reveals(result: SignatureVerdict, reveals: object, seals: list[dict]) -> None:
+    """Check a bundle's reveals against its latest seal. A reveal that does
+    not match what was sealed makes the bundle ``invalid``; reveals are never
+    checked against a seal whose signature was not."""
+    if not isinstance(reveals, list) or not reveals:
+        return
+    latest = seals[-1] if seals else None
+    decoded = rs.envelope_payload(latest) if latest is not None and rs.is_envelope(latest) else None
+    for item in reveals:
+        name = item.get("field") if isinstance(item, dict) else None
+        check = ("seal_not_checked" if decoded is None or not result.signature_checked
+                 else v2.check_reveal(item, statement=decoded[1], statement_bytes=decoded[0]))
+        result.reveals.append({"field": name if isinstance(name, str) else None, "check": check})
+    if result.verdict != rs.VERDICT_INVALID and any(r["check"] != "matches" for r in result.reveals):
+        result.verdict, result.reason = rs.VERDICT_INVALID, "reveal_mismatch"
 
 
 def verify_bundle(bundle: object) -> SignatureVerdict:
@@ -341,6 +384,7 @@ def verify_bundle(bundle: object) -> SignatureVerdict:
     inner = {projection.get("receipt_id"), stored_receipt_id(record) if isinstance(record, dict) else receipt_id}
     if inner - {receipt_id, None}:
         result.verdict, result.reason = rs.VERDICT_INVALID, "receipt_id_mismatch"
+    _check_reveals(result, bundle.get("reveals"), [s for s in seals if isinstance(s, dict)])
     return result
 
 

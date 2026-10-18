@@ -24,7 +24,9 @@ while it was off) is not sealed by a later amendment.
 What is never done
 ------------------
 * ``runs.jsonl`` is never touched: seals live in the sidecar
-  ``.openshard/receipt-signatures.jsonl`` and are not synced.
+  ``.openshard/receipt-signatures.jsonl``. Only a seal made by sync itself
+  (:func:`seal_for_sync`, seal v2, docs/receipt-seal-v2.md) is sent, beside
+  the receipt it covers; the sidecar is never read by sync code.
 * Sealing never blocks or fails a write. When it cannot sign it appends a
   "not signed" line with a reason (or, when the sidecar itself is not
   writable, a line in the OpenShard home) and returns.
@@ -45,6 +47,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
+from openshard.history import receipt_seal_v2 as v2
 from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.receipt_keys import (
     KeyUnavailableError,
@@ -75,7 +78,10 @@ COVERAGE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("record_content",),
         ("agent_claims", "verification_outcome", "capture_completeness", "sealed_at"),
     ),
+    v2.SEAL_VERSION: (v2.COVERS, v2.DOES_NOT_COVER),
 }
+# predicateType -> the one seal_version it may carry.
+PREDICATE_VERSIONS = {PREDICATE_TYPE: SEAL_VERSION, v2.PREDICATE_TYPE: v2.SEAL_VERSION}
 
 SEAL_CREATED = "created"
 SEAL_SESSION_ENDED = "session_ended"
@@ -244,9 +250,14 @@ def build_statement(
     }
 
 
+def statement_bytes(statement: dict) -> bytes:
+    """The Statement bytes a seal signs (DSSE signs them as they are; nothing re-canonicalises them)."""
+    return json.dumps(statement, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 def sign_statement(statement: dict, key) -> dict:
     """DSSE envelope over the Statement bytes as serialised here."""
-    body = json.dumps(statement, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    body = statement_bytes(statement)
     signature = key.sign(pae(PAYLOAD_TYPE, body))
     return {
         "payloadType": PAYLOAD_TYPE,
@@ -316,13 +327,16 @@ def _signature_ok(public_raw: bytes, signature_b64: object, message: bytes) -> b
 
 def _statement_problem(statement: dict, receipt_id: str | None) -> str | None:
     predicate = statement.get("predicate")
-    if statement.get("_type") != STATEMENT_TYPE or statement.get("predicateType") != PREDICATE_TYPE:
+    version = PREDICATE_VERSIONS.get(str(statement.get("predicateType")))
+    if statement.get("_type") != STATEMENT_TYPE or version is None:
         return "unknown_statement_type"
-    if not isinstance(predicate, dict) or predicate.get("seal_version") not in COVERAGE:
+    if not isinstance(predicate, dict) or predicate.get("seal_version") != version:
         return "unknown_seal_version"
     rid = _statement_receipt_id(statement)
     if rid is None or (receipt_id is not None and rid != receipt_id):
         return "receipt_id_mismatch"
+    if version == v2.SEAL_VERSION and _subject_digest(statement, v2.fields_subject(rid)) is None:
+        return "malformed_statement"
     return None
 
 
@@ -334,12 +348,15 @@ def verify_envelope(
     receipt_id: str | None = None,
     record_sha256: str | None = None,
     projection_sha256: str | None = None,
+    sync_sha256: str | None = None,
 ) -> SignatureCheck:
     """Check one envelope under verdict rules v1. Never raises.
 
-    ``record_sha256`` / ``projection_sha256`` are the digests of the current
-    content; a digest left ``None`` is not checked (a bundle without the
-    record). ``public_keys`` maps keyid -> raw public key.
+    ``record_sha256`` / ``projection_sha256`` / ``sync_sha256`` are the
+    digests of the current content; a digest left ``None`` is not checked (a
+    bundle without the record). ``sync_sha256`` is the JCS digest of a hosted
+    receipt (seal v2 ``sync:`` subject); a seal without that subject never
+    matches it. ``public_keys`` maps keyid -> raw public key.
     """
     decoded = envelope_payload(envelope) if is_envelope(envelope) else None
     if decoded is None:
@@ -364,6 +381,8 @@ def verify_envelope(
         return SignatureCheck(VERDICT_INVALID, "record_changed", keyid, statement)
     if projection_sha256 is not None and _subject_digest(statement, f"projection:{rid}") != projection_sha256:
         return SignatureCheck(VERDICT_INVALID, "projection_changed", keyid, statement)
+    if sync_sha256 is not None and _subject_digest(statement, v2.sync_subject(str(rid))) != sync_sha256:
+        return SignatureCheck(VERDICT_INVALID, "synced_receipt_changed", keyid, statement)
     if keyid not in trusted_keyids:
         return SignatureCheck(VERDICT_UNKNOWN_KEY, "key_not_trusted", keyid, statement)
     return SignatureCheck(VERDICT_VERIFIED, "ok", keyid, statement)
@@ -564,22 +583,89 @@ def _seal_one(history_dir: Path, runs_path: Path, receipt_id: str, *, amendment:
             and _subject_digest(last[1], f"projection:{receipt_id}") == projection_sha
         ):
             return SealOutcome("skipped", "already_sealed", receipt_id)
-        try:
-            key = load_or_create_key()
-        except KeyUnavailableError as exc:
-            return _append_not_signed(history_dir, receipt_id, exc.reason)
-        statement = build_statement(
-            receipt_id=receipt_id,
-            shard_id=entry.get("shard_id") if isinstance(entry.get("shard_id"), str) else None,
-            record_sha256=record_sha,
-            projection_sha256=projection_sha,
-            seal_reason=SEAL_AMENDED if previous else point,
-            previous_seal_digest=seal_digest(previous[-1]) if previous else None,
-            core_version=_core_version(),
-        )
-        envelope = sign_statement(statement, key)
-        _append_line(path, envelope)
-    return SealOutcome("sealed", statement["predicate"]["seal_reason"], receipt_id, envelope)
+        return _write_seal(history_dir, receipt_id, entry, record_sha, projection_sha,
+                           reason=SEAL_AMENDED if previous else point, previous=previous)
+
+
+def _write_seal(history_dir: Path, receipt_id: str, entry: dict, record_sha: str, projection_sha: str, *,
+                reason: str, previous: list[dict], sync_sha256: str | None = None) -> SealOutcome:
+    """Sign and append one v2 seal (docs/receipt-seal-v2.md); the caller holds the sidecar lock.
+
+    The salts line is written first, so a seal never exists without the
+    salts its field commitments need for a later reveal.
+    """
+    try:
+        key = load_or_create_key()
+    except KeyUnavailableError as exc:
+        return _append_not_signed(history_dir, receipt_id, exc.reason)
+    salts, commitments, uncommitted = v2.commit_fields(receipt_id, entry)
+    statement = v2.build_statement(
+        receipt_id=receipt_id,
+        shard_id=entry.get("shard_id") if isinstance(entry.get("shard_id"), str) else None,
+        record_sha256=record_sha,
+        projection_sha256=projection_sha,
+        fields_sha256=v2.fields_digest(commitments),
+        uncommitted=uncommitted,
+        seal_reason=reason,
+        previous_seal_digest=seal_digest(previous[-1]) if previous else None,
+        core_version=_core_version(),
+        sealed_at=datetime.datetime.now(datetime.UTC).isoformat(),
+        sync_sha256=sync_sha256,
+    )
+    v2.append_salts(history_dir, receipt_id=receipt_id,
+                    statement_sha256=hashlib.sha256(statement_bytes(statement)).hexdigest(),
+                    salts=salts, commitments=commitments)
+    envelope = sign_statement(statement, key)
+    _append_line(sidecar_path(history_dir), envelope)
+    return SealOutcome("sealed", reason, receipt_id, envelope)
+
+
+def _seal_for_sync(history_dir: Path, receipt_id: str, record_hash: str, sync_sha256: str) -> SealOutcome:
+    from openshard.history.jsonl_store import history_file_lock
+    from openshard.history.store import load_history
+
+    with history_file_lock(sidecar_path(history_dir), timeout=10.0):
+        found = _find(load_history(history_dir / "runs.jsonl", coerce=False), receipt_id)
+        if found is None:
+            return SealOutcome("skipped", "record_not_found", receipt_id)
+        index, entry = found
+        if entry.get("content_hash") != record_hash:
+            return SealOutcome("skipped", "record_changed_since_discovery", receipt_id)
+        lines = read_sidecar(history_dir)
+        previous = seals_for(lines, receipt_id)
+        if not previous:
+            return SealOutcome("skipped", "never_sealed", receipt_id)
+        if not is_envelope(_latest_line(lines, receipt_id)):
+            return SealOutcome("skipped", "latest_change_not_signed", receipt_id)
+        if verify_shard_hash(entry)["status"] != "valid":
+            return _append_not_signed(history_dir, receipt_id, "content_hash_mismatch")
+        record_sha = record_digest(entry)
+        projection_sha = projection_digest(receipt_projection(entry, index, _attestations(history_dir)))
+        last = envelope_payload(previous[-1])
+        if last is not None and all(
+            _subject_digest(last[1], name) == digest for name, digest in (
+                (f"record:{receipt_id}", record_sha), (f"projection:{receipt_id}", projection_sha),
+                (v2.sync_subject(receipt_id), sync_sha256))):
+            return SealOutcome("skipped", "already_sealed", receipt_id, previous[-1])
+        return _write_seal(history_dir, receipt_id, entry, record_sha, projection_sha,
+                           reason=v2.SEAL_SYNCED, previous=previous, sync_sha256=sync_sha256)
+
+
+def seal_for_sync(history_dir: Path, receipt_id: str, *, record_hash: str, sync_sha256: str) -> SealOutcome:
+    """The seal that covers the exact receipt sync is about to send (seal v2).
+
+    *sync_sha256* is ``receipt_seal_v2.sync_digest`` of that receipt and
+    *record_hash* the stored ``content_hash`` it was built from. Returns the
+    latest seal when it already names this receipt, else appends a chained
+    ``synced`` seal. A Receipt that was never sealed, whose latest change was
+    not signed, or that changed since sync read it gets no seal
+    (``envelope`` is ``None``): it is sent unsigned, never sealed after the
+    fact. Never raises.
+    """
+    history_dir = Path(history_dir)
+    if not signing_enabled(history_dir):
+        return SealOutcome("skipped", "signing_disabled", receipt_id)
+    return _guarded(history_dir, receipt_id, partial(_seal_for_sync, history_dir, receipt_id, record_hash, sync_sha256))
 
 
 def _guarded(history_dir: Path, receipt_id: str, attempt: Callable[[], SealOutcome]) -> SealOutcome:
@@ -700,6 +786,7 @@ _INVALID_WORDS = {
     "chain_broken": "seal chain broken",
     "key_revoked": "key revoked before sealing",
     "earlier_seal_bad_signature": "an earlier seal does not verify",
+    "synced_receipt_changed": "hosted receipt differs from the sealed copy",
 }
 
 
@@ -722,10 +809,12 @@ __all__ = [
     "receipt_projection",
     "reseal_after_attestation",
     "seal_after_write",
+    "seal_for_sync",
     "seal_point",
     "seals_for",
     "sign_statement",
     "signature_label",
+    "statement_bytes",
     "signature_line",
     "signature_status",
     "signing_enabled",

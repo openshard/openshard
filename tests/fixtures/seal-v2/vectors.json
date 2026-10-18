@@ -1,0 +1,185 @@
+{
+  "description": "Seal v2 cross-language vectors (docs/receipt-seal-v2.md). Core and the Platform both test against this file; regenerate only with a design change.",
+  "jcs": [
+    {
+      "name": "rfc8785_section_3_2_2",
+      "input_json": "{\"numbers\":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],\"string\":\"\\u20ac$\\u000F\\u000aA'\\u0042\\u0022\\u005c\\\\\\\"\\/\",\"literals\":[null,true,false]}",
+      "canonical": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"\u20ac$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}",
+      "sha256": "2d5e01a318d0f0879ab568c4be289c8b1f64ef8921a53c6277d5e069978baacb"
+    },
+    {
+      "name": "rfc8785_section_3_2_3_key_order",
+      "input_json": "{\"\\u20ac\":\"Euro Sign\",\"\\r\":\"Carriage Return\",\"\\ufb33\":\"Hebrew Letter Dalet With Dagesh\",\"1\":\"One\",\"\\ud83d\\ude00\":\"Emoji: Grinning Face\",\"\\u0080\":\"Control\",\"\\u00f6\":\"Latin Small Letter O With Diaeresis\"}",
+      "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u0080\":\"Control\",\"\u00f6\":\"Latin Small Letter O With Diaeresis\",\"\u20ac\":\"Euro Sign\",\"\ud83d\ude00\":\"Emoji: Grinning Face\",\"\ufb33\":\"Hebrew Letter Dalet With Dagesh\"}",
+      "sha256": "5e321556d22018a9656991a9e94f77ec175fa193e52a2429d312f8419ec8b08c"
+    },
+    {
+      "name": "integer_like_keys_sort_as_strings",
+      "input_json": "{\"10\":\"ten\",\"2\":\"two\",\"1\":\"one\",\"a\":\"letter\",\"01\":\"zero-one\"}",
+      "canonical": "{\"01\":\"zero-one\",\"1\":\"one\",\"10\":\"ten\",\"2\":\"two\",\"a\":\"letter\"}",
+      "sha256": "557318e7a639e6a5de4892e86cdc65f4eff65feb7701dbfa59435b70766a77cd"
+    },
+    {
+      "name": "numbers",
+      "input_json": "[0,-0,1,-1,1.0,1.5,-1.5,0.1,1e21,1e20,0.000001,1e-7,5e-324,1.7976931348623157e308,9007199254740991,9007199254740992,123456789012345678901234567890,1e16,0.00000123]",
+      "canonical": "[0,0,1,-1,1,1.5,-1.5,0.1,1e+21,100000000000000000000,0.000001,1e-7,5e-324,1.7976931348623157e+308,9007199254740991,9007199254740992,1.2345678901234568e+29,10000000000000000,0.00000123]",
+      "sha256": "243c6b629940d0b6f25863919ea970cd1940ab2251e4694f201b4eb539c476c7"
+    },
+    {
+      "name": "strings",
+      "input_json": "[\"\", \"plain\", \"quote\\\" backslash\\\\ slash/\", \"\\b\\f\\n\\r\\t\", \"\\u0000\\u001f\\u007f\", \"\\u2028\\u2029\", \"caf\\u00e9 \\ud83d\\ude00\"]",
+      "canonical": "[\"\",\"plain\",\"quote\\\" backslash\\\\ slash/\",\"\\b\\f\\n\\r\\t\",\"\\u0000\\u001f\u007f\",\"\u2028\u2029\",\"caf\u00e9 \ud83d\ude00\"]",
+      "sha256": "e6784fb68628c7973a9ae32d4c64fa1b70d98bdea330dd9d1693dc5290f6113f"
+    },
+    {
+      "name": "nested_empty",
+      "input_json": "{\"b\":[],\"a\":{},\"c\":\"\",\"d\":[{},[]],\"e\":{\"z\":null,\"y\":[true,false]}}",
+      "canonical": "{\"a\":{},\"b\":[],\"c\":\"\",\"d\":[{},[]],\"e\":{\"y\":[true,false],\"z\":null}}",
+      "sha256": "25509c0993fb1afe926dfe2a95b7e097c6b07f71942e763c40180c81e98b6b18"
+    }
+  ],
+  "hosted_seal": {
+    "description": "A seal v2 made by sync over `receipt`, signed with a fixed test key (Ed25519 signatures are deterministic). The Platform must reach the same verdicts.",
+    "receipt": {
+      "shard_id": "shard-20261018-0001",
+      "receipt_id": "rcpt_0123456789abcdef0123456789abcdef",
+      "task_id": null,
+      "capture_completeness": {
+        "depth": "unknown",
+        "status": "unknown",
+        "reasons": [],
+        "derived": true
+      },
+      "integrity": "Checksum matches",
+      "run_id": "2026-10-18T10:00:00Z",
+      "attempt_number": null,
+      "created_at": "2026-10-18T10:00:00Z",
+      "task_short": "fix the parser",
+      "task_full": "fix the parser",
+      "task_title": "Fix parser",
+      "agent": "OpenShard",
+      "origin": "unknown",
+      "capture_depth": "unknown",
+      "model": "Not recorded",
+      "model_stages": [],
+      "strategy": "Not recorded",
+      "risk": "Not recorded",
+      "sandbox": "Not recorded",
+      "files_changed": 0,
+      "files": [],
+      "changes": null,
+      "files_excluded": [],
+      "diff_added": null,
+      "diff_removed": null,
+      "checks": "Not recorded",
+      "status": "Not recorded",
+      "verification_status": null,
+      "verification_reason": null,
+      "verification_returncode": null,
+      "verification_duration_seconds": null,
+      "approval": "Not recorded",
+      "cost": "Not recorded",
+      "result": "Not recorded",
+      "repo": null,
+      "branch": null,
+      "git_state": null,
+      "duration_seconds": null,
+      "context_quality": null,
+      "findings": [],
+      "task_completion": null,
+      "cost_usd": null,
+      "cost_provenance": null,
+      "cost_is_estimate": false,
+      "tokens_input": null,
+      "tokens_output": null,
+      "tokens_cache_read": null,
+      "tokens_cache_creation": null,
+      "tokens_provenance": null,
+      "owner": null,
+      "repo_identity": null,
+      "verification": {
+        "version": 1,
+        "status": "unknown",
+        "source": null,
+        "observation_mode": "none",
+        "checks_attempted": null,
+        "checks_passed": null,
+        "checks_failed": null,
+        "checks_skipped": null,
+        "checks": [],
+        "started_at": null,
+        "completed_at": null,
+        "duration_seconds": null,
+        "exit_code": null,
+        "artifact_sha": null,
+        "reason": null,
+        "complete": true,
+        "incomplete_reasons": [],
+        "derived": true
+      },
+      "policy_decisions": null,
+      "permissions": null,
+      "approval_detail": null,
+      "sandbox_detail": null,
+      "execution_loop": null,
+      "base_commit": null,
+      "provider": null,
+      "surface": null,
+      "tokens_not_recorded_reason": null,
+      "cost_not_recorded_reason": null,
+      "commit": null,
+      "pr_url": null,
+      "content_hash": "sha256:edd080967795e0b832daf40f3dd657327737aa2e66e46a5e0ddc1178f7b59d43",
+      "session": null,
+      "routing": null,
+      "retry": null,
+      "agent_budgets": null,
+      "adaptive_routing": null,
+      "supervisor_routing": null,
+      "capability_snapshot": null,
+      "organisation_policy": null
+    },
+    "sync_sha256": "7ae5089bf54d66b2f5ca2b1a2429466345aaba8ce075926770db2f105e441c57",
+    "seal": {
+      "envelope": {
+        "payloadType": "application/vnd.in-toto+json",
+        "payload": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJwcmVkaWNhdGUiOnsiY2Fub25pY2FsaXphdGlvbiI6Imh0dHBzOi8vd3d3LnJmYy1lZGl0b3Iub3JnL3JmYy9yZmM4Nzg1IiwiY29yZV92ZXJzaW9uIjoiMC41LjAiLCJjb3ZlcnMiOlsicmVjb3JkX2NvbnRlbnQiLCJyZWNvcmRfZmllbGRzIiwic3luY2VkX3JlY2VpcHQiXSwiZG9lc19ub3RfY292ZXIiOlsiYWdlbnRfY2xhaW1zIiwidmVyaWZpY2F0aW9uX291dGNvbWUiLCJjYXB0dXJlX2NvbXBsZXRlbmVzcyIsInNlYWxlZF9hdCJdLCJwcmV2aW91c19yZWNvcmRfZGlnZXN0IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsInJlY2VpcHRfaWQiOiJyY3B0XzAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIiwic2VhbF9yZWFzb24iOiJzeW5jZWQiLCJzZWFsX3ZlcnNpb24iOiIyIiwic2VhbGVkX2F0IjoiMjAyNi0xMC0xOFQxMDowNTowMCswMDowMCIsInNoYXJkX2lkIjoic2hhcmQtMjAyNjEwMTgtMDAwMSIsInVuY29tbWl0dGVkX2ZpZWxkcyI6W119LCJwcmVkaWNhdGVUeXBlIjoiaHR0cHM6Ly9naXRodWIuY29tL29wZW5zaGFyZC9vcGVuc2hhcmQvYmxvYi9tYWluL2RvY3MvcmVjZWlwdC1zZWFsLXYyLm1kI3NlYWwtdjIiLCJzdWJqZWN0IjpbeyJkaWdlc3QiOnsic2hhMjU2IjoiZWRkMDgwOTY3Nzk1ZTBiODMyZGFmNDBmM2RkNjU3MzI3NzM3YWEyZTY2ZTQ2YTVlMGRkYzExNzhmN2I1OWQ0MyJ9LCJuYW1lIjoicmVjb3JkOnJjcHRfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifSx7ImRpZ2VzdCI6eyJzaGEyNTYiOiIwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIn0sIm5hbWUiOiJwcm9qZWN0aW9uOnJjcHRfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifSx7ImRpZ2VzdCI6eyJzaGEyNTYiOiJlYzMzOThiYTliNWVkM2I2ZWIzNjhlNDVjMWVkMGY3MWM3M2YwYjZiZTczMWQxNmI5ZGY4MmM1YmFjMzAwYzNjIn0sIm5hbWUiOiJyZWNvcmRfZmllbGRzOnJjcHRfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifSx7ImRpZ2VzdCI6eyJzaGEyNTYiOiI3YWU1MDg5YmY1NGQ2NmIyZjVjYTJiMWEyNDI5NDY2MzQ1YWFiYThjZTA3NTkyNjc3MGRiMmYxMDVlNDQxYzU3In0sIm5hbWUiOiJzeW5jOnJjcHRfMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifV19",
+        "signatures": [
+          {
+            "keyid": "ed25519:4f39f0c5405e31a7673a346c21373ffd7dbdacc8a17b297eed2b9825e4b7cd54",
+            "sig": "2qIarxg9ZM12iCJaesUfuxEcwffpX1PztwLn6lANSCZvLdvO6ffBzFF62zFva0r1drVZ5S/Rt4XdrpytQUW4Dg=="
+          }
+        ]
+      },
+      "public_key": {
+        "algorithm": "ed25519",
+        "keyid": "ed25519:4f39f0c5405e31a7673a346c21373ffd7dbdacc8a17b297eed2b9825e4b7cd54",
+        "public_key": "xVMTsphtOb4Q5/S5iuL81rAjd097zP5UgOhnqsDbIQQ="
+      }
+    },
+    "expected": {
+      "registered_key": "verified",
+      "unregistered_key": "signed_unknown_key",
+      "receipt_changed": "invalid",
+      "signature_changed": "invalid"
+    },
+    "reveal": {
+      "_type": "https://github.com/openshard/openshard/blob/main/docs/receipt-seal-v2.md#reveal-v1",
+      "receipt_id": "rcpt_0123456789abcdef0123456789abcdef",
+      "statement_sha256": "d75e7e387c38d509e268e3fd0afae20fda718a8bbf5f41dd7bf594434c5d498d",
+      "field": "task",
+      "value": "fix the parser",
+      "salt": "-DovBY-dhc9ojIa5eVLT4ch69Yw9AgPqhl2dhFgt-DI",
+      "commitments": {
+        "cost_usd": "4d229e354d209803be9bbdd8c4ae6ab7e42cd062693c65e282cbd22827496a8d",
+        "files": "7b7ee0ed440bf55113a27a1728455d92c24cf4c3adfbb0ced05572fe284309ec",
+        "receipt_id": "4afdb98a2c8ef7c861bc526eb95d78ec4d091fc7e4001952c6810d6bcadc37b7",
+        "shard_id": "1cad1805614dee61c3de0ca9c6858d0cf696f5ec8c9d5a735cd993cb33c088c4",
+        "task": "ea8f3c5e8147eb26260d1dea0e51372fc085977bb6e0c28be01d56ccb7f3924f",
+        "timestamp": "78acd2498d5299f6c2b4b8f6393f3f44335f56b89c0ba5f89b753482a639b4d6",
+        "tokens_input": "10f16c266c0eb5ec7f37378974d9499658220efe166cf1698d388e215568a04f",
+        "workflow": "69a5bab674130c81e00f3d3e29dd9eee001e8cef8f1bcc54bbea2b244efe4ad9"
+      }
+    }
+  }
+}
