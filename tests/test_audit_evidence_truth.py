@@ -184,7 +184,9 @@ class TestScenarioSurfacesAgree:
         assert "1 command(s) exited non-zero" in entry["summary"]
         out = render_compact_shard_receipt(build_shard_receipt(entry))
         assert "Shell × 2 (1 failed)" in out
-        assert "Shell: rm -rf /  (exit 1; agent-reported; policy class: blocked)" in out
+        # The classifier says whether OpenShard would re-run it; nothing was blocked.
+        assert "Shell: rm -rf /  (exit 1; agent-reported; outside OpenShard's re-run rules (not enforced))" in out
+        assert "policy class" not in out and "blocked" not in out
 
     def test_prompt_excerpt_redacts_email_and_jwt(self, audit_repo):
         task = _runs(audit_repo)[-1]["task"]
@@ -555,3 +557,23 @@ class TestHistoricalReceiptIntegrityIsNeverManufactured:
         # Reading never wrote a hash back into the stored record.
         stored = json.loads((repo / ".openshard" / "runs.jsonl").read_text(encoding="utf-8"))
         assert "content_hash" not in stored
+
+
+@pytest.mark.parametrize(("safety", "tag"), [
+    ("blocked", "outside OpenShard's re-run rules (not enforced)"),
+    ("needs_approval", "re-run would need approval (not enforced)"),
+    ("safe", None),
+])
+def test_failed_activity_re_run_class_never_reads_as_enforcement(safety, tag):
+    from types import SimpleNamespace
+
+    from openshard.history.event import EVENT_TOOL_INVOKED
+    from openshard.history.receipt_render import failed_activity_rows
+
+    ev = SimpleNamespace(
+        event_type=EVENT_TOOL_INVOKED, status="failed", action="Shell: x | y", target=None,
+        evidence="agent_reported", metadata={"tool": "Shell", "exit_code": 1, "command_safety": safety},
+    )
+    (row,) = failed_activity_rows(SimpleNamespace(events=[ev]))
+    assert row.strip() == ("Shell: x | y  (exit 1; agent-reported" + (f"; {tag})" if tag else ")"))
+    assert "policy class" not in row

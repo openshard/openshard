@@ -107,6 +107,34 @@ class TestAfterOpenShardReRun:
         assert stored["verification_attempted"] is False and "post_session_verification" not in stored
 
 
+ATTEMPTED = {**HOOKS_FULL, "verification_attempted": True, "verification_passed": None}
+
+
+class TestCaptureAndChecksRowsBesideAReRun:
+    """The Capture and Checks rows never contradict an OpenShard re-run on the Verified row."""
+
+    def test_without_rerun_capture_still_says_not_verified(self, tmp_path: Path):
+        repo = _repo(tmp_path, [ATTEMPTED])
+        for args in (["last"], ["last", "--full"]):
+            out = _ok(_invoke(args, repo))
+            assert "OpenShard did not execute or verify this run" in out
+            assert "Agent's run: attempted, outcome not captured" in out
+            assert "Attempted (unverified)" not in out
+
+    def test_rerun_capture_says_not_executed_and_checks_names_the_agent(self, tmp_path: Path):
+        repo = _repo(tmp_path, [ATTEMPTED])
+        _attest(repo, ATTEMPTED, "passed")
+        for args in (["last"], ["last", "--full"]):
+            out = _ok(_invoke(args, repo))
+            assert "Passed (OpenShard re-ran the check(s): 1/1 passed @ 59f31c55f399)" in out
+            assert "OpenShard did not execute this run" in out
+            assert "did not execute or verify" not in out
+            assert "Agent's run: attempted, outcome not captured" in out
+            assert "Attempted (unverified)" not in out
+        # Stored/synced vocabulary is unchanged; only the rendered row changed.
+        assert _receipt(repo).checks_display == "Attempted (unverified)"
+
+
 class TestLabelHelpers:
     def test_nothing_resolves_without_an_observed_outcome(self):
         truth = interpret_evidence(None)

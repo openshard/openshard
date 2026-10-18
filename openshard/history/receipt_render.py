@@ -42,6 +42,7 @@ from openshard.history.shard_contract import (
 from openshard.history.timeline import normalize_timeline
 from openshard.history.usage_evidence import usage_line
 from openshard.history.verification_truth import (
+    BASIS_POST_SESSION,
     INTEGRITY_NOTE,
     interpret_receipt,
     turn_status_label,
@@ -148,18 +149,21 @@ def _tool_failure_counts(receipt: ShardReceipt) -> dict[str, int]:
 
 _MAX_FAILED_ACTIVITY_ROWS = 5
 
+# The classifier's class says whether ``openshard verify`` would re-run the
+# command; on an observed agent's run nothing was blocked or approved.
 _COMMAND_SAFETY_TAGS: dict[str, str] = {
-    "blocked": "policy class: blocked",
-    "needs_approval": "policy class: needs approval",
+    "blocked": "outside OpenShard's re-run rules (not enforced)",
+    "needs_approval": "re-run would need approval (not enforced)",
 }
 
 def failed_activity_rows(receipt: ShardReceipt) -> list[str]:
-    """Human rows for failed tool calls: what ran, how it ended, and its policy class.
+    """Human rows for failed tool calls: what ran, how it ended, and its re-run class.
 
     The action text is the scrubbed, capped label the capture stored (never
-    raw output); the exit code and the policy class come from the event's
-    metadata. Activity failures are not verification: a failed ``rm`` is
-    listed here, never counted as a check.
+    raw output); the exit code and the re-run class come from the event's
+    metadata. The class is advisory: OpenShard only observed the command.
+    Activity failures are not verification: a failed ``rm`` is listed here,
+    never counted as a check.
     """
     from openshard.history.event import tool_identity
 
@@ -239,7 +243,8 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
 
     ``Capture`` answers "how deep could OpenShard see?" (the unchanged
     capture depth; an externally observed run always says OpenShard did not
-    execute or verify it). ``Gaps`` answers "is evidence known lost?":
+    execute it, and did not verify it unless an OpenShard re-run did).
+    ``Gaps`` answers "is evidence known lost?":
     ``None known``, the loss itself (``1 queued event could not be decoded``),
     or ``Unknown`` for records written before loss tracking. The row is
     shown whenever the answer is not the default expectation, so a receipt
@@ -251,7 +256,7 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
     if receipt.shard is not None and receipt.shard.origin == ORIGIN_EXTERNAL_OBSERVED:
         rows.append(_row(
             "Capture",
-            f"{receipt.shard.capture_depth} {_EM} OpenShard did not execute or verify this run",
+            f"{receipt.shard.capture_depth} {_EM} {_external_capture_text(receipt)}",
         ))
         rows.append(_row("Gaps", gaps_display(block)))
     elif receipt.shard is not None and receipt.shard.origin == ORIGIN_HISTORICAL_IMPORT:
@@ -260,6 +265,21 @@ def _capture_rows(receipt: ShardReceipt) -> list[str]:
     elif status == COMPLETENESS_INCOMPLETE:
         rows.append(_row("Gaps", gaps_display(block)))
     return rows
+
+def _external_capture_text(receipt: ShardReceipt) -> str:
+    """What OpenShard did with an observed run; a later OpenShard re-run is stated on the Verified row."""
+    if interpret_receipt(receipt).basis == BASIS_POST_SESSION:
+        return "OpenShard did not execute this run"
+    return "OpenShard did not execute or verify this run"
+
+_AGENT_ATTEMPTED_TEXT = "Agent's run: attempted, outcome not captured"
+
+def _session_checks_label(receipt: ShardReceipt) -> str:
+    """``checks_label``, saying it is the agent's own run when OpenShard only observed the session."""
+    label = checks_label(receipt)
+    observed = receipt.shard is not None and receipt.shard.origin in (
+        ORIGIN_EXTERNAL_OBSERVED, ORIGIN_HISTORICAL_IMPORT)
+    return _AGENT_ATTEMPTED_TEXT if observed and label == "Attempted (unverified)" else label
 
 _UNCONTROLLED_CONTROL_TEXT = (
     f"None {_EM} OpenShard only observed this agent; it could not block, approve or sandbox its actions"
@@ -275,7 +295,7 @@ def _capture_rows_full(receipt: ShardReceipt) -> list[str]:
     depth = str(block.get("depth") or (receipt.shard.capture_depth if receipt.shard else "unknown"))
     origin = receipt.shard.origin if receipt.shard is not None else None
     if origin == ORIGIN_EXTERNAL_OBSERVED:
-        depth_text = f"{depth} {_EM} OpenShard did not execute or verify this run"
+        depth_text = f"{depth} {_EM} {_external_capture_text(receipt)}"
     elif origin == ORIGIN_HISTORICAL_IMPORT:
         depth_text = f"{depth} {_EM} {_HISTORICAL_CAPTURE_TEXT}"
     else:
@@ -820,7 +840,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
             lines.extend(_failed_rows)
     lines += watch_rows(receipt)
     lines += [
-        _row("Checks", checks_label(receipt)),
+        _row("Checks", _session_checks_label(receipt)),
         _row("Verified", verified_label(receipt)),
         _row("Integrity", receipt.integrity),
         _row("Risk", receipt.risk),
@@ -984,7 +1004,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         if not _has_risk_ev and receipt.risk and receipt.risk not in ("Not recorded", "-", ""):
             lines.append(f"{_INDENT}  {_chk} risk classified: {receipt.risk}")
         if not _has_checks_ev and receipt.checks_display and receipt.checks_display != "Not run":
-            lines.append(f"{_INDENT}  {_chk} checks: {checks_label(receipt)}")
+            lines.append(f"{_INDENT}  {_chk} checks: {_session_checks_label(receipt)}")
         # receipt_saved always last
         if _receipt_ev:
             _sym = _chk if _receipt_ev.get("status", "completed") != "failed" else _fail
@@ -1128,7 +1148,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
             _cr = cr if detail == "full" else _truncate_compact(cr, 90)
             lines.append(f"{_INDENT}  {_cr}")
     else:
-        lines.append(f"{_INDENT}{checks_label(receipt)}")
+        lines.append(f"{_INDENT}{_session_checks_label(receipt)}")
     lines.append(_row("Verified", verified_label(receipt)))
     lines.append("")
 
