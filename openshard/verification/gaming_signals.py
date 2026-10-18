@@ -156,10 +156,8 @@ def grader_patterns(repo_root: Path | None) -> tuple[str, ...]:
 
 # -- events: reads, writes to OpenShard's records -------------------------------
 
-_RECORD_MARKERS = (
-    ".openshard/", "runs.jsonl", "receipt-signatures.jsonl", "verifications.jsonl",
-    ".claude/projects/", ".codex/sessions/",
-)
+_RECORD_DIRS = (".openshard/", ".claude/projects/", ".codex/sessions/")
+_RECORD_FILES = frozenset({"runs.jsonl", "receipt-signatures.jsonl", "verifications.jsonl"})
 _READERS = frozenset({"cat", "head", "tail", "less", "more", "bat", "nl", "strings", "xxd", "od", "type"})
 _WRITERS = frozenset({"rm", "mv", "cp", "truncate", "tee", "shred", "unlink", "dd"})
 _SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|&]")
@@ -168,7 +166,10 @@ _SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|&]")
 def is_record_path(path: str) -> bool:
     """Whether *path* is OpenShard's own state or an agent transcript directory."""
     norm = path.replace("\\", "/")
-    return norm.startswith((".openshard/", "~/.openshard/")) or any(m in norm for m in _RECORD_MARKERS)
+    norm = norm[2:] if norm.startswith("./") else norm
+    # A bare record file name counts only without a directory (``rm runs.jsonl``
+    # run inside .openshard/): elsewhere it is somebody else's file.
+    return norm.startswith(_RECORD_DIRS) or any(f"/{d}" in norm for d in _RECORD_DIRS) or norm in _RECORD_FILES
 
 
 def _command_words(action: str) -> list[list[str]]:

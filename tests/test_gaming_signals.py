@@ -273,6 +273,7 @@ def test_command_record_writes():
     assert gs.command_record_writes("Bash: sed -i s/a/b/ .openshard/receipt-signatures.jsonl") == [
         ".openshard/receipt-signatures.jsonl"]
     assert gs.command_record_writes("Bash: grep x .openshard/runs.jsonl") == []
+    assert gs.command_record_writes("Bash: rm tests/fixtures/runs.jsonl") == []  # someone else's file
 
 
 # -- receipt, history JSON, sync, verdict ----------------------------------------
