@@ -1348,6 +1348,27 @@ Openshard-Tokens-Cache-Creation: 1000
 Openshard-Cost-USD: 0.1234
 ```
 
+`Openshard-Tokens-Cache-Creation` is the total cache write; the optional
+`Openshard-Tokens-Cache-Creation-1h` names the part billed at the 1-hour rate.
+
+Claude Code cloud sessions do not add these themselves. Before committing, the
+agent runs `openshard usage trailers --append-to <message-file>` (or prints the
+lines with `openshard usage trailers`). It reads the session's transcripts
+(`$CLAUDE_CODE_SESSION_ID` under `~/.claude/projects`, subagent transcripts in
+`<session>/subagents/` included) and writes `Openshard-Model` plus the token
+trailers for the usage since the previous commit, replacing any declared
+`Openshard-Model`. Each message is claimed by one commit only (state in
+`~/.openshard/usage-trailers/<session>.json`, shared by every worktree); a
+commit that never lands releases its claim. When usage cannot be stated
+exactly (no transcript, nothing new, malformed counters, several models,
+surcharged requests) it prints nothing and exits 1. In a throwaway cloud clone
+a hook can do it for every commit:
+
+```sh
+printf '#!/bin/sh\nopenshard usage trailers --append-to "$1" || true\n' > .git/hooks/prepare-commit-msg
+chmod +x .git/hooks/prepare-commit-msg
+```
+
 A provider-reported dollar amount wins. If only trustworthy token counters are
 available, Core can calculate a dated official-list-rate estimate for an exact
 supported model and marks it as estimated. Missing usage remains unknown, never
