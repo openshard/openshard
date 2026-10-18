@@ -36,6 +36,7 @@ from tests.capture_fixtures import (
     _payload,
     _post,
     _queue_line,
+    _sealed,
     _Service,
     _session_dir,
     _status_payload,
@@ -101,7 +102,7 @@ class TestLifecycle:
         # No paths leak through the health document.
         assert str(Path.home()) not in json.dumps(doc)
 
-    def test_shutdown_drains_queue_and_removes_state(self, service, capture_env, repo):
+    def test_shutdown_drains_queue_and_removes_state(self, service, capture_env, repo, receipt_scope):
         service.server.recorder.pause_processing()
         _drive_session_http(service.port, repo)
         assert _lines(repo) == []  # nothing folded yet
@@ -110,7 +111,8 @@ class TestLifecycle:
         assert service.exit_code == 0
         assert not Path(client.state_path(capture_env)).exists()
         entries = _lines(repo)
-        assert len(entries) == 1 and entries[0]["capture"]["session_end_observed"] is True
+        assert len(entries) == 1 and _sealed(entries[0])
+        assert entries[0]["capture"]["session_end_observed"] is (receipt_scope == "session")  # a turn: sealed at Stop
         assert not list(_session_dir(repo).glob("*.queue*.jsonl"))
 
     def test_shutdown_requires_matching_instance_id(self, service):
@@ -404,12 +406,12 @@ def _stable_view(entry: dict) -> dict:
 
 
 class TestEventualConsistency:
-    def test_http_session_produces_the_same_record_as_the_inline_path(self, service, tmp_path):
+    def test_http_session_produces_the_same_record_as_the_inline_path(self, service, tmp_path, receipt_scope):
         via_http = _make_repo(tmp_path / "http repo")
         via_inline = _make_repo(tmp_path / "inline repo")
         _drive_session_http(service.port, via_http)
         _drive_session_inline(via_inline)
-        assert _wait_for(lambda: (_e := _first_line(via_http)) is not None and _e["capture"]["session_end_observed"])
+        assert _wait_for(lambda: _sealed(_first_line(via_http)))
         assert service.server.recorder.wait_idle(20)
         http_entry, inline_entry = _lines(via_http)[0], _lines(via_inline)[0]
         assert _stable_view(http_entry) == _stable_view(inline_entry)
@@ -999,9 +1001,9 @@ class TestPortRaceGrace:
 
 
 class TestDedupAcrossSessionEnd:
-    def test_a_late_duplicate_after_session_end_does_not_double_count(self, service, repo):
+    def test_a_late_duplicate_after_session_end_does_not_double_count(self, service, repo, receipt_scope):
         _drive_session_http(service.port, repo)
-        assert _wait_for(lambda: (_e := _first_line(repo)) is not None and _e["capture"]["session_end_observed"])
+        assert _wait_for(lambda: _sealed(_first_line(repo)))
         assert service.server.recorder.wait_idle(20)
         entry_before = _lines(repo)[0]
         assert entry_before["capture"]["applied_event_ids"], "ended record must persist its dedup ids"

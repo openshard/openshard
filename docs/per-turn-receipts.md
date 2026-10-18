@@ -128,7 +128,9 @@ session sends nothing until its turn seals.
 | Case | Result |
 |---|---|
 | Turn never completes (crash, terminal closed, no `Stop`) | the open turn is swept after an hour idle exactly like a session today: `session_end_not_observed`, sealed `idle_swept`, synced |
-| `SessionEnd` after the last sealed turn | ignored; no empty Receipt. The session end is not recorded on any turn |
+| `SessionEnd` after the last sealed turn | ignored; no empty Receipt, and nothing streamed to remote capture. The session end is not recorded on any turn |
+| A late or repeated `Stop` after a sealed turn | ignored (it can carry no work); no empty buffer is left behind |
+| `claude --resume` after the session ended | the next Receipt says `start_source: resume`, not `turn`, and stays in the session's Task |
 | Another Stop hook blocks and the agent continues | Claude's hooks are synchronous and ordered, so the next hook opens the next turn Receipt (no prompt; task text not captured) instead of being dropped |
 | Capture service down (inline hooks) | same sealing in the hook process; no PR lookup; no immediate sync (the next sync run picks it up) |
 | Hosted runtimes (`claude-code-web`, `cursor-cloud`) | unchanged: Stop seals with `session_end_not_observed` (logic moved into `claude_turn_receipts.close_turn`) |

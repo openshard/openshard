@@ -32,7 +32,7 @@ from openshard.adapters import claude_capture_client as client
 from openshard.adapters import claude_workspace as ws
 from openshard.adapters.claude_hooks_install import install_claude_hooks
 from openshard.history.store import load_history
-from tests.capture_fixtures import _git, _make_repo, _Service, _wait_for
+from tests.capture_fixtures import _git, _make_repo, _sealed, _Service, _wait_for
 
 SID = "7a7a7a7a-6b6b-4c7c-8d8d-9e9e9e9e9e9e"
 SID2 = "8b8b8b8b-6b6b-4c7c-8d8d-9e9e9e9e9e9e"
@@ -140,8 +140,24 @@ def _receipts(repo: Path) -> list[dict]:
 
 
 def _ended(repo: Path, count: int = 1) -> bool:
+    """*count* final Receipts: the session ended, or (per-turn Receipts, the default) each turn was sealed."""
     receipts = _receipts(repo)
-    return len(receipts) == count and all(r["capture"].get("session_end_observed") for r in receipts)
+    return len(receipts) == count and all(_sealed(r) for r in receipts)
+
+
+# Per-turn Receipts (the default) across checkouts: see the turn branches of the tests that use it.
+_TURN_USAGE_BUG = pytest.mark.parametrize("receipt_scope", [
+    pytest.param("turn", marks=pytest.mark.xfail(strict=True, reason=(
+        "bug: with per-turn Receipts a turn worked only in another checkout has no Receipt in the usage-owning "
+        "checkout, so its usage is counted nowhere (its own Receipt says it was attributed elsewhere), and that "
+        "checkout mints its own task_id (even within one turn) instead of sharing the session's"))),
+    "session",
+], indirect=True)
+
+
+def _turn_totals(*receipts: dict) -> tuple[int, int]:
+    """The session's usage summed over every Receipt (each turn counted once, wherever it ran)."""
+    return (sum(r.get("prompt_tokens") or 0 for r in receipts), sum(r.get("completion_tokens") or 0 for r in receipts))
 
 
 def _changed(receipt: dict) -> set[str]:
@@ -156,7 +172,7 @@ def _commit(repo: Path, message: str) -> str:
     return _head(repo)
 
 
-def test_work_in_a_linked_worktree_is_attributed_to_the_worktree(repos):
+def test_work_in_a_linked_worktree_is_attributed_to_the_worktree(repos, receipt_scope):
     platform, wt = repos["platform"], repos["wt"]
     wt_start = _head(wt)
     service = _Service({**os.environ})
@@ -213,13 +229,14 @@ def test_work_in_a_linked_worktree_is_attributed_to_the_worktree(repos):
     assert "prompt_tokens" not in worktree_receipt
     assert worktree_receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
     assert worktree_receipt["capture"]["cost_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
-    # Both observed the session end.
+    # Both observed the session end; turn Receipts are sealed at the Stop instead and never claim it.
     for receipt in (project_receipt, worktree_receipt):
-        assert receipt["capture"]["session_end_observed"] is True
+        assert receipt["capture"]["session_end_observed"] is (receipt_scope == "session")
         assert receipt["executor"] == "claude_code_hooks"
 
 
-def test_usage_is_counted_once_when_turns_move_between_checkouts(repos):
+@_TURN_USAGE_BUG
+def test_usage_is_counted_once_when_turns_move_between_checkouts(repos, receipt_scope):
     """Seen live: a session's four Receipts summed to 129% of its transcript's tokens.
 
     A checkout that owned a later turn read the transcript from its own
@@ -252,10 +269,17 @@ def test_usage_is_counted_once_when_turns_move_between_checkouts(repos):
         claude.status(cost=0.65)
         claude.send("Stop")
         claude.send("SessionEnd", reason="other")
-        assert _wait_for(lambda: _ended(platform) and _ended(wt))
+        assert _wait_for(lambda: _ended(platform, 1 if receipt_scope == "session" else 2) and _ended(wt))
     finally:
         service.stop()
 
+    if receipt_scope == "turn":  # turns 1 and 3 in the project, turn 2 in the worktree
+        first, third = _receipts(platform)
+        (second,) = _receipts(wt)
+        assert _turn_totals(first, second, third) == (1110, 111)  # every turn's usage, each once
+        assert len({first["task_id"], second["task_id"], third["task_id"]}) == 1  # one session, one Task
+        assert _changed(second) == {"parser.py"}
+        return
     (project_receipt,) = _receipts(platform)
     (worktree_receipt,) = _receipts(wt)
     assert project_receipt["prompt_tokens"] == 1110 and project_receipt["completion_tokens"] == 111
@@ -269,7 +293,7 @@ def test_usage_is_counted_once_when_turns_move_between_checkouts(repos):
     assert _changed(worktree_receipt) == {"parser.py"}
 
 
-def test_a_worktree_of_another_repository_is_recorded_as_that_repository(repos):
+def test_a_worktree_of_another_repository_is_recorded_as_that_repository(repos, receipt_scope):
     platform, core_wt = repos["platform"], repos["core_wt"]
     service = _Service({**os.environ})
     try:
@@ -300,7 +324,7 @@ def test_a_worktree_of_another_repository_is_recorded_as_that_repository(repos):
     assert not (repos["core"] / ".openshard" / "runs.jsonl").exists()
 
 
-def test_two_worktrees_in_one_turn_share_the_task_and_count_usage_once(repos):
+def test_two_worktrees_in_one_turn_share_the_task_and_count_usage_once(repos, receipt_scope):
     platform, wt, core_wt = repos["platform"], repos["wt"], repos["core_wt"]
     service = _Service({**os.environ})
     try:
@@ -329,7 +353,7 @@ def test_two_worktrees_in_one_turn_share_the_task_and_count_usage_once(repos):
     assert all(_changed(r) == set() and r["capture"]["prompt_count"] == 0 for r in project)
 
 
-def test_a_worktree_first_opened_by_a_notification_turn_keeps_the_users_task(repos):
+def test_a_worktree_first_opened_by_a_notification_turn_keeps_the_users_task(repos, receipt_scope):
     """Seen live: a checkout first touched in a turn a background-task notification opened said "task not captured".
 
     The notification is what Claude Code delivers as the turn's prompt; the
@@ -362,7 +386,7 @@ def test_a_worktree_first_opened_by_a_notification_turn_keeps_the_users_task(rep
     assert _changed(worktree_receipt) == {"parser.py"}
 
 
-def test_a_shell_write_after_a_prompt_from_an_unopened_checkout_counts_as_the_sessions_work(repos):
+def test_a_shell_write_after_a_prompt_from_an_unopened_checkout_counts_as_the_sessions_work(repos, receipt_scope):
     """Review finding on #560: opening the checkout only after the write snapshotted the new file as pre-existing.
 
     A user's prompt whose cwd is another checkout opens it before any command
@@ -387,7 +411,7 @@ def test_a_shell_write_after_a_prompt_from_an_unopened_checkout_counts_as_the_se
     assert worktree_receipt["task"] == "Write the result in the worktree"
 
 
-def test_a_service_restart_mid_session_keeps_recording_into_the_worktree(repos):
+def test_a_service_restart_mid_session_keeps_recording_into_the_worktree(repos, receipt_scope):
     platform, wt = repos["platform"], repos["wt"]
     env = {**os.environ}
     service = _Service(env)
@@ -414,10 +438,14 @@ def test_a_service_restart_mid_session_keeps_recording_into_the_worktree(repos):
     assert _changed(worktree_receipt) == {"before.py", "after.py"}
     assert worktree_receipt["task"] == "Survive a restart"
     assert worktree_receipt["capture"]["tool_call_count"] == 2
-    assert worktree_receipt["capture"]["session_end_observed"] is True
+    if receipt_scope == "session":
+        assert worktree_receipt["capture"]["session_end_observed"] is True
+    else:  # sealed at the Stop; the SessionEnd after it is not recorded on the turn
+        assert worktree_receipt["capture"]["status"] == "turn_completed"
 
 
-def test_a_restarted_service_keeps_the_session_usage_on_the_same_receipt(repos):
+@_TURN_USAGE_BUG
+def test_a_restarted_service_keeps_the_session_usage_on_the_same_receipt(repos, receipt_scope):
     platform, wt = repos["platform"], repos["wt"]
     env = {**os.environ}
     service = _Service(env)
@@ -446,6 +474,11 @@ def test_a_restarted_service_keeps_the_session_usage_on_the_same_receipt(repos):
         service.stop()
     (project_receipt,) = _receipts(platform)
     (worktree_receipt,) = _receipts(wt)
+    if receipt_scope == "turn":  # turn 1 in the project, turn 2 in the worktree after the restart
+        assert _turn_totals(project_receipt, worktree_receipt) == (1100, 110)
+        assert worktree_receipt["task_id"] == project_receipt["task_id"]
+        assert not list(platform.rglob("*.usage-owner")) and not list(wt.rglob("*.usage-owner"))
+        return
     assert project_receipt["prompt_tokens"] == 1100 and project_receipt["completion_tokens"] == 110
     assert "prompt_tokens" not in worktree_receipt
     assert worktree_receipt["capture"]["tokens_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
@@ -453,7 +486,7 @@ def test_a_restarted_service_keeps_the_session_usage_on_the_same_receipt(repos):
     assert not list(platform.rglob("*.usage-owner")) and not list(wt.rglob("*.usage-owner"))
 
 
-def test_delayed_queue_processing_folds_the_same_receipts(repos):
+def test_delayed_queue_processing_folds_the_same_receipts(repos, receipt_scope):
     platform, wt = repos["platform"], repos["wt"]
     service = _Service({**os.environ})
     try:
@@ -478,7 +511,7 @@ def test_delayed_queue_processing_folds_the_same_receipts(repos):
     assert worktree_receipt["task"] == project_receipt["task"] == "Queue it all"
 
 
-def test_concurrent_sessions_in_the_same_worktree_stay_separate(repos):
+def test_concurrent_sessions_in_the_same_worktree_stay_separate(repos, receipt_scope):
     platform, wt = repos["platform"], repos["wt"]
     service = _Service({**os.environ})
     try:
@@ -505,7 +538,7 @@ def test_concurrent_sessions_in_the_same_worktree_stay_separate(repos):
     assert {f["path"] for f in by_session[SID2]["files_detail"] if f.get("attribution") == "agent_reported"} == {"second.py"}
 
 
-def test_events_outside_every_repository_stay_with_the_project(repos, tmp_path):
+def test_events_outside_every_repository_stay_with_the_project(repos, tmp_path, receipt_scope):
     platform = repos["platform"]
     scratch = tmp_path / "scratch"
     scratch.mkdir()
@@ -525,7 +558,7 @@ def test_events_outside_every_repository_stay_with_the_project(repos, tmp_path):
     assert not (scratch / ".openshard").exists()
 
 
-def test_a_notification_with_its_cwd_in_a_worktree_does_not_open_it(repos):
+def test_a_notification_with_its_cwd_in_a_worktree_does_not_open_it(repos, receipt_scope):
     """Seen live: a background-task notification arriving while the shell sat in a checkout opened an empty Receipt there."""
     platform, wt = repos["platform"], repos["wt"]
     service = _Service({**os.environ})
@@ -542,11 +575,13 @@ def test_a_notification_with_its_cwd_in_a_worktree_does_not_open_it(repos):
     finally:
         service.stop()
     (project_receipt,) = _receipts(platform)
-    assert project_receipt["capture"]["turn_count"] == 2  # the notification's turn closed in the project
+    # Session: the notification's turn closed in the project. Turns: turn 1 was sealed at its Stop and
+    # the notification's turn had no work, so it is no Receipt anywhere.
+    assert project_receipt["capture"]["turn_count"] == (2 if receipt_scope == "session" else 1)
     assert not (wt / ".openshard" / "runs.jsonl").exists()
 
 
-def test_git_log_in_an_unopened_worktree_stays_home(repos):
+def test_git_log_in_an_unopened_worktree_stays_home(repos, receipt_scope):
     platform, wt = repos["platform"], repos["wt"]
     service = _Service({**os.environ})
     try:
@@ -565,7 +600,7 @@ def test_git_log_in_an_unopened_worktree_stays_home(repos):
     assert not (wt / ".openshard" / "runs.jsonl").exists()
 
 
-def test_pytest_in_an_unopened_worktree_still_opens_it(repos):
+def test_pytest_in_an_unopened_worktree_still_opens_it(repos, receipt_scope):
     platform, wt = repos["platform"], repos["wt"]
     service = _Service({**os.environ})
     try:
@@ -609,7 +644,7 @@ def test_read_only_allowlist_rejects(command):
     assert not is_read_only_command(command)
 
 
-def test_a_command_that_changes_directory_is_attributed_where_it_ran(repos):
+def test_a_command_that_changes_directory_is_attributed_where_it_ran(repos, receipt_scope):
     """``cd <worktree> && git commit`` from the project's shell acts in the worktree: its commit belongs there."""
     platform, wt = repos["platform"], repos["wt"]
     service = _Service({**os.environ})
@@ -635,7 +670,7 @@ def test_a_command_that_changes_directory_is_attributed_where_it_ran(repos):
     assert sha not in project_receipt["session_commits"]["shas"]
 
 
-def test_the_worktree_receipt_is_not_written_into_the_project(repos):
+def test_the_worktree_receipt_is_not_written_into_the_project(repos, receipt_scope):
     """The original defect: the worktree edit used to land in the project's Receipt with the project's git facts."""
     platform, wt = repos["platform"], repos["wt"]
     service = _Service({**os.environ})
