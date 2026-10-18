@@ -73,6 +73,20 @@ Platform's contract is closed: it rejects any key it does not define, so a
 new Core field becomes hosted data only after the contract is updated
 there. Plain `http://` is refused except to loopback.
 
+A sealed Receipt also carries `seal` beside `receipt` (seal v2,
+[receipt-seal-v2.md](receipt-seal-v2.md)): the install's DSSE envelope over
+a Statement naming the JCS digest of that exact `receipt`, and the public
+key it names. Digests, ids, timestamps and a signature only; never the
+salts behind the field commitments. Before the first sealed send of a
+flush, sync registers the key with `POST <endpoint>/v1/orgs/<org>/signing-keys`
+(`{"algorithm", "keyid", "public_key"}`); a Platform without that route
+answers 404 and the seal is sent anyway (it reads "key not registered"
+there). A record that was never sealed, or with signing off, is sent
+without `seal`, exactly as before. If the Platform rejects an envelope
+because of its seal (`invalid_payload` naming `seal`, as a Platform that
+predates seal v2 answers), sync sends the same receipt once more without
+it, so the Receipt still syncs, unsigned. Any other rejection stays final.
+
 The Platform identifies a hosted Receipt by `(organisation, receipt_id)`.
 Records written before v0.4.4 have no `receipt_id` and cannot sync;
 `status` counts them under "cannot sync".

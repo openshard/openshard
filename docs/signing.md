@@ -415,5 +415,5 @@ sent.
 
 Approved for v0.5.0: the command is `openshard verify --signature`;
 `cryptography>=42` is a core dependency; signing is on by default; seals
-live in the sidecar `receipt-signatures.jsonl` and are not synced in this
-phase; the same-user-agent limit (threat 1) is stated publicly.
+live in the sidecar `receipt-signatures.jsonl`, and only the seal made by
+sync for the exact hosted receipt is sent (seal v2); the same-user-agent limit (threat 1) is stated publicly.

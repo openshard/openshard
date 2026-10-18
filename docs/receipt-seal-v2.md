@@ -1,8 +1,8 @@
 # Receipt seal v2: checking the hosted copy
 
-Status: v0.5.0. Core seals new Receipts with v2 (this page); v1 seals keep
-verifying. Sending the seal with sync, key registration and the Platform's
-check land in separate changes, in the order under "Rollout".
+Status: v0.5.0. Core seals new Receipts with v2 (this page) and sync sends
+the seal and registers the key; v1 seals keep verifying. The Platform's
+check ships separately, in the order under "Rollout".
 
 Read [signing.md](signing.md) first. Everything there still holds: a seal
 is one narrow claim, *the holder of key K sealed this content*, it adds no
@@ -190,12 +190,14 @@ with the names Core uses (signing.md, verdict rules v1), first match wins:
 | `not_signed` | no seal was sent | Not signed |
 | `invalid` | malformed, wrong statement type or receipt id, signature does not verify, or the `sync:` digest differs from the stored receipt | Signature invalid |
 | `signed_unknown_key` | everything checks with the carried key, but that key is not registered to this organisation | Signed · key not registered |
-| `verified` | everything checks with a key registered to this organisation | Signed · verified by Openshard |
+| `verified` | everything checks with a key registered to this organisation | Signed · registered key (in full: Signed · matches this organisation's registered key) |
 
 `verified` means: the hosted receipt is byte for byte what the holder of a
 key registered to this organisation sealed. It does not mean the work was
 right, the checks passed, capture was complete, or that the agent did not
-forge it with the same user's key. The card keeps the content-hash
+forge it with the same user's key. Registration is trust-on-first-use, so
+the card says the seal matches the organisation's registered key, never
+that Openshard verified the Receipt. The card keeps the content-hash
 `Checksum` row and the witness row separate from this one.
 
 ## Rollout
@@ -207,7 +209,8 @@ forge it with the same user's key. The card keeps the content-hash
    strict Platform schema is updated in the same change.
 
 Step 4 must not ship before step 2 is deployed: an older Platform rejects
-the unknown key and the Receipt would not sync.
+the unknown key. Core then resends the receipt without the seal, so the
+Receipt still syncs, but unsigned.
 
 ## Not in v2
 

@@ -132,7 +132,9 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
 def build_envelope(entry: dict, index: int, *, core_version: str, multi_agent: bool = False) -> dict:
     """The v1 sync envelope for *entry*. ``source.receipt_schema_version`` is the
     record's own stamped version (``"unknown"`` for pre-stamping records, as
-    Core itself labels them), never today's."""
+    Core itself labels them), never today's. The optional ``seal`` (seal v2)
+    is added by the flush beside ``receipt``, never inside it
+    (``sync/seal.py``)."""
     schema_version = entry.get("schema_version")
     if not isinstance(schema_version, str) or not schema_version:
         schema_version = None
