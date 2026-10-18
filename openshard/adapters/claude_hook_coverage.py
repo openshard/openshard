@@ -167,7 +167,8 @@ def evaluate(buf: dict, state: dict[str, Any] | None) -> list[dict[str, Any]] | 
     state["ok_settled"] = int(state.get("ok_settled") or 0) + sum(1 for t in ok if t <= cutoff)
     ok = state["ok"] = [t for t in ok if t > cutoff]
     before = state["ok_settled"]
-    hooks = int(buf.get("tool_call_count") or 0)
+    # Read hooks (matched since v0.5.0) are not in COUNTED_TOOLS: leave them out.
+    hooks = int(buf.get("tool_call_count") or 0) - int(buf.get("read_call_count") or 0)
     reasons: list[dict[str, Any]] = []
     if before > hooks:
         reasons.append(make_reason(GAP_TOOL_CALLS, before - hooks))

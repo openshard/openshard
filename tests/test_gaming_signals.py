@@ -193,6 +193,88 @@ def test_read_tool_events_from_other_agents_match_patterns():
     assert found["writes"] == []
 
 
+def _read(repo: Path, rel: str, *, failed: bool = False, content: str = "SECRET-FILE-CONTENT") -> None:
+    path = rel if Path(rel).is_absolute() else str(repo / rel)
+    if failed:
+        _run(repo, "PostToolUseFailure", tool_name="Read", tool_input={"file_path": path}, error="File does not exist.")
+    else:
+        _run(repo, "PostToolUse", tool_name="Read", tool_input={"file_path": path},
+             tool_response={"type": "text", "file": {"filePath": path, "content": content}})
+
+
+def test_claude_read_tool_of_answer_files_is_flagged_by_path_only(repo):
+    _start(repo)
+    for rel in ("src/app.py", "evals/grader.py", "tests/__snapshots__/app.test.ts.snap",
+                "tests/fixtures/input.json", "tests/golden/out.txt", "web/a.snap"):
+        _read(repo, rel)
+    entry = _end(repo)
+    signal = _kinds(entry)["grader_or_answer_read"]
+    assert signal["paths"] == ["evals/grader.py", "tests/__snapshots__/app.test.ts.snap",
+                               "tests/golden/out.txt", "web/a.snap"]  # test inputs (fixtures/) are not answers
+    assert signal["message"].startswith("Agent read a grading or answer file: evals/grader.py")
+    text = (repo / ".openshard" / "runs.jsonl").read_text(encoding="utf-8")
+    assert "SECRET-FILE-CONTENT" not in text
+    # A read is a counted tool call but not an Event; hook coverage leaves it out
+    # of the count it compares with the transcript's edit and shell calls.
+    assert not [e for e in entry.get("events") or [] if (e.get("metadata") or {}).get("tool") == "Read"]
+    assert entry["capture"]["tool_call_count"] == 6
+
+
+def test_read_hooks_never_hide_a_missing_edit_hook():
+    from openshard.adapters import claude_hook_coverage as cov
+
+    buf = {"last_stop_at": "2026-10-18T10:00:00Z", "last_activity_at": "2026-10-18T10:00:00Z",
+           "tool_call_count": 3, "read_call_count": 3}
+    state = {"ok": [], "ok_settled": 1, "last_at": None}  # one Edit/Bash result in the transcript
+    reasons = cov.evaluate(buf, state)
+    assert [r["kind"] for r in reasons] == [cov.GAP_TOOL_CALLS]
+
+
+def test_failed_and_outside_repository_reads_are_not_flagged(repo, tmp_path):
+    _start(repo)
+    _read(repo, "evals/grader.py", failed=True)  # never shown to the agent
+    outside = tmp_path / "elsewhere" / "golden" / "out.txt"
+    _read(repo, str(outside))
+    assert _end(repo)["gaming_signals"] == []
+
+
+def test_read_tool_follows_configured_patterns(repo):
+    (repo / ".openshard").mkdir()
+    (repo / ".openshard" / "config.yml").write_text("gaming_checks:\n  grader_patterns: []\n", encoding="utf-8")
+    _start(repo)
+    _read(repo, "evals/grader.py")
+    assert _end(repo)["gaming_signals"] == []
+
+
+def test_a_repository_can_add_fixtures_to_its_patterns(repo):
+    (repo / ".openshard").mkdir()
+    (repo / ".openshard" / "config.yml").write_text(
+        "gaming_checks:\n  grader_patterns: ['**/fixtures/**']\n", encoding="utf-8")
+    _start(repo)
+    _read(repo, "tests/fixtures/input.json")
+    assert _kinds(_end(repo))["grader_or_answer_read"]["paths"] == ["tests/fixtures/input.json"]
+
+
+def test_read_path_never_routes_or_attributes_work():
+    from openshard.adapters.claude_hooks import extract_hook_payload
+
+    payload = extract_hook_payload({"hook_event_name": "PostToolUse", "session_id": SID, "tool_name": "Read",
+                                    "tool_input": {"file_path": "/r/tests/fixtures/a.json"},
+                                    "tool_response": {"file": {"content": "SECRET"}}})
+    assert payload is not None and payload.file_path is None  # routing / baselines read file_path only
+    assert payload.read_path == "/r/tests/fixtures/a.json"
+
+
+@pytest.mark.parametrize(("path", "matched"), [
+    ("tests/__snapshots__/a.test.ts.snap", True), ("pkg/testdata/golden/out.txt", True),
+    ("x/out.golden", True), ("tests/fixtures/input.json", False), ("tests/expected/a.txt", True),
+    ("ui/snapshots/home.png", True), ("src/fixture_loader.py", False), ("src/snapshot.py", False),
+    ("docs/expected-behaviour.md", False),
+])
+def test_default_patterns_cover_expected_test_outputs(path, matched):
+    assert gs.matches_any(path, gs.DEFAULT_GRADER_PATTERNS) is matched
+
+
 # -- masked_exit -----------------------------------------------------------------
 
 

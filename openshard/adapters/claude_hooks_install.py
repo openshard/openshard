@@ -70,7 +70,7 @@ _GIT_TIMEOUT_SECONDS = 5.0
 # Must name every tool in claude_hooks.FILE_TOOLS | COMMAND_TOOLS (asserted in
 # tests): Claude Code's Windows shell tool is ``PowerShell``, and a tool left
 # out here never reaches the adapter at all.
-TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell"
+TOOL_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell|Read"
 
 TRANSPORT_COMMAND = "command"
 TRANSPORT_HTTP = "http"
