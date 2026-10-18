@@ -34,6 +34,7 @@ _STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?$")
 _SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 _CONTENT_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _AGENT_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+SESSION_NONCE_RE = re.compile(r"^[a-z2-7]{26}$")
 _REASON_CODE_RE = re.compile(r"^[a-z_]{1,64}$")
 _ROLES = ("planner", "executor", "validator")
 
@@ -1246,6 +1247,36 @@ def session_key_for(agent: object, session_id: object) -> str | None:
     return "ses_" + hashlib.sha256(f"{agent}:{session_id}".encode()).hexdigest()[:32]
 
 
+def mint_session_nonce() -> str:
+    """A fresh random session nonce: 128 bits as 26 lowercase base32 characters (URL-safe).
+
+    Minted once when a captured session starts. It binds the session's
+    Receipt to the Events remote capture streamed for it (it rides in the
+    first one's metadata). It is not a secret and proves nothing on its own.
+    Base32 rather than hex or base64: it is shorter than the scrubber's
+    32-character opaque-run rule and holds no ``-`` / ``_`` / capitals, so no
+    secret pattern can ever withhold it from an Event.
+    """
+    import base64
+    import secrets
+
+    return base64.b32encode(secrets.token_bytes(16)).decode("ascii").rstrip("=").lower()
+
+
+def session_nonce_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and SESSION_NONCE_RE.fullmatch(value) else None
+
+
+def recorded_session_nonce(entry: dict) -> str | None:
+    """The nonce in the record's ``session.started`` Event metadata, or None (older records: unknown)."""
+    for event in entry.get("events") or []:
+        if isinstance(event, dict) and event.get("event_type") == "session.started":
+            nonce = session_nonce_or_none(_dict(event.get("metadata")).get("session_nonce"))
+            if nonce:
+                return nonce
+    return None
+
+
 def session_block(entry: dict) -> dict[str, Any] | None:
     capture = _dict(entry.get("capture"))
     if not capture:
@@ -1265,6 +1296,11 @@ def session_block(entry: dict) -> dict[str, Any] | None:
         "tool_call_count": _count(capture.get("tool_call_count")),
         "tool_failure_count": _count(capture.get("tool_failure_count")),
     }
+    # Additive: only sessions that minted one carry it, so older records keep
+    # their exact shape and an absent nonce stays absent (unknown), never invented.
+    nonce = recorded_session_nonce(entry)
+    if nonce:
+        block["session_nonce"] = nonce
     return None if _all_none(block) else block
 
 
@@ -1451,8 +1487,11 @@ __all__ = [
     "project_entry_evidence",
     "retry_block",
     "routing_block",
+    "mint_session_nonce",
+    "recorded_session_nonce",
     "sandbox_detail_block",
     "session_block",
+    "session_nonce_or_none",
     "stage_metrics",
     "unsafe_text",
 ]

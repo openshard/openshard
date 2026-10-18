@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 from openshard.connected.config import ConnectedConnection, ConnectedSession
@@ -86,7 +87,9 @@ class ConnectedCaptureClient:
             "events": batch.get("events", []),
             "links": batch.get("links", []),
         }
-        return self._request("/events", body, classify_status)[0]
+        result, answer = self._request("/events", body, classify_status)
+        # Accepted: ``details`` carries the response body (its witness acknowledgement, when present).
+        return replace(result, details=answer) if result.accepted and isinstance(answer, dict) else result
 
     def send(self, envelope: dict) -> SendResult:
         return self._request("/receipts", {**self._identity(), "envelope": envelope}, classify_status)[0]

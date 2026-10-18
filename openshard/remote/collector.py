@@ -34,12 +34,15 @@ Nothing here raises into a hook, and nothing here logs the token.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -406,6 +409,7 @@ def _send_batch(
     last_seq = events[-1]["seq"]
     if result.accepted:
         spool.acknowledge(env, capture_id, last_seq, sent=len(events))
+        _keep_witness(env, capture_id, wire_witness(result.details))
         report.events_sent += len(events)
         return "ok"
     if result.kind == "unauthorized":
@@ -426,6 +430,100 @@ def _send_batch(
                 return outcome
         return "ok"
     return "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# The witness acknowledgement an accepted batch may carry
+# ---------------------------------------------------------------------------
+
+_STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?$")
+_CHAIN_HEAD_RE = re.compile(r"^[A-Za-z0-9:_-]{16,128}$")
+_MAX_WITNESS_SIG_BYTES = 4096
+
+
+def _seq(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def wire_witness(body: object) -> dict[str, Any] | None:
+    """The ``witness`` block of an accepted append response, bounded, or None when absent or unusable.
+
+    ``seq_to`` is the Platform's position for the batch's last Event in this
+    capture's chain, so it counts the Events the Platform says it holds.
+    Nothing is checked cryptographically here; ``sig`` is kept as received
+    (bounded) for a later offline check.
+    """
+    block = body.get("witness") if isinstance(body, dict) else None
+    if not isinstance(block, dict):
+        return None
+    seq_to = _seq(block.get("seq_to"))
+    seq_from = block.get("seq_from")
+    if seq_to < 1 or (seq_from is not None and not 1 <= _seq(seq_from) <= seq_to):
+        return None
+    chain_head, received_at, sig = block.get("chain_head"), block.get("received_at"), block.get("sig")
+    try:
+        sig = sig if isinstance(sig, dict) and len(json.dumps(sig)) <= _MAX_WITNESS_SIG_BYTES else None
+    except (TypeError, ValueError):
+        sig = None
+    return {
+        "seq_from": seq_from,
+        "seq_to": seq_to,
+        "chain_head": chain_head if isinstance(chain_head, str) and _CHAIN_HEAD_RE.fullmatch(chain_head) else None,
+        "received_at": received_at if isinstance(received_at, str) and _STAMP_RE.fullmatch(received_at) else None,
+        "sig": sig,
+    }
+
+
+def _keep_witness(env: dict | os._Environ | None, capture_id: str, witness: dict[str, Any] | None) -> None:
+    """Keep *witness* in spool state, unless an earlier acknowledgement already reached further.
+
+    Bookkeeping only: the batch is already acknowledged, so a state write
+    that fails (lock timeout, disk) loses this acknowledgement, not Events.
+    """
+    if witness is None:
+        return
+    try:
+        held = (spool.read_state(spool.session_env(env, capture_id)) or {}).get("witness")
+        if isinstance(held, dict) and _seq(held.get("seq_to")) > witness["seq_to"]:
+            return
+        spool.update_state(env, capture_id, witness={**witness, "acknowledged_at": spool.now_stamp()})
+    except OSError:  # TimeoutError (the spool lock) is an OSError too
+        return
+
+
+def _ago(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s ago"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} h ago"
+    return f"{int(seconds // 86400)} d ago"
+
+
+def witness_status(state: object, *, now: datetime | None = None) -> dict[str, Any]:
+    """What a spool knows about the hosted witness: ``acknowledged``, ``not_connected`` or ``unknown``.
+
+    Only an acknowledgement the Platform returned counts. Events sent
+    without one leave the witness unknown, never assumed.
+    """
+    state = state if isinstance(state, dict) else {}
+    block = state.get("witness")
+    count = _seq(block.get("seq_to")) if isinstance(block, dict) else 0
+    if isinstance(block, dict) and count:
+        stamp = block.get("acknowledged_at")
+        try:
+            when = datetime.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+            last = f"last {_ago(max(((now or datetime.now(UTC)) - when).total_seconds(), 0.0))}"
+        except ValueError:
+            last = "last time unknown"
+        noun = "event" if count == 1 else "events"
+        return {"state": "acknowledged", "events": count, "acknowledged_at": stamp,
+                "text": f"{count} {noun} acknowledged \u00b7 {last}"}
+    if not state.get("last_contact_at"):
+        return {"state": "not_connected", "events": None, "acknowledged_at": None, "text": "not connected"}
+    return {"state": "unknown", "events": None, "acknowledged_at": None,
+            "text": "unknown (the Platform has not returned a witness acknowledgement)"}
 
 
 # ---------------------------------------------------------------------------
@@ -554,4 +652,6 @@ __all__ = [
     "record",
     "request_delivery",
     "run_background_flusher",
+    "wire_witness",
+    "witness_status",
 ]

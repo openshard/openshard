@@ -1592,7 +1592,7 @@ def _buffer_profile(buf: Mapping[str, Any]) -> AgentProfile:
 
 def _new_buffer(
     session_id: str, repo_root: Path, first_hook: str, *, now: str | None = None, agent: str = AGENT_CLAUDE_CODE,
-    baseline: dict | None = None, start_head: str | None = None,
+    baseline: dict | None = None, start_head: str | None = None, nonce: str | None = None,
 ) -> dict:
     from openshard.analysis.repo_map import collect_git_info
 
@@ -1682,7 +1682,7 @@ def _new_buffer(
         action=f"{profile.label} session observed (first hook: {first_hook})",
         status="started",
         evidence="directly_observed",
-        metadata={"hook": first_hook},
+        metadata={"hook": first_hook, "session_nonce": fidelity.session_nonce(nonce)},  # binds Receipt to journal
         occurred_at=now,
     )
     return buf
@@ -2155,9 +2155,8 @@ def _resumed_segment(
     ended receipt's dedup ids are carried over, so a replayed queue line it
     already applied is still recognised as a duplicate.
     """
-    buf = _new_buffer(
-        session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline, start_head=start_head,
-    )
+    buf = _new_buffer(session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline,
+                      start_head=start_head, nonce=fidelity.carried_session_nonce(persisted))
     buf["start_source"] = "resume"
     if agent == AGENT_CODEX:
         buf["codex_usage_baseline_required"] = True

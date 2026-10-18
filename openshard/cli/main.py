@@ -7797,6 +7797,7 @@ def remote_status(as_json: bool) -> None:
     """Show what this environment is attached to and what is still queued locally."""
     from openshard.connected.config import resolve_connection
     from openshard.remote import spool
+    from openshard.remote.collector import witness_status
     from openshard.remote.config import resolve_attachment
     from openshard.remote.transport import RemoteCaptureClient
 
@@ -7805,6 +7806,8 @@ def remote_status(as_json: bool) -> None:
     local = {key: state.get(key) for key in ("collector_id", "spooled", "sent", "rejected", "dropped", "stopped",
                                              "last_contact_at", "last_attempt_at")}
     local["pending"] = spool.pending_count(spool.session_env(None, "legacy")) if attachment else spool.pending_count()
+    witness = witness_status(state)
+    local["witness"] = witness
     connection = resolve_connection() if attachment is None else None
     sessions = []
     if attachment is None:
@@ -7820,6 +7823,7 @@ def remote_status(as_json: bool) -> None:
                 "spooled": session_state.get("spooled", 0),
                 "sent": session_state.get("sent", 0),
                 "stopped": session_state.get("stopped"),
+                "witness": witness_status(session_state),
             })
         if sessions:
             for key in ("spooled", "sent"):
@@ -7847,10 +7851,12 @@ def remote_status(as_json: bool) -> None:
             if not sessions:
                 click.echo("  No captured session has been recorded in this environment yet.")
             for session in sessions:
+                click.echo(f"  witness:   {session['capture_id']}: {(session['witness'] or {})['text']}")
                 if session.get("stopped"):
                     click.echo(f"  stopped:   {session['capture_id']}: {session['stopped']}")
         else:
             click.echo("Remote capture: not attached  (openshard remote attach)")
+            click.echo("  witness:   not connected")
             if local["pending"]:
                 click.echo(f"  {local['pending']} queued event(s) retained; reconnect the original account to deliver them.")
         return
@@ -7862,6 +7868,7 @@ def remote_status(as_json: bool) -> None:
     click.echo(f"  local:     {local['spooled'] or 0} captured, {local['sent'] or 0} sent, {local['pending']} queued"
                + (f", {local['rejected']} refused" if local.get("rejected") else "")
                + (f", {local['dropped']} over the limit" if local.get("dropped") else ""))
+    click.echo(f"  witness:   {witness['text']}")
     if local.get("stopped"):
         click.echo(f"  stopped:   {local['stopped']}")
 

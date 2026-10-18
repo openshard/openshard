@@ -1,6 +1,7 @@
-# Signed Receipts
+# Signed Receipts and the hosted witness
 
-Status: Phase 1 implemented. The per-install key and sealing
+Status: the hosted witness ships in v0.5.0 (see "The hosted witness" below).
+Signing Phase 1 implemented. The per-install key and sealing
 (`history/receipt_keys.py`, `history/receipt_signing.py`, on by default);
 the offline check, bundles and `signature_status`
 (`history/receipt_verify.py`); `openshard verify --signature`,
@@ -10,8 +11,8 @@ Phases 2 and 3 are not started.
 **The limit, stated plainly:** a seal made with this machine's key proves
 only that the record is unchanged since it was sealed with this machine's
 key. A coding agent running as the same OS user can read that key and sign
-a forged record with it (threat 1). Catching that needs a party the agent
-cannot reach: the witness log (Phase 2).
+a forged record with it (threat 1). Catching a later rewrite needs a party
+the agent cannot reach: the hosted witness (v0.5.0, below).
 
 Today every Receipt carries a `content_hash` (`history/shard_hash.py`): a
 SHA-256 over the record's canonical JSON. It catches an edit that forgot to
@@ -30,11 +31,11 @@ content hashed to H, and has not been shown to have changed it since.*
 | The record was not changed after sealing by someone without the key. | That anything the agent said is true. Agent-reported evidence stays agent-reported. |
 | Which install (key) sealed it. | That the checks passed. That is the verification block, which keeps its own evidence source (`agent_reported`, `directly_observed`, `independently_verified`). |
 | That a later amendment (`note`, `feedback`, `verify`) was sealed by the same key, if it was. | That capture was complete. Missing evidence stays missing. |
-| | When it was sealed. `signed_at` is the local clock, self-asserted, until a witness (Phase 2) adds its own time. |
+| | When it was sealed. `signed_at` is the local clock, self-asserted, until the hosted witness adds its own time. |
 
 Signing adds no evidence level. A signed `agent_reported` claim is still an
 `agent_reported` claim. The independent re-run (`openshard verify`) and the
-Platform witness (Phase 2) are separate claims and are shown separately.
+hosted witness are separate claims and are shown separately.
 
 ### Threats
 
@@ -60,6 +61,53 @@ Platform witness (Phase 2) are separate claims and are shown separately.
 5. **Key theft.** Anyone with the private key can sign as that install.
    Rotation and revocation below; hardware-backed keys are out of scope.
 
+## The hosted witness (v0.5.0)
+
+A Receipt lives in `.openshard/runs.jsonl`, inside the repository the agent
+can write. The witness is a copy the agent cannot rewrite: with remote or
+connected capture, each Event leaves the machine seconds after it happens,
+and the Platform, not the machine, records when it arrived and in what
+order. The public promise is **proof that can't be changed afterwards**.
+
+| The witness proves | It does not prove |
+| --- | --- |
+| The Platform received this Event, with this content, at its own time, and has not changed it since. | That the Event is true. An agent running as the developer's OS user can still send invented Events live, with the local credential. We say so. |
+| An Event changed or deleted on the machine after it was acknowledged disagrees with the held copy. | That capture was complete. Events that reached the witness late (buffered offline) or never are shown as such, never as witnessed. |
+| | That checks passed. "Witnessed" is never "verified"; independent verification stays CI or `openshard verify`. |
+
+The witness adds no evidence level and never turns a result green.
+
+What Core does:
+
+- **Session nonce.** When a captured session starts, Core mints a random
+  128-bit nonce (26 lowercase base32 characters, URL-safe). It is not a
+  secret. It rides in the metadata of the session's first remote-capture
+  Event, which the Receipt keeps too, and in the `session` block of
+  `history --json`, so the Platform can tie a Receipt to the Events it
+  witnessed. A resumed session keeps its nonce; a Receipt written before
+  this has none, and none is invented. The receipt-sync payload leaves it
+  out until the Platform contract accepts the field.
+- **Witness acknowledgement.** When the Platform acknowledges a batch it
+  may return a witness acknowledgement. Core keeps the latest in the local
+  spool state (`~/.openshard/remote-capture/`) and `openshard remote
+  status` shows it:
+
+  ```
+  witness:   214 events acknowledged · last 12s ago
+  witness:   not connected
+  witness:   unknown (the Platform has not returned a witness acknowledgement)
+  ```
+
+  Only an acknowledgement the Platform actually returned counts. Events
+  that were sent without one leave the witness unknown, never assumed.
+
+Capture never waits for the witness: hooks append to the local spool and
+return, sending happens off the hook path, and a failure there never fails
+a hook or blocks the agent. Nothing new leaves the machine beyond the
+nonce: the witness holds the same scrubbed, bounded Events remote capture
+already sends (event types, tool names, repo-relative paths, statuses,
+counts, hashes; no code, diffs, prompts, transcripts or output).
+
 ## Options considered
 
 | Option | Strength | Cost | Use |
@@ -78,8 +126,8 @@ Platform witness (Phase 2) are separate claims and are shown separately.
   unknown keys.
 - **Phase 2 (after v0.5.0):** `openshard sync connect` registers the
   install's public key and sync sends the envelope next to the Receipt.
-  The hosted service checks it and adds its own witness signature (see
-  "What is open and what is hosted").
+  The hosted service checks it alongside its witness (which ships in
+  v0.5.0, above; see "What is open and what is hosted").
 - **Phase 3 (later):** optional Sigstore signing in CI
   (`pip install openshard[sigstore]`), producing a Sigstore bundle over the
   same Statement.
@@ -314,9 +362,9 @@ added outside the projection, so it never changes a sealed digest. Phase 2 wordi
 | Signature invalid | `invalid` |
 | Signed · key not registered | `signed_unknown_key` (an edge case, so it is not shown as verified) |
 
-A failed content hash keeps today's failure wording. Once Phase 2 ships, a
-witnessed Receipt adds a separate line, "Witnessed by Platform at <time>",
-so the install's claim and the server's claim are never merged.
+A failed content hash keeps today's failure wording. A witnessed Receipt
+shows the witness on its own line, so the install's claim and the server's
+claim are never merged.
 
 ## Dependencies
 
@@ -345,9 +393,9 @@ envelope and Statement format on this page, and offline
 `openshard verify --signature`. Anyone can read and rerun the verifier;
 a verdict nobody can inspect would not be credible.
 
-Hosted, provided by the Platform service: the server counter-signature
-(witness) on ingest, the stored audit trail of signed envelopes, the key
-registry and rotation UI, organisation key policies, signed audit exports,
+Hosted, provided by the Platform service: the witness of captured Events
+(v0.5.0), the server counter-signature on ingest, the stored audit trail of
+signed envelopes, the key registry and rotation UI, organisation key policies, signed audit exports,
 and reconciling agent claims against independently observed evidence. Core
 only sends the public key and envelopes to it; a hosted witness statement
 uses the same open envelope format, so `openshard verify` can check it

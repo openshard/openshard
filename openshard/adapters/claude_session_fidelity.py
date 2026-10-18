@@ -31,6 +31,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from openshard.history.receipt_evidence import (
+    mint_session_nonce,
+    recorded_session_nonce,
+    session_nonce_or_none,
+)
+
 PROMPT_SOURCE_AGENT_NOTIFICATION = "agent_notification"
 _NOTIFICATION_PREFIXES = ("<task-notification>", "<agent-message ", "<agent-message>", "<teammate-message")
 
@@ -120,6 +126,24 @@ def rebuilt_counters(capture: dict) -> dict[str, Any]:
         "archived_events": capture.get("hook_events_archived"),
         "event_log": capture.get("event_log"),
     }
+
+
+def session_nonce(carried: object = None) -> str:
+    """The nonce for a new buffer's ``session.started`` Event: one carried over, else a fresh one.
+
+    It lives in that Event's metadata, which the Receipt keeps (the opening
+    Events are never archived away) and remote capture streams first, so a
+    buffer rebuilt from its record keeps it without minting another. A
+    ``--resume`` segment of an ended session carries the nonce the session
+    started with, so one agent session binds to its remote-capture journal
+    through one nonce (as it does through one ``session_key``).
+    """
+    return session_nonce_or_none(carried) or mint_session_nonce()
+
+
+def carried_session_nonce(entry: dict) -> str | None:
+    """The nonce an earlier Receipt of the same agent session started with, or None."""
+    return recorded_session_nonce(entry)
 
 
 def capture_fields(buf: dict) -> dict[str, Any]:

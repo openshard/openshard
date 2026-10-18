@@ -96,6 +96,10 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
     # would reject the whole envelope); diff_added/diff_removed still carry
     # the counts, and null still means unknown.
     payload.pop("lines_not_recorded_reason", None)
+    # Same for the session nonce: the Platform's session schema is strict too.
+    # It still reaches the Platform in the first remote-capture Event's metadata.
+    if isinstance(payload.get("session"), dict):
+        payload["session"] = {k: v for k, v in payload["session"].items() if k != "session_nonce"}
     if not multi_agent:
         payload.pop("multi_agent", None)
     return payload
