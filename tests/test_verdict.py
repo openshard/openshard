@@ -85,7 +85,9 @@ class TestCommit:
     def test_not_checked_yet_is_unknown(self, repo, monkeypatch):
         code, doc = _run(repo, monkeypatch, "--commit", "HEAD")
         assert code == 2 and doc["verdict"] == "unknown" and doc["reason"] == "not_checked"
-        assert set(doc) == KEYS and doc["subject"] == {"kind": "commit", "id": _head(repo)}
+        assert set(doc) == KEYS | {"match"} and doc["match"] is None
+        assert doc["subject"] == {"kind": "commit", "id": _head(repo),
+                                  "tree_oid": _git(repo, "rev-parse", "HEAD^{tree}")}
 
     def test_a_bound_passing_rerun_is_verified(self, repo, monkeypatch):
         entry = _entry(1)

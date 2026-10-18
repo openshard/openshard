@@ -13,6 +13,7 @@ def run_verify_from_ci(entry: dict, loc, receipt_label, *, as_json: bool, strict
     from openshard.cli.main import _machine_envelope, _remote_request_delivery, _utc_stamp
     from openshard.verification import ci_evidence as ci
     from openshard.verification.post_session import (
+        commit_tree,
         evidence_for_entry,
         load_attestations,
         record_attestation,
@@ -68,7 +69,8 @@ def run_verify_from_ci(entry: dict, loc, receipt_label, *, as_json: bool, strict
         )
         return
     pr_head = ci.fetch_github_pr_head(repo_root)
-    attestation = ci.build_ci_attestation(entry, result, target, created_at=_utc_stamp(), pr_head=pr_head)
+    attestation = ci.build_ci_attestation(entry, result, target, created_at=_utc_stamp(), pr_head=pr_head,
+                                          tree_oid=commit_tree(repo_root, target.sha))
     if attestation is None:
         finish("ci_unavailable", "CI verdict could not be recorded.", 2, commit=target.sha)
         return

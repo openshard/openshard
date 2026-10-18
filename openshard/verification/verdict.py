@@ -44,6 +44,9 @@ VERDICT_UNKNOWN = "unknown"
 VERDICT_ERROR = "error"
 EXIT_CODES = {VERDICT_VERIFIED: 0, VERDICT_FAILED: 1, VERDICT_UNKNOWN: 2, VERDICT_ERROR: 3}
 
+MATCH_COMMIT = "commit"  # evidence bound to exactly the commit asked about
+MATCH_TREE = "tree"  # evidence bound to another commit with the same tree
+
 REASON_NOT_CHECKED = "not_checked"  # no evidence names this subject
 REASON_NO_RECEIPT = "no_receipt"  # no Receipt carries this task id
 REASON_INTEGRITY_MISMATCH = "integrity_mismatch"  # the Receipt changed after its hash was written
@@ -102,14 +105,27 @@ def error(kind: str, ident: str, message: str) -> dict[str, Any]:
     }, message=message, evidence=[], receipts=[])
 
 
-def commit_verdict(sha: str, attestations: list[dict]) -> dict[str, Any]:
-    """The verdict for exactly *sha* (a full lowercase commit id) from *attestations*."""
-    matched = [item for item in attestations if isinstance(item, dict) and _bound_sha(item) == sha]
+def commit_verdict(sha: str, attestations: list[dict], *, tree_oid: str | None = None) -> dict[str, Any]:
+    """The verdict for *sha* (a full lowercase commit id) from *attestations*.
+
+    Evidence bound to exactly *sha* is used when there is any (``match:
+    commit``). Otherwise, with *tree_oid* (the tree of *sha*), evidence bound
+    to another commit with that same tree is used (``match: tree``): the same
+    content under a different commit id, e.g. after a squash merge.
+    """
+    items = [item for item in attestations if isinstance(item, dict) and _bound_sha(item)]
+    matched = [item for item in items if _bound_sha(item) == sha]
+    match = MATCH_COMMIT if matched else None
+    if not matched and tree_oid:
+        matched = [item for item in items if item.get("tree_oid") == tree_oid]
+        match = MATCH_TREE if matched else None
     summaries = [summarize_attestation(item) for item in matched]
     truth = interpret_evidence(None, post_session_verification={"evidence": summaries})
     result = _from_truth(truth, reason=None if summaries else REASON_NOT_CHECKED)
-    rows = [_evidence_row(s, item.get("receipt_id")) for s, item in zip(summaries, matched, strict=True)]
-    return _document({"kind": "commit", "id": sha}, result, evidence=rows, receipts=[])
+    rows = [{**_evidence_row(s, item.get("receipt_id")), "tree_oid": item.get("tree_oid"), "match": match}
+            for s, item in zip(summaries, matched, strict=True)]
+    subject = {"kind": "commit", "id": sha, "tree_oid": tree_oid}
+    return _document(subject, result, match=match, evidence=rows, receipts=[])
 
 
 def task_verdict(task_id: str, entries: list[dict], attestations: list[dict], *, build_receipt) -> dict[str, Any]:

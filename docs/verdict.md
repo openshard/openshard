@@ -22,10 +22,15 @@ Usage errors exit 3, never 2, so 2 always means "unknown".
 
 ## What counts
 
-- `--commit`: only `openshard verify` re-runs and CI verdicts bound to exactly
-  that commit (`.openshard/verifications.jsonl`). A re-run on a dirty tree is
-  not bound to a commit and does not count. The newest conclusive evidence
-  wins, by the same rules `openshard last` uses (`history/verification_truth.py`).
+- `--commit`: only `openshard verify` re-runs and CI verdicts bound to that
+  commit (`.openshard/verifications.jsonl`). A re-run on a dirty tree is not
+  bound to a commit and does not count. The newest conclusive evidence wins,
+  by the same rules `openshard last` uses (`history/verification_truth.py`).
+- Evidence records the commit's tree (`tree_oid`) beside the commit. When no
+  evidence names the commit itself, evidence bound to another commit with the
+  same tree is used and labelled `match: "tree"` (a squash merge, a rebased or
+  amended commit: same content, new id). Evidence for the commit itself
+  always wins (`match: "commit"`).
 - `--task`: the task's latest Receipt, with the later evidence recorded for
   it. Earlier Receipts are listed in `receipts`, never used for the verdict.
 - A Receipt whose content hash no longer matches is `unknown`
@@ -37,7 +42,7 @@ Usage errors exit 3, never 2, so 2 always means "unknown".
 {
   "schema": "openshard.verdict",
   "schema_version": 1,
-  "subject": {"kind": "commit", "id": "<full sha>"},
+  "subject": {"kind": "commit", "id": "<full sha>", "tree_oid": "<its tree, or null>"},
   "verdict": "verified",
   "exit_code": 0,
   "reason": "verified_passed",
@@ -45,10 +50,12 @@ Usage errors exit 3, never 2, so 2 always means "unknown".
   "authority": "directly_observed",
   "basis": "post_session",
   "artifact_sha": "<sha the evidence is bound to, or null>",
+  "match": "commit",
   "evidence": [
     {"attestation_id": "vat_...", "receipt_id": "rcpt_...", "kind": "rerun",
      "status": "passed", "source": "directly_observed",
-     "artifact_sha": "<sha>", "created_at": "2026-10-18T11:00:01Z"}
+     "artifact_sha": "<sha>", "created_at": "2026-10-18T11:00:01Z",
+     "tree_oid": "<tree>", "match": "commit"}
   ],
   "receipts": []
 }
@@ -58,6 +65,7 @@ Usage errors exit 3, never 2, so 2 always means "unknown".
   `STATES`), or `not_checked`, `no_receipt`, `integrity_mismatch`, `error`.
 - `authority` is `directly_observed`, `independently_verified`,
   `git_verified`, `agent_reported` or `none`.
+- `match` (commit verdicts only) is `commit`, `tree` or null (no evidence).
 - `--task` adds `receipt_id` (the latest Receipt) and fills `receipts` with
   `{receipt_id, verdict, state, authority}` per Receipt, oldest first.
 - `error` adds `message`.
