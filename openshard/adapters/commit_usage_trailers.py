@@ -20,13 +20,18 @@ Usage is attributed once. A locked state file per session under the
 OpenShard home (``usage-trailers/<session>.json``, shared by every agent,
 worktree and repository) keeps the message ids already claimed. The ids of the latest call stay *pending* until ``HEAD`` moves in
 the repository they were printed for: a commit that never landed releases
-them, a landed one makes them permanent. Without a state the window starts at
-``HEAD``'s commit time (usage before the last commit belongs to it), or at
-``--since``.
+them, a landed one makes them permanent.
+
+The window is the claim state, not ``HEAD``: an identified caller gets every
+message of its own transcript that no commit has claimed (a subagent's
+transcript starts when the agent does), so a rebase or merge that moves
+``HEAD`` to a newer commit cannot shrink the count. The session window starts
+at the session's latest landed claim (the whole session before the first).
+``--since`` overrides either.
 
 When the caller cannot be told apart, every transcript of the session is
 counted instead and labelled ``Openshard-Usage-Scope: session-window`` (usage
-since the last commit, which may include parallel agents' work); an exact
+since the session's last claimed commit, which may include parallel agents' work); an exact
 caller is ``agent``. Claims are session-wide, so the two never count one
 message twice. When no true number exists -- no new usage, malformed or
 capped counters, several models, surcharged requests -- no trailer is
@@ -77,6 +82,10 @@ def _git(repo: Path, *args: str) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else None
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _utc(dt: datetime) -> str:
@@ -226,6 +235,25 @@ def trailer_lines(summary: dict | None, scope: str = SCOPE_AGENT) -> list[str]:
     return lines
 
 
+def _short(n: int) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1_000_000 else f"{n / 1e3:.1f}k" if n >= 1000 else str(n)
+
+
+def trailer_summary(lines: list[str]) -> str:
+    """One line for the terminal: scope, total tokens and the list-rate estimate when one exists."""
+    from openshard.models.pricing import estimate_usage_cost
+
+    values = dict(line.split(": ", 1) for line in lines)
+    counts = {field: int(values.get(key, "0")) for field, key in TRAILER_KEYS}
+    total = counts["input"] + counts["output"] + counts["cache_read"] + counts["cache_creation"]
+    cost = estimate_usage_cost(values.get("Openshard-Model"), input_tokens=counts["input"],
+                               output_tokens=counts["output"], cache_read_tokens=counts["cache_read"],
+                               cache_write_tokens=counts["cache_creation"] - counts["cache_creation_1h"],
+                               cache_write_1h_tokens=counts["cache_creation_1h"])
+    price = f"~${cost.usd:.{2 if cost.usd >= 0.01 else 4}f} list-rate est." if cost is not None else "cost unknown"
+    return f"scope {values.get(SCOPE_KEY)}, {_short(total)} tokens, {price}"
+
+
 def _state_path(session_id: str) -> Path:
     from openshard.util.home import openshard_home
 
@@ -257,7 +285,8 @@ def _load_state(path: Path) -> dict:
     except (OSError, ValueError) as exc:
         raise UsageUnavailable(f"Attribution state {path} is unreadable; usage could be counted twice.") from exc
     if not (isinstance(data, dict) and isinstance(data.get("attributed", []), list)
-            and isinstance(data.get("pending", {}), dict) and isinstance(data.get("since", {}), dict)):
+            and isinstance(data.get("pending", {}), dict) and isinstance(data.get("since", {}), dict)
+            and isinstance(data.get("session_since", ""), str)):
         raise UsageUnavailable(f"Attribution state {path} is malformed; usage could be counted twice.")
     return data
 
@@ -273,6 +302,9 @@ def _settle_pending(state: dict, own: str) -> None:
                 del state["pending"][key]
             continue
         state["attributed"] = [*state.get("attributed", []), *((claim or {}).get("ids") or [])]
+        at = claim.get("at") if isinstance(claim, dict) else None
+        if isinstance(at, str) and at > state.get("session_since", ""):
+            state["session_since"] = at  # the session window restarts after its latest landed claim
         del state["pending"][key]
 
 
@@ -289,9 +321,10 @@ def usage_trailers(
     """Trailer lines for the usage this commit has not had claimed by an earlier one.
 
     The committing agent's own transcript when it can be identified
-    (``Openshard-Usage-Scope: agent``); otherwise every transcript of the
-    session (``session-window``: usage since the last commit, which may
-    include parallel agents' work). *deliver* (when given) receives the lines
+    (``Openshard-Usage-Scope: agent``: all of its unclaimed messages);
+    otherwise every transcript of the session (``session-window``: unclaimed
+    usage since the session's last landed claim, which may include parallel
+    agents' work). *deliver* (when given) receives the lines
     before they are claimed; if it raises, nothing is claimed.
     """
     session_id, main, explicit = session_transcript(session_id, transcript)
@@ -306,9 +339,9 @@ def usage_trailers(
     with _locked(path):
         state = _load_state(path)
         _settle_pending(state, key)
-        floor = resolve_since(repo, since) if since else state.get("since", {}).get(key)
-        if floor is None and head is not None:
-            floor = resolve_since(repo, head)
+        # Not HEAD's time: after a rebase or merge HEAD is someone else's newer commit.
+        floor = (resolve_since(repo, since) if since
+                 else (state.get("session_since") or None) if scope == SCOPE_SESSION else None)
         claimed = {*state.get("attributed", []),
                    *(i for c in state.get("pending", {}).values() for i in (c.get("ids") or []))}
         summary, ids = read_usage(files, floor, claimed)
@@ -316,8 +349,8 @@ def usage_trailers(
         if deliver is not None:
             deliver(lines)
         if record:
-            state.setdefault("since", {}).setdefault(key, floor)
-            state.setdefault("pending", {})[key] = {"repo": toplevel, "head": head, "ids": ids}
+            state.setdefault("pending", {})[key] = {"repo": toplevel, "head": head, "ids": ids,
+                                                    "at": _utc(_now())}
             state.update(version=2, session=session_id)
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(state), encoding="utf-8")

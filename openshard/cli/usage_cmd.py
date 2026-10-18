@@ -129,7 +129,7 @@ def usage_show(receipt_ref: str | None, as_json: bool) -> None:
 
 @usage_group.command("trailers")
 @click.option("--since", default=None, metavar="COMMIT|TIME",
-              help="Start of the window for the first call (default: HEAD's commit time).")
+              help="Start of the window (default: every message no commit has claimed yet).")
 @click.option("--transcript", type=click.Path(path_type=Path), default=None,
               help="The committing agent's transcript (default: found from $CLAUDE_CODE_SESSION_ID).")
 @click.option("--session", "session_id", default=None, help="Claude Code session id (default: $CLAUDE_CODE_SESSION_ID).")
@@ -139,7 +139,7 @@ def usage_show(receipt_ref: str | None, as_json: bool) -> None:
 @click.pass_context
 def usage_trailers_cmd(ctx: click.Context, since: str | None, transcript: Path | None, session_id: str | None,
                        msg_file: Path | None, no_record: bool) -> None:
-    """Openshard-Tokens-* commit trailers for the committing agent's usage since its last commit.
+    """Openshard-Tokens-* commit trailers for the committing agent's usage no commit has claimed yet.
 
     Counts only the transcript of the agent running this (main thread or one
     subagent); each message is claimed by one commit only. When usage cannot be
@@ -148,12 +148,14 @@ def usage_trailers_cmd(ctx: click.Context, since: str | None, transcript: Path |
     from openshard.adapters.commit_usage_trailers import (
         UsageUnavailable,
         append_trailers,
+        trailer_summary,
         usage_trailers,
     )
 
     def deliver(lines: list[str]) -> None:
         if msg_file is not None:
             append_trailers(msg_file, lines)
+            click.echo(f"Added usage trailers: {trailer_summary(lines)}", err=True)
         else:
             click.echo("\n".join(lines))
 
