@@ -1,9 +1,9 @@
 # Per-turn Receipts (Claude Code first)
 
-Status: first step shipped behind a flag, **off by default** for v0.5.0.
-Turn it on with `OPENSHARD_TURN_RECEIPTS=on` in the capture service's
-environment, or `turn_receipts: true` in `.openshard/config.yml`
-(the environment wins; `off` there beats the config).
+Status: **on by default** from v0.5.0. Opt out with
+`OPENSHARD_TURN_RECEIPTS=off` in the capture service's environment, or
+`turn_receipts: false` in `.openshard/config.yml` (the environment wins).
+A session already open when Core is upgraded keeps its session Receipt.
 
 ## Problem
 
@@ -65,7 +65,7 @@ exception and is always labelled.
 | Commits | yes | `session_commits` from the turn-start HEAD to the turn-end HEAD, same corroboration rules |
 | Usage / cost | yes | transcript messages timestamped at or after the turn start (`_transcript_usage`, `since = started_at`) |
 | Checks | yes | check commands observed in that turn |
-| Independent re-runs | later | `openshard verify` / CI attach as evidence (`sync/evidence.py`), never rewrite |
+| Independent re-runs | yes | a turn with a resulting commit gets commit verification; with `post_session_verify: safe`, a sealed turn *without* a commit that changed files gets the working-tree run (a turn that changed nothing gets none). Results attach as evidence, never rewrite |
 | Session end | session-level | no turn Receipt claims it; see Failure modes |
 
 ## Sealing and signing
@@ -88,31 +88,34 @@ turn stays "still in progress". Measured locally only in tests; the target is
 
 ## Platform contract
 
-Nothing new is sent in this step, so the strict envelope
-(`tests/fixtures/platform/receipt-sync-envelope.v1.json`) is unchanged:
+Platform #243 accepts the turn fields (all optional, nullable). For a turn
+Receipt Core sends:
 
-* turn Receipts sync as ordinary Receipts; `session.session_key` relates the
-  turns of one session, `session.start_source` is `turn`, `session.ended` is
-  `false`;
-* a `session`-grouped `task_id` is sent as `null`, because the contract
-  defines `task_id` as an explicit declaration. An `explicit` one is sent.
+* `task_id` with `task_grouping`: `session` for a Task OpenShard grouped from
+  the observed session, `explicit` for a declared one. Absent means explicit,
+  so session Receipts are unchanged;
+* in `session`: `receipt_scope: "turn"`, `turn_index` and
+  `previous_receipt_id` (the previous turn's Receipt), beside the existing
+  `session_key`, `start_source: "turn"` and `ended: false`.
 
-For the Platform to show Tasks of turns, it must first accept (optional,
-nullable): `task_grouping` (`explicit` | `session` | `branch`), and in
-`session`: `receipt_scope`, `turn_index`, `previous_receipt_id`. Then Core can
-send the session-grouped `task_id`. An "in progress" view is a separate
-Platform PR; the hook for it is the in-progress turn Receipt already on disk
-(`receipt_scope: turn`, no `turn_sealed_at`).
+The same `session` fields are in `openshard history --json`. `openshard last`
+and `openshard history` print `Turn 2 of session ses_1a2b3c4d`.
+
+## In progress
+
+A sealed turn syncs; an open one does not (hosted Receipts are immutable). An
+open-turn signal for the Platform is a separate change.
 
 ## Backwards compatibility
 
-* Flag off: byte-for-byte today's record (a test asserts the shape).
-* Older records render unchanged; nothing is back-filled.
+* Opted out: byte-for-byte today's record (a test asserts the shape).
+* Older records render unchanged; nothing is back-filled or rewritten.
 * `openshard last` shows the latest turn; `history` lists every turn;
   `task attempts <task_id>` lists a session's turns; MCP `get_receipt` is
   unchanged.
-* A session Receipt rebuilt from disk never turns into a turn Receipt
-  mid-life when the flag flips; new sessions pick the flag up.
+* A session Receipt never turns into a turn Receipt mid-life: not when rebuilt
+  from disk, and not when a buffer an older Core opened (more than one prompt
+  or turn already) meets the new default. New sessions pick the flag up.
 
 ## Failure modes
 
@@ -154,9 +157,10 @@ command output. The new fields are an enum, an integer, a timestamp and an id.
 
 ## Still open
 
-1. Branch grouping across sessions and PR linking (`task_grouping: branch`).
-2. Platform: accept the optional fields above; then send session-grouped `task_id`.
-3. Record the session end as session-level evidence for the last turn.
-4. Carry transcript offsets across turns.
-5. Codex, Cursor and OpenCode turn boundaries.
-6. Default the flag on once 1-3 land and a release has run with it.
+1. Branch grouping across chats (`task_grouping: branch`: same repository and
+   branch within 24 h joins the Task; once the branch has a PR, the PR is
+   authoritative). Needs a cross-session lookup on the capture path and a PR
+   rule; not in v0.5.0.
+2. Record the session end as session-level evidence for the last turn.
+3. Carry transcript offsets across turns.
+4. Codex, Cursor and OpenCode turn boundaries.

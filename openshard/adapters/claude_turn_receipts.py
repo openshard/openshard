@@ -1,6 +1,6 @@
-"""Per-turn Receipts for Claude Code (docs/per-turn-receipts.md). Behind a flag, off by default.
+"""Per-turn Receipts for Claude Code (docs/per-turn-receipts.md). On by default since v0.5.0.
 
-With the flag on, one Claude Code prompt -> completed turn (``UserPromptSubmit``
+With the flag on (the default), one Claude Code prompt -> completed turn (``UserPromptSubmit``
 ... ``Stop``) is one Receipt instead of one Receipt per agent session. The
 turn's Receipt is sealed when its ``Stop`` is applied and becomes
 sync-eligible at once; the next hook of the same session opens the next
@@ -15,13 +15,12 @@ Grouping. Turns of one session share a ``task_id``. A declared task
 (``OPENSHARD_TASK_ID``) wins and is recorded as ``task_grouping: explicit``;
 otherwise the first turn mints one and the later turns of the same agent
 session inherit it, recorded as ``task_grouping: session`` -- a grouping
-OpenShard made from the session id it observed, never a declaration. The sync
-projection does not send a session-grouped ``task_id`` (the Platform contract
-defines ``task_id`` as explicit); see ``sync/envelope.receipt_payload``.
+OpenShard made from the session id it observed, never a declaration. Sync sends
+both, labelled (``sync/envelope.receipt_payload``).
 
 Flag: ``OPENSHARD_TURN_RECEIPTS=on|off`` in the capture process's environment
-wins; else ``turn_receipts: true`` in the repository's ``.openshard/config.yml``.
-It is read once per session buffer and then sticks to it.
+wins; else ``turn_receipts: false`` in the repository's ``.openshard/config.yml``
+opts out. It is read once per session buffer and then sticks to it.
 """
 
 from __future__ import annotations
@@ -49,7 +48,7 @@ _CLOUD_TURN_SURFACES = frozenset({("cursor", "cursor-cloud"), ("claude_code", "c
 
 
 def enabled(repo_root: Path, env: Mapping[str, str] | None = None) -> bool:
-    """Whether new Claude Code sessions in *repo_root* get per-turn Receipts. Never raises."""
+    """Whether new Claude Code sessions in *repo_root* get per-turn Receipts (default: yes). Never raises."""
     source = os.environ if env is None else env
     value = str(source.get(TURN_RECEIPTS_ENV) or "").strip().lower()
     if value in _ON:
@@ -60,22 +59,32 @@ def enabled(repo_root: Path, env: Mapping[str, str] | None = None) -> bool:
         path = Path(repo_root) / ".openshard" / "config.yml"
         # Same cheap pre-check as verification/auto.py: YAML only when the key is there.
         if not path.is_file() or CONFIG_KEY.encode() not in path.read_bytes():
-            return False
+            return True
         from openshard.config.settings import load_config_safe
 
         config, valid, _ = load_config_safe(cwd=Path(repo_root))
-        return bool(valid) and config.get(CONFIG_KEY) is True
+        return not (bool(valid) and config.get(CONFIG_KEY) is False)
     except Exception:
-        return False
+        return True
 
 
 def turn_scoped(buf: dict, repo_root: Path) -> bool:
-    """True when *buf* records one turn. Decided once per buffer, then sticky."""
+    """True when *buf* records one turn. Decided once per buffer, then sticky.
+
+    A buffer that already holds more than one prompt or turn was opened by a
+    Core without this decision (an upgrade mid-session): it stays a session
+    Receipt, so a record already on disk never turns into a turn Receipt.
+    """
     scope = buf.get("receipt_scope")
     if scope is None:
-        scope = SCOPE_TURN if buf.get("agent") == AGENT_CLAUDE_CODE and enabled(repo_root) else "session"
-        buf["receipt_scope"] = scope
+        in_flight = _count(buf.get("prompt_count")) > 1 or _count(buf.get("turn_count")) > 1
+        turn = buf.get("agent") == AGENT_CLAUDE_CODE and not in_flight and enabled(repo_root)
+        scope = buf["receipt_scope"] = SCOPE_TURN if turn else "session"
     return scope == SCOPE_TURN
+
+
+def _count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def is_turn_sealed(capture: object) -> bool:

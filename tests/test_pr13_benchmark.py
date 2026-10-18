@@ -469,7 +469,9 @@ class TestBenchmarkPipeline:
         assert burn["verified_success"] is False
         assert burn["repeated_known_failure"]["matched"] is True
         assert burn["openshard"]["history_present"] is True
-        assert burn["openshard"]["captured_session_end_observed"] is True
+        # Per-turn Receipts (the default): the completed turn is sealed at its Stop and the
+        # session end is not recorded on it (docs/per-turn-receipts.md, Still open).
+        assert burn["openshard"]["captured_session_end_observed"] is False
         evidence = burn["openshard"]["expected_evidence"]
         assert evidence["present"] is True, evidence["checks"]
         shard = burn["openshard"]["history"]["shards"][0]
