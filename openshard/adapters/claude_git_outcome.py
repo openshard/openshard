@@ -291,6 +291,9 @@ def _stamp_line_counts(
     from openshard.history.receipt_evidence import base_commit_value, commit_value
 
     per_file: dict[str, dict] | None = None
+    added: int | None
+    removed: int | None
+    reason: str | None
     if files_source != "git_diff_inferred":
         added, removed, reason = None, None, LINES_GIT_UNAVAILABLE
     else:

@@ -26,6 +26,7 @@ from openshard.sync.envelope import receipt_payload
 from tests.capture_fixtures import SID
 
 _PER_FILE_KEYS = ("lines_added", "lines_removed", "binary")
+_PLATFORM_SCHEMA = Path(__file__).parent / "fixtures" / "platform" / "receipt-sync-envelope.v1.json"
 
 
 def _run(repo: Path, event: str, **fields) -> None:
@@ -229,5 +230,9 @@ class TestRenderAndSync:
         assert {k: v for k, v in payload.items() if k != "integrity"} == {
             k: v for k, v in other.items() if k != "integrity"
         }
+        # The Platform's file entry is strict and has no per-file counts yet.
+        schema = json.loads(_PLATFORM_SCHEMA.read_text(encoding="utf-8"))
+        item = schema["properties"]["receipt"]["properties"]["files"]["items"]
+        assert item.get("additionalProperties") is False
         for f in payload["files"]:
-            assert set(f) == {"path", "change_type", "summary", "attribution"}
+            assert set(f) == set(item["properties"]) == {"path", "change_type", "summary", "attribution"}
