@@ -254,6 +254,54 @@ class TestMultipleSessions:
         assert files_b["b.py"]["attribution"] == "agent_reported"
         assert entry_b["files_created"] == 1
 
+    def _commit(self, repo, sid: str, msg: str) -> None:
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", msg)
+        _run(repo, "PostToolUse", sid, tool_name="Bash", tool_input={"command": f"git add -A && git commit -m {msg}"})
+
+    def test_next_session_edit_and_commit_is_agent_reported_and_shown_in_git(self, repo):
+        """Dogfood shape (shard-20261018-0016/0017): session 1 commits two files via Bash; session 2
+        edits a file with Edit and commits it. Session 2 read "1 agent-reported, 0 git-observed",
+        which looked as if git had not seen the file although its numstat counted the line."""
+        (repo / "tests").mkdir()
+        (repo / "tests" / "test_urls.py").write_text("a\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "seed")
+        _start(repo, SID)
+        (repo / "a.py").write_text("1\n", encoding="utf-8")
+        (repo / "b.py").write_text("2\n", encoding="utf-8")
+        self._commit(repo, SID, "s1")
+        first = _finish(repo, SID)
+        assert first["changes"]["git_observed"] == 2 and "agent_reported_in_git" not in first["changes"]
+        _start(repo, SID2)
+        _agent_write(repo, "tests/test_urls.py", "a\nb\n", sid=SID2, tool="Edit")
+        self._commit(repo, SID2, "s2")
+        second = _finish(repo, SID2)
+        files = _by_path(second)
+        assert set(files) == {"tests/test_urls.py"}  # base is session 2's start HEAD, not session 1's
+        # The attribution is unchanged: the agent's success signal credits it; git backs it.
+        assert files["tests/test_urls.py"]["attribution"] == "agent_reported"
+        assert second["files_source"] == "git_diff_inferred" and second["lines_added"] == 1
+        assert second["changes"]["agent_reported"] == 1 and second["changes"]["git_observed"] == 0
+        assert second["changes"]["agent_reported_in_git"] == 1
+        assert "Files: 1 agent-reported (also in git diff), 0 git-observed." in second["summary"]
+        receipt = build_shard_receipt(second)
+        assert receipt.agent_reported_in_git == 1 and "agent_reported_in_git" not in (receipt.changes or {})
+        assert "1 file (1 agent-reported, also in git diff)" in render_compact_shard_receipt(receipt)
+
+    def test_agent_reported_files_are_not_marked_in_git_when_git_is_unavailable(self, repo, monkeypatch):
+        import openshard.adapters.claude_code_import as cci
+
+        monkeypatch.setattr(cci, "_parse_git_changed_files", lambda *a, **k: ([], "not_available"))
+        _start(repo)
+        _agent_write(repo, "calc.py", "x = 1\n", tool="Edit")
+        entry = _finish(repo)
+        assert _by_path(entry)["calc.py"]["attribution"] == "agent_reported"
+        assert entry["changes"]["agent_reported"] == 1
+        assert "agent_reported_in_git" not in entry["changes"]
+        assert "also in git diff" not in entry["summary"]
+        assert "also in git diff" not in render_compact_shard_receipt(build_shard_receipt(entry))
+
 
 class TestCompatibility:
     def test_old_record_without_attribution_still_renders(self):
