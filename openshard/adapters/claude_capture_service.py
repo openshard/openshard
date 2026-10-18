@@ -164,6 +164,7 @@ _IDLE_CHECK_SECONDS = 30.0
 # Retried indefinitely: dropping already-durably-queued evidence is the one
 # outcome this exists to prevent, so there is no retry cap or give-up.
 _RETRY_BACKOFF_SECONDS = 2.0
+_SIGNAL_DRAIN_SECONDS = 5.0  # supervisors often SIGKILL ~10 s after SIGTERM
 
 
 def _now() -> str:
@@ -368,10 +369,10 @@ class CaptureRecorder:
     def stop(self, *, drain: bool = True, timeout: float = 30.0) -> None:
         """Stop the worker; with *drain* every already-queued session is replayed first.
 
-        The drain is bounded by *timeout*: a session whose replay keeps
-        failing (its retry never succeeds) is left on disk for the next
-        service start to recover, rather than keeping this worker alive
-        after the caller has stopped waiting for it.
+        The drain is bounded by *timeout*: sessions not folded by then (a
+        large backlog, or a replay whose retry never succeeds) are left on
+        disk for the next service start to recover, rather than keeping this
+        worker alive after the caller has stopped waiting for it.
         """
         self._stop.set()
         self._drain_deadline = time.monotonic() + (timeout if drain else 0.0)
@@ -840,6 +841,8 @@ class CaptureRecorder:
 
     def _worker_loop(self) -> None:
         while True:
+            if self._stop.is_set() and time.monotonic() >= self._drain_deadline:
+                return  # drain time is up: what is still queued stays on disk for recovery
             try:
                 item = self._pending.get(timeout=0.5)
             except queue.Empty:
@@ -863,8 +866,6 @@ class CaptureRecorder:
                     # to happen here, and the wait until it is due has to
                     # be a real sleep. Past the drain deadline the files
                     # stay on disk for the next service start to recover.
-                    if self._stop.is_set() and time.monotonic() >= self._drain_deadline:
-                        return
                     for root_str, sid in self._due_retries():
                         self.enqueue(Path(root_str), sid)
                     if next_due is not None:
@@ -1546,19 +1547,18 @@ def serve(
     if ready is not None:
         ready.set()
     try:
-        server.shutdown_requested.wait()
+        while not server.shutdown_requested.wait(0.5):  # timed, so a SIGTERM handler gets to run
+            pass
     finally:
-        _log(f"stopping ({server.shutdown_reason or 'shutdown requested'}); draining queue")
-        recorder.stop(drain=True)
-        _telemetry_service_event(
-            env, "idle_exit" if str(server.shutdown_reason or "").startswith("idle") else "stopped",
-            recorder, server,
-        )
-        # Stdlib-recommended order: join the thread running serve_forever()
-        # (shutdown() was already triggered by begin_shutdown()) before
-        # closing the socket out from under it.
-        serve_thread.join(timeout=10)
+        reason = str(server.shutdown_reason or "")
+        _log(f"stopping ({reason or 'shutdown requested'}); draining queue")
+        serve_thread.join(timeout=5)  # stop taking hooks (stdlib order: join, then close)
         server.server_close()
+        # Bounded: what is not folded in time stays queued on disk for the next start.
+        recorder.stop(drain=True, timeout=_SIGNAL_DRAIN_SECONDS if reason.startswith("signal") else 30.0)
+        _telemetry_service_event(
+            env, "idle_exit" if reason.startswith("idle") else "stopped", recorder, server,
+        )
         try:
             sys.setswitchinterval(previous_switch)
         except (ValueError, AttributeError):
