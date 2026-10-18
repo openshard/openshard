@@ -313,13 +313,15 @@ class TestEmissionFromCapture:
         assert done["model_family"] == "unknown" and done["cost_usd"] is None
         _assert_clean(events)
 
-    def test_capture_keeps_working_when_telemetry_explodes(self, telemetry_on, repo):
+    def test_capture_keeps_working_when_telemetry_explodes(self, telemetry_on, repo, receipt_scope):
         state.set_consent("on", source="cli")
         env = {"CLAUDE_PROJECT_DIR": str(repo)}
         with patch("openshard.telemetry.client.emit", side_effect=RuntimeError("telemetry is on fire")):
             first = handle_claude_hook(_hook(repo, "UserPromptSubmit", prompt="task"), env=env)
             last = handle_claude_hook(_hook(repo, "Stop"), env=env)
-        assert first.action == "record_created" and last.action == "record_updated"
+        # A turn's Stop seals (finalises) its Receipt; a session Receipt is only updated.
+        assert first.action == "record_created"
+        assert last.action == ("record_updated" if receipt_scope == "session" else "record_finalized")
         lines = (repo / ".openshard" / "runs.jsonl").read_text(encoding="utf-8").splitlines()
         assert len(lines) == 1 and json.loads(lines[0])["task"] == "task"
         with patch("openshard.telemetry.state.load_state", side_effect=RuntimeError("state unreadable")):

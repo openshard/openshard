@@ -265,13 +265,14 @@ class TestCapturePaths:
         assert block["status"] == "not_run" and block["checks_attempted"] == 0
         assert block["source"] == "directly_observed"
 
-    def test_check_evidence_survives_sealing_in_the_original_receipt(self, repo):
+    def test_check_evidence_survives_sealing_in_the_original_receipt(self, repo, receipt_scope):
         from openshard.adapters.claude_hooks import sweep_stale_buffers
 
         _hook(repo, "UserPromptSubmit", prompt="task")
         _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "pytest"})
-        _hook(repo, "Stop")
-        assert sweep_stale_buffers(repo, max_age_seconds=0)  # idle sweep: buffer folded and deleted
+        _hook(repo, "Stop")  # seals a turn Receipt
+        if receipt_scope == "session":
+            assert sweep_stale_buffers(repo, max_age_seconds=0)  # idle sweep: buffer folded and deleted
         sealed = _runs(repo)[-1]
         _hook(repo, "UserPromptSubmit", prompt="resume")  # a new receipt segment
         _hook(repo, "PostToolUseFailure", tool_name="Bash", tool_input={"command": "go test ./..."},
@@ -318,13 +319,14 @@ class TestCapturePaths:
         block = _runs(repo)[-1]["verification"]
         assert block["status"] == "failed" and block["checks_passed"] == 0 and block["checks_failed"] == 1
 
-    def test_late_tool_hook_cannot_rewrite_a_sealed_failure(self, repo):
+    def test_late_tool_hook_cannot_rewrite_a_sealed_failure(self, repo, receipt_scope):
         from openshard.adapters.claude_hooks import sweep_stale_buffers
 
         _hook(repo, "UserPromptSubmit", prompt="task")
         _hook(repo, "PostToolUseFailure", tool_name="Bash", tool_input={"command": "pytest"}, error="Exit code 1")
-        _hook(repo, "Stop")
-        assert sweep_stale_buffers(repo, max_age_seconds=0)
+        _hook(repo, "Stop")  # seals a turn Receipt
+        if receipt_scope == "session":
+            assert sweep_stale_buffers(repo, max_age_seconds=0)
         sealed = _runs(repo)[-1]
         _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "pytest"})
         _hook(repo, "Stop")
@@ -332,6 +334,10 @@ class TestCapturePaths:
         block = entry["verification"]
         assert _runs(repo)[0] == sealed
         assert sealed["verification"]["status"] == "failed"
+        if receipt_scope == "turn":  # the agent continued: the next turn has its own Receipt and its own check
+            assert len(_runs(repo)) == 2 and entry["capture"]["turn_index"] == 2
+            assert block["status"] == "passed" and (block["checks_passed"], block["checks_failed"]) == (1, 0)
+            return
         # A late tool hook without a new prompt does not replace the sealed run.
         assert block["status"] == "failed" and (block["checks_passed"], block["checks_failed"]) == (0, 1)
         assert entry["capture"]["check_runs"] == {"passed": 0, "failed": 1}

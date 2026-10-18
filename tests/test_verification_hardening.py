@@ -43,6 +43,7 @@ from openshard.history.verification_truth import (
 from openshard.history.verification_view import (
     WORK_COMPLETED,
     WORK_ENDED_WITHOUT_FINAL_EVENT,
+    WORK_TURN_COMPLETED,
     build_verification_view,
     render_verification_view,
 )
@@ -123,7 +124,7 @@ def _receipt(entry: dict, *attestations: dict):
 
 
 class TestSessionRecordAlone:
-    def test_agent_reported_pass_is_shown_as_passed_but_never_as_confirmed(self, repo):
+    def test_agent_reported_pass_is_shown_as_passed_but_never_as_confirmed(self, repo, receipt_scope):
         entry = _claude_session(repo, ("PostToolUse", _bash("pytest -q")))
         receipt = _receipt(entry)
         truth = interpret_receipt(receipt)
@@ -134,7 +135,7 @@ class TestSessionRecordAlone:
         assert "not verified by OpenShard" in view["evidence"]["label"]
         # Nothing that scores or gates treats the claim as a pass.
         assert truth.effective_status == "unknown" and truth.basis == BASIS_SESSION
-        assert view["work"]["state"] == WORK_COMPLETED
+        assert view["work"]["state"] == (WORK_COMPLETED if receipt_scope == "session" else WORK_TURN_COMPLETED)
         assert view["capture"]["label"] == "Partial" and view["capture"]["status"] == "complete"  # hooks only
 
     def test_agent_reported_failure_names_the_failed_check(self, repo):
@@ -310,6 +311,7 @@ class TestSessionRecordAlone:
 
 
 class TestSessionFinalisation:
+    @pytest.mark.session_receipts("sweeps a session Receipt left open after its Stop; a turn is sealed there")
     def test_missing_end_hook_is_closed_by_the_sweep_without_a_fabricated_end(self, repo):
         entry = _claude_session(repo, ("PostToolUse", _bash("pytest -q")), end=False)
         assert entry["capture"]["session_end_observed"] is False
@@ -345,6 +347,7 @@ class TestSessionFinalisation:
         assert view["verification"]["failed_checks"] == ["check-1"]
         assert view["original"] == {"status": "passed", "source": "agent_reported", "counts_label": "1/1 passed"}
 
+    @pytest.mark.session_receipts("closes a session Receipt left open after its Stop; a turn is sealed there")
     def test_verify_closes_a_stale_session_before_verifying_it(self, repo, monkeypatch):
         monkeypatch.chdir(repo)
         _claude_session(repo, ("PostToolUse", _bash("pytest -q")), end=False)
@@ -648,7 +651,7 @@ class TestAutoPostSessionVerify:
         assert auto.schedule_post_session_verify(repo, {"receipt_id": "rcpt_1"}, spawner=lambda a, c: True,
                                                  env={auto.ENV_DISABLE: "1"}) is False
 
-    def test_session_end_triggers_it_once_and_a_turn_end_does_not(self, repo, monkeypatch):
+    def test_session_end_triggers_it_once_and_a_turn_end_does_not(self, repo, monkeypatch, receipt_scope):
         self._enable(repo)
         monkeypatch.delenv(auto.ENV_DISABLE, raising=False)
         spawned: list[list[str]] = []
@@ -656,10 +659,14 @@ class TestAutoPostSessionVerify:
         _claude(repo, "UserPromptSubmit", prompt="fix it")
         _claude(repo, "PostToolUse", **_bash("pytest -q"))
         _claude(repo, "Stop")
-        assert spawned == []
+        assert spawned == []  # a sealed turn that changed no files gets no working-tree run
         _claude(repo, "SessionEnd", reason="exit")
-        assert len(spawned) == 1 and spawned[0][-2] == _runs(repo)[-1]["receipt_id"]
+        if receipt_scope == "session":
+            assert len(spawned) == 1 and spawned[0][-2] == _runs(repo)[-1]["receipt_id"]
+        else:  # the SessionEnd after a sealed turn touches no Receipt, so it starts nothing
+            assert spawned == []
 
+    @pytest.mark.session_receipts("sweeps a session Receipt left open after its Stop; a turn is sealed there")
     def test_stale_sweep_triggers_it_for_a_session_with_no_end_event(self, repo, monkeypatch):
         self._enable(repo)
         monkeypatch.delenv(auto.ENV_DISABLE, raising=False)
@@ -669,16 +676,26 @@ class TestAutoPostSessionVerify:
         sweep_stale_buffers(repo.resolve(), max_age_seconds=0)
         assert len(spawned) == 1
 
-    def test_a_spawn_failure_never_breaks_capture(self, repo, monkeypatch):
+    def test_a_spawn_failure_never_breaks_capture(self, repo, monkeypatch, receipt_scope):
         self._enable(repo)
         monkeypatch.delenv(auto.ENV_DISABLE, raising=False)
+        attempts: list[list[str]] = []
 
         def boom(argv, cwd):
+            attempts.append(argv)
             raise OSError("cannot spawn")
 
         monkeypatch.setattr(auto, "_spawn_detached", boom)
-        entry = _claude_session(repo, ("PostToolUse", _bash("pytest -q")))
-        assert entry["capture"]["session_end_observed"] is True
+        calls: list[tuple[str, dict]] = [("PostToolUse", _bash("pytest -q"))]
+        if receipt_scope == "turn":  # a turn is re-run at its Stop only when it changed files
+            (repo / "fix.py").write_text("x = 1\n", encoding="utf-8")
+            calls.insert(0, ("PostToolUse", {"tool_name": "Write", "tool_input": {"file_path": str(repo / "fix.py")}}))
+        entry = _claude_session(repo, *calls)
+        assert len(attempts) == 1
+        if receipt_scope == "session":
+            assert entry["capture"]["session_end_observed"] is True
+        else:
+            assert entry["capture"]["status"] == "turn_completed"
 
 
 # ---------------------------------------------------------------------------

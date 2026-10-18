@@ -12,7 +12,7 @@ from openshard.adapters.claude_hooks import (
 )
 from openshard.history.correlation import CONTEXT_ENV
 from openshard.sync.envelope import receipt_payload
-from tests.capture_fixtures import _auth_headers, _lines, _wait_for
+from tests.capture_fixtures import _auth_headers, _lines, _sealed, _wait_for
 from tests.test_task_context_capture import SID1, TASK_A, _claude_docs, _codex_docs
 from tests.test_workflow_correlation import CONTEXT
 
@@ -60,21 +60,21 @@ def test_inline_client_uses_launcher_context(repo):
     assert _lines(repo)[0]["correlation"] == {"evidence": "declared", **CONTEXT}
 
 
-def test_http_header_transport_and_persisted_replay(service, repo):
+def test_http_header_transport_and_persisted_replay(service, repo, receipt_scope):
     headers = {**_auth_headers(str(repo)), client.CORRELATION_HEADER: json.dumps(CONTEXT)}
     for doc in _claude_docs(repo, SID1):
         response = client._request("POST", service.port, client.HOOK_PATH,
                                    json.dumps(doc).encode(), headers)
         assert response == (200, b"{}")
-    assert _wait_for(lambda: bool(_lines(repo)) and _lines(repo)[0]["capture"]["session_end_observed"])
+    assert _wait_for(lambda: bool(_lines(repo)) and _sealed(_lines(repo)[0]))
     assert service.server.recorder.wait_idle(60)
     assert _lines(repo)[0]["correlation"] == {"evidence": "declared", **CONTEXT}
 
 
-def test_invalid_header_keeps_receipt_uncorrelated(service, repo):
+def test_invalid_header_keeps_receipt_uncorrelated(service, repo, receipt_scope):
     headers = {**_auth_headers(str(repo)), client.CORRELATION_HEADER: "{invalid"}
     for doc in _claude_docs(repo, SID1):
         assert client._request("POST", service.port, client.HOOK_PATH,
                                json.dumps(doc).encode(), headers) == (200, b"{}")
-    assert _wait_for(lambda: bool(_lines(repo)) and _lines(repo)[0]["capture"]["session_end_observed"])
+    assert _wait_for(lambda: bool(_lines(repo)) and _sealed(_lines(repo)[0]))
     assert "correlation" not in _lines(repo)[0]
