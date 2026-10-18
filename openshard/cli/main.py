@@ -638,7 +638,7 @@ def _telemetry_after_setup(result) -> None:
             agents=[a for a in result.configured_agents() if a in ("claude_code", "codex", "opencode", "cursor", "antigravity", "hermes", "grok_build")],
             mcp=bool(result.mcp is not None and result.mcp.status in ("installed", "updated", "already_installed")),
             capture_service=(
-                "ok" if service_state in ("running", "started")
+                "ok" if service_state in ("running", "started", "restarted", "restart_failed")
                 else "disabled" if service_state == "disabled" else "failed"
             ),
             result="ok" if result.readiness != "not_ready" else "error",
@@ -683,13 +683,13 @@ def _render_setup_components(result) -> None:
         }.get(result.statusline.status, result.statusline.status)
         click.echo(f"  Enrichment:    {statusline_state}")
     if result.capture_service is not None:
-        service_state = {
-            "running": f"running (127.0.0.1:{result.capture_service.get('port')})",
-            "started": f"started (127.0.0.1:{result.capture_service.get('port')})",
-            "disabled": "disabled (OPENSHARD_CAPTURE_DISABLE)",
-            "unavailable": "not running (could not be started)",
-        }.get(str(result.capture_service.get("state")), str(result.capture_service.get("state")))
-        click.echo(f"  Capture:       {service_state}")
+        from openshard.adapters.capture_refresh import setup_service_line
+
+        click.echo(f"  Capture:       {setup_service_line(result.capture_service)}")
+    ignore_status = (getattr(result, "history_ignore", None) or {}).get("status")
+    if ignore_status in ("added", "already_ignored"):
+        where = "added to .git/info/exclude" if ignore_status == "added" else "already ignored"
+        click.echo(f"  Git ignore:    .openshard/ local state ({where})")
     click.echo(f"  Improve OpenShard: {_telemetry_line(_telemetry_status())}")
     # PR12: one line per additional agent, whether or not it was found.
     _agent_state_labels = {
@@ -707,6 +707,12 @@ def _render_setup_components(result) -> None:
         if agent_result is None:
             continue
         click.echo(f"  {label} {_agent_state_labels.get(agent_result.status, agent_result.status)}")
+
+
+def _display_next_steps(result) -> list[str]:
+    from openshard.adapters.claude_setup import display_next_steps
+
+    return display_next_steps(result)
 
 
 def _configured_agent_names(result) -> list[str]:
@@ -732,7 +738,7 @@ def _render_setup_readiness(result) -> None:
         click.echo(f"  1. {open_line}")
         click.echo("  2. Complete a normal coding task.")
         click.echo("  3. Run `openshard last` to see the captured Receipt.")
-        for step in result.next_steps:
+        for step in _display_next_steps(result):
             click.echo(f"  ! {step}")
     elif result.readiness == "ready_partial":
         click.echo("OpenShard is ready, with limitations (see below).")
@@ -741,12 +747,12 @@ def _render_setup_readiness(result) -> None:
         click.echo(f"  1. {open_line}")
         click.echo("  2. Complete a normal coding task.")
         click.echo("  3. Run `openshard last` to see the captured Receipt.")
-        for step in result.next_steps:
+        for step in _display_next_steps(result):
             click.echo(f"  ! {step}")
     else:
         click.echo("OpenShard setup is incomplete.")
         click.echo("\nNext step:")
-        for step in result.next_steps:
+        for step in _display_next_steps(result):
             click.echo(f"  - {step}")
 
 
@@ -858,7 +864,7 @@ def _connect_next_steps(link, check, result) -> list[str]:
             steps.append("Re-run `openshard connect --endpoint <url> --org <uuid>` with the right endpoint, "
                          "organisation id and API key (or `openshard sync disconnect` to forget this link).")
     if result.readiness == "not_ready":
-        steps.extend(result.next_steps)
+        steps.extend(_display_next_steps(result))
     else:
         names = _configured_agent_names(result)
         steps.append(f"Open {' or '.join(names)} in this repository and complete a normal coding task.")
@@ -900,7 +906,7 @@ def _render_connect_result(link, stored: bool, check, result, next_steps: list[s
     for i, step in enumerate(next_steps, 1):
         click.echo(f"  {i}. {step}")
     if result.readiness == "ready_partial":
-        for step in result.next_steps:
+        for step in _display_next_steps(result):
             click.echo(f"  ! {step}")
 
 
@@ -3884,13 +3890,9 @@ def _foreign_capture_service_detail(status: dict) -> str:
 
 
 def _stale_capture_service_detail(status: dict) -> str:
-    from openshard import __version__
+    from openshard.adapters.capture_refresh import stale_detail
 
-    return (
-        f"running OpenShard {status.get('version')} while this installation is {__version__}; it still folds "
-        "sessions with the old code until replaced -- run `openshard setup` (or start a new session) to "
-        "replace it now"
-    )
+    return stale_detail(status)
 
 
 def _render_capture_status(status: dict) -> None:
@@ -3901,6 +3903,10 @@ def _render_capture_status(status: dict) -> None:
         click.echo(f"Capture service: stale ({_stale_capture_service_detail(status)})")
     if status.get("running"):
         click.echo(f"Capture service: running on 127.0.0.1:{status['port']} (pid {status.get('pid')})")
+        from openshard.adapters.capture_refresh import status_version_line
+
+        if version_line := status_version_line(status):
+            click.echo(version_line)
         uptime = status.get("uptime_seconds")
         if isinstance(uptime, (int, float)):
             click.echo(f"  uptime:   {int(uptime)}s")
