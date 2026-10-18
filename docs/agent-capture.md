@@ -187,8 +187,9 @@ reached), `session_end_not_observed` (the buffer was swept after an hour
 idle without a SessionEnd), `integration_limitation`. Valid lines next to
 a corrupt one are still applied; transient I/O errors keep the retry path
 and are never counted as corruption. The compact receipt keeps the usual
-`Capture  partial — OpenShard did not execute or verify this run` line and
-adds `Gaps  None known` / `Gaps  1 queued event could not be decoded` /
+`Capture  partial — OpenShard did not execute or verify this run` line
+(`... did not execute this run` once an `openshard verify` re-run is on the
+Verified row) and adds `Gaps  None known` / `Gaps  1 queued event could not be decoded` /
 `Gaps  Unknown (record predates loss tracking)`; the full receipt has a
 CAPTURE section with `Capture depth`, `Completeness` and `Known gaps`.
 JSON carries `capture_completeness = {depth, status, reasons, derived}`.
@@ -556,9 +557,10 @@ Activity failures are kept apart from verification. A shell command the
 agent reports as exited non-zero -- whichever hook carried it -- counts in
 `capture.command_failure_count`, is listed under the receipt's `Activity`
 (`Shell × 2 (1 failed)`, then the scrubbed command with its exit code and
-the class the existing safety classifier gives it, e.g. `policy class:
-blocked` for `rm -rf /`), and appears in the summary sentence. It is never a
-verification check, and `tool_failure_count` (the agent's own tool-failure
+whether OpenShard's own re-run rules would re-run it, e.g. `outside
+OpenShard's re-run rules (not enforced)` for `rm -rf /`; OpenShard only
+observed the command, so nothing was blocked), and appears in the summary
+sentence. It is never a verification check, and `tool_failure_count` (the agent's own tool-failure
 events, also what telemetry reports) is unchanged.
 
 ### Integration audit (latest official docs, 2026-09)

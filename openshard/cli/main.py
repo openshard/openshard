@@ -731,7 +731,7 @@ def _render_setup_readiness(result) -> None:
         click.echo("\nNext steps:")
         click.echo(f"  1. {open_line}")
         click.echo("  2. Complete a normal coding task.")
-        click.echo("  3. Run `openshard last` to see the captured Shard receipt.")
+        click.echo("  3. Run `openshard last` to see the captured Receipt.")
         for step in result.next_steps:
             click.echo(f"  ! {step}")
     elif result.readiness == "ready_partial":
@@ -740,7 +740,7 @@ def _render_setup_readiness(result) -> None:
         click.echo("\nNext steps:")
         click.echo(f"  1. {open_line}")
         click.echo("  2. Complete a normal coding task.")
-        click.echo("  3. Run `openshard last` to see the captured Shard receipt.")
+        click.echo("  3. Run `openshard last` to see the captured Receipt.")
         for step in result.next_steps:
             click.echo(f"  ! {step}")
     else:

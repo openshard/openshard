@@ -302,6 +302,8 @@ class TestSetupCli(_RepoCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("OpenShard is ready. Use Claude Code normally.", result.output)
         self.assertIn("openshard last", result.output)
+        self.assertIn("to see the captured Receipt.", result.output)
+        self.assertNotIn("Shard receipt", result.output)
 
     def test_setup_json_action_result(self):
         runner = CliRunner()
