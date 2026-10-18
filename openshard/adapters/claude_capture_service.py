@@ -1102,6 +1102,7 @@ class CaptureServer(ThreadingHTTPServer):
             "pid": os.getpid(),
             "port": self.port,
             "version": _version(),
+            "build": client.installed_build(),
             "features": list(client.SERVICE_FEATURES),
             "started_at": self.started_at,
             "uptime_seconds": round(time.monotonic() - self.started_monotonic, 1),
@@ -1598,8 +1599,8 @@ def service_status(env: dict | os._Environ | None = None) -> dict:
             # refuse every event; "unknown": too old to answer and not named
             # by this home's state file -- not adopted either.
             "credential": "accepted" if ours else "refused" if ours is False else "unknown",
-            "version": doc.get("version"),
-            # A service of ours left over from another OpenShard version:
+            "version": doc.get("version"), "build": doc.get("build"),
+            # A service of ours left over from another OpenShard version or build:
             # replaced at the next `openshard setup` / session start.
             "stale_version": bool(ours) and client.service_version_stale(doc),
             "uptime_seconds": doc.get("uptime_seconds"),

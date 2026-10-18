@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
@@ -568,8 +568,35 @@ class TestHistoryStateIgnored(unittest.TestCase):
         with patch.dict(os.environ, _NO_KEYS, clear=False), \
              patch(f"{_MCP_MODULE}.shutil.which", side_effect=_which), \
              patch(f"{_MCP_MODULE}.subprocess.run", side_effect=_subprocess_router()), \
-             patch("openshard.adapters.claude_setup.ensure_history_state_ignored",
-                   return_value="Could not update .git/info/exclude; add .openshard/ to your gitignore.") as helper:
+             patch("openshard.adapters.claude_setup.history_ignore_state",
+                   return_value={"status": "unconfirmed", "warning": _EXCLUDE_WARNING}) as helper:
             result = run_setup(repo_path=root)
         helper.assert_called_once_with(root.resolve())
-        self.assertIn("Could not update .git/info/exclude; add .openshard/ to your gitignore.", result.next_steps)
+        self.assertIn(_EXCLUDE_WARNING, result.next_steps)
+        self.assertEqual(result.to_dict()["history_ignore"]["status"], "unconfirmed")
+
+    def test_status_says_whether_the_rule_was_added_or_already_present(self):
+        from openshard.adapters.claude_hooks_install import history_ignore_state
+
+        root = self._repo()
+        self.assertEqual(history_ignore_state(root), {"status": "added", "warning": None})
+        self.assertEqual(history_ignore_state(root)["status"], "already_ignored")
+        other = self._repo()
+        (other / ".gitignore").write_text(".openshard/\n", encoding="utf-8")
+        self.assertEqual(history_ignore_state(other)["status"], "already_ignored")
+        self.assertFalse((root / ".gitignore").exists())  # still never a committed file
+
+    def test_setup_output_reports_the_git_ignore_rule(self):
+        from openshard.cli.main import _render_setup_components
+
+        result = MagicMock(is_git=False, history_writable=True, mcp=None, hooks=None, statusline=None,
+                           capture_service=None, agents={}, history_ignore={"status": "added", "warning": None})
+        with patch("openshard.cli.main._telemetry_status", return_value={}), \
+             patch("openshard.cli.main._telemetry_line", return_value="off"), \
+             patch("openshard.cli.main.click.echo") as echo:
+            _render_setup_components(result)
+        text = "\n".join(str(c.args[0]) for c in echo.call_args_list)
+        self.assertIn("Git ignore:    .openshard/ local state (added to .git/info/exclude)", text)
+
+
+_EXCLUDE_WARNING = "Could not update .git/info/exclude; add .openshard/ to your gitignore."

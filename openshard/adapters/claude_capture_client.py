@@ -390,14 +390,45 @@ def _installed_version() -> str | None:
     return version if version and version != "unknown" else None
 
 
+_BUILD_CACHE: list[str | None] = []
+
+
+def installed_build() -> str | None:
+    """Content identity of the installed package, or None when it cannot be read.
+
+    The version string alone cannot tell two installs apart between releases
+    (``pip install git+...`` of main reports the last released version), so
+    this is a digest of the install's ``RECORD``, which lists every installed
+    file with its hash: any change to the installed code changes it. An
+    editable install's RECORD lists only its path hook, so edits there do
+    not change it. Read once per process.
+    """
+    if not _BUILD_CACHE:
+        build: str | None = None
+        try:
+            import hashlib
+            from importlib.metadata import PackageNotFoundError, distribution
+
+            record = distribution("openshard").read_text("RECORD")
+            build = hashlib.sha256(record.encode("utf-8")).hexdigest()[:12] if record else None
+        except (ImportError, PackageNotFoundError, OSError, ValueError):
+            build = None
+        _BUILD_CACHE.append(build)
+    return _BUILD_CACHE[0]
+
+
 def service_version_stale(doc: dict | None) -> bool:
-    """Whether the service that answered :func:`health` runs a different OpenShard version than this client.
+    """Whether the service that answered :func:`health` runs different OpenShard code than this client.
 
     A service keeps the code it was started with; after an upgrade (``pipx
     upgrade openshard``) the old one goes on folding every session until
     it idles out (hours), so fixes and new evidence in the upgrade silently
-    do not apply. ``True`` only when both versions are known and differ;
-    an unknown version on either side is never called stale.
+    do not apply. ``True`` when both versions are known and differ, or when
+    they match but the builds (:func:`installed_build`) are both known and
+    differ, or when the service sends no ``build`` field at all: every
+    service from this code sends one (possibly null), so its absence proves
+    the service predates this client. An unknown version or build on either
+    side is never called stale.
     """
     if not isinstance(doc, dict):
         return False
@@ -405,7 +436,12 @@ def service_version_stale(doc: dict | None) -> bool:
     ours = _installed_version()
     if not isinstance(theirs, str) or not theirs or theirs == "unknown" or ours is None:
         return False
-    return theirs != ours
+    if theirs != ours:
+        return True
+    if "build" not in doc:
+        return True
+    their_build, our_build = doc.get("build"), installed_build()
+    return isinstance(their_build, str) and our_build is not None and their_build != our_build
 
 
 def _replace_if_stale(port: int, env: dict | os._Environ, *, wait_seconds: float = 5.0) -> bool:

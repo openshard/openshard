@@ -37,7 +37,6 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from openshard.adapters.claude_capture_client import ensure_service
 from openshard.adapters.claude_capture_service import service_status
 from openshard.adapters.claude_hooks_install import (
     HOOK_EVENTS,
@@ -45,7 +44,7 @@ from openshard.adapters.claude_hooks_install import (
     SETTINGS_RELPATH,
     ClaudeHooksInstallResult,
     capability_state,
-    ensure_history_state_ignored,
+    history_ignore_state,
     install_claude_hooks,
     install_claude_statusline,
     installed_events,
@@ -268,8 +267,11 @@ class SetupResult:
     statusline: ClaudeHooksInstallResult | None
     readiness: str  # "ready" | "ready_partial" | "not_ready"
     next_steps: list[str] = field(default_factory=list)
-    # Capture service: {"state": running|started|disabled|unavailable, "port": int|None}
+    # Capture service: {"state": running|started|restarted|restart_failed|disabled|unavailable,
+    # "port": int|None, "previous_version"/"previous_build" after a restart}
     capture_service: dict | None = None
+    # Whether .openshard/ runtime state is git-ignored: {"status", "warning"} (history_ignore_state)
+    history_ignore: dict | None = None
     # Codex / OpenCode capture integrations, keyed by agent
     # ("codex", "opencode"); each configured only when its CLI is installed.
     agents: dict = field(default_factory=dict)
@@ -298,6 +300,7 @@ class SetupResult:
             "mcp": _mcp_result_dict(self.mcp),
             "hooks": _hooks_result_dict(self.hooks),
             "statusline": _hooks_result_dict(self.statusline),
+            "history_ignore": self.history_ignore,
             "capture_service": self.capture_service if self.capture_service is not None else {"status": "skipped"},
             "agents": {k: r.to_dict() for k, r in self.agents.items()},
             "configured_agents": self.configured_agents(),
@@ -307,13 +310,23 @@ class SetupResult:
         }
 
 
+def display_next_steps(result) -> list[str]:
+    """A setup result's ``next_steps`` minus the opt-in hints (Hermes) its per-agent lines already show."""
+    shown = {
+        getattr(r, "message", None) for r in (getattr(result, "agents", None) or {}).values()
+        if getattr(r, "status", None) == "skipped_optin"
+    }
+    return [step for step in result.next_steps if step not in shown]
+
+
 def ensure_capture_service() -> dict:
-    """Start (or find) the capture service; ``{"state", "port"}``. Never raises."""
-    try:
-        port, state = ensure_service()
-    except Exception:
-        port, state = None, "unavailable"
-    return {"state": state, "port": port}
+    """Start (or find) the capture service, restarting an out-of-date one of ours; ``{"state", "port"}``.
+
+    See ``capture_refresh.ensure_current_service``. Never raises.
+    """
+    from openshard.adapters.capture_refresh import ensure_current_service
+
+    return ensure_current_service()
 
 
 def _claude_install_step(claude_avail: ClaudeCliAvailability) -> str:
@@ -384,9 +397,9 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
     # Runtime state under .openshard/ is per-clone and never meant to be
     # committed; keep it out of `git status` and `git add .` locally
     # (.git/info/exclude), with the shareable config.yml re-included.
-    ignore_warning = ensure_history_state_ignored(root)
-    if ignore_warning:
-        next_steps.append(ignore_warning)
+    history_ignore = history_ignore_state(root)
+    if history_ignore["warning"]:
+        next_steps.append(history_ignore["warning"])
 
     # The capture service first: the Claude HTTP hooks and the OpenCode
     # plugin written below must target the port it actually listens on
@@ -475,5 +488,5 @@ def run_setup(*, repo_path: Path | None = None) -> SetupResult:
         repo_root=root, is_git=True, claude_cli=claude_avail,
         history_path=history_path, history_writable=writable,
         mcp=mcp_result, hooks=hooks_result, statusline=statusline_result,
-        readiness=readiness, next_steps=next_steps, capture_service=service, agents=agents,
+        readiness=readiness, next_steps=next_steps, capture_service=service, agents=agents, history_ignore=history_ignore,
     )

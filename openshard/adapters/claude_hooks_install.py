@@ -579,7 +579,11 @@ def ensure_local_settings_ignored(
 HISTORY_EXCLUDE_LINES: tuple[str, ...] = (".openshard/*", "!.openshard/config.yml")
 
 
-def ensure_history_state_ignored(repo_root: Path, *, note: str = "added by openshard setup") -> str | None:
+def _unconfirmed(warning: str) -> dict:
+    return {"status": "unconfirmed", "warning": warning}
+
+
+def history_ignore_state(repo_root: Path, *, note: str = "added by openshard setup") -> dict:
     """Keep the repository's OpenShard runtime state out of git, locally.
 
     ``.openshard/`` holds Receipts (``runs.jsonl``), verification attestations,
@@ -590,8 +594,10 @@ def ensure_history_state_ignored(repo_root: Path, *, note: str = "added by opens
     Receipts. The rule lives in ``.git/info/exclude`` (documented git, never
     committed) so nothing of the user's is changed; ``.openshard/config.yml``
     (the verification contract a team may share) is re-included. Files git
-    already tracks are unaffected. Returns a warning when the rule could not
-    be confirmed; never raises.
+    already tracks are unaffected. Returns ``{"status", "warning"}``:
+    ``already_ignored`` (git already ignores it, e.g. through the user's own
+    .gitignore; nothing written), ``added`` (the rule was appended to
+    .git/info/exclude) or ``unconfirmed`` (with the warning). Never raises.
     """
     probe = ".openshard/runs.jsonl"
     try:
@@ -601,11 +607,11 @@ def ensure_history_state_ignored(repo_root: Path, *, note: str = "added by opens
             text=True, timeout=_GIT_TIMEOUT_SECONDS,
         )
     except Exception:
-        return f"Could not run git to confirm {probe} is ignored; make sure .openshard/ is not committed."
+        return _unconfirmed(f"Could not run git to confirm {probe} is ignored; make sure .openshard/ is not committed.")
     if check.returncode == 0:
-        return None
+        return {"status": "already_ignored", "warning": None}
     if check.returncode != 1:
-        return f"Could not confirm {probe} is git-ignored; make sure .openshard/ is not committed."
+        return _unconfirmed(f"Could not confirm {probe} is git-ignored; make sure .openshard/ is not committed.")
     try:
         where = subprocess.run(
             ["git", "rev-parse", "--git-path", "info/exclude"],
@@ -613,7 +619,7 @@ def ensure_history_state_ignored(repo_root: Path, *, note: str = "added by opens
             text=True, timeout=_GIT_TIMEOUT_SECONDS,
         )
         if where.returncode != 0 or not where.stdout.strip():
-            return "Could not locate .git/info/exclude; add .openshard/ to your gitignore."
+            return _unconfirmed("Could not locate .git/info/exclude; add .openshard/ to your gitignore.")
         exclude_path = Path(where.stdout.strip())
         if not exclude_path.is_absolute():
             exclude_path = repo_root / exclude_path
@@ -621,15 +627,20 @@ def ensure_history_state_ignored(repo_root: Path, *, note: str = "added by opens
         present = {ln.strip() for ln in existing.splitlines()}
         missing = [line for line in HISTORY_EXCLUDE_LINES if line not in present]
         if not missing:
-            return None
+            return {"status": "already_ignored", "warning": None}
         exclude_path.parent.mkdir(parents=True, exist_ok=True)
         with exclude_path.open("a", encoding="utf-8") as fh:
             if existing and not existing.endswith("\n"):
                 fh.write("\n")
             fh.write(f"# {note}\n" + "".join(f"{line}\n" for line in missing))
-        return None
+        return {"status": "added", "warning": None}
     except Exception:
-        return "Could not update .git/info/exclude; add .openshard/ to your gitignore."
+        return _unconfirmed("Could not update .git/info/exclude; add .openshard/ to your gitignore.")
+
+
+def ensure_history_state_ignored(repo_root: Path, *, note: str = "added by openshard setup") -> str | None:
+    """:func:`history_ignore_state`'s warning alone: None when the rule is in place."""
+    return history_ignore_state(repo_root, note=note)["warning"]
 
 
 def install_claude_hooks(
