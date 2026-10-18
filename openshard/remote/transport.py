@@ -27,6 +27,7 @@ idempotency, and without an organisation API key in the runtime.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 from openshard.remote.config import Attachment
@@ -89,7 +90,9 @@ class RemoteCaptureClient:
         return result, body if isinstance(body, dict) else None
 
     def send_events(self, batch: dict) -> SendResult:
-        return self._request("POST", "/events", batch, classify_status)[0]
+        """The classified answer; when accepted, ``details`` carries the Platform's response body."""
+        result, body = self._request("POST", "/events", batch, classify_status)
+        return replace(result, details=body) if result.accepted and isinstance(body, dict) else result
 
     # PlatformTransport / EvidenceTransport (sync/transport.py)
 
