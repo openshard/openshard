@@ -433,6 +433,14 @@ never invented evidence.
   both and sends them on its own header (`X-OpenShard-Agent-Env`), since
   the capture service does not share Claude Code's environment; the first
   observation in a session wins.
+* **A turn that stopped on an error**: Claude Code fires `StopFailure`
+  instead of `Stop` when a turn ends on an API error. It is folded as a
+  `SessionIdle` snapshot (never a completed turn) and adds the completeness
+  reason `stopped_at_cap` (`error: max_output_tokens`) or `stopped_on_error`
+  (any other documented value; an undocumented one is `unknown`), so the
+  Receipt's `Partial` says why. These are the agent's report. OpenShard's
+  own idle timeout stays `session_idle_sealed`; a lost VM cannot be observed
+  from inside it and is never claimed locally.
 * **End of session (git)**: at `SessionEnd` (or the idle sweep) capture
   records `git_end_head` and `session_commits` (`git_observed`). A commit
   counts only when it is reachable from the end HEAD but not the start

@@ -173,6 +173,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from openshard.adapters import claude_session_fidelity as fidelity
+from openshard.adapters import claude_stop_failure as stop_failure
 from openshard.adapters import claude_turn_receipts as turns
 from openshard.adapters.agent_env import PROVIDER_SOURCE_AGENT_ENV, claude_agent_env
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
@@ -3622,6 +3623,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         # good moment to snapshot whatever evidence is already staged.
         buf["idle_count"] = int(buf.get("idle_count") or 0) + 1
         buf["last_idle_at"] = now
+        stop_failure.note_stop_failure(buf, payload.attrs)  # Claude Code StopFailure only
         _append_event(
             buf, event_type="session.activity", action="session idle (turn completion not confirmed)",
             status="unknown", evidence="directly_observed",
@@ -4226,7 +4228,7 @@ def extract_agent_payload(
     fact); a ``HookPayload`` is a lifecycle/tool fact; ``None`` is ignored.
     """
     if agent == AGENT_CLAUDE_CODE:
-        return extract_hook_payload(data, event_override=event_override)
+        return stop_failure.extract(data, extract_hook_payload, event_override=event_override)
     if agent == "codex":
         from openshard.adapters.codex_hooks import extract_codex_payload
 
