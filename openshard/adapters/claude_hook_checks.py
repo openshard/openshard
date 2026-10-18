@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from openshard.verification.check_command import item_outcome, suite_supersedes
+from openshard.verification.gaming_signals import note_masked_check
 
 MAX_BUFFERED_CHECKS = 20
 
@@ -41,6 +42,7 @@ def record_checks(buf: dict, payload: Any, action: str, outcome: str, at: str) -
         _record_check(buf, item["name"], item["kind"], status=status, at=at,
                       exit_code=payload.command_exit_code if status != "unknown" else None,
                       key=key, unattributed=reason, suite=item.get("suite"))
+        note_masked_check(buf, item["name"], item.get("exit_masked"))  # a test line that cannot fail
 
 
 def _record_check(

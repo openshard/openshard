@@ -47,6 +47,7 @@ from openshard.models.pricing import (
     estimate_usage_cost,
     single_pricing_model,
 )
+from openshard.verification.gaming_signals import gaming_signals_block
 
 _PROFILE_TO_STRATEGY: dict[str, str] = {
     "native_light": "Single",
@@ -1569,7 +1570,7 @@ def build_shard_receipt(
         ),
         changes=_changes_summary(_changes_block),
         files_excluded=_files_excluded,
-        recorded_evidence=project_entry_evidence(entry),
+        recorded_evidence={**project_entry_evidence(entry), "gaming_signals": gaming_signals_block(entry)},
         usage=effective_usage(entry, _own_usage_attestations(entry, usage_attestations)),
         shard=build_shard(
             entry,
