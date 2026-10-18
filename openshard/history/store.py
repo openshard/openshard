@@ -60,7 +60,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
-from openshard.history.jsonl_store import amend_last_jsonl
+from openshard.history.jsonl_store import amend_last_jsonl, history_file_lock
 from openshard.history.shard_hash import (
     INTEGRITY_AS_STORED_FIELD,
     SHARD_HASH_FIELD,
@@ -88,6 +88,24 @@ def _parse_record(line: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+_READ_LOCK_TIMEOUT_SECONDS = 1.0
+
+
+def _read_settled(runs_path: Path) -> str:
+    """The file's text, read under the history lock so no in-place line update is half-seen.
+
+    An upsert can overwrite a record's line where it is (``jsonl_store``); a
+    reader without the lock could catch that line mid-write. The wait is
+    bounded: on contention, or where the lock cannot be taken (a read-only
+    store), the read goes ahead without it, as it always did.
+    """
+    try:
+        with history_file_lock(runs_path, timeout=_READ_LOCK_TIMEOUT_SECONDS):
+            return runs_path.read_text(encoding="utf-8")
+    except OSError:  # LockTimeoutError is an OSError too
+        return runs_path.read_text(encoding="utf-8")
+
+
 def load_history(runs_path: Path, *, coerce: bool = True) -> list[dict]:
     """Return every well-formed record in *runs_path*, oldest first.
 
@@ -111,7 +129,7 @@ def load_history(runs_path: Path, *, coerce: bool = True) -> list[dict]:
     try:
         if not runs_path.exists():
             return []
-        text = runs_path.read_text(encoding="utf-8")
+        text = _read_settled(runs_path)
     except OSError:
         return []
     records: list[dict] = []
