@@ -112,6 +112,18 @@ def file_to_dict(raw: dict, *, extended: bool = False) -> dict[str, Any]:
     return out
 
 
+def _turn_to_dict(receipt: ShardReceipt) -> dict[str, Any] | None:
+    """Which turn of which session a per-turn Receipt covers, with its display label. None otherwise."""
+    from openshard.history.receipt_render import turn_label
+
+    label = turn_label(receipt)
+    if label is None:
+        return None
+    session = (receipt.recorded_evidence or {}).get("session") or {}
+    return {"label": label, "turn_index": session.get("turn_index"), "session_key": session.get("session_key"),
+            "previous_receipt_id": session.get("previous_receipt_id")}
+
+
 def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[str, Any]:
     """Canonical ShardReceipt -> bounded, privacy-safe dict.
 
@@ -172,6 +184,11 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         "context_quality": receipt.context_quality,
         "findings": [finding_to_dict(f) for f in findings[:MAX_FINDINGS]],
     }
+    # Additive, MCP get_receipt shape only (the extended form carries the same facts in
+    # ``session``): per-turn Receipts (docs/per-turn-receipts.md); every other key set is unchanged.
+    turn = None if extended else _turn_to_dict(receipt)
+    if turn:
+        d["turn"] = turn
     if extended:
         d.update({
             "task_completion": receipt.task_completion,

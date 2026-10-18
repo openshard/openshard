@@ -106,12 +106,12 @@ open. It is sent only when:
 
 Until then `status` reports it as "still in progress".
 
-With per-turn Receipts switched on (`OPENSHARD_TURN_RECEIPTS=on`, off by
-default; [per-turn-receipts.md](per-turn-receipts.md)) each completed Claude
+With per-turn Receipts (on by default, `OPENSHARD_TURN_RECEIPTS=off` opts
+out; [per-turn-receipts.md](per-turn-receipts.md)) each completed Claude
 Code turn is its own Receipt, eligible as soon as its `Stop` seals it
 (`turn_sealed`), and the capture service syncs it straight away instead of at
-its next 5-minute tick. A session-grouped `task_id` is sent as `null`; a
-declared one is sent.
+its next 5-minute tick. Its `task_id` is sent with `task_grouping` (`session`
+when OpenShard grouped the session's turns, `explicit` when declared).
 
 ## How the Platform answers, and what happens next
 

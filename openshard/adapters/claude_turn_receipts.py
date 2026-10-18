@@ -18,6 +18,11 @@ session inherit it, recorded as ``task_grouping: session`` -- a grouping
 OpenShard made from the session id it observed, never a declaration. Sync sends
 both, labelled (``sync/envelope.receipt_payload``).
 
+Open turn. The prompt Event that opens a turn carries ``turn_opened``, the
+turn's ``receipt_id``, ``receipt_scope`` and ``turn_index``; the seal adds a
+``receipt.sealed`` Event. Both are ordinary Events, so a linked session streams
+them through remote / connected capture while the turn is still open.
+
 Flag: ``OPENSHARD_TURN_RECEIPTS=on|off`` in the capture process's environment
 wins; else ``turn_receipts: false`` in the repository's ``.openshard/config.yml``
 opts out. It is read once per session buffer and then sticks to it.
@@ -26,6 +31,7 @@ opts out. It is read once per session buffer and then sticks to it.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -33,6 +39,8 @@ from typing import Any
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
 from openshard.history.capture_completeness import REASON_SESSION_END_NOT_OBSERVED, make_reason
 from openshard.history.task_identity import new_task_id, stored_task_id
+
+_RECEIPT_ID_RE = re.compile(r"^rcpt_[0-9a-f]{32}$")
 
 TURN_RECEIPTS_ENV = "OPENSHARD_TURN_RECEIPTS"
 CONFIG_KEY = "turn_receipts"
@@ -87,6 +95,41 @@ def _count(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _turn_facts(buf: dict) -> dict[str, Any]:
+    index = buf.get("turn_index")
+    return {"receipt_scope": SCOPE_TURN, "turn_index": index if _count(index) > 0 else 1}
+
+
+def _name_receipt(event: dict, buf: dict) -> None:
+    """Put the turn's ``receipt_id`` on *event*'s metadata.
+
+    Set after ``make_event``: its free-text scrubber drops long hex runs, and
+    this value is an identifier Core minted, checked against its exact shape
+    here (as ``remote/spool.wire_link`` does), never free text.
+    """
+    receipt_id = (buf.get("record") or {}).get("receipt_id")
+    if isinstance(receipt_id, str) and _RECEIPT_ID_RE.match(receipt_id) and isinstance(event.get("metadata"), dict):
+        event["metadata"]["receipt_id"] = receipt_id
+
+
+def mark_opened(buf: dict, repo_root: Path) -> None:
+    """Mark the prompt Event that just opened a turn with the turn's Receipt. No-op otherwise.
+
+    The open turn's Receipt exists from its first prompt; this puts its
+    identity on an Event, so a linked session's journal says "turn N is open"
+    before the turn completes. Nothing about the turn's outcome is claimed.
+    """
+    if not turn_scoped(buf, repo_root):
+        return
+    events = buf.get("events") or []
+    last = events[-1] if events and isinstance(events[-1], dict) else {}
+    metadata = last.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get("hook") != "UserPromptSubmit":
+        return  # the prompt Event was not staged (buffer full): say nothing rather than mark another
+    metadata.update({"turn_opened": True, **_turn_facts(buf)})
+    _name_receipt(last, buf)
+
+
 def is_turn_sealed(capture: object) -> bool:
     """True for a persisted turn Receipt whose turn completed: immutable, like an ended session."""
     return (
@@ -115,8 +158,25 @@ def close_turn(payload: Any, buf: dict, repo_root: Path, *, now: str, has_activi
         return True, False
     if has_activity and not buf.get("ended") and turn_scoped(buf, repo_root):
         buf["turn_sealed_at"] = now
+        _sealed_event(buf, now)
         return False, True
     return False, False
+
+
+def _sealed_event(buf: dict, now: str) -> None:
+    """The turn's Receipt is final from this Stop on: say so on an Event (streamed when linked).
+
+    Final, not signed: whether a signature follows depends on the install's key.
+    """
+    from openshard.adapters.claude_hooks import _append_event
+
+    before = len(buf.get("events") or [])
+    _append_event(buf, event_type="receipt.sealed", action="turn completed; Receipt final", status="passed",
+                  evidence="directly_observed", occurred_at=now,
+                  metadata={**_turn_facts(buf), "turn_status": "turn_completed"})
+    events = buf.get("events") or []
+    if len(events) > before and isinstance(events[-1], dict):
+        _name_receipt(events[-1], buf)
 
 
 def inherit(buf: dict, persisted: Mapping[str, Any], *, same_receipt: bool) -> None:

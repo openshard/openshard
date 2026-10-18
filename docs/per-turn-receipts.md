@@ -98,24 +98,42 @@ Receipt Core sends:
   `previous_receipt_id` (the previous turn's Receipt), beside the existing
   `session_key`, `start_source: "turn"` and `ended: false`.
 
-The same `session` fields are in `openshard history --json`. `openshard last`
-and `openshard history` print `Turn 2 of session ses_1a2b3c4d`.
+The same `session` fields are in `openshard history --json`; MCP
+`get_receipt` adds a `turn` object (`label`, `turn_index`, `session_key`,
+`previous_receipt_id`) for turn Receipts only. `openshard last` and
+`openshard history` print `Turn 2 of session ses_1a2b3c4d`.
 
 ## In progress
 
-A sealed turn syncs; an open one does not (hosted Receipts are immutable). An
-open-turn signal for the Platform is a separate change.
+A sealed turn syncs; an open one does not (hosted Receipts are immutable). The
+open turn is signalled on the existing remote / connected capture journal
+instead (`openshard/remote`), so only for a linked session:
+
+* the `UserPromptSubmit` Event (`session.activity`) that opens a turn carries
+  `turn_opened: true`, `receipt_scope: "turn"`, `turn_index` and the open
+  turn's `receipt_id`;
+* the `Stop` that seals it adds a `receipt.sealed` Event (action
+  `turn completed; Receipt final`, `turn_status: "turn_completed"`) with the
+  same three facts. Final is not signed: a signature depends on the install key.
+
+For the Platform: a turn is "in progress" while its journal has a
+`turn_opened` Event for a `receipt_id` and neither a `receipt.sealed` Event for
+it nor a synced Receipt with that id. A capture that goes silent
+(`silentAfterSeconds`) is "interrupted", never "in progress". An unlinked
+session sends nothing until its turn seals.
 
 ## Backwards compatibility
 
 * Opted out: byte-for-byte today's record (a test asserts the shape).
 * Older records render unchanged; nothing is back-filled or rewritten.
 * `openshard last` shows the latest turn; `history` lists every turn;
-  `task attempts <task_id>` lists a session's turns; MCP `get_receipt` is
-  unchanged.
+  `task attempts <task_id>` lists a session's turns; MCP `get_receipt` adds
+  `turn` for turn Receipts only.
 * A session Receipt never turns into a turn Receipt mid-life: not when rebuilt
   from disk, and not when a buffer an older Core opened (more than one prompt
   or turn already) meets the new default. New sessions pick the flag up.
+* Files a previous turn left uncommitted are listed as pre-existing
+  ("changed before the turn") and are not counted as the turn's changes.
 
 ## Failure modes
 
@@ -164,3 +182,6 @@ command output. The new fields are an enum, an integer, a timestamp and an id.
 2. Record the session end as session-level evidence for the last turn.
 3. Carry transcript offsets across turns.
 4. Codex, Cursor and OpenCode turn boundaries.
+5. Remote capture links at most 10 Receipts per capture (`spool.MAX_LINKS`,
+   Platform `receiptsPerCapture`); turns after the tenth stream Events that
+   name their Receipt but get no link.
