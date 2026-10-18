@@ -54,6 +54,7 @@ from openshard.cli.run_output import (
 from openshard.cli.run_output import (
     _Spinner as _Spinner,
 )
+from openshard.cli.signing_cmd import signature_mode as _signature_mode
 from openshard.config.settings import (
     find_config_path,
     get_anthropic_api_key,
@@ -2211,6 +2212,7 @@ def last(more: bool, full: bool, as_json: bool):
         receipt = build_shard_receipt(
             entry, index=len(entries) - 1, post_session_verification=_post, usage_attestations=_usage_atts,
         )
+        from openshard.history import receipt_verify as _rv
         from openshard.history.proof_contract import build_shard_proof_contract
         from openshard.history.shard_quality import build_shard_quality_summary
         from openshard.history.trust_score import evaluate_trust_score
@@ -2240,6 +2242,7 @@ def last(more: bool, full: bool, as_json: bool):
             verification_view=build_verification_view(receipt),
             post_session_verification=_post,
             usage=receipt.usage,
+            signature_status=_rv.signature_status(log_path, entry, len(entries) - 1),
             **_content_hash_fields(entry),
         )
         click.echo(json.dumps(payload, indent=2))
@@ -2331,6 +2334,7 @@ def _select_entry(entries: list[dict], ref: str | None) -> dict | None:
 
 
 @cli.command("verify")
+@_signature_mode
 @click.option("--compare-base", default=None, metavar="COMMIT",
               help="Also execute approved pytest checks on detached base/head worktrees; never overrides failures.")
 @click.option("--receipt", "receipt_ref", default=None, metavar="ID",
@@ -2377,6 +2381,9 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
     bound to, else a clean HEAD that descends from the session's start
     commit) and appends the verdict as ``independently_verified`` evidence.
     Pending or unavailable CI records nothing. Earlier evidence is kept.
+
+    With --signature nothing runs: the Receipt's seals are checked offline
+    (or a bundle's, with --file) and the verdict says what they prove.
     """
     from openshard.config.settings import load_config_safe
     from openshard.verification.post_session import (
@@ -2556,8 +2563,11 @@ def history_cmd(limit: int, repo_filter: str | None, as_json: bool) -> None:
                     duration_ms=int((time.perf_counter() - _t0) * 1000))
 
     if as_json:
-        status = "ok" if page.items else "not_found"
-        click.echo(json.dumps(_machine_envelope("history", status, **history_json_body(page, loc)), indent=2))
+        from openshard.history.receipt_verify import attach_signature_status
+
+        body = history_json_body(page, loc)
+        attach_signature_status(body["shards"], loc.runs_path)
+        click.echo(json.dumps(_machine_envelope("history", "ok" if page.items else "not_found", **body), indent=2))
         return
     if not page.items:
         if repo_filter and page.total_shards == 0 and loc.runs_path.exists():
@@ -7103,7 +7113,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     state["git_repo"] = ob.detect_git_repo()
 
     from openshard.adapters.agent_setup import agent_label, detect_agent_integrations
-
+    from openshard.cli import signing_cmd as _signing
     root = find_repo_root(repo_path)
     base_dir = root if root is not None else (repo_path or Path.cwd())
     claude_status = detect_claude_integration(root)
@@ -7122,9 +7132,8 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     agent_statuses = detect_agent_integrations(root, service_port=service_port)
     for key, status in agent_statuses.items():
         state[key] = status.to_dict()
-    telemetry = _telemetry_status()
-    state["telemetry"] = telemetry
-
+    state["telemetry"] = telemetry = _telemetry_status()
+    state["receipt_signing"] = signing = _signing.doctor_state(base_dir)
     if as_json:
         click.echo(json.dumps(state, indent=2))
         return
@@ -7275,7 +7284,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
             else:
                 ready_agents.append(label)
 
-    click.echo("")
+    _signing.echo_doctor_block(signing)
     if ready_agents and not limited_agents:
         click.echo(f"Ready -- use {', '.join(ready_agents)} normally.")
     elif ready_agents or limited_agents:
@@ -8383,9 +8392,11 @@ cli.add_command(osn_group)
 cli.add_command(learn_group)
 cli.add_command(usage_group)
 
+from openshard.cli.signing_cmd import keys_group  # noqa: E402
 from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
 
 cli.add_command(workflow_group)
+cli.add_command(keys_group)
 
 
 if __name__ == "__main__":

@@ -222,12 +222,216 @@ def read_public_key(env: dict | None = None) -> tuple[str, bytes] | None:
     return key.keyid, key.public_raw
 
 
+# ---------------------------------------------------------------------------
+# Keyring: public keys only (``openshard keys``, ``openshard verify --signature``)
+# ---------------------------------------------------------------------------
+
+RETIRED_DIRNAME = "retired"  # this install's earlier keys, after ``keys rotate``
+TRUSTED_DIRNAME = "trusted"  # other installs' keys pinned with ``keys trust``
+REVOCATIONS_FILENAME = "revoked.json"  # {keyid: revoked_at}
+
+SOURCE_THIS_INSTALL = "this_install"
+SOURCE_RETIRED = "this_install_retired"
+SOURCE_PINNED = "pinned"
+
+
+@dataclass(frozen=True)
+class PublicKey:
+    """A public key this install trusts. Never carries private material."""
+
+    keyid: str
+    public_raw: bytes
+    source: str
+    retired_at: str | None = None
+    revoked_at: str | None = None
+
+
+def public_key_record(keyid: str, public_raw: bytes) -> dict:
+    """The exportable form: what ``keys export`` writes and ``keys trust`` reads."""
+    return {"algorithm": ALGORITHM, "keyid": keyid, "public_key": base64.b64encode(public_raw).decode("ascii")}
+
+
+def parse_public_key(data: object) -> tuple[str, bytes] | None:
+    """``(keyid, raw)`` from an exported record, or ``None`` when it is not a
+    well-formed Ed25519 public key whose keyid matches its bytes."""
+    if not isinstance(data, dict) or data.get("algorithm", ALGORITHM) != ALGORITHM:
+        return None
+    try:
+        raw = base64.b64decode(str(data.get("public_key", "")), validate=True)
+    except ValueError:
+        return None
+    if len(raw) != 32:
+        return None
+    keyid = keyid_for(raw)
+    return (keyid, raw) if data.get("keyid", keyid) == keyid else None
+
+
+def _hex(keyid: str) -> str:
+    return keyid[len(KEYID_PREFIX):] if keyid.startswith(KEYID_PREFIX) else keyid
+
+
+def _read_key_dir(directory: Path) -> list[tuple[str, bytes, dict]]:
+    out: list[tuple[str, bytes, dict]] = []
+    if not directory.is_dir():
+        return out
+    for path in sorted(directory.glob("*.pub")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        parsed = parse_public_key(data)
+        if parsed:
+            out.append((parsed[0], parsed[1], data))
+    return out
+
+
+def revocations(env: dict | None = None) -> dict[str, str]:
+    try:
+        data = json.loads((keys_dir(env) / REVOCATIONS_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(data, dict) else {}
+
+
+def keyring(env: dict | None = None) -> dict[str, PublicKey]:
+    """Every public key trusted here: this install's current key, its retired
+    keys and pinned keys, with revocation times. Never creates a key; never raises."""
+    directory = keys_dir(env)
+    revoked = revocations(env)
+    ring: dict[str, PublicKey] = {}
+    for keyid, raw, _data in _read_key_dir(directory / TRUSTED_DIRNAME):
+        ring[keyid] = PublicKey(keyid, raw, SOURCE_PINNED, revoked_at=revoked.get(keyid))
+    for keyid, raw, data in _read_key_dir(directory / RETIRED_DIRNAME):
+        retired_at = data.get("retired_at") if isinstance(data.get("retired_at"), str) else None
+        ring[keyid] = PublicKey(keyid, raw, SOURCE_RETIRED, retired_at, revoked.get(keyid))
+    own = read_public_key(env)
+    if own:
+        ring[own[0]] = PublicKey(own[0], own[1], SOURCE_THIS_INSTALL, revoked_at=revoked.get(own[0]))
+    return ring
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.UTC).isoformat()
+
+
+def rotate_key(env: dict | None = None) -> tuple[str | None, str]:
+    """Replace this install's key. The old public key moves to ``retired/`` so
+    old seals keep verifying; records are not re-signed. Returns
+    ``(old keyid or None, new keyid)``. Raises :class:`KeyUnavailableError`
+    when the current key cannot be read (it is then left untouched)."""
+    try:
+        import cryptography  # noqa: F401
+    except ImportError as exc:
+        raise KeyUnavailableError("crypto_unavailable") from exc
+    from openshard.history.jsonl_store import LockTimeoutError, history_file_lock
+
+    directory = keys_dir(env)
+    private_path = directory / PRIVATE_KEY_FILENAME
+    _ensure_dir(directory)
+    old: str | None = None
+    try:
+        with history_file_lock(private_path, timeout=10.0):
+            if private_path.is_file():
+                current = _load(private_path)
+                old = current.keyid
+                retired = directory / RETIRED_DIRNAME
+                retired.mkdir(mode=0o700, exist_ok=True)
+                record = {**public_key_record(current.keyid, current.public_raw), "retired_at": _now()}
+                (retired / f"{_hex(current.keyid)}.pub").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            _create(private_path, directory / PUBLIC_KEY_FILENAME)
+    except LockTimeoutError as exc:
+        raise KeyUnavailableError("key_lock_timeout") from exc
+    except OSError as exc:
+        raise KeyUnavailableError("key_dir_unwritable") from exc
+    return old, _load(private_path).keyid
+
+
+def trust_key(data: object, env: dict | None = None) -> str:
+    """Pin another install's public key (an exported record). Returns its keyid.
+    Raises ``ValueError`` when *data* is not a valid exported Ed25519 key."""
+    parsed = parse_public_key(data)
+    if parsed is None:
+        raise ValueError("not an exported Ed25519 public key (algorithm, keyid, public_key)")
+    keyid, raw = parsed
+    directory = keys_dir(env) / TRUSTED_DIRNAME
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    record = {**public_key_record(keyid, raw), "trusted_at": _now()}
+    (directory / f"{_hex(keyid)}.pub").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return keyid
+
+
+def revoke_key(keyid: str, env: dict | None = None) -> str:
+    """Record that *keyid* is revoked from now. Returns ``revoked_at`` (the first
+    one, if it was already revoked). Refuses this install's current key:
+    rotate first, or every new seal would be invalid."""
+    own = read_public_key(env)
+    if own and own[0] == keyid:
+        raise ValueError("this is the current key of this install; run `openshard keys rotate` first")
+    if not keyid.startswith(KEYID_PREFIX) or len(_hex(keyid)) != 64:
+        raise ValueError("expected a keyid like ed25519:<64 hex characters>")
+    current = revocations(env)
+    if keyid not in current:
+        current[keyid] = _now()
+        directory = keys_dir(env)
+        _ensure_dir(directory)
+        (directory / REVOCATIONS_FILENAME).write_text(json.dumps(current, indent=2, sort_keys=True) + "\n",
+                                                      encoding="utf-8")
+    return current[keyid]
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def key_health(env: dict | None = None) -> dict:
+    """What ``openshard doctor`` reports about the signing key. Never creates
+    or prints the key; never raises. On POSIX the mode is only read; on
+    Windows the owner-only ACL is (re)applied once and its outcome reported."""
+    try:
+        import cryptography  # noqa: F401
+        crypto = True
+    except ImportError:
+        crypto = False
+    private_path = keys_dir(env) / PRIVATE_KEY_FILENAME
+    health: dict = {
+        "crypto_available": crypto, "key_present": private_path.is_file(), "keyid": None,
+        "problem": None, "owner_only": None, "platform": "windows" if _is_windows() else "posix",
+    }
+    if not crypto or not health["key_present"]:
+        return health
+    try:
+        key = _load(private_path) if _is_windows() else None
+        if key is None:
+            # Read the mode before loading: loading tightens a loose mode.
+            health["owner_only"] = not stat.S_IMODE(private_path.stat().st_mode) & 0o077
+            own = read_public_key(env)
+            if own is None:
+                raise KeyUnavailableError("key_corrupt")
+            health["keyid"] = own[0]
+        else:
+            health["keyid"], health["owner_only"] = key.keyid, key.owner_only
+    except KeyUnavailableError as exc:
+        health["problem"] = exc.reason
+    except OSError:
+        health["problem"] = "key_unreadable"
+    return health
+
+
 __all__ = [
     "KeyUnavailableError",
+    "PublicKey",
     "SigningKey",
     "fingerprint8",
+    "key_health",
     "keyid_for",
+    "keyring",
     "keys_dir",
     "load_or_create_key",
+    "parse_public_key",
+    "public_key_record",
     "read_public_key",
+    "revocations",
+    "revoke_key",
+    "rotate_key",
+    "trust_key",
 ]
