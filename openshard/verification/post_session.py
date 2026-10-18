@@ -745,6 +745,14 @@ def record_attestation(repo_root: Path, attestation: dict) -> Path:
 
     path = attestations_path(repo_root)
     append_jsonl(path, attestation)
+    # A sealed Receipt whose projection this changes gets a chained re-seal
+    # (docs/signing.md). Never raises, never blocks the write.
+    try:
+        from openshard.history.receipt_signing import reseal_after_attestation
+
+        reseal_after_attestation(path.parent, attestation)
+    except Exception:  # signing is never allowed to fail the attestation it follows
+        pass
     return path
 
 

@@ -23,6 +23,10 @@ Helpers exposed:
 
 All derive the same lock path from the data file, so an append, an upsert, an
 amend and a rewrite of the same history file mutually exclude.
+
+After a write to a ``runs.jsonl`` returns, the written record is handed to
+``history.receipt_signing.seal_after_write`` (it seals only records that
+stopped changing; ``write_jsonl`` rewrites are never sealed).
 """
 
 from __future__ import annotations
@@ -298,7 +302,33 @@ def _learning_update(function):
     return wrapped
 
 
+def _seal_on_write(extract: Callable[[tuple, dict, object], object], *, amendment: bool = False):
+    """After a write to a ``runs.jsonl``, seal the written record if it stopped changing.
+
+    Like the learning refresh, this runs once the write returned and its lock
+    is released, and it never raises: a Receipt is written whether or not it
+    can be signed (``history.receipt_signing`` records why when it cannot).
+    """
+    def decorate(function):
+        @wraps(function)
+        def wrapped(path, *args, **kwargs):
+            result = function(path, *args, **kwargs)
+            if Path(path).name == "runs.jsonl":
+                try:
+                    record = extract(args, kwargs, result)
+                    if isinstance(record, dict):
+                        from openshard.history.receipt_signing import seal_after_write
+
+                        seal_after_write(Path(path), record, amendment=amendment)
+                except Exception:
+                    pass
+            return result
+        return wrapped
+    return decorate
+
+
 @_learning_update
+@_seal_on_write(lambda args, kwargs, result: args[0] if args else kwargs.get("record"))
 def upsert_jsonl(
     path: Path, record: dict, match: Callable[[dict], bool], *, timeout: float | None = None
 ) -> str:
@@ -345,6 +375,7 @@ def upsert_jsonl(
 
 
 @_learning_update
+@_seal_on_write(lambda args, kwargs, result: result[0] if isinstance(result, tuple) else None)
 def upsert_jsonl_with(
     path: Path,
     build: Callable[[list[str], dict | None], dict],
@@ -404,6 +435,7 @@ def upsert_jsonl_with(
 
 
 @_learning_update
+@_seal_on_write(lambda args, kwargs, result: result, amendment=True)
 def amend_last_jsonl(
     path: Path, transform: Callable[[dict], dict], *, timeout: float | None = None
 ) -> dict | None:
@@ -463,6 +495,7 @@ def _last_line_unterminated(path: Path) -> bool:
 
 
 @_learning_update
+@_seal_on_write(lambda args, kwargs, result: args[0] if args else kwargs.get("record"))
 def append_jsonl(path: Path, record: dict) -> None:
     """Append one record to *path* as a single locked, fsync'd JSON line.
 
@@ -486,6 +519,7 @@ def append_jsonl(path: Path, record: dict) -> None:
 
 
 @_learning_update
+@_seal_on_write(lambda args, kwargs, result: result)
 def append_jsonl_with(path: Path, build: Callable[[list[str]], dict]) -> dict:
     """Append the record ``build(existing_lines)`` returns, deciding it under the lock.
 

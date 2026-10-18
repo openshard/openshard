@@ -261,9 +261,14 @@ class TestScenarioSurfacesAgree:
         assert "Checksum matches" in s["last"]
         full = CliRunner().invoke(cli, ["last", "--full"], catch_exceptions=False).output
         assert "does not prove who wrote it" in full
+        # The local seal made when the record was written does catch it
+        # (docs/signing.md); nothing claims the record is signed or authentic.
+        assert "Invalid (record changed after it was sealed)" in s["last"]
         for text in (s["last"], full, s["proof"], s["trust"]):
             low = text.lower()
-            assert "signed" not in low and "signature" not in low and "authentic" not in low
+            assert "signed ·" not in low and "authentic" not in low
+        for text in (s["proof"], s["trust"]):
+            assert "signature" not in text.lower()
 
 
 class TestVerifyStrict:

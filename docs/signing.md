@@ -1,6 +1,15 @@
-# Signed Receipts (design proposal)
+# Signed Receipts
 
-Status: proposal, not implemented. Nothing on this page exists in Core yet.
+Status: Phase 1 in progress. Implemented: the per-install key and sealing
+(`history/receipt_keys.py`, `history/receipt_signing.py`), on by default.
+Not yet implemented: `openshard verify --signature`, bundles, the
+`openshard keys` commands and the `doctor` checks named below.
+
+**The limit, stated plainly:** a seal made with this machine's key proves
+only that the record is unchanged since it was sealed with this machine's
+key. A coding agent running as the same OS user can read that key and sign
+a forged record with it (threat 1). Catching that needs a party the agent
+cannot reach: the witness log (Phase 2).
 
 Today every Receipt carries a `content_hash` (`history/shard_hash.py`): a
 SHA-256 over the record's canonical JSON. It catches an edit that forgot to
@@ -144,16 +153,48 @@ points at which it becomes eligible for sync). One-shot records (`import`,
 `wrap`, native runs) are sealed when written. A legitimate amendment
 (`openshard note`, `feedback`, a `verify` attestation) writes a new seal
 with `seal_reason: amended` and `previous_record_digest` set, so the chain
-of seals shows every change. Sealing never blocks or fails a run: if it
-cannot sign, the record is simply unsigned and `doctor` says why.
+of seals shows every change. An `openshard verify` attestation lives in its
+own file and is not part of today's `history --json` projection, so it adds
+a seal only if it changes the projection; no seal covers the attestation
+file itself. A record that was never sealed (written before signing shipped
+or while it was off) is not sealed by a later amendment.
+
+Sealing never blocks or fails a run. If it cannot sign, the record is
+written anyway and a "not signed" line with a reason (`key_corrupt`,
+`crypto_unavailable`, `content_hash_mismatch`, `seal_failed:<error>`, ...)
+is appended to the sidecar; if the sidecar itself cannot be written, the
+line goes to `~/.openshard/receipt-signing-failures.jsonl`. A record whose
+stored `content_hash` already disagrees with its content is never sealed.
+Sidecar writes are fsync'd appends under a cross-process lock on the sidecar
+(the same lock mechanism the history uses), and each seal is decided from a
+fresh read of `runs.jsonl` while that lock is held, so
+the capture service and a CLI process can seal concurrently.
+
+### Turning signing off
+
+Signing is on by default. Any of these turns it off for new seals:
+
+- `OPENSHARD_RECEIPT_SIGNING=off` (also `0`, `false`, `no`, `disabled`) in
+  the environment of the process that writes the record, including the
+  capture service;
+- `receipt_signing: false` in the repository's `.openshard/config.yml`;
+- `receipt_signing: false` in `~/.openshard/config.yml`.
+
+An unreadable config never turns it off. When a Receipt that was sealed
+earlier is amended while signing is off, a `signing_disabled` "not signed"
+line is written, so it reads as unsigned rather than as changed after
+sealing.
 
 ### Keys
 
 - Private key: `~/.openshard/keys/receipt-signing.ed25519` (PKCS#8 PEM,
   unencrypted), file mode 0600, directory 0700, created on first seal.
-  `OPENSHARD_HOME` applies. Never inside a repository. On Windows the file
-  is created with an owner-only ACL; if that cannot be confirmed, `doctor`
-  warns.
+  `OPENSHARD_HOME` applies. Never inside a repository, never logged, never
+  synced. On Windows POSIX modes do not apply: the file is restricted with
+  `icacls` (inheritance removed, current user only). This is best effort;
+  if it cannot be confirmed the key is still used and the warning is left
+  for `doctor` (not implemented yet). An existing key that cannot be read
+  is never replaced; seals then record `key_corrupt` or `key_unreadable`.
 - Public key: `receipt-signing.ed25519.pub` beside it (raw key, base64,
   plus keyid). `openshard keys show` prints it for pinning out of band.
 - Rotation: `openshard keys rotate` writes a new key and moves the old
@@ -216,6 +257,12 @@ the sealed copy (full record not provided; record digest not checked)`.
 
 ## Receipt card "Tamper check" row
 
+In Core today, `openshard last` adds one row after `Integrity`, checked
+against this install's own key: `Signature  Signed · key <first 8 hex of
+the keyid>`, `Checksum only (not signed)` (`Not signed` when the record has no valid
+checksum), or `Invalid (<why>)`, e.g. `Invalid (record changed after it
+was sealed)`.
+
 The card's row is a Platform string; Core's `--json` gains a matching
 `signature_status`. Phase 2 wording:
 
@@ -266,16 +313,9 @@ offline. If Core's projection changed between sealing and sending (an
 upgrade), sync re-seals first, so the projection digest matches what is
 sent.
 
-## Open questions
+## Decisions
 
-1. Is `openshard verify --signature` acceptable, or do you want a separate
-   command? A bare `openshard verify <file>` would be confused with the
-   existing check re-run.
-2. Is adding `cryptography` (~5 MB) as a core dependency acceptable for
-   v0.5.0?
-3. Should signing be on by default in v0.5.0, or opt-in
-   (`openshard keys init`) until Phase 2 gives it a visible payoff?
-4. Is a sidecar file (`receipt-signatures.jsonl`) right, or should seals
-   live inside the record (needs a Platform contract change before sync)?
-5. Is the honest limit in threat 1 (a same-user agent can use the key)
-   acceptable to state publicly at launch, or should Phase 2 ship first?
+Approved for v0.5.0: the command is `openshard verify --signature`;
+`cryptography>=42` is a core dependency; signing is on by default; seals
+live in the sidecar `receipt-signatures.jsonl` and are not synced in this
+phase; the same-user-agent limit (threat 1) is stated publicly.

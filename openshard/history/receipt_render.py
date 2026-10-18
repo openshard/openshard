@@ -1372,3 +1372,20 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
     lines.append(_SEP)
 
     return "\n".join(lines)
+
+
+def with_signature_row(rendered: str, signature: str | None) -> str:
+    """*rendered* with a ``Signature`` row right after its first ``Integrity`` row.
+
+    *signature* is ``receipt_signing.signature_label`` wording ("Signed · key
+    3f9a1c21" or "Checksum only (not signed)"); ``None`` leaves the block as it was.
+    """
+    if not signature:
+        return rendered
+    lines = rendered.split("\n")
+    integrity = _row("Integrity", "")
+    for position, line in enumerate(lines):
+        if line.startswith(integrity):
+            lines.insert(position + 1, _row("Signature", signature))
+            break
+    return "\n".join(lines)
