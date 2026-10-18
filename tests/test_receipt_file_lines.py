@@ -217,22 +217,26 @@ class TestRenderAndSync:
         assert file_lines_display({"path": "a.py", "lines_added": True, "lines_removed": 0}) == ""
         assert file_lines_display({"path": "a.py", "lines_added": 0, "lines_removed": 0}) == "  +0 / -0"
 
-    def test_sync_payload_is_unchanged_by_per_file_counts(self, repo):
-        entry = self._entry(repo)
-        assert any(k in f for f in entry["files_detail"] for k in _PER_FILE_KEYS)
-        stripped = copy.deepcopy(entry)
-        stripped["files_detail"] = [
-            {k: v for k, v in f.items() if k not in _PER_FILE_KEYS} for f in stripped["files_detail"]
-        ]
-        payload = receipt_payload(entry, 0)
-        other = receipt_payload(stripped, 0)
-        # Only the local checksum differs (the stripped copy was edited after it was written).
-        assert {k: v for k, v in payload.items() if k != "integrity"} == {
-            k: v for k, v in other.items() if k != "integrity"
-        }
-        # The Platform's file entry is strict and has no per-file counts yet.
+    def test_sync_payload_carries_per_file_counts(self, repo):
+        payload = receipt_payload(self._entry(repo), 0)
+        files = {f["path"]: f for f in payload["files"]}
+        assert files["calc.py"]["diff_added"] == 2
+        assert files["calc.py"]["diff_removed"] == 0
+        assert files["calc.py"]["binary"] is None
+        assert files["blob.bin"]["binary"] is True
+        assert files["blob.bin"]["diff_added"] is None and files["blob.bin"]["diff_removed"] is None
+        # The Platform's file entry is strict: every key Core sends must be one it accepts.
         schema = json.loads(_PLATFORM_SCHEMA.read_text(encoding="utf-8"))
         item = schema["properties"]["receipt"]["properties"]["files"]["items"]
         assert item.get("additionalProperties") is False
         for f in payload["files"]:
-            assert set(f) == set(item["properties"]) == {"path", "change_type", "summary", "attribution"}
+            assert set(f) <= set(item["properties"])
+
+    def test_unknown_per_file_counts_sync_as_null_never_zero(self, repo):
+        entry = self._entry(repo)
+        stripped = copy.deepcopy(entry)
+        stripped["files_detail"] = [
+            {k: v for k, v in f.items() if k not in _PER_FILE_KEYS} for f in stripped["files_detail"]
+        ]
+        for f in receipt_payload(stripped, 0)["files"]:
+            assert f["diff_added"] is None and f["diff_removed"] is None and f["binary"] is None
