@@ -15,6 +15,9 @@ Helpers exposed:
   byte-for-byte (malformed lines included).
 - ``upsert_jsonl_with(path, build, match)`` — the same upsert, but build the
   record under the lock from the current raw lines and matched record.
+- ``find_last_record(path, match, key=...)``, ``count_lines(path)``,
+  ``line_count(lines)`` and ``holds_value(lines, field, value)`` — reads that
+  do not parse the whole history (from the file's end, or a byte scan).
 - ``amend_last_jsonl(path, transform)`` — replace the *last* well-formed
   record with ``transform(record)`` in place; every other line is preserved
   byte-for-byte. The read-transform-write is one critical section.
@@ -385,6 +388,33 @@ class _LinesUnderLock(Sequence[str]):
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lines: list[str] | None = None
+        self._bytes: bytes | None = None
+
+    def _data(self) -> bytes:
+        if self._bytes is None:
+            self._bytes = self._path.read_bytes() if self._path.exists() else b""
+        return self._bytes
+
+    def line_count(self) -> int:
+        """The number of lines, by a byte scan (see :func:`line_count`)."""
+        return len(self._lines) if self._lines is not None else _universal_line_count(self._data())
+
+    def holds_value(self, field: str, value: str) -> bool:
+        """True when a record's *field* is *value* (see :func:`holds_value`)."""
+        if self._lines is not None or not _PLAIN_KEY.fullmatch(value):
+            return _parsed_holds(self._all(), field, value)
+        data = self._data()
+        needle = json.dumps(value).encode("utf-8")
+        at = data.find(needle)
+        while at != -1:
+            start = data.rfind(b"\n", 0, at) + 1
+            end = data.find(b"\n", at)
+            end = len(data) if end == -1 else end + 1
+            record = _parse_line(data[start:end])
+            if record is not None and record.get(field) == value:
+                return True
+            at = data.find(needle, end)
+        return False
 
     def _all(self) -> list[str]:
         if self._lines is None:
@@ -750,6 +780,136 @@ def amend_last_jsonl(
             _atomic_replace(path, "".join(existing))
             return amended
         return None
+
+
+# ---------------------------------------------------------------------------
+# Reads that do not parse the whole history
+# ---------------------------------------------------------------------------
+
+_SCAN_BLOCK_BYTES = 1 << 20
+
+
+def _universal_line_count(data: bytes) -> int:
+    """Lines as a text-mode read counts them: "\\n", "\\r\\n" and "\\r" each end one."""
+    if not data:
+        return 0
+    count = _occurrences(data, b"\n")
+    if b"\r" in data:
+        count += _occurrences(data, b"\r") - _occurrences(data, b"\r\n")
+    return count + (data[-1:] not in (b"\n", b"\r"))
+
+
+def _occurrences(data: bytes, sep: bytes) -> int:
+    """``data.count(sep)``; a find loop is several times faster for the long lines of a history."""
+    count, at = 0, data.find(sep)
+    while at != -1:
+        count += 1
+        at = data.find(sep, at + 1)
+    return count
+
+
+def line_count(lines: Sequence[str]) -> int:
+    """``len(lines)``; for the lines an upsert builder gets, a byte count without decoding them.
+
+    The byte count treats only "\\n", "\\r\\n" and "\\r" as line ends, so it
+    can differ from ``len()`` for a line holding a raw form feed or Unicode
+    line separator, which a JSON writer does not emit.
+    """
+    return lines.line_count() if isinstance(lines, _LinesUnderLock) else len(lines)
+
+
+def _parsed_holds(lines: Sequence[str], field: str, value: str) -> bool:
+    for line in lines:
+        record = _parse_line(line.encode("utf-8"))
+        if record is not None and record.get(field) == value:
+            return True
+    return False
+
+
+def holds_value(lines: Sequence[str], field: str, value: str) -> bool:
+    """True when a well-formed record in *lines* has ``record[field] == value``.
+
+    For the lines an upsert builder gets and a *value* of letters, digits,
+    "_" and "-" (one JSON spelling), only lines holding that spelling are
+    parsed, so checking that an id is free does not parse the whole history.
+    """
+    if isinstance(lines, _LinesUnderLock):
+        return lines.holds_value(field, value)
+    return _parsed_holds(lines, field, value)
+
+
+def count_lines(path: Path) -> int:
+    """The number of lines in *path* as a text-mode read counts them (0 when missing), by a byte scan."""
+    try:
+        return _universal_line_count(Path(path).read_bytes())
+    except FileNotFoundError:
+        return 0
+
+
+def _lines_from_end(fh, size: int, needle: bytes | None) -> Iterator[tuple[int, bytes]]:
+    """``(offset, raw)`` of whole lines, last first, read backwards in blocks.
+
+    With *needle*, only lines that contain it. A line longer than a block is
+    read whole by doubling the block until a line start is in it.
+    """
+    hi, block = size, _SCAN_BLOCK_BYTES
+    while hi > 0:
+        lo = max(0, hi - block)
+        fh.seek(lo)
+        chunk = fh.read(hi - lo)
+        start = chunk.find(b"\n") + 1 if lo else 0
+        if lo and start in (0, len(chunk)):  # no whole line in this block
+            block *= 2
+            continue
+        end = len(chunk)
+        while end > start:
+            at = chunk.rfind(needle, start, end) if needle else end - 1
+            if at < start:
+                break
+            line_start = chunk.rfind(b"\n", 0, at) + 1
+            line_end = chunk.find(b"\n", at)
+            line_end = len(chunk) if line_end == -1 else line_end + 1
+            yield lo + line_start, chunk[line_start:line_end]
+            end = line_start
+        hi = lo + start
+
+
+def _last_record(path: Path, match: Callable[[dict], bool], key: str | None) -> tuple[int, dict] | None:
+    try:
+        fh = path.open("rb")
+    except FileNotFoundError:
+        return None
+    with fh:
+        needle = json.dumps(key).encode("utf-8") if key is not None and _PLAIN_KEY.fullmatch(key) else None
+        for offset, raw in _lines_from_end(fh, os.fstat(fh.fileno()).st_size, needle):
+            record = _parse_line(raw)
+            if record is not None and match(record):
+                return offset, record
+    return None
+
+
+def find_last_record(
+    path: Path, match: Callable[[dict], bool], *, key: str | None = None, timeout: float = 1.0,
+) -> tuple[int, dict] | None:
+    """The last well-formed record satisfying *match*, with its byte offset, or None.
+
+    The file is read from its end, so a recent record costs little whatever
+    the history's size. *key* is as for :func:`upsert_jsonl` (a string whose
+    JSON encoding every line that can match contains, e.g. a receipt or
+    session id): when it is letters, digits, "_" and "-", only lines holding
+    it are parsed; otherwise every line is, from the end. The read holds the
+    history lock so no in-place overwrite is half-seen; the wait is bounded
+    by *timeout*, after which (or where the lock cannot be taken) it reads
+    without the lock, as ``history.store.load_history`` does.
+    """
+    path = Path(path)
+    if not path.exists():
+        return None  # take no lock and create no directory
+    try:
+        with history_file_lock(path, timeout=timeout):
+            return _last_record(path, match, key)
+    except OSError:  # LockTimeoutError too
+        return _last_record(path, match, key)
 
 
 def _last_line_unterminated(path: Path) -> bool:

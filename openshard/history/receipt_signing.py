@@ -193,7 +193,7 @@ def record_digest(stored_entry: dict) -> str:
     return compute_shard_hash(stored_entry).split(":", 1)[1]
 
 
-def receipt_projection(stored_entry: dict, index: int, attestations: list[dict]) -> dict:
+def receipt_projection(stored_entry: dict, index: int | None, attestations: list[dict]) -> dict:
     """The privacy-bounded ``history --json`` projection of one stored record.
 
     Built exactly as ``history.query`` builds a row: the record coerced the
@@ -524,6 +524,27 @@ def _find(stored: list[dict], receipt_id: str) -> tuple[int, dict] | None:
     return None
 
 
+def _find_stored(runs_path: Path, receipt_id: str) -> tuple[int | None, dict] | None:
+    """The last stored record for *receipt_id*, as ``load_history(coerce=False)`` gives it, and its index.
+
+    Found from the end of ``runs.jsonl`` without parsing the rest. The index
+    (the record's position in ``load_history``) only names a record that has
+    no ``shard_id`` (``build_shard_receipt``), so only then is the history
+    loaded to compute it; otherwise it is None.
+    """
+    from openshard.history.jsonl_store import find_last_record
+    from openshard.history.store import load_history
+
+    hit = find_last_record(runs_path, lambda r: stored_receipt_id(r) == receipt_id, key=receipt_id)
+    if hit is None:
+        return None
+    entry = hit[1]
+    entry.pop(INTEGRITY_AS_STORED_FIELD, None)  # as load_history drops it
+    if isinstance(entry.get("shard_id"), str) and entry["shard_id"]:
+        return None, entry
+    return _find(load_history(runs_path, coerce=False), receipt_id)
+
+
 def _note_not_signed(history_dir: Path, receipt_id: str, reason: str) -> SealOutcome:
     """Record "not signed" + *reason* for a caller that does not hold the sidecar lock."""
     from openshard.history.jsonl_store import history_file_lock
@@ -555,12 +576,10 @@ def _seal_one(history_dir: Path, runs_path: Path, receipt_id: str, *, amendment:
     version after a seal over the newer one.
     """
     from openshard.history.jsonl_store import history_file_lock
-    from openshard.history.store import load_history
 
     path = sidecar_path(history_dir)
     with history_file_lock(path, timeout=10.0):
-        stored = load_history(runs_path, coerce=False)
-        found = _find(stored, receipt_id)
+        found = _find_stored(runs_path, receipt_id)
         if found is None:
             return SealOutcome("skipped", "record_not_found", receipt_id)
         index, entry = found
