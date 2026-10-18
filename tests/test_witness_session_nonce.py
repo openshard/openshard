@@ -169,11 +169,14 @@ class TestSessionNonce:
         _hook(repo, "Stop")
         events, _ = spool.pending(None, CAPTURE_ID)
         assert all(set(e) == WIRE_EVENT_KEYS for e in events)
-        assert set(events[0]["metadata"]) == {"hook", "session_nonce"}
+        # Claude Code sessions also carry the installed hook configuration's hash.
+        assert set(events[0]["metadata"]) == {"hook", "session_nonce", "hook_config_hash"}
         entry = _entries(repo)[-1]
         without = json.loads(json.dumps(entry))
         for event in without["events"]:
             event["metadata"].pop("session_nonce", None)
+            event["metadata"].pop("hook_config_hash", None)
+        without["capture"].pop("hook_config_hash", None)
         # The sync payload is exactly what it was before the nonce existed:
         # the Platform's session schema is strict and does not accept it yet.
         def payload(record: dict) -> dict:

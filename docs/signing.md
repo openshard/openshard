@@ -104,9 +104,11 @@ What Core does:
 Capture never waits for the witness: hooks append to the local spool and
 return, sending happens off the hook path, and a failure there never fails
 a hook or blocks the agent. Nothing new leaves the machine beyond the
-nonce: the witness holds the same scrubbed, bounded Events remote capture
-already sends (event types, tool names, repo-relative paths, statuses,
-counts, hashes; no code, diffs, prompts, transcripts or output).
+nonce and, for Claude Code, `hook_config_hash` in the same first Event (a
+hash of the installed OpenShard hook entries, never their headers): the
+witness holds the same scrubbed, bounded Events remote capture already
+sends (event types, tool names, repo-relative paths, statuses, counts,
+hashes; no code, diffs, prompts, transcripts or output).
 
 ## Options considered
 

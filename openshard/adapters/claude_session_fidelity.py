@@ -12,6 +12,11 @@ Three facts a reader needs that the staging buffer used to blur:
   Events past the window are appended to a local, append-only event log
   (``.openshard/event_log/<receipt id>.jsonl``) instead of being discarded;
   only a log write that fails is a capture loss.
+* **Silent hooks are said as such.** Claude Code's hooks fail open, so the
+  hash of the hook configuration installed when the session was first
+  observed is recorded (``claude_hook_health``), and work the session's
+  transcript shows but no hook delivered becomes a capture gap
+  (``claude_hook_coverage``).
 * **An idle seal is said as such.** A buffer idle past the sweep threshold
   (an hour by default) is sealed into its Receipt without a session end
   (``sweep_stale_buffers``, moved here from claude_hooks); the Receipt says
@@ -112,6 +117,33 @@ def note_agent_notification(buf: dict) -> int:
     return buf["agent_notification_count"]
 
 
+def start_metadata(agent: str, repo_root: Path) -> dict[str, str]:
+    """Extra ``session.started`` metadata: the installed hook configuration's hash (Claude Code only)."""
+    from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
+    from openshard.adapters.claude_hook_health import hook_config_hash
+
+    digest = hook_config_hash(repo_root) if agent == AGENT_CLAUDE_CODE else None
+    return {"hook_config_hash": digest} if digest else {}
+
+
+def note_coverage_gaps(buf: dict) -> None:
+    """Record work the transcript shows but no hook delivered (see claude_hook_coverage). Never raises."""
+    from openshard.adapters.claude_hook_coverage import note_gaps
+
+    note_gaps(buf)
+
+
+def _hook_config_hash(buf: dict) -> str | None:
+    """The hash the ``session.started`` Event carries, or the one a rebuilt buffer kept."""
+    for event in buf.get("events") or []:
+        if isinstance(event, dict) and event.get("event_type") == "session.started":
+            value = (event.get("metadata") or {}).get("hook_config_hash")
+            if isinstance(value, str):
+                return value
+    value = buf.get("hook_config_hash")
+    return value if isinstance(value, str) else None
+
+
 def capture_status(buf: dict, ended: object) -> dict[str, Any]:
     """``capture.status`` (ended / idle / in_progress) and the extra facts below."""
     status = "ended" if ended else ("idle" if buf.get("idle_sealed_at") else "in_progress")
@@ -125,6 +157,7 @@ def rebuilt_counters(capture: dict) -> dict[str, Any]:
         "agent_notification_count": capture.get("agent_notification_count"),
         "archived_events": capture.get("hook_events_archived"),
         "event_log": capture.get("event_log"),
+        "hook_config_hash": capture.get("hook_config_hash"),
     }
 
 
@@ -156,6 +189,9 @@ def capture_fields(buf: dict) -> dict[str, Any]:
         out["event_log"] = buf.get("event_log")
     if buf.get("idle_sealed_at"):
         out["idle_sealed_at"] = buf["idle_sealed_at"]
+    digest = _hook_config_hash(buf)
+    if digest:
+        out["hook_config_hash"] = digest
     return out
 
 
