@@ -398,39 +398,180 @@ class TestRendering:
         assert "pre-existing (changed before the turn)" in text
 
 
+class TestTaskEndsAtBranchChange:
+    def test_a_switch_between_turns_starts_a_new_task(self, repo, turn_flag):
+        _hook(repo, "UserPromptSubmit", prompt="add a")
+        _write(repo, "a.py")
+        _hook(repo, "Stop")
+        _git(repo, "checkout", "-q", "-b", "other")
+        _hook(repo, "UserPromptSubmit", prompt="add b")
+        _write(repo, "b.py")
+        _hook(repo, "Stop")
+        first, second = _entries(repo)
+        assert is_task_id(second["task_id"]) and first["task_id"] != second["task_id"]
+        assert second["capture"]["task_grouping"] == "session" and second["capture"]["turn_index"] == 2
+
+    def test_a_switch_during_a_turn_ends_the_task_at_the_next_prompt(self, repo, turn_flag):
+        _hook(repo, "UserPromptSubmit", prompt="start feature")
+        _git(repo, "checkout", "-q", "-b", "feature")
+        _write(repo, "a.py")
+        _hook(repo, "Stop")
+        _hook(repo, "UserPromptSubmit", prompt="continue")
+        _write(repo, "b.py")
+        _hook(repo, "Stop")
+        _hook(repo, "UserPromptSubmit", prompt="and more")
+        _hook(repo, "Stop")
+        first, second, third = _entries(repo)
+        assert first["task_id"] != second["task_id"] and second["task_id"] == third["task_id"]
+
+    @pytest.mark.parametrize(("state", "ended"), [("MERGED", "pr_merged"), ("CLOSED", "pr_closed"), ("OPEN", None)])
+    def test_the_next_prompt_after_the_pr_merged_or_closed_starts_a_new_task(self, repo, turn_flag, monkeypatch,
+                                                                              state, ended):
+        monkeypatch.delenv("OPENSHARD_PR_LOOKUP", raising=False)
+        monkeypatch.setattr(ch, "_PR_LOOKUP_ENABLED", True)
+        url = "https://github.com/acme/widget/pull/7"
+        monkeypatch.setattr(ch, "_gh_pull_request", lambda root, branch, commits: {
+            "url": url, "number": 7, "head": sorted(commits)[0], "source": "gh_observed"})
+        asked: list[str] = []
+        monkeypatch.setattr(turns, "pr_state", lambda u, cwd: asked.append(u) or state)
+        _hook(repo, "UserPromptSubmit", prompt="add a")
+        _write(repo, "a.py")
+        _git(repo, "add", "a.py")
+        _git(repo, "commit", "-q", "-m", "a")
+        _hook(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "git commit -m a"},
+              tool_response={"stdout": "", "stderr": ""})
+        _hook(repo, "Stop")
+        _hook(repo, "UserPromptSubmit", prompt="explain")
+        _hook(repo, "Stop")
+        _hook(repo, "UserPromptSubmit", prompt="next")
+        _hook(repo, "Stop")
+        first, second, third = _entries(repo)
+        assert first["pull_request"]["url"] == url
+        if ended is None:
+            assert asked == [url, url]  # asked at each later prompt while the PR is open
+            assert first["task_id"] == second["task_id"] == third["task_id"]
+            assert third["capture"]["task_pr_url"] == url
+        else:
+            assert asked == [url]  # the new Task has no PR yet: nothing more to ask
+            assert first["task_id"] != second["task_id"] == third["task_id"]
+            assert second["capture"]["previous_task_ended"] == ended
+            assert "task_pr_url" not in second["capture"]
+
+    def test_no_pr_lookup_outside_the_capture_service(self, repo, turn_flag, monkeypatch):
+        monkeypatch.setattr(turns, "pr_state", lambda u, cwd: pytest.fail("gh called on a hook path"))
+        persisted = {"pull_request": {"url": "https://github.com/acme/widget/pull/7"}, "git_branch": "main",
+                     "capture": {"receipt_scope": "turn", "turn_index": 1}}
+        buf = {"agent": "claude_code", "git_branch": "main"}
+        turns.inherit(buf, persisted, same_receipt=False, repo_root=repo)
+        assert "previous_task_ended" not in buf and buf["task_pr_url"].endswith("/7")
+
+    def test_a_declared_task_is_kept_across_a_branch_change(self, repo, turn_flag):
+        root, task = repo.resolve(), new_task_id()
+        for event, extra in (("UserPromptSubmit", {"task_excerpt": "one"}), ("Stop", {}), ("checkout", {}),
+                             ("UserPromptSubmit", {"task_excerpt": "two"}), ("Stop", {})):
+            if event == "checkout":
+                _git(repo, "checkout", "-q", "-b", "other")
+                continue
+            ch.apply_reduced_hook(ch.ReducedHookPayload(event=event, session_id=SID, task_id=task, **extra), root)
+        assert {e["task_id"] for e in _entries(repo)} == {task}
+
+
 class TestPostSessionVerifyPerTurn:
-    def _calls(self, monkeypatch) -> list[str]:
+    """``post_session_verify: safe`` re-runs a Task once it settles, not at every turn (verification/settle.py)."""
+
+    @pytest.fixture
+    def runs(self, repo, monkeypatch) -> list[list[str]]:
         from openshard.verification import auto
 
-        calls: list[str] = []
-        monkeypatch.setattr(auto, "schedule_post_session_verify",
-                            lambda root, entry, **_: calls.append(entry["receipt_id"]) or True)
-        return calls
+        (repo / ".openshard").mkdir(exist_ok=True)
+        (repo / ".openshard" / "config.yml").write_text("post_session_verify: safe\n", encoding="utf-8")
+        monkeypatch.delenv(auto.ENV_DISABLE, raising=False)
+        argvs: list[list[str]] = []
+        monkeypatch.setattr(auto, "_spawn_detached", lambda argv, cwd: argvs.append(argv) or True)
+        return argvs
 
-    def test_runs_for_a_sealed_turn_that_changed_files_only(self, repo, turn_flag, monkeypatch):
-        from openshard.verification import auto
+    @staticmethod
+    def _working_tree_runs(argvs: list[list[str]]) -> list[str]:
+        return [a[a.index("--receipt") + 1] for a in argvs if "--commit" not in a]
 
-        _two_turns(repo)  # turn 1 commits a.py; turn 2 leaves b.py uncommitted
+    def test_nothing_runs_at_a_stop_and_one_run_starts_once_the_task_settles(self, repo, turn_flag, runs):
+        from openshard.verification import settle
+
+        _two_turns(repo)  # turn 1 commits a.py (verified on commit); turn 2 leaves b.py uncommitted
         _hook(repo, "UserPromptSubmit", prompt="explain b")  # turn 3 changes nothing
         _hook(repo, "Stop")
         first, second, third = _entries(repo)
-        calls = self._calls(monkeypatch)
-        monkeypatch.setattr(auto, "schedule_commit_verify", lambda root, entry, **_: True)
-        for entry in (first, second, third):
-            auto.schedule_for_receipt(repo, entry, finalized=False, turn_ended=True)
-        assert [auto.sealed_turn_changed_files(e) for e in (first, second, third)] == [True, True, False]
-        assert calls == [second["receipt_id"]]  # turn 1 has its commit verified instead; turn 3 has nothing to run
+        assert any("--commit" in a for a in runs)  # on commit: unchanged
+        assert self._working_tree_runs(runs) == []  # no working-tree run while the agent works
+        assert settle.run_due(repo, now=time.time() + 60) == 0  # still inside the quiet period
+        assert settle.run_due(repo, now=time.time() + 601) == 1
+        assert self._working_tree_runs(runs) == [second["receipt_id"]]  # the last turn that changed files
+        assert settle.run_due(repo, now=time.time() + 9999) == 0  # never twice
 
-    def test_an_open_turn_and_a_session_receipt_are_not_run_at_a_stop(self, repo, flag_off, monkeypatch):
-        from openshard.verification import auto
+    def test_a_new_prompt_holds_the_run_and_the_period_is_configurable(self, repo, turn_flag, runs):
+        from openshard.verification import settle
+
+        (repo / ".openshard" / "config.yml").write_text(
+            "post_session_verify: safe\npost_session_verify_settle_minutes: 1\n", encoding="utf-8")
+        _hook(repo, "UserPromptSubmit", prompt="add a")
+        _write(repo, "a.py")
+        _hook(repo, "Stop")
+        _hook(repo, "UserPromptSubmit", prompt="and b")  # a turn is open: the Task has not settled
+        assert settle.run_due(repo, now=time.time() + 61) == 0
+        _write(repo, "b.py")
+        _hook(repo, "Stop")
+        assert settle.run_due(repo, now=time.time() + 61) == 1
+        assert self._working_tree_runs(runs) == [_entries(repo)[-1]["receipt_id"]]
+
+    def test_a_branch_change_settles_the_previous_task_at_once(self, repo, turn_flag, runs):
+        _hook(repo, "UserPromptSubmit", prompt="add a")
+        _write(repo, "a.py")
+        _hook(repo, "Stop")
+        _git(repo, "checkout", "-q", "-b", "next")
+        _hook(repo, "UserPromptSubmit", prompt="something else")
+        _hook(repo, "Stop")
+        first, second = _entries(repo)
+        assert first["task_id"] != second["task_id"]
+        assert self._working_tree_runs(runs) == [first["receipt_id"]]
+
+    def test_a_clean_head_already_re_run_is_not_run_again(self, repo, turn_flag, runs):
+        from openshard.verification import settle
 
         _hook(repo, "UserPromptSubmit", prompt="add a")
         _write(repo, "a.py")
         _hook(repo, "Stop")
-        [entry] = _entries(repo)
-        calls = self._calls(monkeypatch)
-        assert auto.schedule_for_receipt(repo, entry, finalized=False, turn_ended=True) is False
-        assert calls == [] and auto.sealed_turn_changed_files(entry) is False
+        (repo / "a.py").unlink()  # the tree is back at HEAD
+        head = (ch.run_git(repo, ["rev-parse", "HEAD"]) or "").strip()
+        with (repo / ".openshard" / "verifications.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"version": 1, "kind": "post_session_verification", "commit": head,
+                                 "verification": {"artifact_sha": head}}) + "\n")
+        assert settle.run_due(repo, now=time.time() + 601) == 0
+        assert self._working_tree_runs(runs) == []
+
+    def test_off_by_config_notes_nothing(self, repo, turn_flag, monkeypatch):
+        from openshard.verification import auto, settle
+
+        monkeypatch.delenv(auto.ENV_DISABLE, raising=False)
+        calls: list[str] = []
+        monkeypatch.setattr(auto, "_spawn_detached", lambda argv, cwd: calls.append(argv) or True)
+        _hook(repo, "UserPromptSubmit", prompt="add a")
+        _write(repo, "a.py")
+        _hook(repo, "Stop")
+        assert settle.run_due(repo, now=time.time() + 601) == 0 and calls == []
+        assert not list((repo / ".openshard").glob("verify-requests/settle-*"))
+
+
+def test_settle_period_defaults_to_ten_minutes_and_ignores_bad_values(repo):
+    from openshard.verification import settle
+
+    assert settle.settle_seconds(repo) == 600
+    (repo / ".openshard").mkdir(exist_ok=True)
+    for raw, expected in (("2", 120), ("0", 0), ("-1", 600), ("soon", 600), ("true", 600)):
+        (repo / ".openshard" / "config.yml").write_text(
+            f"post_session_verify_settle_minutes: {raw}\n", encoding="utf-8")
+        assert settle.settle_seconds(repo) == expected, raw
+    assert settle.run_due_all(lambda: [repo, repo / "missing"]) == 0
+    assert settle.run_due_all(lambda: 1 / 0) == 0  # a timer thread never dies
 
 
 def test_each_sealed_turn_is_a_completed_receipt_for_telemetry(repo, turn_flag, monkeypatch):

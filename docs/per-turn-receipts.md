@@ -41,6 +41,18 @@ Task (task_id)           the job; may span prompts, sessions, agents, days
    every later turn of the same agent session inherits it:
    `task_grouping: session`. This is a grouping OpenShard made from the
    session id it observed, never a declaration; that is why it is labelled.
+3. A Task ends when the branch changes: a turn that starts on a different
+   branch than the previous turn started on (the agent switched during that
+   turn, or someone switched between turns) mints a new `task_id`. Unknown
+   on one side counts as a change. A declared task is never split.
+4. A Task also ends when its PR merges or closes. Once a turn of the Task
+   found its PR (`gh`, at a `Stop`), the capture service asks GitHub for that
+   PR's state at each later prompt (`gh pr view --json state`, read-only,
+   5 s timeout); `MERGED` or `CLOSED` starts a new Task. No `gh`, no network,
+   or inline hooks: not observed, and the Task carries on.
+   The new Task's first Receipt records why (`capture.previous_task_ended`:
+   `branch_changed`, `pr_merged` or `pr_closed`); the Task's PR is carried
+   locally in `capture.task_pr_url`.
 
 `history/task_identity.py` keeps its rule that `task_id` is never inferred from
 prompts, timing or repository state; the session grouping is the one stated
@@ -54,7 +66,7 @@ exception and is always labelled.
 | Commits | yes | `session_commits` from the turn-start HEAD to the turn-end HEAD, same corroboration rules |
 | Usage / cost | yes | transcript messages timestamped at or after the turn start (`_transcript_usage`, `since = started_at`) |
 | Checks | yes | check commands observed in that turn |
-| Independent re-runs | yes | a turn with a resulting commit gets commit verification; with `post_session_verify: safe`, a sealed turn *without* a commit that changed files gets the working-tree run (a turn that changed nothing gets none). Results attach as evidence, never rewrite |
+| Independent re-runs | yes | a turn with a resulting commit gets commit verification; with `post_session_verify: safe`, the working-tree run starts once the Task settles (see Settle check). Results attach as evidence, never rewrite |
 | Session end | session-level | no turn Receipt claims it; see Failure modes |
 
 ## Sealing and signing
@@ -73,6 +85,19 @@ while the session is open. In the capture service the seal calls
 `sync.client.request_sync()`, which wakes the background sync loop at once
 (polling at 250 ms) instead of waiting for its 5-minute tick. The in-progress
 turn stays "still in progress".
+
+## Settle check
+
+With `post_session_verify: safe`, a sealed turn that changed files no longer
+starts `openshard verify` at its `Stop`. It is noted as its session's pending
+re-run (`.openshard/verify-requests/settle-*.json`), and the run starts when
+the Task settles: no new prompt for `post_session_verify_settle_minutes`
+(default 10) after the session's latest sealed turn, or the session's next
+sealed turn is in a new Task. A turn with a commit is verified on commit, as
+before, and clears the pending run. One run per pending Receipt, and none
+for a clean HEAD that already has a bound re-run. Checked by the capture
+service's sync timer (every 5 minutes, linked or not) and at any later seal
+in the repository, so a run starts 10 to 15 minutes after the last turn.
 
 ## Platform contract
 

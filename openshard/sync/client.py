@@ -49,6 +49,7 @@ from openshard.sync.envelope import (
     eligibility,
     payload_hash,
 )
+from openshard.verification.settle import run_due_all
 
 DEFAULT_FLUSH_LIMIT = 50
 SYNC_INTERVAL_SECONDS = 300.0
@@ -685,6 +686,7 @@ def sync_periodically(
     """
     env = os.environ if env is None else env
     while _next_tick(stop, interval):
+        run_due_all(repos)  # the same timer starts settled Tasks' re-runs (verification/settle.py), linked or not
         if resolve_link(env) is None:
             continue
         try:

@@ -205,12 +205,14 @@ def _sealed_event(buf: dict, now: str) -> None:
         _name_receipt(events[-1], buf)
 
 
-def inherit(buf: dict, persisted: Mapping[str, Any], *, same_receipt: bool) -> None:
+def inherit(buf: dict, persisted: Mapping[str, Any], *, same_receipt: bool, repo_root: Path | None = None) -> None:
     """Carry turn scope and session grouping from *persisted* into *buf*.
 
     *same_receipt*: *buf* was rebuilt from *persisted* (a lost staging buffer),
     so it keeps that Receipt's turn index and task. Otherwise *buf* is the next
-    segment of the same agent session: the next turn, in the same Task.
+    segment of the same agent session: the next turn, in the same Task unless
+    that Task ended (``previous_task_ended``): the branch changed, or the
+    capture service saw the Task's PR merged or closed.
     """
     capture = persisted.get("capture")
     if not isinstance(capture, dict) or capture.get("receipt_scope") != SCOPE_TURN:
@@ -225,8 +227,9 @@ def inherit(buf: dict, persisted: Mapping[str, Any], *, same_receipt: bool) -> N
         buf["turn_index"] = index
         if task_id is not None and capture.get("task_grouping") == GROUPING_SESSION:
             buf["turn_task_id"] = task_id
-        if isinstance(capture.get("turn_sealed_at"), str):
-            buf["turn_sealed_at"] = capture["turn_sealed_at"]
+        for key in ("turn_sealed_at", "previous_task_ended", "task_pr_url"):
+            if isinstance(capture.get(key), str):
+                buf[key] = capture[key]
         return
     buf["turn_index"] = index + 1
     if _opened_by(buf) == _SESSION_END:
@@ -236,8 +239,84 @@ def inherit(buf: dict, persisted: Mapping[str, Any], *, same_receipt: bool) -> N
         buf["remote_spooled"] = len(buf.get("events") or [])
     if is_turn_sealed(capture) and capture.get("session_end_observed") is not True:
         buf["start_source"] = START_SOURCE_TURN  # the previous turn completed; the session did not end
+    pr_url = _task_pr_url(persisted)
+    ended = "branch_changed" if branch_changed(buf, persisted) else _pr_ended(pr_url, buf, repo_root)
+    if ended is not None:
+        buf["previous_task_ended"] = ended  # the previous turn's Task ended; this prompt starts a new one
+        return
     if task_id is not None:
         buf["turn_task_id"] = task_id
+    if pr_url is not None:
+        buf["task_pr_url"] = pr_url
+
+
+def _task_pr_url(persisted: Mapping[str, Any]) -> str | None:
+    """The pull request the previous turn's Task is known to have: its own, or one an earlier turn found."""
+    pr = persisted.get("pull_request")
+    if isinstance(pr, dict) and isinstance(pr.get("url"), str):
+        return str(pr["url"])
+    capture = persisted.get("capture")
+    url = capture.get("task_pr_url") if isinstance(capture, dict) else None
+    return url if isinstance(url, str) else None
+
+
+_PR_ENDED = {"MERGED": "pr_merged", "CLOSED": "pr_closed"}
+
+
+def _pr_ended(url: str | None, buf: Mapping[str, Any], repo_root: Path | None) -> str | None:
+    """``pr_merged`` / ``pr_closed`` when GitHub says the Task's PR is no longer open, else None.
+
+    One read-only ``gh pr view <url> --json state`` at a turn's start, only in
+    the capture service (never on a hook Claude Code is waiting on), and only
+    when an earlier turn of the Task found a PR. No ``gh``, no network: None.
+    """
+    if url is None or buf.get("agent") != AGENT_CLAUDE_CODE:
+        return None
+    from openshard.adapters import claude_hooks
+
+    if not claude_hooks._PR_LOOKUP_ENABLED or os.environ.get(claude_hooks.PR_LOOKUP_ENV, "").lower() == "off":
+        return None
+    return _PR_ENDED.get(pr_state(url, repo_root) or "")
+
+
+def pr_state(url: str, cwd: Path | None) -> str | None:
+    """GitHub's state for the pull request *url* (``OPEN``, ``MERGED``, ``CLOSED``) via ``gh``. Never raises."""
+    import json
+    import shutil
+    import subprocess
+
+    from openshard.util.git import NO_WINDOW_KW
+
+    try:
+        exe = shutil.which("gh")
+        if exe is None:
+            return None
+        proc = subprocess.run(
+            [exe, "pr", "view", url, "--json", "state"], cwd=str(cwd) if cwd else None,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5.0, check=False,
+            **NO_WINDOW_KW,
+        )
+        state = json.loads(proc.stdout or "").get("state") if proc.returncode == 0 else None
+    except Exception:
+        return None
+    return state if isinstance(state, str) else None
+
+
+def branch_changed(buf: Mapping[str, Any], persisted: Mapping[str, Any]) -> bool:
+    """The Task ended at a branch change: this turn starts off the branch the previous turn started on.
+
+    Covers both an agent switching branch during the previous turn and a
+    switch between turns. Then the next prompt starts a new Task (a new
+    session-grouped ``task_id``). Unknown (no branch, detached HEAD) on one
+    side only also counts as a change: when unsure, a new Task.
+    """
+    capture = persisted.get("capture")
+    capture = capture if isinstance(capture, dict) else {}
+    previous = capture["start_branch"] if "start_branch" in capture else persisted.get("git_branch")
+    current = buf.get("git_branch")
+    previous = previous if isinstance(previous, str) and previous else None
+    current = current if isinstance(current, str) and current else None
+    return previous != current
 
 
 def _opened_by(buf: dict) -> object:
@@ -264,6 +343,9 @@ def stamp(entry: dict, buf: dict, repo_root: Path) -> None:
     if isinstance(buf.get("turn_sealed_at"), str):
         capture["turn_sealed_at"] = buf["turn_sealed_at"]
         capture["status"] = "turn_completed"  # final: the turn completed; the session itself may still be open
+    for key in ("previous_task_ended", "task_pr_url"):
+        if isinstance(buf.get(key), str):
+            capture[key] = buf[key]
     if stored_task_id(entry) is not None:
         capture["task_grouping"] = GROUPING_EXPLICIT
         return
