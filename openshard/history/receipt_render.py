@@ -889,6 +889,16 @@ def _fmt_timestamp(ts: str) -> str:
     except (ValueError, AttributeError):
         return ts
 
+def file_lines_display(fd: dict) -> str:
+    """``  +N / -M`` (or ``  binary``) for a file entry git counted; empty when unknown, never 0."""
+    if fd.get("binary") is True:
+        return "  binary"
+    added, removed = fd.get("lines_added"), fd.get("lines_removed")
+    if all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in (added, removed)):
+        return f"  +{added} / -{removed}"
+    return ""
+
+
 def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> str:
     """Render a full structured SHARD block with consistent separator style. Pure, no I/O."""
     lines: list[str] = []
@@ -1083,7 +1093,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         if isinstance(_fd, dict) and "path" in _fd:
             _line = _file_line(_fd)
             if _line:
-                lines.append(_line)
+                lines.append(_line + file_lines_display(_fd))
     if len(receipt.files_detail) > 10:
         lines.append(f"{_INDENT}  (+{len(receipt.files_detail) - 10} more)")
     lines += excluded_changes_rows(receipt)
