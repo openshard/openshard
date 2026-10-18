@@ -103,6 +103,7 @@ HOOK_SPECS: tuple[HookSpec, ...] = (
     HookSpec("PostToolUse", TOOL_MATCHER, 5, TRANSPORT_HTTP),
     HookSpec("PostToolUseFailure", TOOL_MATCHER, 5, TRANSPORT_HTTP),
     HookSpec("Stop", None, 5, TRANSPORT_HTTP),
+    HookSpec("StopFailure", None, 5, TRANSPORT_HTTP),  # a turn that ended on an API error
     HookSpec("SessionEnd", None, 5, TRANSPORT_HTTP),
 )
 SYNC_EVENTS: frozenset[str] = frozenset(s.event for s in HOOK_SPECS if not s.run_async)
