@@ -630,6 +630,7 @@ class ShardReceipt:
     # changes counted as this run's; ``files_excluded`` the pre-existing /
     # other-session changes git also showed, kept for provenance only.
     changes: dict | None = None
+    agent_reported_in_git: int = 0  # changes.agent_reported_in_git; local display only, not in the sync schema
     files_excluded: list[dict] = field(default_factory=list)
     # Bounded control/proof/cost evidence already stored on the record
     # (history/receipt_evidence.py): approval_detail, sandbox_detail,
@@ -933,7 +934,7 @@ def file_changes_unobservable(receipt: ShardReceipt) -> bool:
 
 
 def changed_files_display(receipt: ShardReceipt) -> str:
-    """``2 files (1 agent-reported, 1 git-observed)`` when provenance is known, else ``2 files``."""
+    """``2 files (1 agent-reported, also in git diff; 1 git-observed, ...)`` when known, else ``2 files``."""
     n = receipt.files_changed
     changes = receipt.changes
     if file_changes_unobservable(receipt):
@@ -942,7 +943,8 @@ def changed_files_display(receipt: ShardReceipt) -> str:
     if changes and n > 0:
         parts = []
         if changes.get("agent_reported"):
-            parts.append(f"{changes['agent_reported']} agent-reported")
+            in_git = receipt.agent_reported_in_git == changes["agent_reported"]
+            parts.append(f"{changes['agent_reported']} agent-reported" + (", also in git diff" if in_git else ""))
         if changes.get("git_observed"):
             parts.append(f"{changes['git_observed']} git-observed, actor not established")
         if parts:
@@ -1569,6 +1571,7 @@ def build_shard_receipt(
             post_session_verification if isinstance(post_session_verification, dict) else None
         ),
         changes=_changes_summary(_changes_block),
+        agent_reported_in_git=_g if isinstance(_g := (_changes_block or {}).get("agent_reported_in_git"), int) and _g > 0 else 0,
         files_excluded=_files_excluded,
         recorded_evidence={**project_entry_evidence(entry), "gaming_signals": gaming_signals_block(entry)},
         usage=effective_usage(entry, _own_usage_attestations(entry, usage_attestations)),

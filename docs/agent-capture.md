@@ -144,6 +144,12 @@ A pre-existing file that changed again during the session is
 file the agent reports editing is `agent_reported` with the same flag. A
 Codex `apply_patch` target that appears in the diff is `git_observed` with
 `agent_attempted: true` -- Codex reports the attempt, not its success.
+The attributions are exclusive: a file the agent reported *and* git's diff
+lists stays `agent_reported` (never upgraded or double-counted), and
+`changes.agent_reported_in_git` counts those git-backed ones, so the
+local receipt reads `1 file (1 agent-reported, also in git diff)`. It is
+absent when the file list is the hook's own (git unavailable), and stays
+out of the Platform sync envelope, whose `changes` schema is closed.
 
 The record carries `files_detail[].attribution` and a `changes` block
 (counts, `baseline.source`, `baseline.dirty_paths`, `baseline.truncated`,

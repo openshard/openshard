@@ -313,6 +313,37 @@ def _stamp_line_counts(
         ]
 
 
+def _stamp_agent_files_in_git(changes_block: dict, changed_files: list[dict], files_source: str) -> None:
+    """``changes.agent_reported_in_git``: agent-reported files git's diff also listed.
+
+    ``agent_reported`` and ``git_observed`` are exclusive attributions (who
+    is credited), not evidence levels: a file the agent's hook reported is
+    ``agent_reported`` even when git shows it changed, and ``git_observed``
+    means git alone, actor not established. When the counted files came
+    from git (``git_diff_inferred``), every one was in the session's diff,
+    so this records that the agent-reported ones are git-backed too. Absent
+    when the list is the hook's own (git unavailable) or none were reported:
+    old records and the fallback are unchanged, and nothing is upgraded.
+    """
+    if files_source != "git_diff_inferred":
+        return
+    n = sum(1 for f in changed_files if f.get("attribution") == "agent_reported")
+    if n:
+        changes_block["agent_reported_in_git"] = n
+
+
+def _files_attr_text(changes_block: dict) -> str:
+    """The summary's `` Files: ...`` sentence for a hook-captured session's ``changes`` block."""
+    reported = changes_block["agent_reported"]
+    also = " (also in git diff)" if reported and changes_block.get("agent_reported_in_git") == reported else ""
+    text = f" Files: {reported} agent-reported{also}, {changes_block['git_observed']} git-observed"
+    if changes_block.get("pre_existing_excluded"):
+        text += f", {changes_block['pre_existing_excluded']} pre-existing excluded"
+    if changes_block.get("other_session_excluded"):
+        text += f", {changes_block['other_session_excluded']} other-session excluded"
+    return text + "."
+
+
 def _merge_git_outcome(fresh: dict | None, stored: object) -> dict | None:
     """*fresh* with what an earlier outcome for this session already established.
 

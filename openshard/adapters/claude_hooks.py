@@ -191,12 +191,14 @@ from openshard.adapters.claude_git_outcome import (  # noqa: F401  (re-exported 
     _MAX_SESSION_COMMITS,
     _REFLOG_CREATED_RE,
     _SHA_RE,
+    _files_attr_text,
     _merge_git_outcome,
     _own_result_commit,
     _recorded_start_branch,
     _reflog_created,
     _session_files_base,
     _sha_or_none,
+    _stamp_agent_files_in_git,
     _stamp_files_base,
     _stamp_git_outcome,
     _stamp_line_counts,
@@ -3139,14 +3141,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     end_text = (f" Session ended (reason={ended.get('reason') or 'unknown'})." if ended else "") + fidelity.summary_suffix(buf)
     # First sentence kept short: the receipt's Result line shows the first
     # complete sentence (see shard_contract._result_display).
-    _attr_text = (
-        f" Files: {changes_block['agent_reported']} agent-reported, {changes_block['git_observed']} git-observed"
-        + (f", {changes_block['pre_existing_excluded']} pre-existing excluded"
-           if changes_block["pre_existing_excluded"] else "")
-        + (f", {changes_block['other_session_excluded']} other-session excluded"
-           if changes_block["other_session_excluded"] else "")
-        + "."
-    )
+    _stamp_agent_files_in_git(changes_block, changed_files, files_source)
+    _attr_text = _files_attr_text(changes_block)
     command_failures = int(buf.get("command_failure_count") or 0)
     # Its own sentence so the receipt's Result line (the first sentence) stays
     # short; the compact receipt lists the failed commands under Activity.

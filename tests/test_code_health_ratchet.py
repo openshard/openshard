@@ -49,7 +49,8 @@ MODULE_LINE_BUDGETS = {
     "openshard/cli/main.py": 8454,
     "openshard/adapters/claude_hooks.py": 4556,
     "openshard/native/context.py": 3742,
-    "openshard/history/shard_contract.py": 1807,
+    # +3: the compact Receipt says agent-reported files are also in git's diff (ShardReceipt.agent_reported_in_git).
+    "openshard/history/shard_contract.py": 1810,
     "openshard/run/pipeline.py": 2827,
     "openshard/cli/run_output.py": 2580,
     "openshard/cli/osn_cmd.py": 2388,
