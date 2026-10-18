@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 from openshard.history.run_cost import run_total_cost, stored_retry_attempts
+from openshard.models.pricing import priced_models
 
 MAX_TEXT = 300
 MAX_POLICY_DECISIONS = 20
@@ -1451,6 +1452,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "session": session_block,
         "routing": routing_block,
         "retry": retry_block,
+        "rated_models": priced_models,  # local; views.py turns it into ``rates``
     }
     out: dict[str, Any] = {}
     for key, fn in projectors.items():

@@ -162,6 +162,7 @@ class CheckRun:
     setup_failed: bool = False  # the project could not be set up to run it; ``note`` says why
     # With ``setup_failed``: what the runner's own summary reported before setup failed (all passing).
     reported: ReportedTests | None = None
+    started_at: str | None = None  # wall-clock UTC stamp when OpenShard started the process
 
 
 @dataclass
@@ -492,7 +493,8 @@ def run_check_process(argv: list[str], *, cwd: Path, timeout: float, echo: bool,
     return proc, (bytes(head) + bytes(tail)).decode("utf-8", "replace")
 
 
-def _setup_failed_run(check: PlannedCheck, code: int, duration: float, setup: str, output: str | None) -> CheckRun:
+def _setup_failed_run(check: PlannedCheck, code: int, duration: float, setup: str, output: str | None,
+                      *, started_at: str | None = None) -> CheckRun:
     """An ``unknown`` check whose project could not be set up, keeping any all-passing test counts it reported."""
     from openshard.verification.setup_failure import (
         reported_test_results,
@@ -503,7 +505,7 @@ def _setup_failed_run(check: PlannedCheck, code: int, duration: float, setup: st
     reported = reported_test_results(output)
     note = rerun_partial_reason(reported, setup) if reported else rerun_setup_reason(setup)
     return CheckRun(check, CHECK_UNKNOWN, exit_code=code, duration_seconds=duration, note=note,
-                    setup_failed=True, reported=reported)
+                    setup_failed=True, reported=reported, started_at=started_at)
 
 
 def run_checks(
@@ -548,6 +550,7 @@ def run_checks(
             "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
         }
         io["env"] = check_environment(env)
+        started_at = _now()
         started = time.monotonic()
         output: str | None = None
         try:
@@ -560,24 +563,27 @@ def run_checks(
         except subprocess.TimeoutExpired:
             results.append(CheckRun(
                 check, CHECK_UNKNOWN, duration_seconds=round(time.monotonic() - started, 2),
-                note=f"timed out after {timeout:g}s; no exit code",
+                note=f"timed out after {timeout:g}s; no exit code", started_at=started_at,
             ))
             continue
         except OSError as exc:
-            results.append(CheckRun(check, CHECK_UNKNOWN, note=f"could not start ({type(exc).__name__})"))
+            results.append(CheckRun(check, CHECK_UNKNOWN, note=f"could not start ({type(exc).__name__})",
+                                    started_at=started_at))
             continue
         code = getattr(proc, "returncode", None)
         duration = round(time.monotonic() - started, 2)
         if not isinstance(code, int) or isinstance(code, bool):
-            results.append(CheckRun(check, CHECK_UNKNOWN, duration_seconds=duration, note="no exit code"))
+            results.append(CheckRun(check, CHECK_UNKNOWN, duration_seconds=duration, note="no exit code",
+                                    started_at=started_at))
             continue
         setup = rerun_setup_failure(code, output) if code != 0 else None
         if setup is not None:
             # The project could not be set up to run it: no verdict on the change.
-            results.append(_setup_failed_run(check, code, duration, setup, output))
+            results.append(_setup_failed_run(check, code, duration, setup, output, started_at=started_at))
             continue
         results.append(CheckRun(
             check, CHECK_PASSED if code == 0 else CHECK_FAILED, exit_code=code, duration_seconds=duration,
+            started_at=started_at,
         ))
     return results
 
@@ -608,10 +614,7 @@ def build_attestation(
     With *commit* (``openshard verify --commit``) the result binds only when
     the tree that ran was exactly that commit; *checkout* says where it ran.
     """
-    checks = [
-        VerificationCheck(name=r.check.name, status=r.status, kind=r.check.kind, exit_code=r.exit_code)
-        for r in results
-    ]
+    checks = [_attested_check(r) for r in results]
     incomplete: list[str] = []
     # Bound only when what ran was exactly a commit: no change of any kind
     # before the run (an untracked file could be under test), and afterwards
@@ -669,6 +672,21 @@ def build_attestation(
         "raw_output_stored": False,
         "verification": block,
     }
+
+
+def _attested_check(r: CheckRun) -> VerificationCheck:
+    """The verification-block check for *r*: outcome, timing, and setup failure with any reported counts."""
+    check = VerificationCheck(name=r.check.name, status=r.status, kind=r.check.kind, exit_code=r.exit_code,
+                              duration_seconds=r.duration_seconds, started_at=r.started_at)
+    if r.setup_failed:
+        # Unknown, never failed: the exit code belongs to the setup (VerificationCheck.to_dict keeps the rule).
+        check.setup_failed = True
+        if r.reported is not None:
+            check.reported_runner = r.reported.runner
+            check.reported_passed = r.reported.passed
+            check.reported_failed = r.reported.failed
+            check.reported_skipped = r.reported.skipped
+    return check
 
 
 def _check_row(r: CheckRun) -> dict:

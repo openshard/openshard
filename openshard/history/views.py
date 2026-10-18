@@ -174,8 +174,7 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
             "tokens_cache_creation": receipt.tokens_cache_creation,
             "tokens_provenance": receipt.tokens_provenance,
             # Why diff_added/diff_removed are null (hook capture); None when
-            # counted or not stated. Local only until the Platform accepts it
-            # (stripped in sync.envelope.receipt_payload).
+            # counted or not stated (the sync envelope omits it then).
             "lines_not_recorded_reason": receipt.lines_not_recorded_reason,
             # Explicit run owner recorded by Core. Never inferred from organisation metadata.
             "owner": receipt.owner,
@@ -232,7 +231,7 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
     what was recorded.
     """
     evidence = receipt.recorded_evidence or {}
-    return {
+    out: dict[str, Any] = {
         "policy_decisions": policy_decisions_block(receipt.policy_decisions),
         "permissions": evidence.get("permissions"),
         "approval_detail": evidence.get("approval_detail"),
@@ -265,6 +264,52 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
         # organisation's ``advanced_osn`` capability is on.
         "multi_agent": evidence.get("multi_agent"),
     }
+    # Additive: present only when the cost is a list-rate estimate, so every
+    # other record keeps its exact shape and unknown rates stay absent.
+    rates = _rates(receipt)
+    if rates:
+        out["rates"] = rates
+    return out
+
+
+MAX_RATES = 8
+
+
+def _rates(receipt: ShardReceipt) -> list[dict[str, Any]] | None:
+    """The dated list rates behind an ``official_rate_estimate`` cost, one per priced model.
+
+    None unless the cost was priced from ``models/pricing.py``, every priced
+    model has a single rate there (a model with a long-context tier was priced
+    at two, which one row cannot state), and the models are known. Never a
+    partial list.
+    """
+    from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE, official_rate
+
+    if receipt.cost_provenance != COST_PROVENANCE_OFFICIAL_RATE or receipt.cost_raw is None:
+        return None
+    models = (receipt.recorded_evidence or {}).get("rated_models")
+    if not isinstance(models, list) or not models:
+        return None
+    rows: dict[str, dict[str, Any]] = {}
+    for model in models:
+        rate = official_rate(model)
+        if rate is None or rate.long_context_threshold is not None:
+            return None
+        row = {
+            "model": rate.model_id,
+            "input_per_mtok": rate.input_per_mtok,
+            "output_per_mtok": rate.output_per_mtok,
+            "cache_read_per_mtok": rate.cached_input_per_mtok,
+            "cache_write_5m_per_mtok": rate.cache_write_per_mtok,
+            "cache_write_1h_per_mtok": rate.cache_write_1h_per_mtok,
+            "currency": "USD",
+            "source": rate.source or None,
+            "as_of": rate.as_of,
+        }
+        rows.setdefault(rate.model_id, {k: v for k, v in row.items() if v is not None})
+    if len(rows) > MAX_RATES:
+        return None
+    return list(rows.values())
 
 
 def verification_to_dict(block: dict | None) -> dict[str, Any] | None:

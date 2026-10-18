@@ -3,10 +3,11 @@
 The ``receipt`` object is ``history.views.receipt_to_dict(receipt,
 extended=True)`` built from the stored record -- the projection
 ``openshard history --json`` prints -- including the structured
-``verification`` block and ``task_title``. Nothing is added, removed,
-renamed or filled in here: a key the Platform contract does not define is
-the Platform's to reject, and that rejection is recorded locally rather than
-papered over.
+``verification`` block and ``task_title``. ``receipt_payload`` only omits
+unrecorded optional keys and adds the recorded ``session.task_source`` and
+``session.hook_config_hash`` (contract values only); nothing is renamed or
+filled in: a key the Platform contract does not define is the Platform's to reject,
+and that rejection is recorded locally rather than papered over.
 
 Quiescence
 ----------
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -43,6 +45,10 @@ REASON_SESSION_IN_PROGRESS = "session_in_progress"
 REASON_SESSION_ENDED = "session_ended"
 REASON_SESSION_QUIESCENT = "session_quiescent"
 REASON_RECORD_COMPLETE = "record_complete"
+
+# Platform receipt-sync ``session.task_source`` values (Platform #230).
+_HOOK_CONFIG_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+TASK_SOURCES = frozenset({"first_user_prompt_excerpt", "agent_reported", "not_captured", "imported", "unknown"})
 
 
 @dataclass(frozen=True)
@@ -92,14 +98,22 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
     ``advanced_osn``, receives exactly the receipt it did before.
     """
     payload = receipt_to_dict(build_shard_receipt(entry, index=index), extended=True)
-    # Not in the Platform receipt-sync contract yet (its schema is strict and
-    # would reject the whole envelope); diff_added/diff_removed still carry
-    # the counts, and null still means unknown.
-    payload.pop("lines_not_recorded_reason", None)
-    # Same for the session nonce: the Platform's session schema is strict too.
-    # It still reaches the Platform in the first remote-capture Event's metadata.
-    if isinstance(payload.get("session"), dict):
-        payload["session"] = {k: v for k, v in payload["session"].items() if k != "session_nonce"}
+    # The Platform contract accepts the reason since Platform #230; it is
+    # sent only when recorded, never as a placeholder.
+    if payload.get("lines_not_recorded_reason") is None:
+        payload.pop("lines_not_recorded_reason", None)
+    # Two recorded capture facts the session block does not project yet (receipt_evidence
+    # is at its size budget): where the task text came from, as one of the contract's
+    # values, and the digest of the hook configuration that captured the session (#586),
+    # never the configuration. Absent or malformed: omitted (unknown).
+    session = payload.get("session")
+    capture = entry.get("capture")
+    if isinstance(session, dict) and isinstance(capture, dict):
+        if capture.get("task_source") in TASK_SOURCES:
+            session["task_source"] = capture["task_source"]
+        digest = capture.get("hook_config_hash")
+        if isinstance(digest, str) and _HOOK_CONFIG_HASH_RE.match(digest):
+            session["hook_config_hash"] = digest
     if not multi_agent:
         payload.pop("multi_agent", None)
     return payload

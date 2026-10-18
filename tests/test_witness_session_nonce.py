@@ -3,8 +3,8 @@
 A session mints one random, non-secret nonce when its buffer opens. It rides
 in the first remote-capture Event's metadata and in the Receipt's capture
 block and local projection, so the Platform can bind a Receipt to the journal
-it witnessed. The Platform receipt-sync contract does not accept it yet, so
-the sync payload leaves it out. An accepted append may carry a witness
+it witnessed. The sync payload carries it in ``session.session_nonce`` (Platform
+#230 accepts it) and nowhere else. An accepted append may carry a witness
 acknowledgement; the spool keeps it and ``openshard remote status`` shows it.
 Unknown stays unknown: no acknowledgement is never shown as one.
 
@@ -177,15 +177,18 @@ class TestSessionNonce:
             event["metadata"].pop("session_nonce", None)
             event["metadata"].pop("hook_config_hash", None)
         without["capture"].pop("hook_config_hash", None)
-        # The sync payload is exactly what it was before the nonce existed:
-        # the Platform's session schema is strict and does not accept it yet.
+        # The nonce adds exactly one key, session.session_nonce, to the sync payload.
         def payload(record: dict) -> dict:
             # The nonce is covered by the record's checksum, so only the tamper verdict differs.
             return {k: v for k, v in receipt_payload(record, 0).items() if k not in ("integrity", "content_hash")}
 
-        assert payload(entry) == payload(without)
+        nonce = recorded_session_nonce(entry)
+        sent = payload(entry)
+        assert sent["session"].pop("session_nonce") == nonce
+        sent["session"].pop("hook_config_hash", None)  # removed from `without` above too
+        assert sent == payload(without)
         assert receipt_payload(entry, 0)["integrity"] == "Checksum matches"
-        assert recorded_session_nonce(entry) not in json.dumps(receipt_payload(entry, 0))
+        assert json.dumps(receipt_payload(entry, 0)).count(nonce) == 1
 
 
 # ---------------------------------------------------------------------------
