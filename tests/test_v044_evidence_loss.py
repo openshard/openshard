@@ -49,13 +49,7 @@ def _write_queue(repo: Path, text: str, key: str = SID) -> Path:
 
 
 class TestCorruptQueueLines:
-    @pytest.mark.parametrize("receipt_scope", [
-        pytest.param("turn", marks=pytest.mark.xfail(strict=True, reason=(
-            "bug: the service reports a corrupt line's loss after replaying the whole queue file; when that "
-            "file held the turn's Stop, the turn is already sealed, so its Receipt says complete and the loss "
-            "is staged on the next segment instead"))),
-        "session",
-    ], indirect=True)
+    @pytest.mark.parametrize("receipt_scope", ["turn", "session"], indirect=True)
     def test_corrupt_line_is_quarantined_counted_and_marks_capture_incomplete(self, service, repo, receipt_scope):
         _write_queue(
             repo,
@@ -90,6 +84,101 @@ class TestCorruptQueueLines:
         gaps = next(ln for ln in rendered.splitlines() if ln.strip().startswith("Gaps"))
         assert "could not be decoded" in gaps
         assert "partial" in rendered and "did not execute or verify" in rendered
+
+    @pytest.mark.parametrize("receipt_scope", ["turn", "session"], indirect=True)
+    def test_corrupt_line_after_the_stop_still_marks_that_receipt_incomplete(self, service, repo, receipt_scope):
+        # The damaged line may be a late event of the turn the Stop sealed:
+        # the sealed Receipt must not claim complete capture.
+        _write_queue(
+            repo,
+            _queue_line("ok-1", "UserPromptSubmit", task_excerpt="fine") + "\n"
+            + _queue_line("ok-2", "Stop") + "\n"
+            + "garbage that is not json\n",
+        )
+        service.server.recorder.recover(repo)
+        assert _wait_for(lambda: len(_lines(repo)) == 1 and _lines(repo)[0]["capture"].get("completeness"))
+        assert service.server.recorder.wait_idle(20)
+        entries = _lines(repo)
+        assert len(entries) == 1
+        if receipt_scope == "turn":
+            assert entries[0]["capture"]["status"] == "turn_completed"
+        completeness = entries[0]["capture"]["completeness"]
+        assert completeness["status"] == COMPLETENESS_INCOMPLETE
+        assert next(r for r in completeness["reasons"] if r["kind"] == "corrupt_queued_event")["count"] == 1
+        assert client.health(service.port)["stats"]["corrupt_lines"] == 1
+
+    @pytest.mark.parametrize("receipt_scope", ["turn", "session"], indirect=True)
+    def test_loss_between_turns_counts_on_each_receipt_it_could_belong_to_once(self, service, repo, receipt_scope):
+        _write_queue(
+            repo,
+            _queue_line("ok-1", "UserPromptSubmit", task_excerpt="first") + "\n"
+            + _queue_line("ok-2", "Stop") + "\n"
+            + "garbage between turns\n"
+            + _queue_line("ok-3", "UserPromptSubmit", task_excerpt="second") + "\n"
+            + _queue_line("ok-4", "Stop") + "\n",
+        )
+        service.server.recorder.recover(repo)
+        expected = 2 if receipt_scope == "turn" else 1
+        assert _wait_for(lambda: len(_lines(repo)) == expected)
+        assert service.server.recorder.wait_idle(20)
+        entries = _lines(repo)
+        assert len(entries) == expected
+        for entry in entries:
+            # Unknown stays unknown: either turn may have lost it; a session Receipt counts it once.
+            completeness = entry["capture"]["completeness"]
+            assert completeness["status"] == COMPLETENESS_INCOMPLETE
+            assert next(r for r in completeness["reasons"] if r["kind"] == "corrupt_queued_event")["count"] == 1
+        assert client.health(service.port)["stats"]["corrupt_lines"] == 1
+
+    def test_loss_inside_a_turn_is_not_counted_on_the_next_turn(self, service, repo):
+        _write_queue(
+            repo,
+            _queue_line("ok-1", "UserPromptSubmit", task_excerpt="first") + "\n"
+            + "garbage inside the first turn\n"
+            + _queue_line("ok-2", "Stop") + "\n"
+            + _queue_line("ok-3", "UserPromptSubmit", task_excerpt="second") + "\n"
+            + _queue_line("ok-4", "Stop") + "\n",
+        )
+        service.server.recorder.recover(repo)
+        assert _wait_for(lambda: len(_lines(repo)) == 2)
+        assert service.server.recorder.wait_idle(20)
+        first, second = sorted(_lines(repo), key=lambda e: e["capture"]["turn_index"])
+        assert first["capture"]["completeness"]["status"] == COMPLETENESS_INCOMPLETE
+        assert not any(r["kind"] == "corrupt_queued_event" for r in second["capture"]["completeness"]["reasons"])
+
+    @pytest.mark.parametrize("between_turns", [False, True])
+    def test_retried_file_does_not_count_a_sealed_turn_loss_twice(self, service, repo, between_turns):
+        first = [_queue_line("ok-1", "UserPromptSubmit", task_excerpt="fine"), _queue_line("ok-2", "Stop")]
+        lines = first[:1] + ["garbage that is not json"] + first[1:]
+        if between_turns:
+            lines = first + ["garbage that is not json", _queue_line("ok-3", "UserPromptSubmit", task_excerpt="next"),
+                             _queue_line("ok-4", "Stop")]
+        path = _write_queue(repo, "")
+        path = path.with_name(f"{SID}.queue.1.jsonl")  # a rotated file, as _drain_session leaves it
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        recorder = service.server.recorder
+        recorder._replay_file(repo, path)
+        recorder._replay_file(repo, path)  # a transient failure elsewhere in the file would replay it again
+        entries = _lines(repo)
+        assert len(entries) == (2 if between_turns else 1)
+        for entry in entries:
+            reasons = entry["capture"]["completeness"]["reasons"]
+            assert next(r for r in reasons if r["kind"] == "corrupt_queued_event")["count"] == 1
+
+    def test_retry_still_carries_a_loss_after_a_sealed_stop_to_the_next_segment(self, service, repo):
+        # Pass one sealed the turn but the file did not settle; on the retry
+        # the Stop is a duplicate, and the line after it is still owed to the
+        # next segment.
+        path = _write_queue(repo, "")
+        path = path.with_name(f"{SID}.queue.1.jsonl")
+        path.write_text(
+            _queue_line("ok-1", "UserPromptSubmit", task_excerpt="fine") + "\n"
+            + _queue_line("ok-2", "Stop") + "\n" + "garbage that is not json\n",
+            encoding="utf-8",
+        )
+        recorder = service.server.recorder
+        assert recorder._replay_file(repo, path).tail == [(3, 2)]
+        assert recorder._replay_file(repo, path).tail == [(3, 2)]
 
     def test_structurally_invalid_lines_count_as_corrupt(self, service, repo):
         _write_queue(
