@@ -64,6 +64,11 @@ HOOK_COMMAND = "openshard hooks cursor"
 NO_SPAWN_FLAG = "--no-spawn"
 HOOKS_RELPATH = Path(".cursor") / "hooks.json"
 HOOKS_FILE_VERSION = 1
+# Marks the fail-open hook commands `openshard setup --repo` commits
+# (adapters/repo_setup.py). They run this same entrypoint when OpenShard is
+# installed, so a local install treats them as its own instead of adding a
+# second entry that would deliver every event twice.
+REPO_HOOK_MARKER = "OPENSHARD_REPO_HOOK=1"
 
 HOOK_SPECS: tuple[HookSpec, ...] = (
     HookSpec("sessionStart", None, 15, TRANSPORT_COMMAND),  # starts the service when needed
@@ -97,7 +102,11 @@ def is_openshard_cursor_hook(hook: object) -> bool:
     if not isinstance(command, str):
         return False
     stripped = command.strip()
-    return stripped == HOOK_COMMAND or stripped.startswith(HOOK_COMMAND + " ")
+    return stripped == HOOK_COMMAND or stripped.startswith(HOOK_COMMAND + " ") or _is_repo_hook_command(stripped)
+
+
+def _is_repo_hook_command(command: object) -> bool:
+    return isinstance(command, str) and REPO_HOOK_MARKER in command and " hooks cursor" in command
 
 
 def build_hook_config() -> dict[str, list[dict]]:
@@ -137,7 +146,7 @@ def merge_cursor_hooks(settings: dict) -> tuple[dict, dict[str, str]]:
         if not ours:
             entries.append(desired)
             changes[spec.event] = "added"
-        elif len(ours) == 1 and ours[0] == desired:
+        elif len(ours) == 1 and (ours[0] == desired or _is_repo_hook_command(ours[0].get("command"))):
             changes[spec.event] = "unchanged"
         else:
             entries[:] = others + [desired]

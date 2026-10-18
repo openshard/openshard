@@ -192,6 +192,46 @@ a real `osc_`/`osk_` value so an accidentally exposed secret fails closed.
 Do not put the real token in a normal environment variable or file: agent
 generated code can read them.
 
+## Repository-level setup: `openshard setup --repo`
+
+Cloud agents start from a fresh clone and ignore user-level config
+(`~/.claude`, `~/.cursor`), and the local installers write per-user,
+git-excluded files. `openshard setup --repo [--dry-run] [--agents ...]`
+writes the files a team commits instead. It merges into existing files
+(other hooks, keys, steps and lines are kept), leaves a file it cannot parse
+untouched, is idempotent, and prints what changed per file.
+
+| Agent | Files | What runs |
+|---|---|---|
+| `claude` | `.claude/settings.json` | every capture hook runs `openshard hooks claude`; it stands aside when the clone has the local hooks (`.claude/settings.local.json`) |
+| `cursor` | `.cursor/hooks.json`, `.cursor/environment.json` (`install`) | the Cursor hooks; the install step installs OpenShard and links remote capture |
+| `copilot` | `.github/workflows/copilot-setup-steps.yml` (job `copilot-setup-steps`), `.github/hooks/openshard.json` | the setup step installs OpenShard and links; `sessionEnd`/`agentStop` run `openshard remote flush` |
+| `openhands` | `.openhands/setup.sh` (a marked block), `.openhands/hooks.json` (`stop`) | as for Copilot |
+| `devcontainer` | `postCreateCommand` of an existing `.devcontainer/devcontainer.json` or `.devcontainer.json` (never created) | the install step |
+| `devin`, `amp`, `replicas`, `boat` | none: the setup-script lines are printed | the install step |
+
+Every hook command exits 0. When OpenShard is not installed the event is
+skipped with a note on stderr: a gap, not a failure. Only in Claude Code on
+the web (`CLAUDE_CODE_REMOTE=true`) or with `OPENSHARD_REPO_BOOTSTRAP=1` does
+the Claude SessionStart hook start a background install (once per machine;
+`OPENSHARD_REPO_BOOTSTRAP=0` turns it off), so events before it finishes are
+not captured. Multi-repository Claude cloud sessions load hooks from the
+parent directory only (see `claude-cloud-prelaunch.md`), so these do not fire
+there.
+
+No credential is written. The install step runs `openshard remote attach`
+when `OPENSHARD_REMOTE_CAPTURE_URL` and `OPENSHARD_REMOTE_TOKEN` are set in
+the environment (for Copilot, the repository's Agents secrets, which it
+exposes as environment variables); otherwise it says remote capture is not
+linked and capture stays in that environment. A file whose new content looks
+like it holds an OpenShard credential is not written.
+
+Copilot and OpenHands have no OpenShard hook adapter. Their hooks only
+deliver what OpenShard already recorded in that environment (for example an
+`openshard verify` attestation); their sessions are not captured event by
+event. Cursor cloud lifecycle hooks (`sessionStart`/`sessionEnd`) may not
+fire; verify a first Remote event before relying on capture.
+
 ## Fallback: Git and CI only
 
 Where OpenShard cannot run, be installed, reach the network or install

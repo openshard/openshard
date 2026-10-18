@@ -25,9 +25,9 @@ Confirmed against Cursor's hooks reference (``cursor.com/docs/agent/hooks``):
 * ``sessionStart`` (``session_id``, ``is_background_agent``,
   ``composer_mode``) -> ``SessionStart``. ``is_background_agent`` becomes
   the start source (``background`` / ``startup``); ``composer_mode`` is
-  not read. Cloud/background agents do not fire ``sessionStart`` /
-  ``sessionEnd`` at all, so the fold's lazy buffer creation on the first
-  hook seen is what makes those sessions capturable.
+  not read. Cloud/background agents may not fire ``sessionStart`` /
+  ``sessionEnd`` (verify per environment), so the fold's lazy buffer
+  creation on the first hook seen is what keeps those sessions capturable.
 * ``beforeSubmitPrompt`` (``prompt``, ``attachments``) ->
   ``UserPromptSubmit``. Only ``prompt`` is read, and only to derive the
   scrubbed, bounded task excerpt; ``attachments`` (file paths and rule
