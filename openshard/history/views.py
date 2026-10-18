@@ -90,16 +90,26 @@ def finding_to_dict(finding: ShardFinding) -> dict[str, Any]:
     }
 
 
-def file_to_dict(raw: dict) -> dict[str, Any]:
+def _line_count(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def file_to_dict(raw: dict, *, extended: bool = False) -> dict[str, Any]:
     summary = raw.get("summary")
     attribution = raw.get("attribution")
-    return {
+    out: dict[str, Any] = {
         "path": raw.get("path"),
         "change_type": raw.get("change_type"),
         "summary": truncate_text(summary) if isinstance(summary, str) else None,
         # v0.4.4: agent_reported | git_observed | pre_existing | other_session; None for old records.
         "attribution": attribution if isinstance(attribution, str) else None,
     }
+    if extended:
+        # Per-file git numstat counts (#589); None means not recorded, never 0.
+        out["diff_added"] = _line_count(raw.get("lines_added"))
+        out["diff_removed"] = _line_count(raw.get("lines_removed"))
+        out["binary"] = True if raw.get("binary") is True else None
+    return out
 
 
 def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[str, Any]:
@@ -141,9 +151,9 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         "risk": receipt.risk,
         "sandbox": receipt.sandbox,
         "files_changed": receipt.files_changed,
-        "files": [file_to_dict(f) for f in files_raw[:MAX_FILES] if isinstance(f, dict)],
+        "files": [file_to_dict(f, extended=extended) for f in files_raw[:MAX_FILES] if isinstance(f, dict)],
         "changes": receipt.changes,
-        "files_excluded": [file_to_dict(f) for f in receipt.files_excluded[:MAX_FILES] if isinstance(f, dict)],
+        "files_excluded": [file_to_dict(f, extended=extended) for f in receipt.files_excluded[:MAX_FILES] if isinstance(f, dict)],
         "diff_added": receipt.diff_added,
         "diff_removed": receipt.diff_removed,
         "checks": receipt.checks_display,

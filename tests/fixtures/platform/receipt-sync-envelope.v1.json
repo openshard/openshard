@@ -799,6 +799,39 @@
                     "type": "null"
                   }
                 ]
+              },
+              "diff_added": {
+                "description": "Lines added to this file (Core lines_added). Null or absent is unknown, never 0.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "diff_removed": {
+                "description": "Lines removed from this file (Core lines_removed). Null or absent is unknown, never 0.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "binary": {
+                "description": "Whether git reported this file as binary (no line counts). Null or absent is unknown.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "additionalProperties": false
@@ -985,6 +1018,39 @@
                   {
                     "type": "null"
                   }
+                ]
+              },
+              "diff_added": {
+                "description": "Lines added to this file (Core lines_added). Null or absent is unknown, never 0.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "diff_removed": {
+                "description": "Lines removed from this file (Core lines_removed). Null or absent is unknown, never 0.",
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "binary": {
+                "description": "Whether git reported this file as binary (no line counts). Null or absent is unknown.",
+                "type": [
+                  "boolean",
+                  "null"
                 ]
               }
             },
