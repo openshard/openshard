@@ -1260,3 +1260,88 @@ class TestStaleVersion:
         result = CliRunner().invoke(cli, ["doctor"], env=env)
         assert "✗ Capture service (running OpenShard 0.0.1 while this installation is" in result.output
         assert "openshard setup" in result.output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM is TerminateProcess on Windows: no handler runs")
+class TestSigtermUnderLoad:
+    """Overnight soak BUG-1: with hooks arriving back to back, an untimed wait
+    in serve() could keep the SIGTERM handler from ever running (5/12 trials).
+    The service must exit promptly, and every event it acknowledged must still
+    reach its receipt (folded before exit, or recovered by the next start)."""
+
+    def test_sigterm_while_hooks_arrive_exits_promptly_and_keeps_acked_events(
+        self, tmp_path, capture_env, monkeypatch,
+    ):
+        import signal
+
+        port = _free_port()
+        monkeypatch.setenv("OPENSHARD_CAPTURE_PORT", str(port))
+        env = {**capture_env, "OPENSHARD_CAPTURE_PORT": str(port),
+               "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+        repo = _make_repo(tmp_path / "repo")
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "openshard.cli.entrypoint", "capture", "serve"],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            assert _wait_for(lambda: client.health(port, timeout=0.3) is not None, timeout=30)
+            sessions = [f"sigterm-{n}-{os.getpid()}" for n in range(4)]
+            acked = dict.fromkeys(sessions, 0)
+            attempted = dict.fromkeys(sessions, 0)
+            stop = threading.Event()
+
+            def poster(sid: str) -> None:
+                assert client.post_hook(port, _payload("SessionStart", repo, sid, source="startup"),
+                                        project_dir=str(repo), env=env)
+                i = 0
+                while not stop.is_set():
+                    i += 1
+                    attempted[sid] += 1
+                    raw = _payload("PostToolUse", repo, sid, tool_name="Bash", tool_input={"command": f"echo {i}"})
+                    if client.post_hook(port, raw, project_dir=str(repo), env=env):
+                        acked[sid] += 1
+                    else:
+                        time.sleep(0.01)  # refused once stopping: do not spin
+
+            threads = [threading.Thread(target=poster, args=(sid,), daemon=True) for sid in sessions]
+            for thread in threads:
+                thread.start()
+            assert _wait_for(lambda: all(acked.values()), timeout=30)
+            time.sleep(1.0)
+            started = time.monotonic()
+            proc.send_signal(signal.SIGTERM)
+            # Poll interval + listener close + a 5 s bounded drain, with room
+            # for a loaded CI box; the bug was "never" (killed after 90 s).
+            rc = proc.wait(timeout=30)
+            elapsed = time.monotonic() - started
+            stop.set()
+            for thread in threads:
+                thread.join(10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(10)
+        assert rc == 0
+        assert elapsed < 20, f"took {elapsed:.1f}s to exit after SIGTERM"
+        # Nothing acknowledged may be lost: what the drain did not fold is
+        # still queued on disk, and the next service start folds it.
+        restarted = _Service(capture_env, port=port)
+        try:
+            def tool_calls(sid: str) -> int:
+                try:
+                    state = json.loads((_session_dir(repo) / f"{sid}.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    return -1
+                return int(state.get("tool_call_count") or 0)
+
+            def nothing_left_queued() -> bool:
+                return not list(_session_dir(repo).glob("*.queue*.jsonl")) and restarted.server.recorder.pending == 0
+
+            assert _wait_for(nothing_left_queued, timeout=60)
+            counts = {sid: tool_calls(sid) for sid in sessions}
+            # Every acknowledged event reached the session's record. A
+            # connection reset can leave an event queued but unacked (outcome
+            # unknown), so the count may be higher, never above what was sent.
+            assert all(acked[sid] <= counts[sid] <= attempted[sid] for sid in sessions), (acked, counts, attempted)
+        finally:
+            restarted.stop()
