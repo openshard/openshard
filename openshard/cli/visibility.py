@@ -23,7 +23,7 @@ from datetime import datetime
 from openshard.history.locate import HistoryLocation
 from openshard.history.proof_signals import verification_status_from_receipt
 from openshard.history.query import HistoryPage, RecentShard, RelevantContext, RelevantMatch
-from openshard.history.receipt_render import tokens_line
+from openshard.history.receipt_render import tokens_line, turn_label
 from openshard.history.shard import (
     CAPTURE_FULL,
     CAPTURE_PARTIAL,
@@ -190,7 +190,8 @@ def no_history_lines(loc: HistoryLocation) -> list[str]:
 
 def _history_row_lines(item: RecentShard) -> list[str]:
     r = item.receipt
-    parts = [r.agent, status_label(r), f"checks: {checks_label(r)}", f"cost: {cost_label(r)}"]
+    turn = turn_label(r)  # per-turn Receipts name their turn; session Receipts are unchanged
+    parts = [r.agent, *([turn] if turn else []), status_label(r), f"checks: {checks_label(r)}", f"cost: {cost_label(r)}"]
     if r.files_changed:
         parts.append(f"{r.files_changed} file{'s' if r.files_changed != 1 else ''}")
     if item.attempt_count > 1:

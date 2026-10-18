@@ -14,7 +14,8 @@ observed, but only if somebody runs it. With
 
 in ``.openshard/config.yml`` the capture path starts it when a session's
 Receipt is finalised (a session-end event, or the stale sweep closing a
-session that never sent one).
+session that never sent one), and for a per-turn Receipt when its turn
+completed having changed files.
 
 What it will and will not do
 ----------------------------
@@ -221,8 +222,10 @@ def schedule_for_receipt(repo_root: Path, entry: dict | None, *, finalized: bool
 
     A Receipt that names its resulting commit gets commit verification at a
     completed turn and at session end. Only a Receipt *without* a commit gets
-    the opt-in working-tree run at session end: for a Receipt with a commit
-    that unbound run would only add a weaker, later result.
+    the opt-in working-tree run: at session end, or for a per-turn Receipt
+    when its turn sealed having changed files (a turn that changed nothing
+    has nothing new to re-run). For a Receipt with a commit that unbound run
+    would only add a weaker, later result.
     """
     try:
         if not isinstance(entry, dict) or not (finalized or turn_ended):
@@ -231,13 +234,35 @@ def schedule_for_receipt(repo_root: Path, entry: dict | None, *, finalized: bool
 
         if commit_value(entry):
             return schedule_commit_verify(repo_root, entry)
+        if _is_sealed_turn(entry):  # finalized at its Stop: re-run only a turn that changed files
+            return sealed_turn_changed_files(entry) and schedule_post_session_verify(repo_root, entry)
         return finalized and schedule_post_session_verify(repo_root, entry)
     except Exception:
         return False
 
 
+_NOT_THIS_TURNS = frozenset({"pre_existing", "other_session"})
+
+
+def _is_sealed_turn(entry: dict) -> bool:
+    capture = entry.get("capture")
+    return isinstance(capture, dict) and capture.get("receipt_scope") == "turn" and isinstance(
+        capture.get("turn_sealed_at"), str)
+
+
+def sealed_turn_changed_files(entry: dict) -> bool:
+    """A sealed per-turn Receipt (docs/per-turn-receipts.md) with at least one file the turn changed."""
+    if not _is_sealed_turn(entry):
+        return False
+    files = entry.get("files_detail")
+    return any(
+        isinstance(f, dict) and f.get("path") and f.get("attribution") not in _NOT_THIS_TURNS
+        for f in (files if isinstance(files, list) else [])
+    )
+
+
 __all__ = [
     "CONFIG_KEY", "ENV_DISABLE", "MODE_OFF", "MODE_SAFE", "auto_verify_enabled", "commit_verify_argv",
     "commit_verify_enabled", "schedule_commit_verify", "schedule_for_receipt", "schedule_post_session_verify",
-    "verify_argv",
+    "sealed_turn_changed_files", "verify_argv",
 ]

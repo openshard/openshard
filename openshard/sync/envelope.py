@@ -50,6 +50,8 @@ REASON_RECORD_COMPLETE = "record_complete"
 # Platform receipt-sync ``session.task_source`` values (Platform #230).
 _HOOK_CONFIG_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TASK_SOURCES = frozenset({"first_user_prompt_excerpt", "agent_reported", "not_captured", "imported", "unknown"})
+# Platform receipt-sync ``task_grouping`` values Core records (Platform #243; ``branch`` is not recorded yet).
+TASK_GROUPINGS = frozenset({"explicit", "session"})
 
 
 @dataclass(frozen=True)
@@ -118,12 +120,11 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
         digest = capture.get("hook_config_hash")
         if isinstance(digest, str) and _HOOK_CONFIG_HASH_RE.match(digest):
             session["hook_config_hash"] = digest
-    if isinstance(capture, dict) and capture.get("task_grouping") == "session":
-        # The contract's task_id is an explicit declaration. A Task OpenShard
-        # grouped from the observed session id stays local until the Platform
-        # accepts ``task_grouping`` (docs/per-turn-receipts.md); the session
-        # key already relates the turns.
-        payload["task_id"] = None
+    if isinstance(capture, dict) and capture.get("task_grouping") in TASK_GROUPINGS and payload.get("task_id"):
+        # How Core arrived at task_id (Platform #243): ``explicit`` (declared) or
+        # ``session`` (OpenShard grouped a session's turns; never a declaration).
+        # Sent only with the task_id it labels; absent means explicit.
+        payload["task_grouping"] = capture["task_grouping"]
     if not multi_agent:
         payload.pop("multi_agent", None)
     return payload

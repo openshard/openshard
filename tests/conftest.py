@@ -204,6 +204,19 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _session_receipts_unless_asked(monkeypatch):
+    """Claude Code capture tests written for one Receipt per session keep testing that path.
+
+    Per-turn Receipts are the default (docs/per-turn-receipts.md); the opt-out
+    keeps session Receipts, and this suite's session-scope tests are its
+    regression set. Turn tests set ``OPENSHARD_TURN_RECEIPTS`` themselves
+    (``tests/test_turn_receipts.py``, ``tests/test_turn_signal.py``), and
+    ``test_on_by_default`` removes it to exercise the default.
+    """
+    monkeypatch.setenv("OPENSHARD_TURN_RECEIPTS", "off")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_codex_home(tmp_path_factory, monkeypatch):
     """Codex hook-trust detection never reads the developer's real ~/.codex."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex_home")))

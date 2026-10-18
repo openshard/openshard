@@ -1,4 +1,4 @@
-"""Per-turn Receipts for Claude Code (docs/per-turn-receipts.md), behind ``OPENSHARD_TURN_RECEIPTS``.
+"""Per-turn Receipts for Claude Code (docs/per-turn-receipts.md): on by default, ``OPENSHARD_TURN_RECEIPTS=off`` opts out.
 
 Every test drives the real hook path (``handle_claude_hook`` / ``apply_reduced_hook``)
 in a throw-away git repository with an isolated ``OPENSHARD_HOME`` (conftest).
@@ -42,6 +42,11 @@ def repo(tmp_path: Path) -> Path:
 @pytest.fixture
 def turn_flag(monkeypatch):
     monkeypatch.setenv(turns.TURN_RECEIPTS_ENV, "on")
+
+
+@pytest.fixture
+def flag_off(monkeypatch):
+    monkeypatch.setenv(turns.TURN_RECEIPTS_ENV, "off")
 
 
 @pytest.fixture(autouse=True)
@@ -175,7 +180,9 @@ class TestTwoPromptsOneSession:
         assert first["task_id"] == second["task_id"] == task
         assert first["capture"]["task_grouping"] == second["capture"]["task_grouping"] == "explicit"
         doc = envelope.build_envelope(second, 1, core_version="9.9.9")
-        assert doc["receipt"]["task_id"] == task
+        assert doc["receipt"]["task_id"] == task and doc["receipt"]["task_grouping"] == "explicit"
+        errors = list(jsonschema.Draft202012Validator(SCHEMA).iter_errors(doc))
+        assert not errors, [e.message for e in errors[:3]]
 
 
 class TestSync:
@@ -203,10 +210,32 @@ class TestSync:
         assert (report.sent, report.in_progress) == (1, 1)
         [sent] = recording.envelopes
         assert sent["receipt"]["receipt_id"] == sealed["receipt_id"]
-        assert sent["receipt"]["task_id"] is None  # a session grouping is not sent as a declared task
-        assert sent["receipt"]["session"]["ended"] is False
+        # A session grouping is sent, labelled as one (Platform #243), never as a declared task.
+        assert sent["receipt"]["task_id"] == sealed["task_id"] and sent["receipt"]["task_grouping"] == "session"
+        session = sent["receipt"]["session"]
+        assert session["ended"] is False
+        assert (session["receipt_scope"], session["turn_index"], session["previous_receipt_id"]) == ("turn", 1, None)
         errors = list(jsonschema.Draft202012Validator(SCHEMA).iter_errors(sent))
         assert not errors, [e.message for e in errors[:3]]
+
+    def test_turn_two_names_the_previous_turn_and_validates_strictly(self, repo, turn_flag):
+        _two_turns(repo)
+        first, second = _entries(repo)
+        doc = envelope.build_envelope(second, 1, core_version="9.9.9")
+        session = doc["receipt"]["session"]
+        assert (session["receipt_scope"], session["turn_index"]) == ("turn", 2)
+        assert session["previous_receipt_id"] == first["receipt_id"]
+        assert session["session_key"] == envelope.build_envelope(first, 0, core_version="9.9.9")["receipt"]["session"]["session_key"]
+        assert doc["receipt"]["task_id"] == first["task_id"] and doc["receipt"]["task_grouping"] == "session"
+        errors = list(jsonschema.Draft202012Validator(SCHEMA).iter_errors(doc))
+        assert not errors, [e.message for e in errors[:3]]
+
+    def test_session_receipts_send_none_of_the_turn_fields(self, repo, flag_off):
+        _two_turns(repo, end=True)
+        [entry] = _entries(repo)
+        receipt = envelope.build_envelope(entry, 0, core_version="9.9.9")["receipt"]
+        assert "task_grouping" not in receipt
+        assert not {"receipt_scope", "turn_index", "previous_receipt_id"} & set(receipt["session"])
 
     def test_seal_point_matches_sync_eligibility_for_turn_receipts(self):
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -234,9 +263,13 @@ class TestSync:
         assert not thread.is_alive()
 
 
-class TestFlagOff:
-    def test_flag_off_keeps_one_session_receipt(self, repo, monkeypatch):
+class TestDefaultAndOptOut:
+    def test_on_by_default(self, repo, monkeypatch):
         monkeypatch.delenv(turns.TURN_RECEIPTS_ENV, raising=False)
+        _two_turns(repo)
+        assert [e["capture"]["receipt_scope"] for e in _entries(repo)] == ["turn", "turn"]
+
+    def test_opt_out_keeps_one_session_receipt(self, repo, flag_off):
         _two_turns(repo, end=True)
         [entry] = _entries(repo)
         capture = entry["capture"]
@@ -247,12 +280,40 @@ class TestFlagOff:
         assert capture["start_source"] == "startup"
         assert _paths(entry) == {"a.py", "b.py"}
 
-    def test_off_in_the_environment_beats_the_repository_config(self, repo, monkeypatch):
+    def test_config_opts_out_and_the_environment_wins(self, repo):
+        assert turns.enabled(repo, env={}) is True and turns.enabled(repo / "missing", env={}) is True
         (repo / ".openshard").mkdir(exist_ok=True)
-        (repo / ".openshard" / "config.yml").write_text("turn_receipts: true\n", encoding="utf-8")
+        config = repo / ".openshard" / "config.yml"
+        config.write_text("turn_receipts: true\n", encoding="utf-8")
         assert turns.enabled(repo, env={}) is True
         assert turns.enabled(repo, env={turns.TURN_RECEIPTS_ENV: "off"}) is False
-        assert turns.enabled(repo / "missing", env={}) is False
+        config.write_text("turn_receipts: false\n", encoding="utf-8")
+        assert turns.enabled(repo, env={}) is False
+        assert turns.enabled(repo, env={turns.TURN_RECEIPTS_ENV: "on"}) is True
+
+    def test_a_session_already_open_at_upgrade_stays_one_session_receipt(self, repo, turn_flag):
+        # A buffer an older Core opened has no scope; after two prompts it is not one turn.
+        assert turns.turn_scoped({"agent": "claude_code", "prompt_count": 2}, repo) is False
+        assert turns.turn_scoped({"agent": "claude_code", "prompt_count": 1, "turn_count": 2}, repo) is False
+        assert turns.turn_scoped({"agent": "claude_code", "prompt_count": 1, "turn_count": 1}, repo) is True
+
+    def test_a_session_open_across_the_upgrade_keeps_its_session_receipt(self, repo, flag_off, monkeypatch):
+        _hook(repo, "UserPromptSubmit", prompt="add a")
+        _write(repo, "a.py")
+        _hook(repo, "Stop")
+        [before] = _entries(repo)
+        buffer = ch.buffer_path(repo.resolve(), SID, "claude_code")
+        staged = json.loads(buffer.read_text(encoding="utf-8"))
+        staged.pop("receipt_scope", None)  # the buffer an older Core left behind
+        buffer.write_text(json.dumps(staged), encoding="utf-8")
+        monkeypatch.setenv(turns.TURN_RECEIPTS_ENV, "on")
+        _hook(repo, "UserPromptSubmit", prompt="add b")
+        _write(repo, "b.py")
+        _hook(repo, "Stop")
+        [after] = _entries(repo)
+        assert after["receipt_id"] == before["receipt_id"] and after["capture"]["prompt_count"] == 2
+        for key in ("receipt_scope", "turn_index", "turn_sealed_at", "task_grouping"):
+            assert key not in after["capture"]
 
     def test_other_agents_are_never_turn_scoped(self, repo, turn_flag):
         assert turns.turn_scoped({"agent": "codex"}, repo) is False
@@ -287,3 +348,78 @@ class TestCaptureService:
         finally:
             running.stop()
             client.configure(transport=None, repo_config=None)
+
+
+class TestRendering:
+    def _receipts(self, repo: Path):
+        from openshard.history.shard_contract import build_shard_receipt
+
+        return [build_shard_receipt(e, index=i) for i, e in enumerate(_entries(repo))]
+
+    def test_last_and_history_name_the_turn(self, repo, turn_flag):
+        from openshard.cli.visibility import _history_row_lines
+        from openshard.history.query import recent_shards
+        from openshard.history.receipt_render import (
+            render_compact_shard_receipt,
+            render_full_shard_receipt,
+        )
+
+        _two_turns(repo)
+        first, second = self._receipts(repo)
+        key = second.recorded_evidence["session"]["session_key"]
+        assert f"  Turn        2 of session {key[:12]}" in render_compact_shard_receipt(second).splitlines()
+        assert f"  Turn        1 of session {key[:12]}" in render_full_shard_receipt(first).splitlines()
+        rows = [line for item in recent_shards(limit=5, repo_path=repo).items for line in _history_row_lines(item)]
+        assert any(f"Turn 2 of session {key[:12]}" in line for line in rows)
+
+    def test_session_receipts_render_without_a_turn_row(self, repo, flag_off):
+        from openshard.history.receipt_render import render_compact_shard_receipt
+
+        _two_turns(repo, end=True)
+        [receipt] = self._receipts(repo)
+        assert not any(line.startswith("  Turn ") for line in render_compact_shard_receipt(receipt).splitlines())
+
+
+class TestPostSessionVerifyPerTurn:
+    def _calls(self, monkeypatch) -> list[str]:
+        from openshard.verification import auto
+
+        calls: list[str] = []
+        monkeypatch.setattr(auto, "schedule_post_session_verify",
+                            lambda root, entry, **_: calls.append(entry["receipt_id"]) or True)
+        return calls
+
+    def test_runs_for_a_sealed_turn_that_changed_files_only(self, repo, turn_flag, monkeypatch):
+        from openshard.verification import auto
+
+        _two_turns(repo)  # turn 1 commits a.py; turn 2 leaves b.py uncommitted
+        _hook(repo, "UserPromptSubmit", prompt="explain b")  # turn 3 changes nothing
+        _hook(repo, "Stop")
+        first, second, third = _entries(repo)
+        calls = self._calls(monkeypatch)
+        monkeypatch.setattr(auto, "schedule_commit_verify", lambda root, entry, **_: True)
+        for entry in (first, second, third):
+            auto.schedule_for_receipt(repo, entry, finalized=False, turn_ended=True)
+        assert [auto.sealed_turn_changed_files(e) for e in (first, second, third)] == [True, True, False]
+        assert calls == [second["receipt_id"]]  # turn 1 has its commit verified instead; turn 3 has nothing to run
+
+    def test_an_open_turn_and_a_session_receipt_are_not_run_at_a_stop(self, repo, flag_off, monkeypatch):
+        from openshard.verification import auto
+
+        _hook(repo, "UserPromptSubmit", prompt="add a")
+        _write(repo, "a.py")
+        _hook(repo, "Stop")
+        [entry] = _entries(repo)
+        calls = self._calls(monkeypatch)
+        assert auto.schedule_for_receipt(repo, entry, finalized=False, turn_ended=True) is False
+        assert calls == [] and auto.sealed_turn_changed_files(entry) is False
+
+
+def test_each_sealed_turn_is_a_completed_receipt_for_telemetry(repo, turn_flag, monkeypatch):
+    actions: list[tuple[str, str]] = []
+    monkeypatch.setattr(ch, "_emit_receipt_telemetry", lambda entry, action: actions.append((entry["receipt_id"], action)))
+    _two_turns(repo)
+    first, second = _entries(repo)
+    for entry in (first, second):
+        assert (entry["receipt_id"], "record_finalized") in actions
+        assert [a for r, a in actions if r == entry["receipt_id"]].count("record_finalized") == 1

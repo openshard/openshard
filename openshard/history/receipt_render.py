@@ -238,6 +238,25 @@ def _evidence_summary(receipt: ShardReceipt) -> list[str]:
             out = [f"{label} ({_OBSERVER_DISPLAY[observer]})" if x == label else x for x in out]
     return out
 
+def turn_label(receipt: ShardReceipt) -> str | None:
+    """``Turn 2 of session ses_1a2b3c4d`` for a per-turn Receipt (docs/per-turn-receipts.md); else None.
+
+    The session is named by its one-way ``session_key``, never the agent's id.
+    """
+    session = (receipt.recorded_evidence or {}).get("session")
+    if not isinstance(session, dict) or session.get("receipt_scope") != "turn":
+        return None
+    index = session.get("turn_index")
+    turn = f"Turn {index}" if isinstance(index, int) and index > 0 else "Turn (number not recorded)"
+    key = session.get("session_key")
+    return f"{turn} of session {key[:12]}" if isinstance(key, str) else f"{turn} of an unidentified session"
+
+
+def turn_rows(receipt: ShardReceipt) -> list[str]:
+    label = turn_label(receipt)
+    return [_row("Turn", label.removeprefix("Turn "))] if label else []
+
+
 def _capture_rows(receipt: ShardReceipt) -> list[str]:
     """The compact ``Capture`` / ``Gaps`` rows.
 
@@ -805,7 +824,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
         lines.append(_row("Receipt ID", receipt.receipt_id))
     if receipt.task_id:
         lines.append(_row("Task ID", receipt.task_id))
-    lines += _capture_rows(receipt)
+    lines += turn_rows(receipt) + _capture_rows(receipt)
     if receipt.task_completion:
         # Resolved by later evidence (see verification_truth.turn_status_label)
         # so this row never contradicts the Verified row below it.
@@ -1405,7 +1424,7 @@ def render_full_shard_receipt(receipt: ShardReceipt, detail: str = "full") -> st
         lines.append(_row("Receipt ID", receipt.receipt_id))
     if receipt.task_id:
         lines.append(_row("Task ID", receipt.task_id))
-    lines.append(_row("Shard ID", receipt.shard_id))
+    lines += turn_rows(receipt) + [_row("Shard ID", receipt.shard_id)]
     lines.append(_row("Created", _fmt_timestamp(receipt.created_at)))
     lines.append(_row("Integrity", receipt.integrity))
     if receipt.integrity_status != "missing":

@@ -1232,9 +1232,8 @@ def session_key(capture: dict) -> str | None:
 
     A session that works in several checkouts keeps one Receipt per checkout;
     they share this key and nothing else. The agent's own session id never
-    crosses (it names a local transcript): the key is ``ses_`` + the first 32
-    hex characters of sha256("<agent>:<session id>"), which cannot be turned
-    back into it.
+    crosses (it names a local transcript): the key is ``ses_`` + the first 32 hex
+    characters of sha256("<agent>:<session id>"), which cannot be turned back.
     """
     return session_key_for(capture.get("agent") or "claude_code", capture.get("session_id"))
 
@@ -1297,11 +1296,13 @@ def session_block(entry: dict) -> dict[str, Any] | None:
         "tool_call_count": _count(capture.get("tool_call_count")),
         "tool_failure_count": _count(capture.get("tool_failure_count")),
     }
-    # Additive: only sessions that minted one carry it, so older records keep
-    # their exact shape and an absent nonce stays absent (unknown), never invented.
-    nonce = recorded_session_nonce(entry)
+    nonce = recorded_session_nonce(entry)  # additive: only sessions that minted one; absent stays absent
     if nonce:
         block["session_nonce"] = nonce
+    if capture.get("receipt_scope") == "turn":  # per-turn Receipts (docs/per-turn-receipts.md); else absent
+        prev = str(capture.get("resumed_from_receipt_id"))  # the previous turn's Receipt; malformed -> None
+        block.update(receipt_scope="turn", turn_index=_count(capture.get("turn_index")),
+                     previous_receipt_id=prev if re.fullmatch(r"rcpt_[0-9a-f]{32}", prev) else None)
     return None if _all_none(block) else block
 
 

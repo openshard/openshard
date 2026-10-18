@@ -4117,7 +4117,7 @@ def apply_reduced_hook(
 
         record = buf.get("record") or {}
         if entry is not None:
-            if payload.event == EVENT_SESSION_END or cloud_turn_closed:
+            if payload.event == EVENT_SESSION_END or cloud_turn_closed or turn_sealed:  # a sealed turn is complete
                 action = "record_finalized"
             elif outcome == "appended":
                 action = "record_created"
