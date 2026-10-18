@@ -129,7 +129,7 @@ Receipts can also carry a content fingerprint. Openshard can use that fingerprin
 
 This is an integrity check on the receipt itself. It is not a claim that the underlying code is correct.
 
-Each finished receipt is also sealed with an Ed25519 key kept on your machine (`~/.openshard/keys/`), so a sealed receipt can't be changed afterwards without its seal showing it, by anyone who does not have that key. The limit, stated plainly: a coding agent running as your OS user can read that key and seal a forged record, and a seal does not make anything the agent said true. Signing is on by default; set `OPENSHARD_RECEIPT_SIGNING=off` to turn it off. See [Signed Receipts](docs/signing.md).
+Each finished receipt is also sealed with an Ed25519 key kept on your machine (`~/.openshard/keys/`), so a sealed receipt can't be changed afterwards without its seal showing it, by anyone who does not have that key. The limit, stated plainly: a coding agent running as your OS user can read that key and seal a forged record, and a seal does not make anything the agent said true. Signing is on by default; set `OPENSHARD_RECEIPT_SIGNING=off` to turn it off. `openshard verify --signature` checks a receipt's seals offline and runs nothing; `--bundle OUT.json` writes a file anyone can check with `--file`. Older receipts read "Checksum only (not signed)". See [Signed Receipts](docs/signing.md).
 
 ---
 

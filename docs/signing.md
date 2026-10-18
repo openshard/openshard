@@ -1,9 +1,11 @@
 # Signed Receipts
 
-Status: Phase 1 in progress. Implemented: the per-install key and sealing
-(`history/receipt_keys.py`, `history/receipt_signing.py`), on by default.
-Not yet implemented: `openshard verify --signature`, bundles, the
-`openshard keys` commands and the `doctor` checks named below.
+Status: Phase 1 implemented. The per-install key and sealing
+(`history/receipt_keys.py`, `history/receipt_signing.py`, on by default);
+the offline check, bundles and `signature_status`
+(`history/receipt_verify.py`); `openshard verify --signature`,
+`openshard keys` and the `doctor` block (`cli/signing_cmd.py`).
+Phases 2 and 3 are not started.
 
 **The limit, stated plainly:** a seal made with this machine's key proves
 only that the record is unchanged since it was sealed with this machine's
@@ -192,18 +194,23 @@ sealing.
   `OPENSHARD_HOME` applies. Never inside a repository, never logged, never
   synced. On Windows POSIX modes do not apply: the file is restricted with
   `icacls` (inheritance removed, current user only). This is best effort;
-  if it cannot be confirmed the key is still used and the warning is left
-  for `doctor` (not implemented yet). An existing key that cannot be read
+  if it cannot be confirmed the key is still used and `openshard doctor`
+  warns ("the owner-only ACL could not be confirmed"). An existing key that cannot be read
   is never replaced; seals then record `key_corrupt` or `key_unreadable`.
 - Public key: `receipt-signing.ed25519.pub` beside it (raw key, base64,
-  plus keyid). `openshard keys show` prints it for pinning out of band.
+  plus keyid). `openshard keys show` prints it; `openshard keys export
+  [-o FILE]` writes `{"algorithm", "keyid", "public_key"}` for someone else
+  to pin with `openshard keys trust FILE` (stored in `keys/trusted/`). A
+  pinned key must come from its owner, never from the bundle it checks.
 - Rotation: `openshard keys rotate` writes a new key and moves the old
   public key to `keys/retired/<keyid>.pub` with `retired_at`. Old seals keep
   verifying against the retired key. Records are not re-signed.
 - Revocation: `openshard keys revoke <keyid>` records `revoked_at`. Seals by
   that key dated after it are reported invalid; earlier ones verify but are
   labelled "key since revoked". Locally this rests on the self-asserted
-  `sealed_at`; Phase 2 makes it trustworthy with the witness time.
+  `sealed_at`; Phase 2 makes it trustworthy with the witness time. The
+  install's current key cannot be revoked; rotate first, or every new seal
+  would read invalid.
 
 ### Old and unsigned Receipts
 
@@ -224,9 +231,15 @@ openshard verify --signature --file BUNDLE.json   # a bundle from anyone, offlin
 openshard verify --signature --receipt ID --bundle OUT.json [--include-record]
 ```
 
-A bundle holds the projection, the envelopes and the public keys; the full
-record only with `--include-record` (it can contain task text). Public keys
-inside a bundle only prove the bundle is self-consistent. "Verified" needs
+A bundle (`mediaType: application/vnd.openshard.receipt-bundle+json`,
+`bundle_version: "1"`) holds the projection, the Receipt's sidecar lines
+(seals and "not signed" notes) and the public keys of its seals; the full
+record only with `--include-record`. The projection is sealed whole, so it
+cannot be trimmed: it is the `history --json` row, which includes the task
+text, file names, repository and branch. The CLI says so when it writes a
+bundle. Public keys inside a bundle only prove the bundle is
+self-consistent: a key whose keyid does not match its bytes is ignored, and
+a key trusted here is always taken from here, never from the bundle. "Verified" needs
 the key to be trusted: this install's own key, a key pinned with
 `openshard keys trust <file>`, or (Phase 2) the Platform's registry.
 
@@ -239,12 +252,31 @@ Verdict rules v1 (`verdict_rules: "1"` in `--json`), first match wins:
 | `signed_unknown_key` | signature verifies, key not trusted here | 0 (2 with `--strict`) |
 | `verified` | signature verifies, digest matches, key trusted | 0 |
 
+Every seal of the Receipt is checked, oldest first: each signature, and
+that each seal links to the one before (`previous_record_digest`). Only the
+latest seal is compared with the current record and projection; a broken
+link or an earlier seal that does not verify is `invalid`. When the latest
+sidecar line is a "not signed" note after earlier seals (signing was turned
+off), the verdict is `not_signed` and says earlier seals exist. A seal whose
+public key is not available here cannot be checked at all; it is reported
+as `signed_unknown_key` with `signature_checked: false` and the words
+"signed, not checked", never as verified. `--json` carries the verdict, the
+reason, the per-seal chain, which digests were checked, and fixed lists of
+what the signature binds (`bound_by_signature`), what is signed but only
+self-asserted (`claimed_not_proven`) and what it never proves
+(`not_proven`).
+
 Output wording (one line per subject checked, then what it means):
 
 ```
-Signature  verified — sealed by ed25519:3f9a…c21 (this install) at 2026-10-17T14:02Z
+Receipt    rcpt_… (this repository)
+Signature  verified — sealed by ed25519:3f9a1c21… (this install) at 2026-10-17T14:02:00+00:00
 Record     matches the sealed content (record digest checked)
-Means      unchanged since sealing by anyone without this key
+Projection matches the sealed copy (projection digest checked)
+Chain      2 seals, each linked to the one before (created, amended)
+Means      the record can't be changed afterwards without this check failing, except by someone holding this key
+Claimed    sealed_at, seal reason and Core version are signed but self-asserted (sealed_at is the sealing machine's clock)
+Limit      a coding agent running as your OS user can read this key and seal a forged record; a copy shared earlier (a bundle, a CI artefact) is what catches a later rewrite
 Not proven the agent's claims, the check results, or capture completeness
 ```
 
@@ -252,8 +284,14 @@ Not proven the agent's claims, the check results, or capture completeness
 Signature  invalid — record changed after it was sealed (sealed 9c1e…, now 4b77…)
 ```
 
-With only a bundle and no record, the second line reads `Projection matches
-the sealed copy (full record not provided; record digest not checked)`.
+With only a bundle and no record, the `Record` line reads `full record not
+provided; record digest not checked`. An unsigned Receipt reads
+`Checksum only (not signed) — no seal for this receipt` (exit 0).
+
+`openshard doctor` adds a "Receipt signing" block: whether signing is on,
+the key's fingerprint (or that none exists yet), whether the key file is
+owner-only (on Windows, whether the `icacls` ACL could be confirmed), and
+any seals recorded in `~/.openshard/receipt-signing-failures.jsonl`.
 
 ## Receipt card "Tamper check" row
 
@@ -263,8 +301,11 @@ the keyid>`, `Checksum only (not signed)` (`Not signed` when the record has no v
 checksum), or `Invalid (<why>)`, e.g. `Invalid (record changed after it
 was sealed)`.
 
-The card's row is a Platform string; Core's `--json` gains a matching
-`signature_status`. Phase 2 wording:
+The card's row is a Platform string; Core's `last --json` and each
+`history --json` row carry a matching `signature_status`
+(`verdict`, `reason`, `label`, `keyid`, `signature_checked`,
+`verdict_rules`), from the same check `verify --signature` runs. It is
+added outside the projection, so it never changes a sealed digest. Phase 2 wording:
 
 | Row reads | When |
 | --- | --- |
@@ -291,8 +332,9 @@ extra would leave `verify --signature` unavailable by default.
 
 An envelope holds digests, ids, timestamps, the keyid, the Core version and
 the signature. No code, diffs, prompts, task text, paths or command output.
-A bundle without `--include-record` holds only the already privacy-bounded
-projection. Phase 3 Rekor entries are public (digest plus CI identity,
+A bundle is different: even without `--include-record` it holds the
+projection, which carries the task text, file names, repository and
+branch, so share it only where the Receipt itself may go. Phase 3 Rekor entries are public (digest plus CI identity,
 e.g. repository and workflow), which is why Sigstore is opt-in.
 
 ## What is open and what is hosted

@@ -50,7 +50,6 @@ from openshard.history.receipt_keys import (
     KeyUnavailableError,
     fingerprint8,
     load_or_create_key,
-    read_public_key,
 )
 from openshard.history.shard_hash import (
     INTEGRITY_AS_STORED_FIELD,
@@ -288,7 +287,7 @@ def _statement_receipt_id(statement: dict) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Data-level verification (the CLI arrives with ``openshard verify --signature``)
+# Data-level verification (the CLI is ``openshard verify --signature``, cli/signing_cmd.py)
 # ---------------------------------------------------------------------------
 
 
@@ -661,30 +660,18 @@ def reseal_after_attestation(history_dir: Path, attestation: dict) -> list[SealO
 
 
 def signature_status(runs_path: Path, stored_entry: dict, index: int) -> SignatureCheck:
-    """The current seal verdict for one stored record, checked against this
-    install's key. Never raises; never creates a key."""
-    receipt_id = stored_receipt_id(stored_entry)
-    integrity = verify_shard_hash(stored_entry)["status"]
-    history_dir = Path(runs_path).parent
-    latest = _latest_line(read_sidecar(history_dir), receipt_id) if receipt_id else None
-    if latest is None:
-        # "Checksum only" is said only of a record whose checksum is valid.
-        return SignatureCheck(VERDICT_NOT_SIGNED, "no_seal" if integrity == "valid" else f"content_hash_{integrity}")
-    if not is_envelope(latest):
-        return SignatureCheck(VERDICT_NOT_SIGNED, str(latest.get("reason") or "not_signed"))
+    """The current seal verdict for one stored record: the whole seal chain,
+    checked against the keys trusted here (``receipt_verify.verify_local``,
+    the same check ``openshard verify --signature`` runs). Never raises;
+    never creates a key."""
+    from openshard.history.receipt_verify import verify_local
+
     try:
-        own = read_public_key()
-        projection = receipt_projection(stored_entry, index, _attestations(history_dir))
-        return verify_envelope(
-            latest,
-            public_keys={own[0]: own[1]} if own else {},
-            trusted_keyids={own[0]} if own else set(),
-            receipt_id=receipt_id,
-            record_sha256=record_digest(stored_entry),
-            projection_sha256=projection_digest(projection),
-        )
+        result = verify_local(runs_path, stored_entry, index)
     except Exception:  # a view must render even when the check cannot run
         return SignatureCheck(VERDICT_KEY_UNAVAILABLE, "check_failed")
+    unchecked = result.verdict == VERDICT_UNKNOWN_KEY and not result.signature_checked
+    return SignatureCheck(VERDICT_KEY_UNAVAILABLE if unchecked else result.verdict, result.reason, result.keyid)
 
 
 def signature_label(check: SignatureCheck) -> str:
@@ -707,6 +694,9 @@ _INVALID_WORDS = {
     "record_changed": "record changed after it was sealed",
     "projection_changed": "receipt changed after it was sealed",
     "bad_signature": "seal does not verify",
+    "chain_broken": "seal chain broken",
+    "key_revoked": "key revoked before sealing",
+    "earlier_seal_bad_signature": "an earlier seal does not verify",
 }
 
 
