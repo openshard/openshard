@@ -127,6 +127,10 @@ class CheckCommand:
     # ``"<family>:full"`` / ``"<family>:narrow"`` for a test-runner run whose
     # scope can be read off its words (see ``_suite``); None otherwise.
     suite: str | None = None
+    # Set when the line itself makes this check unable to fail (``|| true``,
+    # a final ``exit 0``, ``set +e`` before it): one of EXIT_MASKS. An
+    # observation about the command text, never a verdict.
+    exit_masked: str | None = None
 
     @property
     def is_check(self) -> bool:
@@ -203,16 +207,52 @@ def _classify(command: str | None, *, depth: int, shell: str = SHELL_POSIX) -> l
             script = _shell_script(simple.words) if depth < 2 else None
             if script is not None:
                 # ``bash -lc "pytest -q"``: the inner script's exit status is the shell's.
+                mask = _exit_mask(statements, si, ci, shell)
                 for inner in _classify(script, depth=depth + 1):
                     out.append(CheckCommand(inner.kind, inner.segment, inner.unattributed or outer,
                                             inner.failure_unattributed or outer_failure,
-                                            None if moves_dir else inner.suite))
+                                            None if moves_dir else inner.suite, inner.exit_masked or mask))
                 continue
             kind = _kind_of(simple.words)
             if kind != KIND_OTHER:
                 suite = _suite(simple.words) if kind == KIND_TEST and not moves_dir else None
-                out.append(CheckCommand(kind, _display(simple.words), outer, outer_failure, suite))
+                out.append(CheckCommand(kind, _display(simple.words), outer, outer_failure, suite,
+                                        _exit_mask(statements, si, ci, shell)))
     return out
+
+
+# How a command line can make its own check unable to fail (see _exit_mask).
+MASK_OR_TRUE = "or_true"  # pytest || true
+MASK_OR_NOOP = "or_noop"  # pytest || :
+MASK_OR_EXIT_ZERO = "or_exit_zero"  # pytest || exit 0
+MASK_EXIT_ZERO = "exit_zero"  # pytest; exit 0
+MASK_SET_PLUS_E = "set_plus_e"  # set +e; pytest
+EXIT_MASKS = frozenset({MASK_OR_TRUE, MASK_OR_NOOP, MASK_OR_EXIT_ZERO, MASK_EXIT_ZERO, MASK_SET_PLUS_E})
+_NO_FAIL_FALLBACKS = {"true": MASK_OR_TRUE, ":": MASK_OR_NOOP, "exit 0": MASK_OR_EXIT_ZERO}
+
+
+def _exit_mask(statements: list[list[_Simple]], si: int, ci: int, shell: str) -> str | None:
+    """Whether the POSIX line around simple command *ci* of statement *si* can never report its failure.
+
+    Only the explicit, unambiguous forms: a ``|| true`` / ``|| :`` /
+    ``|| exit 0`` after it in its own statement, a later top-level
+    ``exit 0``, or ``set +e`` earlier in the line. A pipe or a later
+    ``echo`` also hides the status but is too common in ordinary use to
+    call out, so it is left to the ``unattributed`` reasons above.
+    """
+    if shell != SHELL_POSIX:
+        return None
+    statement = statements[si]
+    for j in range(ci + 1, len(statement)):
+        fallback = _NO_FAIL_FALLBACKS.get(" ".join(statement[j].words))
+        if statement[j - 1].op_after == "||" and fallback:
+            return fallback
+    if any(st and st[0].words == ["exit", "0"] for st in statements[si + 1:]):
+        return MASK_EXIT_ZERO
+    earlier = [s for st in statements[:si] for s in st] + statement[:ci]
+    if any(s.words[:1] == ["set"] and "+e" in s.words[1:] for s in earlier):
+        return MASK_SET_PLUS_E
+    return None
 
 
 _EXIT_STATUS_WORD = "$?"
@@ -954,6 +994,8 @@ def check_command_items(
         key = suite_key(c.suite, context)
         if key is not None:
             item["suite"] = key
+        if c.exit_masked and c.kind == KIND_TEST:
+            item["exit_masked"] = c.exit_masked
         items.append(item)
     return items
 
@@ -975,6 +1017,8 @@ def queued_check_commands(value: object) -> list[dict] | None:
             clean[field_name] = raw if isinstance(raw, str) and _REASON_CODE_RE.match(raw) else None
         if _valid_suite_key(item.get("suite")):
             clean["suite"] = item["suite"]
+        if item.get("exit_masked") in EXIT_MASKS:
+            clean["exit_masked"] = item["exit_masked"]
         out.append(clean)
     return out
 

@@ -253,9 +253,9 @@ from openshard.verification.check_command import (
     queued_check_commands,
     shell_for_tool,
 )
+from openshard.verification.gaming_signals import stamp_gaming_signals
 
-# Claude Code identity constants -- kept as module names for existing
-# callers/tests; the values are the Claude profile's (adapters/capture_agents.py).
+# Claude Code identity constants (module names kept for callers/tests; values: capture_agents.py).
 EXECUTOR = CLAUDE_CODE_PROFILE.executor
 IMPORT_SOURCE = CLAUDE_CODE_PROFILE.import_source
 IMPORT_METHOD = CLAUDE_CODE_PROFILE.import_method
@@ -3478,6 +3478,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if learning is not None:
         entry["learning"] = learning
     entry["events"] = [dict(e) for e in buf["events"] if isinstance(e, dict)] + file_events
+    stamp_gaming_signals(entry, buf, repo_root)  # observations only; never changes the verdict
     return coerce_shard_entry(entry)
 
 

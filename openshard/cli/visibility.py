@@ -233,6 +233,8 @@ def history_json_body(page: HistoryPage, loc: HistoryLocation) -> dict:
                 # The same interpretation `openshard last --json` carries, so a
                 # later re-run or CI verdict is visible per row here too.
                 "verification_truth": interpret_receipt(item.receipt).to_dict(),
+                # Gaming-check observations; None = not checked. Local only (never synced).
+                "gaming_signals": (item.receipt.recorded_evidence or {}).get("gaming_signals"),
             }
             for item in page.items
         ],
