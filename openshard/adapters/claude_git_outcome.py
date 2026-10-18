@@ -218,23 +218,34 @@ LINES_UNCOMMITTED = "uncommitted_changes_present"
 def _session_line_counts(
     repo_root: Path, base: str | None, commit: str | None, paths: list[str], *, truncated: bool = False,
 ) -> tuple[int | None, int | None, str | None]:
-    """``(added, removed, None)`` from ``git diff --numstat base commit -- paths``, else ``(None, None, reason)``.
+    """``(added, removed, None)`` from ``git diff --numstat base commit -- paths``, else ``(None, None, reason)``."""
+    added, removed, _per_file, reason = _session_numstat(repo_root, base, commit, paths, truncated=truncated)
+    return added, removed, reason
+
+
+def _session_numstat(
+    repo_root: Path, base: str | None, commit: str | None, paths: list[str], *, truncated: bool = False,
+) -> tuple[int | None, int | None, dict[str, dict] | None, str | None]:
+    """``(added, removed, per_file, reason)`` from one ``git diff --numstat base commit -- paths``.
 
     *base* is HEAD when the session started, *commit* the session's own result
     commit (``receipt_evidence.commit_value``) and *paths* the changes counted
     as this session's (the same attribution as ``files_detail``). Unknown
     stays unknown: no base, no commit, a binary file (numstat ``-``), a
     truncated file list, uncommitted changes on those paths or a failed git
-    read give no numbers, never 0. Never raises.
+    read give no totals, never 0. *per_file* maps each path numstat listed to
+    ``{"lines_added", "lines_removed"}`` or ``{"binary": True}`` (paths and
+    counts only); it is None whenever the counts are not honest per file
+    (only a binary file keeps the others' counts). Never raises.
     """
     if _sha_or_none(base) is None:
-        return None, None, LINES_NO_BASE_COMMIT
+        return None, None, None, LINES_NO_BASE_COMMIT
     if _sha_or_none(commit) is None:
-        return None, None, LINES_NO_COMMIT
+        return None, None, None, LINES_NO_COMMIT
     if truncated:
-        return None, None, LINES_FILES_TRUNCATED
+        return None, None, None, LINES_FILES_TRUNCATED
     if not paths:
-        return 0, 0, None  # git observed the range; nothing in it is this session's
+        return 0, 0, {}, None  # git observed the range; nothing in it is this session's
     pathspec = ["--", *(f":(literal){p}" for p in paths)]
     # This session's paths still differing from *commit* (tracked edits or
     # untracked files) are work the commit range cannot count: unknown, not
@@ -242,26 +253,61 @@ def _session_line_counts(
     pending = run_git(repo_root, ["diff", "--name-only", "-z", str(commit), *pathspec])
     untracked = run_git(repo_root, ["ls-files", "--others", "--exclude-standard", "-z", *pathspec])
     if pending is None or untracked is None:
-        return None, None, LINES_GIT_UNAVAILABLE
+        return None, None, None, LINES_GIT_UNAVAILABLE
     if pending.strip("\0").strip() or untracked.strip("\0").strip():
-        return None, None, LINES_UNCOMMITTED
+        return None, None, None, LINES_UNCOMMITTED
     out = run_git(repo_root, ["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", str(base), str(commit), *pathspec])
     if out is None:
-        return None, None, LINES_GIT_UNAVAILABLE
-    added = removed = 0
+        return None, None, None, LINES_GIT_UNAVAILABLE
+    per_file: dict[str, dict] = {}
     for row in out.split("\0"):
         if not row.strip():
             continue
         cols = row.split("\t", 2)
-        if len(cols) < 2:
+        if len(cols) < 3:
             continue
         if cols[0] == "-" or cols[1] == "-":
-            return None, None, LINES_BINARY_FILE
-        if not (cols[0].isdigit() and cols[1].isdigit()):
-            return None, None, LINES_GIT_UNAVAILABLE
-        added += int(cols[0])
-        removed += int(cols[1])
-    return added, removed, None
+            per_file[cols[2]] = {"binary": True}
+        elif cols[0].isdigit() and cols[1].isdigit():
+            per_file[cols[2]] = {"lines_added": int(cols[0]), "lines_removed": int(cols[1])}
+        else:
+            return None, None, None, LINES_GIT_UNAVAILABLE
+    if any(c.get("binary") for c in per_file.values()):
+        return None, None, per_file, LINES_BINARY_FILE
+    return (sum(c["lines_added"] for c in per_file.values()), sum(c["lines_removed"] for c in per_file.values()),
+            per_file, None)
+
+
+def _stamp_line_counts(
+    entry: dict, repo_root: Path, changed_files: list[dict], files_source: str, files_truncated: bool,
+    base: str | None = None,
+) -> None:
+    """``lines_added`` / ``lines_removed`` between the session's base and own commit, or the reason they are unknown.
+
+    The same numstat also stamps each of this session's ``files_detail``
+    entries git listed with its own counts (or ``binary``); excluded files
+    and files git did not list carry none.
+    """
+    from openshard.history.receipt_evidence import base_commit_value, commit_value
+
+    per_file: dict[str, dict] | None = None
+    if files_source != "git_diff_inferred":
+        added, removed, reason = None, None, LINES_GIT_UNAVAILABLE
+    else:
+        paths = [f["path"] for f in changed_files if isinstance(f.get("path"), str)]
+        added, removed, per_file, reason = _session_numstat(
+            repo_root, base or base_commit_value(entry), commit_value(entry), paths, truncated=files_truncated,
+        )
+    entry["lines_added"] = added
+    entry["lines_removed"] = removed
+    if reason is not None:
+        entry["capture"]["lines_not_recorded_reason"] = reason
+    if per_file and isinstance(entry.get("files_detail"), list):
+        own = {id(f) for f in changed_files}
+        entry["files_detail"] = [
+            {**f, **per_file[f["path"]]} if id(f) in own and f.get("path") in per_file else f
+            for f in entry["files_detail"]
+        ]
 
 
 def _merge_git_outcome(fresh: dict | None, stored: object) -> dict | None:

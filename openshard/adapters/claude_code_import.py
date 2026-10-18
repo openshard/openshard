@@ -110,7 +110,7 @@ def _parse_git_changed_files(
     ref = base_ref if isinstance(base_ref, str) and base_ref.strip() else "HEAD"
     try:
         result = subprocess.run(
-            ["git", "diff", ref, "--name-status"],
+            ["git", "diff", "--no-renames", ref, "--name-status"],
             cwd=repo_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

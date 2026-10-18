@@ -195,10 +195,10 @@ from openshard.adapters.claude_git_outcome import (  # noqa: F401  (re-exported 
     _recorded_start_branch,
     _reflog_created,
     _session_files_base,
-    _session_line_counts,
     _sha_or_none,
     _stamp_files_base,
     _stamp_git_outcome,
+    _stamp_line_counts,
     _stored_git_outcome,
 )
 from openshard.adapters.claude_hook_checks import (
@@ -3064,29 +3064,6 @@ def _stamp_reported_counts(entry: dict, buf: dict, model_roles: dict[str, str] |
         # Permission denials the agent reported (Grok Build PermissionDenied);
         # absent for agents whose hooks expose no such event.
         entry["capture"]["permission_denied_count"] = permission_denied_count
-
-
-def _stamp_line_counts(
-    entry: dict, repo_root: Path, changed_files: list[dict], files_source: str, files_truncated: bool,
-    base: str | None = None,
-) -> None:
-    """``lines_added`` / ``lines_removed`` between the session's base and own commit, or the reason they are unknown."""
-    from openshard.history.receipt_evidence import base_commit_value, commit_value
-
-    added: int | None
-    removed: int | None
-    reason: str | None
-    if files_source != "git_diff_inferred":
-        added, removed, reason = None, None, "git_diff_unavailable"
-    else:
-        paths = [f["path"] for f in changed_files if isinstance(f.get("path"), str)]
-        added, removed, reason = _session_line_counts(
-            repo_root, base or base_commit_value(entry), commit_value(entry), paths, truncated=files_truncated,
-        )
-    entry["lines_added"] = added
-    entry["lines_removed"] = removed
-    if reason is not None:
-        entry["capture"]["lines_not_recorded_reason"] = reason
 
 
 def build_hook_entry(buf: dict, repo_root: Path) -> dict:
