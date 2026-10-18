@@ -1348,6 +1348,39 @@ Openshard-Tokens-Cache-Creation: 1000
 Openshard-Cost-USD: 0.1234
 ```
 
+`Openshard-Tokens-Cache-Creation` is the total cache write; the optional
+`Openshard-Tokens-Cache-Creation-1h` names the part billed at the 1-hour rate.
+
+Claude Code cloud sessions do not add these themselves. Before committing, the
+agent runs `openshard usage trailers --append-to <message-file>` (or prints the
+lines with `openshard usage trailers`). It writes `Openshard-Model`,
+`Openshard-Usage-Scope` and the token trailers for the usage since the previous
+commit, replacing any declared `Openshard-Model`.
+
+- `Openshard-Usage-Scope: agent`: only the committing agent's own transcript.
+  Claude Code gives commands no agent id, but each transcript (main thread
+  `<session>.jsonl`, subagents `<session>/subagents/agent-<id>.jsonl`) records
+  the Bash call it is waiting on before the command runs; the caller is the one
+  whose open call is this command or `git commit`, narrowed by the repository
+  and message-file paths when several agents commit at once.
+- `Openshard-Usage-Scope: session-window`: the caller could not be told apart,
+  so every transcript of the session since the last commit is counted. It may
+  include parallel agents' work, and its Receipt cost is recorded with
+  `cost_provenance: official_rate_estimate_session_window`.
+
+Each message is claimed by one commit only (locked state in
+`~/.openshard/usage-trailers/<session>.json`, shared by every agent and
+worktree); a commit that never lands releases its claim. When no true number
+exists (no transcript, nothing new, malformed counters, several models,
+surcharged requests) it prints nothing and exits 1. Do not copy token trailers
+into a PR body: a squash-merge commit would read them again. In a throwaway cloud clone
+a hook can do it for every commit:
+
+```sh
+printf '#!/bin/sh\nopenshard usage trailers --append-to "$1" || true\n' > .git/hooks/prepare-commit-msg
+chmod +x .git/hooks/prepare-commit-msg
+```
+
 A provider-reported dollar amount wins. If only trustworthy token counters are
 available, Core can calculate a dated official-list-rate estimate for an exact
 supported model and marks it as estimated. Missing usage remains unknown, never

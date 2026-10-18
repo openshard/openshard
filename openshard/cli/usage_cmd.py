@@ -127,6 +127,44 @@ def usage_show(receipt_ref: str | None, as_json: bool) -> None:
         click.echo(line)
 
 
+@usage_group.command("trailers")
+@click.option("--since", default=None, metavar="COMMIT|TIME",
+              help="Start of the window for the first call (default: HEAD's commit time).")
+@click.option("--transcript", type=click.Path(path_type=Path), default=None,
+              help="The committing agent's transcript (default: found from $CLAUDE_CODE_SESSION_ID).")
+@click.option("--session", "session_id", default=None, help="Claude Code session id (default: $CLAUDE_CODE_SESSION_ID).")
+@click.option("--append-to", "msg_file", type=click.Path(path_type=Path, dir_okay=False), default=None,
+              help="Add the trailers to this commit message file instead of printing them.")
+@click.option("--no-record", is_flag=True, default=False, help="Print only; do not claim this usage for the next commit.")
+@click.pass_context
+def usage_trailers_cmd(ctx: click.Context, since: str | None, transcript: Path | None, session_id: str | None,
+                       msg_file: Path | None, no_record: bool) -> None:
+    """Openshard-Tokens-* commit trailers for the committing agent's usage since its last commit.
+
+    Counts only the transcript of the agent running this (main thread or one
+    subagent); each message is claimed by one commit only. When usage cannot be
+    stated exactly, nothing is printed and the exit code is 1.
+    """
+    from openshard.adapters.commit_usage_trailers import (
+        UsageUnavailable,
+        append_trailers,
+        usage_trailers,
+    )
+
+    def deliver(lines: list[str]) -> None:
+        if msg_file is not None:
+            append_trailers(msg_file, lines)
+        else:
+            click.echo("\n".join(lines))
+
+    try:
+        usage_trailers(Path.cwd(), session_id=session_id, transcript=transcript, since=since,
+                       record=not no_record, hints=(str(msg_file),) if msg_file else (), deliver=deliver)
+    except UsageUnavailable as exc:
+        click.echo(f"No usage trailers: {exc} Usage stays unknown.", err=True)
+        ctx.exit(_EXIT_REFUSED)
+
+
 @usage_group.group("reconcile")
 def usage_reconcile_group() -> None:
     """Attach usage Cursor reported later to the Receipt that carries the same Cursor id."""
