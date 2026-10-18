@@ -1419,13 +1419,6 @@ def runtime_configuration_block(entry: dict) -> dict | None:
     return block
 
 
-def gaming_signals_value(entry: dict) -> list[dict[str, Any]] | None:
-    """Gaming-check observations (``verification/gaming_signals``); local only, never synced."""
-    from openshard.verification.gaming_signals import gaming_signals_block
-
-    return gaming_signals_block(entry)
-
-
 def project_entry_evidence(entry: Any) -> dict[str, Any]:
     """Every entry-derived block in one dict (``ShardReceipt.recorded_evidence``). Never raises."""
     if not isinstance(entry, dict):
@@ -1446,7 +1439,6 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "capability_snapshot": capability_snapshot_block,
         "organisation_policy": organisation_policy_block,
         "learning": learning_block,
-        "gaming_signals": gaming_signals_value,  # local only; never synced
         "permissions": permission_evidence_block,
         "base_commit": base_commit_value,
         "provider": provider_value,

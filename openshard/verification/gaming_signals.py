@@ -54,6 +54,14 @@ MAX_TEST_DIFF_FILES = 50
 _MESSAGE_CAP = 200
 _PATH_CAP = 200
 
+def _dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _str(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
 # -- test-file heuristics -------------------------------------------------------
 
 _TEST_DIR_PARTS = frozenset({"tests", "test", "__tests__"})
@@ -205,9 +213,9 @@ def scan_events(events: list, patterns: tuple[str, ...]) -> dict[str, list[str]]
     reads: list[str] = []
     writes: list[str] = []
     for ev in _tool_events(events):
-        meta = ev.get("metadata") if isinstance(ev.get("metadata"), dict) else {}
-        target = ev.get("target") if isinstance(ev.get("target"), str) else None
-        action = ev.get("action") if isinstance(ev.get("action"), str) else ""
+        meta = _dict(ev.get("metadata"))
+        target = _str(ev.get("target"))
+        action = _str(ev.get("action"))
         if "command_kind" in meta:
             reads.extend(p for p in command_reads(action) if matches_any(p, patterns))
             writes.extend(command_record_writes(action))
@@ -234,7 +242,7 @@ def note_masked_check(buf: dict, name: object, mask: object) -> None:
     from openshard.verification.check_command import EXIT_MASKS
 
     if isinstance(name, str) and name and mask in EXIT_MASKS:
-        seen = buf.get("gaming_seen") if isinstance(buf.get("gaming_seen"), dict) else {}
+        seen = _dict(buf.get("gaming_seen"))
         _add_seen(seen, "masked", [{"name": name[:160], "mask": mask}])
         buf["gaming_seen"] = seen
 
@@ -324,9 +332,9 @@ def trace_tampering_signal(writes: list[str]) -> dict | None:
 
 
 def _session_test_files(entry: dict) -> list[dict]:
-    files = entry.get("files_detail") if isinstance(entry.get("files_detail"), list) else []
+    files = entry.get("files_detail")
     return [
-        f for f in files
+        f for f in (files if isinstance(files, list) else [])
         if isinstance(f, dict) and isinstance(f.get("path"), str) and is_test_path(f["path"])
         and f.get("attribution") not in ("pre_existing", "other_session")
     ]
@@ -340,12 +348,12 @@ def stamp_gaming_signals(entry: dict, buf: dict, repo_root: Path) -> None:
     diff is re-read at every fold, since the working tree is the evidence.
     """
     try:
-        seen = buf.get("gaming_seen") if isinstance(buf.get("gaming_seen"), dict) else {}
+        seen = _dict(buf.get("gaming_seen"))
         found = scan_events(entry.get("events") or [], grader_patterns(repo_root))
         _add_seen(seen, "reads", found["reads"])
         _add_seen(seen, "writes", found["writes"])
         buf["gaming_seen"] = seen
-        capture = entry.get("capture") if isinstance(entry.get("capture"), dict) else {}
+        capture = entry["capture"] if isinstance(entry.get("capture"), dict) else {}
         test_files = _session_test_files(entry)
         stats: dict[str, dict[str, int]] = {}
         diffable = [f["path"] for f in test_files if f.get("change_type") != "delete"]
@@ -403,7 +411,7 @@ def gaming_signals_block(entry: Any) -> list[dict[str, Any]] | None:
         message = item.get("message")
         if not isinstance(message, str) or not message.strip() or unsafe_text(message):
             continue
-        counts_raw = item.get("counts") if isinstance(item.get("counts"), dict) else {}
+        counts_raw = _dict(item.get("counts"))
         out.append({
             "kind": item["kind"],
             "message": message[:_MESSAGE_CAP],
