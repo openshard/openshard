@@ -25,7 +25,7 @@ class TestHomeScreen(unittest.TestCase):
         result = CliRunner().invoke(cli, [])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("OpenShard", result.output)
-        self.assertIn("The control layer for AI coding", result.output)
+        self.assertIn("Receipts for AI coding agents", result.output)
 
     def test_help_still_renders_click_help(self):
         result = CliRunner().invoke(cli, ["--help"])

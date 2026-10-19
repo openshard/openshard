@@ -47,7 +47,7 @@ async def test_header_brand_contains_openshard(tmp_path):
 async def test_header_tagline_contains_expected_text(tmp_path):
     app = _make_app(tmp_path)
     async with app.run_test(size=_SIZE) as _:
-        assert "layer for AI coding agents" in _text(app.query_one("#header-tagline", Static))
+        assert "Receipts for AI coding agents" in _text(app.query_one("#header-tagline", Static))
 
 
 @pytest.mark.asyncio

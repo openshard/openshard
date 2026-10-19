@@ -36,7 +36,7 @@ _COMMANDS_TEXT = (
 )
 
 _OPENSHARD_TEXT = (
-    "OpenShard is a local CLI and TUI — the control layer for AI coding agents.\n"
+    "OpenShard is a local CLI and TUI that keeps receipts for AI coding agents.\n"
     "It routes tasks to AI models, tracks structured run receipts (shards),\n"
     "and provides model routing, evidence provenance, and session history.\n"
     "\n"
