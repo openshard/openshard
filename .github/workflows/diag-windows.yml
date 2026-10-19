@@ -1,0 +1,52 @@
+name: diag-windows
+on:
+  push:
+    branches: [diag-windows-fix]
+permissions:
+  contents: write
+jobs:
+  win:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv pip install --system -e ".[dev]"
+      - name: Focused diag
+        continue-on-error: true
+        env:
+          DIAG_LOG_DIR: diaglogs
+        run: python -m pytest -p no:xdist -q -rA --junitxml=focused.xml tests/test_claude_worktree_capture.py tests/test_turn_usage_window.py tests/test_util_paths.py tests/test_commit_usage_trailers.py::test_parallel_callers_are_told_apart_by_the_repository_they_name "tests/test_claude_capture_service.py::TestEventualConsistency::test_http_session_produces_the_same_record_as_the_inline_path"
+      - name: Push logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p diaglogs
+          git config user.name diag; git config user.email diag@example.com
+          git checkout --orphan diag-windows-logs-${GITHUB_RUN_ID}
+          git rm -rq --cached .
+          cp focused.xml diaglogs/ || true; git add -f diaglogs
+          git commit -qm logs
+          git push -q origin HEAD:refs/heads/diag-windows-logs-${GITHUB_RUN_ID}
+          echo "::notice title=logs::pushed diag-windows-logs-${GITHUB_RUN_ID}"
+      - name: Test
+        continue-on-error: true
+        run: python -m pytest -n auto -q --junitxml=junit.xml
+      - name: Report failures as annotations
+        if: always()
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          r = ET.parse("junit.xml").getroot()
+          n = 0
+          for tc in r.iter("testcase"):
+              for kind in ("failure", "error"):
+                  f = tc.find(kind)
+                  if f is not None:
+                      n += 1
+                      msg = (f.get("message") or "")[:300].replace("\n", " ").replace("%", "%25")
+                      print(f"::error title={tc.get('classname')}::{tc.get('name')} | {msg}")
+          print(f"::warning title=total::{n} failing")
