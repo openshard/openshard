@@ -54,10 +54,12 @@ from openshard.adapters.claude_transcript_usage import (
     _summarise_transcript_state,
     _transcript_roots,
 )
+from openshard.util.paths import is_absolute, path_key
 
 SESSION_ENV = "CLAUDE_CODE_SESSION_ID"
 _TAIL_BYTES = 512 * 1024  # the open Bash call is among the last records
 _CALL_MARKERS = ("usage trailers", "git commit")
+_WORD_RE = re.compile(r"[^\s\"';&|<>()]+")  # a command's words, unquoted
 SCOPE_KEY = "Openshard-Usage-Scope"
 SCOPE_AGENT = "agent"  # the committing agent's own transcript
 SCOPE_SESSION = "session-window"  # every transcript of the session: may include parallel agents' work
@@ -184,8 +186,23 @@ def caller_transcript(main: Path, hints: tuple[str, ...] = ()) -> Path | None:
     found = [(f, cmds) for f in _session_files(main)
              if (cmds := [c for c in open_bash_commands(f) if any(m in c for m in _CALL_MARKERS)])]
     if len(found) > 1 and hints:
-        found = [(f, cmds) for f, cmds in found if any(all(h in c for h in hints) for c in cmds)]
+        found = [(f, cmds) for f, cmds in found if any(all(_names(c, h) for h in hints) for c in cmds)]
     return found[0][0] if len(found) == 1 else None
+
+
+def _names(command: str, path: str) -> bool:
+    """Whether *command* names *path*, however it is spelled.
+
+    Git prints ``C:/...`` where the agent's shell wrote ``C:\\...`` (or a short
+    name, or another case), so a word of the command counts when it is the
+    same location (``path_key``), not only the same text. Only absolute words
+    count: a relative one would be resolved against this process's directory,
+    not the other agent's.
+    """
+    if path in command:
+        return True
+    want = path_key(path)
+    return any(is_absolute(word) and path_key(word) == want for word in _WORD_RE.findall(command))
 
 
 def read_usage(files: list[Path], since: str | None, exclude: set[str]) -> tuple[dict | None, list[str]]:

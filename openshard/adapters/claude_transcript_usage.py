@@ -136,8 +136,25 @@ def _surcharged(usage: Mapping[str, Any]) -> bool:
     return isinstance(tools, Mapping) and any(_count(v) for v in tools.values())
 
 
-def _new_transcript_state(since: object) -> dict:
-    return {"since": since, "files": {}, "closed": {}, "closed_ids": [], "capped": False}
+def _new_transcript_state(since: object, until: str | None = None) -> dict:
+    return {"since": since, "until": until, "files": {}, "closed": {}, "closed_ids": [], "capped": False}
+
+
+def _transcript_state_for(state: object, since: object, until: str | None) -> dict:
+    """*state* when it still describes the window [*since*, *until*), else a fresh one.
+
+    *until* (exclusive) only ever arrives late, when a turn is sealed; a state
+    that already counted a message at or after it starts over, so a turn folded
+    after the next turn's replies were written never keeps them.
+    """
+    if not isinstance(state, dict) or state.get("since") != since or not isinstance(state.get("files"), dict):
+        return _new_transcript_state(since, until)
+    if state.get("until") != until:
+        latest, bound = _parse_utc(state.get("latest_at")), _parse_utc(until)
+        if state.get("until") is not None or (bound is not None and (latest is None or latest >= bound)):
+            return _new_transcript_state(since, until)
+        state["until"] = until
+    return state
 
 
 def _file_head(file: Path) -> str | None:
@@ -196,7 +213,7 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
     """
     from openshard.adapters.claude_code_import import _sanitize_model
 
-    since = _parse_utc(state.get("since"))
+    since, until = _parse_utc(state.get("since")), _parse_utc(state.get("until"))
     closed_ids = set(state.get("closed_ids") or [])
     for index, file in enumerate(files):
         key = "main" if index == 0 else file.name
@@ -236,10 +253,12 @@ def _read_transcript_increment(state: dict, files: list[Path]) -> bool:
             mid, usage = msg.get("id"), msg.get("usage")
             if not isinstance(mid, str) or not mid or not isinstance(usage, dict):
                 continue
-            if since is not None:
+            if since is not None or until is not None:
                 at = _parse_utc(rec.get("timestamp"))
-                if at is None or at < since:
+                if at is None or (since is not None and at < since) or (until is not None and at >= until):
                     continue
+                if (latest := _parse_utc(state.get("latest_at"))) is None or at > latest:
+                    state["latest_at"] = rec.get("timestamp")
             model = msg.get("model")
             name = _sanitize_model(model) if isinstance(model, str) and model != "<synthetic>" else "unknown"
             if mid not in recent and (mid in closed_ids or any(

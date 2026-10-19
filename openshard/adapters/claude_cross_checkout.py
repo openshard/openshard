@@ -18,7 +18,8 @@ With per-turn Receipts two facts must still hold across those checkouts:
   other checkouts' Receipts had already counted. The router stamps the
   current turn's prompt time (``SINCE_ATTR``) on the work it routes; a turn
   Receipt's usage window starts at the first one it received
-  (``usage_since``), never earlier than the buffer's own start.
+  (``usage_since``), never earlier than the buffer's own start. A sealed turn's
+  window ends with its ``Stop`` (``usage_until``), however late it is folded.
 
 The session's Task is kept beside the capture service's state
 (``<OPENSHARD_HOME>``), never in a repository, so a restarted service keeps it.
@@ -32,6 +33,7 @@ import hashlib
 import os
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +65,22 @@ def usage_since(buf: dict) -> Any:
     if turn and isinstance(since, str) and isinstance(started, str) and since > started:
         return since
     return started
+
+
+def usage_until(buf: dict) -> str | None:
+    """Where a sealed turn Receipt's usage ends (exclusive): the end of the second its ``Stop`` was observed.
+
+    The fold runs after the hook returned, sometimes after the next turn's
+    replies are already in the transcript; they are that turn's, never this one's.
+    """
+    sealed = buf.get("turn_sealed_at")
+    if buf.get("receipt_scope") != "turn" or not isinstance(sealed, str):
+        return None
+    try:
+        at = datetime.fromisoformat(sealed.replace("Z", "+00:00")).astimezone(UTC).replace(microsecond=0)
+    except ValueError:
+        return None
+    return (at + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def task_for(buf: dict) -> str:

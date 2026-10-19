@@ -389,7 +389,7 @@ def _stable_view(entry: dict) -> dict:
         "summary": entry["summary"],
         "capture": {k: v for k, v in entry["capture"].items()
                     if k not in ("started_at", "last_activity_at", "first_prompt_at",
-                                 "last_turn_completed_at", "last_status_ping_at",
+                                 "last_turn_completed_at", "last_status_ping_at", "turn_sealed_at",
                                  # Legitimately differs by capture path: the HTTP/service
                                  # path assigns real dedup ids (CaptureRecorder._next_id);
                                  # the inline path never does (dedup_id=None throughout),
