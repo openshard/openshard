@@ -101,6 +101,8 @@ Git gives us a durable history of code changes, but it does not always tell us w
 Openshard exists to preserve that context.
 The coding agent still does the coding and Openshard keeps the receipt.
 
+Over time, your receipts become a system of record for AI engineering.
+
 ---
 
 ## Openshard doesn't guess
@@ -265,8 +267,8 @@ or file contents), and is retry-safe and idempotent: replaying `sync now`
 never duplicates a Receipt. See [Platform sync](docs/platform-sync.md) for
 the full contract.
 
-The hosted dashboard that reads this synced history is still being built;
-see Project status below.
+Synced Receipts appear in the hosted Platform at
+[app.openshard.dev](https://app.openshard.dev), grouped into tasks.
 
 ---
 
@@ -317,7 +319,7 @@ Openshard is currently a working tool available for use, and the core local rece
 
 The project has automated CI, Ruff and mypy checks, a large pytest suite, Linux and Windows validation, authenticated local capture, receipt integrity checks, explicit capture-completeness handling, and real integration testing across supported agent paths.
 
-Sending Receipts to the Openshard Platform is live and retry-safe (`openshard sync`), and that local-to-hosted path has passed real end-to-end testing. What's still being built on top of it is the hosted web experience: the dashboard, receipt history views, and team controls. They'll build on the same receipt primitive rather than replacing the local workflow.
+Sending Receipts to the Openshard Platform is live and retry-safe (`openshard sync`), and that local-to-hosted path has passed real end-to-end testing. Synced Receipts show up in the hosted Platform at [app.openshard.dev](https://app.openshard.dev) as receipt history and task views. Insights and team controls are being rolled out on the same receipt primitive rather than replacing the local workflow.
 
 For now, the focus is straightforward: making the receipt layer reliable, useful, and easy enough to fit naturally into the way developers already work.
 

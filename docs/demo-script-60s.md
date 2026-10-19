@@ -92,7 +92,7 @@ openshard last --more
 ### Beat 5 — Close (~12 seconds)
 
 **Say:**
-> "OpenShard is the control layer for AI coding agents."
+> "Openshard keeps the receipts for AI coding agents."
 
 **Viewer sees:** Receipt still on screen.
 

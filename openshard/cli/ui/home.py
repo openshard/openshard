@@ -20,7 +20,7 @@ from openshard.run.pipeline import _LOG_PATH
 from .console import make_console
 from .theme import ACCENT_STYLE, BORDER_STYLE, BRAND_STYLE, MUTED_STYLE, SECTION_STYLE, TIP_STYLE
 
-TAGLINE = "The control layer for AI coding agents."
+TAGLINE = "Receipts for AI coding agents."
 
 QUICK_COMMANDS = [
     ("run",      "Make a controlled change"),

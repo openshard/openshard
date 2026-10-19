@@ -34,7 +34,7 @@ try:
 except Exception:
     _VERSION = "v0.1.0"
 
-TAGLINE = "The control layer for AI coding agents"
+TAGLINE = "Receipts for AI coding agents"
 
 _MODE_STRIP_DEFAULT = "Auto mode"
 _STATUS_STRIP = "↳ Sandbox [OFF]     ↳ Receipts [ON]     ↳ Checks [AUTO]     ↳ Approval [SMART]"
