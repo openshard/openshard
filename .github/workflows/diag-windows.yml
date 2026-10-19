@@ -1,0 +1,33 @@
+name: diag-windows
+on:
+  push:
+    branches: [diag-windows]
+jobs:
+  win:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv pip install --system -e ".[dev]"
+      - name: Test
+        continue-on-error: true
+        run: python -m pytest -n auto -q --junitxml=junit.xml
+      - name: Report failures as annotations
+        if: always()
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          r = ET.parse("junit.xml").getroot()
+          n = 0
+          for tc in r.iter("testcase"):
+              for kind in ("failure", "error"):
+                  f = tc.find(kind)
+                  if f is not None:
+                      n += 1
+                      msg = (f.get("message") or "")[:300].replace("\n", " ").replace("%", "%25")
+                      print(f"::error title={tc.get('classname')}::{tc.get('name')} | {msg}")
+          print(f"::warning title=total::{n} failing")
