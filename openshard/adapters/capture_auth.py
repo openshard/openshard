@@ -47,6 +47,7 @@ import os
 import sys
 
 from openshard.util.home import openshard_home
+from openshard.util.paths import path_key
 
 TOKEN_FILENAME = "capture-token"
 TOKEN_HEADER = "X-OpenShard-Capture-Token"
@@ -172,18 +173,7 @@ def normalise_root(root: object) -> str:
     it) run on the same machine, so realpath + normpath + normcase is enough
     to agree on symlinks, trailing separators and case-insensitive drives.
     """
-    if isinstance(root, str):
-        text = root
-    elif isinstance(root, bytes):
-        text = root.decode("utf-8", "replace")
-    else:
-        fspath = getattr(root, "__fspath__", None)
-        text = str(fspath()) if callable(fspath) else str(root)
-    try:
-        text = os.path.realpath(text)
-    except (OSError, ValueError):
-        pass
-    return os.path.normcase(os.path.normpath(text))
+    return path_key(root)
 
 
 def repo_capability(token: str, root: object, agent: str) -> str:
