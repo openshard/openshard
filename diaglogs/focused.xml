@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="3" skipped="0" tests="9" time="38.878" timestamp="2026-10-19T02:04:29.194107+00:00" hostname="runnervm0xl3a"><testcase classname="tests.test_claude_worktree_capture" name="test_a_worktree_first_opened_by_a_notification_turn_keeps_the_users_task[turn]" time="5.308" /><testcase classname="tests.test_claude_worktree_capture" name="test_a_worktree_first_opened_by_a_notification_turn_keeps_the_users_task[session]" time="4.785" /><testcase classname="tests.test_claude_worktree_capture" name="test_usage_is_counted_once_when_turns_move_between_checkouts[turn]" time="5.485" /><testcase classname="tests.test_claude_worktree_capture" name="test_usage_is_counted_once_when_turns_move_between_checkouts[session]" time="4.836" /><testcase classname="tests.test_claude_worktree_capture" name="test_notification_turns_across_checkouts_count_every_turn_once[turn]" time="6.253"><failure message="assert (30400, 3040) == (25400, 2540)&#10;  &#10;  At index 0 diff: 30400 != 25400&#10;  Use -v to get more diff">repos = {'platform': WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_notification_tur...('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_notification_turns_across0/tmp/core-wt')}
+receipt_scope = 'turn'
+
+    def test_notification_turns_across_checkouts_count_every_turn_once(repos, receipt_scope):
+        """A notification turn opens no Receipt where it only arrived: its buffer stays open into the next turn.
+    
+        Per-turn: turn 2 worked only in the worktree (its usage is there), turn 3 did
+        no work anywhere (it rolls into the project's next Receipt, as without
+        worktrees), turn 4 is the project's. The project's buffer, opened by the
+        notification of turn 2, must neither count turn 2 again nor be told its
+        usage is elsewhere for good.
+        """
+        platform, wt = repos["platform"], repos["wt"]
+        note = "&lt;task-notification&gt;\n&lt;task-id&gt;b{}&lt;/task-id&gt;\n&lt;status&gt;completed&lt;/status&gt;\n&lt;/task-notification&gt;"
+        service = _Service({**os.environ})
+        try:
+            claude = _Claude(platform, service.port)
+            claude.start()
+            claude.send("UserPromptSubmit", prompt="Fix the parser")
+            claude.reply(input_tokens=300, output_tokens=30)
+            claude.edit(platform / "notes.md", "plan\n")
+            claude.send("Stop")
+            time.sleep(1.1)
+            claude.send("UserPromptSubmit", prompt=note.format(1))
+            claude.reply(input_tokens=100, output_tokens=10)
+            claude.edit(wt / "parser.py", "PARSED = True\n", cwd=wt)
+            claude.send("Stop", cwd=wt)
+            time.sleep(1.1)
+            claude.send("UserPromptSubmit", prompt=note.format(2))
+            claude.reply(input_tokens=5000, output_tokens=500)
+            claude.send("Stop")
+            time.sleep(1.1)
+            claude.send("UserPromptSubmit", prompt="Now finish in the project")
+            claude.reply(input_tokens=20000, output_tokens=2000)
+            claude.edit(platform / "notes.md", "done\n")
+            claude.send("Stop")
+            claude.send("SessionEnd", reason="other")
+            assert _wait_for(lambda: _ended(wt) and _ended(platform, 1 if receipt_scope == "session" else 2))
+        finally:
+            service.stop()
+        receipts = _receipts(platform) + _receipts(wt)
+&gt;       assert _turn_totals(*receipts) == (25400, 2540)
+E       assert (30400, 3040) == (25400, 2540)
+E         
+E         At index 0 diff: 30400 != 25400
+E         Use -v to get more diff
+
+tests\test_claude_worktree_capture.py:430: AssertionError</failure></testcase><testcase classname="tests.test_claude_worktree_capture" name="test_notification_turns_across_checkouts_count_every_turn_once[session]" time="5.964" /><testcase classname="tests.test_commit_usage_trailers" name="test_parallel_callers_are_told_apart_by_the_repository_they_name" time="0.237"><failure message="AssertionError: assert ('Openshard-Usage-Scope: agent' in 'Openshard-Model: claude-opus-5-5\nOpenshard-Usage-Scope: session-window\nOpenshard-Tokens-Input: 2\nOpenshard-Tokens-Output: 7\nOpenshard-Tokens-Cache-Read: 200\nOpenshard-Tokens-Cache-Creation: 40\n')&#10; +  where 'Openshard-Model: claude-opus-5-5\nOpenshard-Usage-Scope: session-window\nOpenshard-Tokens-Input: 2\nOpenshard-Tokens-Output: 7\nOpenshard-Tokens-Cache-Read: 200\nOpenshard-Tokens-Cache-Creation: 40\n' = &lt;Result okay&gt;.output">repo = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_parallel_callers_are_told0/repo')
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_parallel_callers_are_told0')
+
+    def test_parallel_callers_are_told_apart_by_the_repository_they_name(repo, tmp_path):
+        _write(_transcript(tmp_path), [])
+        _write(_sub(tmp_path, "a"), [_msg("a1", "2026-02-01T00:00:00Z", o=3), _open_call(f"cd {repo} &amp;&amp; git commit -F m")])
+        _write(_sub(tmp_path, "b"), [_msg("b1", "2026-02-01T00:00:00Z", o=4), _open_call("cd /elsewhere &amp;&amp; git commit -F m")])
+        result = _run()
+&gt;       assert "Openshard-Usage-Scope: agent" in result.output and "Openshard-Tokens-Output: 3" in result.output
+E       AssertionError: assert ('Openshard-Usage-Scope: agent' in 'Openshard-Model: claude-opus-5-5\nOpenshard-Usage-Scope: session-window\nOpenshard-Tokens-Input: 2\nOpenshard-Tokens-Output: 7\nOpenshard-Tokens-Cache-Read: 200\nOpenshard-Tokens-Cache-Creation: 40\n')
+E        +  where 'Openshard-Model: claude-opus-5-5\nOpenshard-Usage-Scope: session-window\nOpenshard-Tokens-Input: 2\nOpenshard-Tokens-Output: 7\nOpenshard-Tokens-Cache-Read: 200\nOpenshard-Tokens-Cache-Creation: 40\n' = &lt;Result okay&gt;.output
+
+D:\a\openshard\openshard\tests\test_commit_usage_trailers.py:194: AssertionError</failure></testcase><testcase classname="tests.test_claude_capture_service.TestEventualConsistency" name="test_http_session_produces_the_same_record_as_the_inline_path[turn]" time="2.573"><failure message="AssertionError: assert {'task': 'Add...', ...}], ...} == {'task': 'Add...', ...}], ...}&#10;  &#10;  Omitting 8 identical items, use -vv to show&#10;  Differing items:&#10;  {'capture': {'source': 'claude_code_hooks', 'agent': 'claude_code', 'agent_vendor': 'Anthropic', 'session_id': '0f1e2d3c-4b5a-4697-8877-665544332211', ...}} != {'capture': {'source': 'claude_code_hooks', 'agent': 'claude_code', 'agent_vendor': 'Anthropic', 'session_id': '0f1e2d3c-4b5a-4697-8877-665544332211', ...}}&#10;  Use -v to get more diff">self = &lt;tests.test_claude_capture_service.TestEventualConsistency object at 0x00000168C268AF30&gt;
+service = &lt;tests.capture_fixtures._Service object at 0x00000168C31D9C10&gt;
+tmp_path = WindowsPath('C:/Users/runneradmin/AppData/Local/Temp/pytest-of-runneradmin/pytest-0/test_http_session_produces_the0')
+receipt_scope = 'turn'
+
+    def test_http_session_produces_the_same_record_as_the_inline_path(self, service, tmp_path, receipt_scope):
+        via_http = _make_repo(tmp_path / "http repo")
+        via_inline = _make_repo(tmp_path / "inline repo")
+        _drive_session_http(service.port, via_http)
+        _drive_session_inline(via_inline)
+        assert _wait_for(lambda: _sealed(_first_line(via_http)))
+        assert service.server.recorder.wait_idle(20)
+        http_entry, inline_entry = _lines(via_http)[0], _lines(via_inline)[0]
+        _hv, _iv = _stable_view(http_entry), _stable_view(inline_entry)
+        if _hv != _iv:
+            from tests._diag_plugin import _log
+            for _k in sorted(set(_hv) | set(_iv)):
+                if _hv.get(_k) != _iv.get(_k):
+                    if _k == "capture":
+                        for _c in sorted(set(_hv[_k]) | set(_iv[_k])):
+                            if _hv[_k].get(_c) != _iv[_k].get(_c):
+                                _log("DIFF capture", _c, "http=" + json.dumps(_hv[_k].get(_c), default=str), "inline=" + json.dumps(_iv[_k].get(_c), default=str))
+                    else:
+                        _log("DIFF", _k, json.dumps(_hv.get(_k), default=str)[:600], json.dumps(_iv.get(_k), default=str)[:600])
+&gt;       assert _stable_view(http_entry) == _stable_view(inline_entry)
+E       AssertionError: assert {'task': 'Add...', ...}], ...} == {'task': 'Add...', ...}], ...}
+E         
+E         Omitting 8 identical items, use -vv to show
+E         Differing items:
+E         {'capture': {'source': 'claude_code_hooks', 'agent': 'claude_code', 'agent_vendor': 'Anthropic', 'session_id': '0f1e2d3c-4b5a-4697-8877-665544332211', ...}} != {'capture': {'source': 'claude_code_hooks', 'agent': 'claude_code', 'agent_vendor': 'Anthropic', 'session_id': '0f1e2d3c-4b5a-4697-8877-665544332211', ...}}
+E         Use -v to get more diff
+
+tests\test_claude_capture_service.py:428: AssertionError</failure></testcase><testcase classname="tests.test_claude_capture_service.TestEventualConsistency" name="test_http_session_produces_the_same_record_as_the_inline_path[session]" time="2.586" /></testsuite></testsuites>
