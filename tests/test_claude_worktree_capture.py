@@ -767,3 +767,43 @@ def test_a_turn_usage_window_only_ever_narrows_to_the_turn():
     assert cross.usage_since(buf) == "2026-10-18T10:05:00Z"
     assert cross.usage_since({**buf, "receipt_scope": "session"}) == "2026-10-18T10:00:00Z"
     assert cross.usage_since({**buf, cross.SINCE_ATTR: "2026-10-18T09:00:00Z"}) == "2026-10-18T10:00:00Z"
+
+
+def test_a_turn_folded_late_counts_only_its_own_usage(repos, receipt_scope):
+    """Seen on Windows CI: a turn's Stop folded after the next turn's replies were in the transcript.
+
+    The queue is processed after the hooks return; a slow fold (git on a busy
+    machine) read the transcript to its end, so a sealed turn's Receipt took in
+    the next turn's usage, which that turn's own Receipt counted again. A
+    sealed turn now counts only what was in its turn: replies up to its Stop.
+    """
+    platform, wt = repos["platform"], repos["wt"]
+    service = _Service({**os.environ})
+    try:
+        service.server.recorder.pause_processing()  # every fold happens after the whole session
+        claude = _Claude(platform, service.port)
+        claude.start()
+        claude.send("UserPromptSubmit", prompt="Plan in the project")
+        claude.reply(input_tokens=100, output_tokens=10)
+        claude.edit(platform / "notes.md", "plan\n")
+        claude.send("Stop")
+        time.sleep(1.1)
+        claude.send("UserPromptSubmit", prompt="Work in the worktree", cwd=wt)
+        claude.reply(input_tokens=1000, output_tokens=100)
+        claude.edit(wt / "parser.py", "PARSED = True\n", cwd=wt)
+        claude.send("Stop", cwd=wt)
+        time.sleep(1.1)
+        claude.send("UserPromptSubmit", prompt="Finish in the project")
+        claude.reply(input_tokens=10, output_tokens=1)
+        claude.edit(platform / "notes.md", "done\n")
+        claude.send("Stop")
+        claude.send("SessionEnd", reason="other")
+        service.server.recorder.resume_processing()
+        assert _wait_for(lambda: _ended(platform, 1 if receipt_scope == "session" else 2) and _ended(wt))
+    finally:
+        service.stop()
+    receipts = _receipts(platform) + _receipts(wt)
+    assert _turn_totals(*receipts) == (1110, 111)  # every turn's usage, each once
+    if receipt_scope == "turn":
+        first, third, second = receipts
+        assert [(r["prompt_tokens"], r["completion_tokens"]) for r in (first, second, third)] == [(100, 10), (1000, 100), (10, 1)]

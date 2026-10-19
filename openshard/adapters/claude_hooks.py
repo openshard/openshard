@@ -188,6 +188,7 @@ from openshard.adapters.capture_agents import (
     is_known_agent,
     profile_for,
 )
+from openshard.adapters.claude_cross_checkout import usage_until
 from openshard.adapters.claude_git_outcome import (  # noqa: F401  (re-exported for callers and tests)
     _MAX_SESSION_COMMITS,
     _REFLOG_CREATED_RE,
@@ -222,6 +223,7 @@ from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-expo
     _read_transcript_increment,
     _summarise_transcript_state,
     _transcript_files,
+    _transcript_state_for,
     _valid_transcript_path,
     read_transcript_usage,
 )
@@ -955,13 +957,12 @@ def _transcript_usage(buf: dict) -> dict | None:
         return cached
     try:
         since = usage_since(buf)  # a turn Receipt first opened mid-session counts its own turn only
-        state = buf.get("transcript_state")
-        if not isinstance(state, dict) or state.get("since") != since or not isinstance(state.get("files"), dict):
-            state = _new_transcript_state(since)
+        until = usage_until(buf)  # ... and a sealed one stops at its Stop, however late it is folded
+        state = _transcript_state_for(buf.get("transcript_state"), since, until)
         files, capped = _transcript_files(Path(raw))
         state["capped"] = bool(state.get("capped")) or capped
         if not _read_transcript_increment(state, files):
-            state = _new_transcript_state(since)
+            state = _new_transcript_state(since, until)
             state["capped"] = capped
             if not _read_transcript_increment(state, files):
                 return cached
