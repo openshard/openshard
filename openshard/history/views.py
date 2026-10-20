@@ -224,6 +224,9 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         learning = (receipt.recorded_evidence or {}).get("learning")
         if learning is not None:
             d["learning"] = learning
+        merge_check = (receipt.recorded_evidence or {}).get("merge_check")
+        if merge_check is not None:
+            d["merge_check"] = merge_check
     return d
 
 
