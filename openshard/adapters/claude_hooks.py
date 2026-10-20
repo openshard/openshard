@@ -175,6 +175,7 @@ from typing import Any
 from openshard.adapters import claude_session_fidelity as fidelity
 from openshard.adapters import claude_stop_failure as stop_failure
 from openshard.adapters import claude_turn_receipts as turns
+from openshard.adapters import merge_check
 from openshard.adapters.agent_env import PROVIDER_SOURCE_AGENT_ENV, claude_agent_env
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
 from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
@@ -3360,6 +3361,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if buf.get("correlation_conflicts"):
         entry["capture"]["correlation_conflicts"] = _stored_count(buf["correlation_conflicts"])
     _stamp_git_outcome(entry, buf)
+    merge_check.stamp(entry, buf)  # finalisation-time comparison with the default branch, when made
     files_base = _stamp_files_base(entry, buf)  # set when the agent switched branch
     _stamp_line_counts(entry, repo_root, changed_files, files_source, files_truncated, base=files_base)
     git_writes =[w for w in (buf.get("git_write_at") or []) if isinstance(w, str)]
@@ -3484,6 +3486,8 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
             if not any(r.get("kind") == REASON_GIT_OUTCOME_UNAVAILABLE for r in losses):
                 losses.append(make_reason(REASON_GIT_OUTCOME_UNAVAILABLE))
             buf["capture_losses"] = losses
+        if _PR_LOOKUP_ENABLED:  # capture service only: bounded local git, never on a hook the agent waits on
+            buf["merge_check"] = merge_check.check(repo_root)
     entry = build_hook_entry(buf, repo_root)
     session_id = str(buf.get("session_id"))
     executor = _buffer_profile(buf).executor

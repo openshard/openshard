@@ -10,6 +10,7 @@ from typing import Any
 from openshard.history.capture_completeness import (
     derive_capture_completeness,
 )
+from openshard.history.merge_check import merge_check_block
 from openshard.history.receipt_evidence import project_entry_evidence, recorded_line_counts
 from openshard.history.receipt_identity import stored_receipt_id
 from openshard.history.run_cost import run_total_cost
@@ -1572,7 +1573,7 @@ def build_shard_receipt(
         changes=_changes_summary(_changes_block),
         agent_reported_in_git=_g if isinstance(_g := (_changes_block or {}).get("agent_reported_in_git"), int) and _g > 0 else 0,
         files_excluded=_files_excluded,
-        recorded_evidence={**project_entry_evidence(entry), "gaming_signals": gaming_signals_block(entry), "task_edges": task_edges_block(entry)},
+        recorded_evidence={**project_entry_evidence(entry), "gaming_signals": gaming_signals_block(entry), "task_edges": task_edges_block(entry), "merge_check": merge_check_block(entry)},
         usage=effective_usage(entry, _own_usage_attestations(entry, usage_attestations)),
         shard=build_shard(
             entry,

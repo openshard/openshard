@@ -103,6 +103,38 @@ for a clean HEAD that already has a bound re-run. Checked by the capture
 service's sync timer (every 5 minutes, linked or not) and at any later seal
 in the repository, so a run starts 10 to 15 minutes after the last turn.
 
+## Merge check
+
+When the capture service seals a Receipt (a turn's `Stop`, a session end, the
+idle sweep), it compares the Receipt's HEAD with the default branch this
+checkout already knows and stores the result as `merge_check`
+(`adapters/merge_check.py`; shape and bounds in `history/merge_check.py`).
+It is in the sealed record, so the seal covers it, and sync sends it as an
+optional top-level `merge_check` on the receipt.
+
+* **Base**: the target of `origin/HEAD`, else `origin/main`, `origin/master`,
+  `main`, `master`. No `git fetch`: `base_ref`, `base_sha` and `checked_at`
+  say exactly what was compared. No base, or the checkout is on the base
+  branch: no block.
+* **Facts**: `behind_by` and `base_commits` (commits on the base not in HEAD,
+  newest first, at most 20: sha, author name, subject line, commit time);
+  `conflicts` from `git merge-tree --write-tree` (git 2.38+), at most 50
+  paths, each with up to 20 start lines of the HEAD-side changes that overlap
+  a base-side change (`git diff -U0` hunk numbers against the merge base) and
+  the author of the base commit that last touched those base lines
+  (`git blame`). `lines` is empty when no line-level overlap could be located
+  (binary, rename, delete). The merge's objects go to a throw-away object
+  directory; the repository is not changed.
+* **Unknown stays unknown**: no merge base, git too old, a failed merge-tree:
+  `conflicts: null` (and `behind_by` / `base_commits` null without a merge
+  base). `[]` means checked and clean. Only committed HEAD is compared, never
+  uncommitted changes.
+* **Budget**: every git call shares one 3 second deadline; what is not done
+  in time stays unknown. Never on a hook the agent waits on (inline hooks do
+  not check). Opt out with `OPENSHARD_MERGE_CHECK=off`.
+* **Privacy**: refs, shas, author names, commit subjects, paths and line
+  numbers only. No diff text or file contents are kept or sent.
+
 ## Platform contract
 
 The Platform accepts the turn fields (all optional, nullable). For a turn
