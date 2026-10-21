@@ -20,13 +20,14 @@ jobs:
   gate:
     name: Openshard gate          # the check name you mark as required
     runs-on: ubuntu-latest
+    timeout-minutes: 20           # at least wait-minutes + 5
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0          # the PR's commits, to look for agent marks
       - uses: openshard/openshard@<release tag or commit sha>
         # with:
-        #   wait-minutes: 10
+        #   wait-minutes: 15
 ```
 
 The repository must be connected to an Openshard organisation through the
@@ -36,7 +37,7 @@ ref.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `wait-minutes` | `10` | How long to wait while verification is pending, then fail |
+| `wait-minutes` | `15` | How long to wait while verification is pending, or while an agent change has no Receipt yet, then fail |
 | `api` | `https://api.openshard.dev` | Platform API base |
 | `api-key`, `org` | none | Organisation API key (from a secret) and organisation id, for CI without GitHub OIDC |
 | `commit` | the pull request head commit | The commit to gate |
@@ -66,9 +67,9 @@ Receipts whose verification is bound to that commit.
 | `verified` | **pass** |
 | `failed` | **fail** |
 | `pending` (a Receipt exists, verification not final) | waits up to `wait-minutes`, asking again every 15 s; then pass or fail. Still pending: **fail**. With a Receipt the reason is "Verification incomplete (partial) after N min" and names its verification state (a partial or agent-reported pass is never `verified`); without one, "Verification did not finish in N min" |
-| `none`, and an agent mark on the pull request's commits | **fail**: an agent changed code but there is no Receipt |
-| `none`, no agent mark, team policy `agent_prs` | **pass**: "Human change — no agent activity recorded" |
-| `none`, team policy `all_prs` | **fail** |
+| `none`, and an agent mark on the pull request's commits | waits up to `wait-minutes`, asking again every 15 s, because the Receipt may still be on its way; a Receipt that appears is decided as above. Still none: **fail**: "an agent changed code but there is no Receipt", with how long the gate waited |
+| `none`, no agent mark, team policy `agent_prs` | **pass** at once: "Human change — no agent activity recorded" |
+| `none`, no agent mark, team policy `all_prs` | **fail** at once |
 | `none`, and the commits could not be read | **fail** (check out with `fetch-depth: 0`) |
 | Platform unreachable, credentials refused, no credentials, malformed answer | **fail**, with the reason |
 | Pull request from a fork | **fail**: "Fork PRs can't be verified: GitHub gives them no credentials" |
@@ -76,6 +77,33 @@ Receipts whose verification is bound to that commit.
 Transient failures (network, HTTP 429 or 5xx) are retried within
 `wait-minutes`; a refused credential fails at once. A fresh OIDC token is
 minted for every request.
+
+**Why an agent change waits.** On a push, the gate and the workflow that
+creates the Receipt (for example Openshard Cloud Receipts, which runs the
+checks first) start together, so the gate's first answer is often `none`.
+The gate keeps asking within `wait-minutes`. A human change has nothing to
+wait for and is decided at once. The default of 15 minutes is set from
+Openshard's own Cloud Receipts runs (push to Receipt delivered: median 4.7,
+p90 8.5, longest 9.8 minutes over 50 runs; a `Claude-Session` commit can
+add up to 3 more). Set `wait-minutes` above the time your Receipt workflow
+takes, and keep the gate job's `timeout-minutes` at least `wait-minutes`
++ 5, or the job is cancelled before it can report.
+
+While it waits the gate prints one aligned, timestamped line a minute to
+the log (stderr), folded in a group, then a closing line with the decision:
+
+```
+::group::Openshard gate  ·  waiting up to 15m for the Platform  ·  Codex
+10:00:20Z  Openshard gate  ·  waiting for receipt       ·  Codex             ·  none         ·   0m / 15m
+10:01:20Z  Openshard gate  ·  waiting for receipt       ·  Codex             ·  none         ·   1m / 15m
+10:04:20Z  Openshard gate  ·  waiting for verification  ·  Codex             ·  pending      ·   4m / 15m
+::endgroup::
+10:04:35Z  Openshard gate  ·  passed                    ·  Codex             ·  verified     ·   4m / 15m
+```
+
+In an interactive terminal it shows the same fields as a spinner instead,
+unless `NO_COLOR` is set or `TERM` is `dumb`. The gate's stdout (the
+`Openshard gate: pass` line and the headline) is unchanged.
 
 **Agent marks** are the trailers Openshard already defines, in any commit
 from the pull request's base to its head, or in the pull request body:
@@ -110,9 +138,10 @@ timeout cover the gap.
 
 Known gap: a Receipt is sealed when the agent's turn ends. If an agent
 commits and pushes in the same turn and the gate runs before the turn ends,
-the Platform can have no Receipt yet. A commit with agent marks then fails
-(re-run the check once the Receipt has synced); a commit with no marks under
-`agent_prs` passes as a human change.
+the Platform can have no Receipt yet. A commit with agent marks then waits
+up to `wait-minutes` for it and fails if it has not arrived (re-run the check
+once the Receipt has synced); a commit with no marks under `agent_prs`
+passes as a human change.
 
 ## Which commit is gated
 
@@ -138,14 +167,18 @@ includes the pull request's commits.
 
 ## The summary
 
-The job summary (the run's Summary tab) shows the decision and, for every
-Receipt the Platform returned: a link to it in Openshard, status, agent,
-model, task, files changed, lines added and removed, each check with its
-outcome and evidence source, the verification result with when and which
-commit it is bound to, cost with its source, approvals, whether the Platform
-witnessed the capture, whether its signature verified, and the Receipt's
-`merge_check` (whether its work merged cleanly into the default branch at
-capture) as information only. Anything the Platform does not record reads
+The job summary (the run's Summary tab) reads like the receipt card in
+Openshard: a one-line verdict (`Openshard gate · Passed` or `· Failed`), the
+reason, the commit and the Platform's answer. Then, for every Receipt the
+Platform returned, a two-column table in the card's order: Result (status,
+the verification result when it differs, the commit it is bound to and
+when), Agent, Model, Authorship (when the Platform sends it), Task, Changes
+(files, lines added and removed), Checks (`2/2 passed`, or each outcome
+named), Cost (`~` marks an estimate, with its source), Witnessed (and
+whether the signature verified) and a link to the Receipt. Each check with
+its outcome and evidence source, the approvals, and the Receipt's
+`merge_check` (information only) are folded under "Checks and approvals".
+Each field appears once. Anything the Platform does not record reads
 `unknown`, never zero. Only a witnessed Receipt is described as having a
 detectable rewrite, and being witnessed is not being verified. All text is
 escaped before it is written.

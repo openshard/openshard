@@ -70,7 +70,11 @@ class TestDecision:
     def test_none_with_agent_marks_fails(self):
         r = decide(SHA, _verdict("none"), agent_marks=["Openshard-Agent"])
         assert r.status == "fail" and "an agent changed code but there is no Receipt" in r.headline
-        assert "Openshard-Agent" in r.headline
+        assert "Openshard-Agent" in r.headline and "waited" not in r.headline
+
+    def test_none_with_agent_marks_says_how_long_it_waited(self):
+        r = decide(SHA, _verdict("none"), agent_marks=["Openshard-Agent"], waited_minutes=10)
+        assert r.status == "fail" and r.headline.endswith("The gate waited 10 min for one.")
 
     def test_none_without_marks_under_agent_prs_passes_as_human(self):
         r = decide(SHA, _verdict("none", policy="agent_prs"), agent_marks=[])
@@ -103,42 +107,59 @@ class TestDecision:
 # --- summary ----------------------------------------------------------------
 
 class TestSummary:
-    def test_every_field_is_shown(self):
+    def test_every_field_is_shown_once_in_card_order(self):
         md = "\n".join(render_receipt(FULL_RECEIPT))
-        assert "[open in Openshard](https://app.openshard.dev/o/receipts/rcpt_1)" in md
-        for row in ("| Agent | Claude Code |", "| Model | claude-opus-5-5 |", "| Task | Fix the widget |",
-                    "| Files changed | 3 |", "| Lines | +40 / -2 |",
-                    "| Verification | verified, at 2026-10-21T09:59:00Z, bound to commit aaaaaaaaaaaa |",
-                    "| Cost | \\$0.42 (official\\_rate\\_estimate) |",
-                    "| Approvals | requires\\_approval: True, request\\_source: policy, granted: True, "
-                    "decision\\_source: human |",
-                    "| Platform-witnessed | yes |", "| Signature verified | yes |",
-                    "| pytest | passed | independently\\_verified |", "| ruff | failed | agent\\_reported |",
+        rows = ["| Result | Verified · bound to commit aaaaaaaaaaaa · at 2026-10-21T09:59:00Z |",
+                "| Agent | Claude Code |", "| Model | claude-opus-5-5 |", "| Task | Fix the widget |",
+                "| Changes | 3 files · +40 / −2 |", "| Checks | 1 passed · 1 failed (ruff) |",
+                "| Cost | \\~\\$0.4213 · official rate estimate |", "| Witnessed | Yes · signature verified |",
+                "| Receipt | [Open in Openshard](https://app.openshard.dev/o/receipts/rcpt_1) |"]
+        at = [md.index(row) for row in rows]
+        assert at == sorted(at)
+        assert md.startswith("#### Receipt rcpt\\_1 · Verified")
+        folded = md[md.index("<details><summary>Checks (2) and approvals</summary>"):md.index("</details>")]
+        for row in ("| pytest | passed | independently verified |", "| ruff | failed | agent reported |",
+                    "| Approvals | requires approval: yes, request source: policy, granted: yes, "
+                    "decision source: human |",
                     "| Merge check (informational) | no conflicts with origin/main, 2 commit(s) behind"):
-            assert row in md, row
+            assert row in folded, row
+        for name in ("Agent", "Model", "Cost", "Witnessed", "Approvals", "pytest"):
+            assert md.count(f"| {name} |") == 1, name
         assert "detectable" in md and "not being verified" in md
+        assert "Authorship" not in md
+
+    def test_authorship_is_shown_when_the_platform_sends_it(self):
+        md = "\n".join(render_receipt({**FULL_RECEIPT, "authorship": "agent_authored"}))
+        assert md.index("| Model |") < md.index("| Authorship | agent authored |") < md.index("| Task |")
 
     def test_unknown_is_unknown_never_zero(self):
         md = "\n".join(render_receipt(EMPTY_RECEIPT))
-        for row in ("Agent", "Model", "Task", "Files changed", "Lines", "Cost", "Approvals", "Signature verified"):
+        for row in ("Agent", "Model", "Task", "Changes", "Cost", "Approvals"):
             assert f"| {row} | unknown |" in md, row
-        assert "| Verification | not\\_recorded, time unknown, bound commit unknown |" in md
-        assert "| Platform-witnessed | no |" in md and "Checks: none recorded." in md
+        assert "| Result | Pending · verification not recorded · bound commit unknown · time unknown |" in md
+        assert "| Witnessed | No · signature unknown |" in md and "| Checks | none recorded |" in md
+        assert "Checks: none recorded." in md and "| Receipt | no link |" in md
         lenient = "\n".join(render_receipt({**EMPTY_RECEIPT, "checks": None, "verification": None}))
-        assert "| Verification | unknown |" in lenient and "Checks: unknown." in lenient
+        assert "| Result | Pending · verification unknown |" in lenient
+        assert "| Checks | unknown |" in lenient and "Checks (unknown)" in lenient
         assert "$0" not in md and "| 0 |" not in md and "detectable" not in md
-        assert "open in Openshard" not in md  # no URL, no link
+        assert "Open in Openshard" not in md  # no URL, no link
 
     def test_partial_counts_stay_partial(self):
         md = "\n".join(render_receipt({**EMPTY_RECEIPT, "lines_added": 5}))
-        assert "| Lines | +5 / -unknown |" in md
+        assert "| Changes | files unknown · +5 / −unknown |" in md
+
+    def test_all_passed_checks_read_as_a_fraction(self):
+        md = "\n".join(render_receipt({**EMPTY_RECEIPT, "checks": [
+            {"name": "a", "outcome": "passed", "source": "x"}, {"name": "b", "outcome": "passed", "source": "x"}]}))
+        assert "| Checks | 2/2 passed |" in md
 
     def test_empty_lists_are_none_recorded(self):
         md = "\n".join(render_receipt({**EMPTY_RECEIPT, "approvals": [], "checks": []}))
         assert "| Approvals | none recorded |" in md and "Checks: none recorded." in md
 
     def test_a_real_zero_cost_is_shown(self):
-        assert "| Cost | \\$0.0000 (provider) |" in "\n".join(render_receipt(
+        assert "| Cost | \\$0.0000 · provider |" in "\n".join(render_receipt(
             {**EMPTY_RECEIPT, "cost": {"usd": 0, "source": "provider"}}))
 
     def test_hostile_text_cannot_inject(self):
@@ -155,7 +176,8 @@ class TestSummary:
     def test_decide_lists_every_receipt(self):
         md = decide(SHA, _verdict("failed", receipts=[FULL_RECEIPT, EMPTY_RECEIPT])).summary_markdown
         assert "#### Receipt rcpt\\_1" in md and "#### Receipt rcpt\\_2" in md
-        assert "Platform answer: failed" in md
+        assert md.startswith("### Openshard gate · Failed\n\nVerification failed for this commit.\n")
+        assert "Commit `aaaaaaaaaaaa` · Platform answer failed · checked 2026-10-21T10:00:00Z" in md
 
 
 class TestPlatformContract:
@@ -176,11 +198,11 @@ class TestPlatformContract:
         assert r.status == "pass"
         md = r.summary_markdown
         assert "Merge queue: PR \\#7 head `aaaaaaaaaaaa` (queue commit `444444444444`)." in md
-        assert "[open in Openshard](https://app.openshard.dev/receipts/rcpt_29c27d6dc7309152fe77c9ff6e0a979d)" in md
+        assert "[Open in Openshard](https://app.openshard.dev/receipts/rcpt_29c27d6dc7309152fe77c9ff6e0a979d)" in md
         for row in ("| Agent | Codex |", "| Model | unknown |", "| Cost | unknown |", "| Approvals | unknown |",
-                    "| Signature verified | unknown |", "| Platform-witnessed | no |",
-                    "| Verification | passed, at 2026-10-20T12:00:05Z, bound to commit aaaaaaaaaaaa |",
-                    "| tests | passed | independently\\_verified |"):
+                    "| Witnessed | No · signature unknown |",
+                    "| Result | Verified · verification passed · bound to commit aaaaaaaaaaaa · at 2026-10-20T12:00:05Z |",
+                    "| tests | passed | independently verified |"):
             assert row in md, row
         assert "detectable" not in md
 
@@ -205,7 +227,7 @@ class TestPlatformContract:
         assert out.message.startswith("Verification incomplete (partial) after 0 min") and "verified_partial" in out.message
         r = decide(SHA, out)
         assert r.status == "fail" and "#### Receipt rcpt\\_2" in r.summary_markdown
-        assert "Platform answer: pending" in r.summary_markdown
+        assert "Platform answer pending" in r.summary_markdown
 
 
 # --- agent marks --------------------------------------------------------------
@@ -346,6 +368,23 @@ class TestPoll:
         out, _ = self._poll([blip] * 10, wait=30)
         assert isinstance(out, gp.PlatformError) and out.kind == gp.ERROR_UNREACHABLE and "Still failing" in out.message
 
+    def test_none_is_final_by_default(self):
+        out, clock = self._poll([_verdict("none"), _verdict("verified")])
+        assert out["status"] == "none" and clock.sleeps == []
+
+    def test_wait_on_none_until_a_receipt_appears(self):
+        clock = _Clock()
+        calls = iter([_verdict("none"), _verdict("none"), _verdict("pending"), _verdict("verified")])
+        out = gp.poll(lambda: next(calls), wait_seconds=600, interval=15, sleep=clock.sleep,
+                      monotonic=lambda: clock.now, wait_on_none=True)
+        assert out["status"] == "verified" and clock.sleeps == [15, 15, 15]
+
+    def test_wait_on_none_returns_none_at_the_deadline(self):
+        clock = _Clock()
+        out = gp.poll(lambda: _verdict("none"), wait_seconds=40, interval=15, sleep=clock.sleep,
+                      monotonic=lambda: clock.now, wait_on_none=True)
+        assert isinstance(out, dict) and out["status"] == "none" and sum(clock.sleeps) == 40
+
     def test_permanent_errors_stop_at_once(self):
         auth = gp.PlatformError(gp.ERROR_AUTH, "no")
         out, clock = self._poll([auth])
@@ -436,16 +475,50 @@ class TestCli:
         _commit(repo, "agent work\n\nOpenshard-Agent: Codex")
         head = _commit(repo, "plain follow-up")  # the mark is on an earlier commit in the range
         _serve(monkeypatch, [(200, _verdict("none", sha=head))])
-        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--json")
+        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--json", "--wait-minutes", "0")
         body = json.loads(res.output)
         assert res.exit_code == 1 and body["agent_marks"] == ["Openshard-Agent"]
+
+    def test_agent_change_waits_for_its_receipt(self, repo, monkeypatch):
+        # The race seen on #630: the gate asks before Cloud Receipts has delivered.
+        base = _git(repo, "rev-parse", "HEAD")
+        head = _commit(repo, "agent work\n\nOpenshard-Agent: Claude Code")
+        seen: list = []
+        _serve(monkeypatch, [(200, _verdict("none", sha=head)), (200, _verdict("none", sha=head)),
+                             (200, _verdict("verified", sha=head, receipts=[{**FULL_RECEIPT}]))], seen)
+        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--wait-minutes", "1")
+        assert res.exit_code == 0 and res.stdout.startswith("Openshard gate: pass")  # stdout contract unchanged
+        assert [s[0] for s in seen].count("api") == 3
+        progress = res.stderr.splitlines()
+        assert "waiting for receipt" in progress[0] and "Claude Code" in progress[0]
+        assert progress[-1].split("Z  ", 1)[1].startswith("Openshard gate  ·  passed")
+
+    def test_agent_change_still_without_receipt_fails_after_the_wait(self, repo, monkeypatch):
+        base = _git(repo, "rev-parse", "HEAD")
+        head = _commit(repo, "agent work\n\nOpenshard-Agent: Claude Code")
+        seen: list = []
+        _serve(monkeypatch, [(200, _verdict("none", sha=head))], seen)
+        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--wait-minutes", "0.01")
+        assert res.exit_code == 1 and "an agent changed code but there is no Receipt" in res.output
+        assert "The gate waited 0.01 min for one." in res.output
+        assert [s[0] for s in seen].count("api") > 1
+
+    @pytest.mark.parametrize("policy,code", [("agent_prs", 0), ("all_prs", 1)])
+    def test_human_change_is_decided_at_once(self, repo, monkeypatch, policy, code):  # and prints no progress
+        base = _git(repo, "rev-parse", "HEAD")
+        head = _commit(repo, "a human change")
+        seen: list = []
+        _serve(monkeypatch, [(200, _verdict("none", sha=head, policy=policy)),
+                             (200, _verdict("verified", sha=head))], seen)
+        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--wait-minutes", "10")
+        assert res.exit_code == code and [s[0] for s in seen].count("api") == 1 and res.stderr == ""
 
     def test_agent_mark_in_the_pr_body_counts(self, repo, monkeypatch, tmp_path):
         base = _git(repo, "rev-parse", "HEAD")
         head = _commit(repo, "change")
         _serve(monkeypatch, [(200, _verdict("none", sha=head))])
         event = {"pull_request": {"base": {"sha": base}, "head": {"sha": head}, "body": "Openshard-Agent: Claude Code"}}
-        assert _gate(repo, monkeypatch, "--commit", head, event=event, tmp=tmp_path).exit_code == 1
+        assert _gate(repo, monkeypatch, "--commit", head, "--wait-minutes", "0", event=event, tmp=tmp_path).exit_code == 1
 
     def test_unreadable_commit_range_fails(self, repo, monkeypatch):
         head = _commit(repo, "change")

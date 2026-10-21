@@ -9,7 +9,10 @@ organisation API key. Both return ``openshard.gate_verdict.v1``
 Every failure becomes a :class:`PlatformError` with a plain reason; nothing
 here ever stands in for a verdict. ``poll`` waits while the Platform says
 ``pending`` (and through transient errors) until a final answer or the
-deadline, and the deadline is itself an error. Never raises.
+deadline, and the deadline is itself an error. With ``wait_on_none`` it also
+waits while the Platform says ``none`` (an agent change whose Receipt may
+still be on its way) and, at the deadline, returns that ``none`` answer for
+the caller to decide. Never raises.
 """
 
 from __future__ import annotations
@@ -195,20 +198,30 @@ def poll(
     interval: float,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    wait_on_none: bool = False,
+    on_wait: Callable[[dict[str, Any] | PlatformError], None] | None = None,
 ) -> dict[str, Any] | PlatformError:
-    """Fetch until the verdict is final, a permanent error, or *wait_seconds* pass."""
+    """Fetch until the verdict is final, a permanent error, or *wait_seconds* pass.
+
+    *wait_on_none* treats ``none`` like ``pending`` until the deadline, then
+    returns the ``none`` answer itself (not a timeout error). *on_wait* sees
+    each answer the poll is about to wait on (for progress output only).
+    """
     deadline = monotonic() + max(0.0, wait_seconds)
     last: dict[str, Any] | None = None
     while True:
         result = fetch()
         if isinstance(result, dict) and result.get("status") == "pending":
             last = result
-        waiting = (isinstance(result, PlatformError) and result.transient) or (
+        none = wait_on_none and isinstance(result, dict) and result.get("status") == "none"
+        waiting = none or (isinstance(result, PlatformError) and result.transient) or (
             isinstance(result, dict) and result.get("status") == "pending")
         if not waiting:
             return result
         remaining = deadline - monotonic()
         if remaining <= 0:
+            if none:
+                return result
             minutes = f"{wait_seconds / 60:g}"
             if isinstance(result, PlatformError):
                 return PlatformError(ERROR_UNREACHABLE, f"{result.message} Still failing after {minutes} min.",
@@ -218,6 +231,8 @@ def poll(
                     f"Verification incomplete (partial) after {minutes} min: the Receipt's verification is "
                     f"{_incomplete(result)}, not a verified pass or failure."), last=result)
             return PlatformError(ERROR_TIMEOUT, f"Verification did not finish in {minutes} min.", last=result)
+        if on_wait is not None:
+            on_wait(result)
         sleep(min(interval, remaining))
 
 

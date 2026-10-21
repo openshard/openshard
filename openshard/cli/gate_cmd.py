@@ -1,9 +1,9 @@
 """``openshard ci gate``: the merge gate for one commit (docs/merge-gate.md).
 
-Asks the Openshard Platform for the commit's gate verdict
-(``ci/gate_platform.py``), waiting while verification is pending, reads the
-agent marks on the pull request's commits (``ci/agent_marks.py``) and this
-runner's own trusted evidence, and reduces them with
+Reads the agent marks on the pull request's commits (``ci/agent_marks.py``)
+and this runner's own trusted evidence, asks the Openshard Platform for the
+commit's gate verdict (``ci/gate_platform.py``), waiting while verification
+is pending or while an agent change has no Receipt yet, and reduces them with
 ``ci/merge_gate.decide`` to pass or fail. In GitHub Actions it writes the
 job summary and outputs. Nothing runs and nothing is written to the
 history. Exit 0 pass, 1 fail; there is no third outcome.
@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -104,20 +105,22 @@ def _is_fork(event: dict) -> bool:
     return isinstance(head, str) and isinstance(base, str) and head != base
 
 
-def _commit_marks(root: Path, head: str, base: str | None, pr_body: object) -> list[str] | None:
-    """Agent marks on the change's commits (and PR body); None when the commits could not be read."""
-    from openshard.ci.agent_marks import agent_marks
+def _commit_marks(root: Path, head: str, base: str | None, pr_body: object) -> tuple[list[str] | None, str | None]:
+    """Agent marks on the change's commits (and PR body), None when the commits could not be read,
+    and the agent they name (for progress output only)."""
+    from openshard.ci.agent_marks import agent_marks, agent_name
     from openshard.util.git import run_git
 
+    body = pr_body if isinstance(pr_body, str) else ""
     args = ["log", "--format=%B%x00", f"{base}..{head}"] if base else ["log", "-1", "--format=%B", head]
     messages = run_git(root, args)
     if messages is None:
-        return None
+        return None, agent_name(body)
     marks = agent_marks(messages)
-    for name in agent_marks(pr_body if isinstance(pr_body, str) else ""):
+    for name in agent_marks(body):
         if name not in marks:
             marks.append(name)
-    return marks
+    return marks, agent_name(messages) or agent_name(body)
 
 
 def _resolve(root: Path, ref: str) -> str | None:
@@ -128,7 +131,8 @@ def _resolve(root: Path, ref: str) -> str | None:
     return sha if is_sha(sha) else None
 
 
-def _platform_verdict(api: str, sha: str, env, *, wait_minutes: float, poll_seconds: float):
+def _platform_verdict(api: str, sha: str, env, *, wait_minutes: float, poll_seconds: float,
+                      wait_on_none: bool = False, progress=None):
     import httpx
 
     from openshard.ci import gate_platform as gp
@@ -138,7 +142,9 @@ def _platform_verdict(api: str, sha: str, env, *, wait_minutes: float, poll_seco
         return creds
     with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False) as http:
         return gp.poll(lambda: gp.fetch_once(api, sha, creds, http),
-                       wait_seconds=wait_minutes * 60, interval=poll_seconds)
+                       wait_seconds=wait_minutes * 60, interval=poll_seconds, wait_on_none=wait_on_none,
+                       on_wait=progress.observe if progress else None,
+                       sleep=progress.sleep if progress else time.sleep)
 
 
 @click.command("gate")
@@ -148,8 +154,9 @@ def _platform_verdict(api: str, sha: str, env, *, wait_minutes: float, poll_seco
               help="Where the change starts (default: from the GitHub event). Its commits are checked for agent marks.")
 @click.option("--api", default=None, metavar="URL",
               help="Openshard Platform API base (default: $OPENSHARD_GATE_API, else https://api.openshard.dev).")
-@click.option("--wait-minutes", type=click.FloatRange(min=0, max=360), default=10.0, show_default=True,
-              help="How long to wait while verification is pending before failing.")
+@click.option("--wait-minutes", type=click.FloatRange(min=0, max=360), default=15.0, show_default=True,
+              help="How long to wait while verification is pending, or while an agent change has no Receipt yet, "
+                   "before failing.")
 @click.option("--poll-seconds", type=click.FloatRange(min=0.1), default=POLL_SECONDS, hidden=True)
 @click.option("--strict", is_flag=True, default=False, hidden=True,
               help="Deprecated, no effect: the gate only passes or fails.")
@@ -176,6 +183,7 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
         _write_github_output,
         _write_github_step_summary,
     )
+    from openshard.cli.ui.gate_wait import GateWait
     from openshard.history.locate import locate_history
 
     env = dict(os.environ)
@@ -193,20 +201,33 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
     sha = _resolve(root, commit_ref)
     marks: list[str] | None = None
     local: str | None = None
+    wait_on_none = False
+    progress: GateWait | None = None
     platform: dict | gp.PlatformError
     if sha is None:
         platform = gp.PlatformError("error", f"{commit_ref!r} is not a full commit id in this repository.")
     elif not api_base.startswith(("https://", "http://localhost", "http://127.0.0.1")):
         platform = gp.PlatformError("error", "The Platform API base must be an https:// URL.")
     else:
-        platform = _platform_verdict(api_base, sha, env, wait_minutes=wait_minutes, poll_seconds=poll_seconds)
+        # Read before asking: an agent change's Receipt is often still being
+        # created (Cloud Receipts runs its checks first), so "none" on such a
+        # change means keep asking within --wait-minutes. A human change, or
+        # one this runner's own evidence decides, is decided at once.
+        local_now = _local_verdict(sha)
+        base = base_ref or _event_base(event)
+        pr = event.get("pull_request")
+        marks_now, agent = _commit_marks(root, sha, base, pr.get("body") if isinstance(pr, dict) else None)
+        wait_on_none = bool(marks_now) and local_now not in ("verified", "failed")
+        progress = GateWait(agent=agent, wait_minutes=wait_minutes, env=env)
+        platform = _platform_verdict(api_base, sha, env, wait_minutes=wait_minutes, poll_seconds=poll_seconds,
+                                     wait_on_none=wait_on_none, progress=progress)
         if isinstance(platform, dict) and platform.get("status") == "none":
-            local = _local_verdict(sha)
-            base = base_ref or _event_base(event)
-            pr = event.get("pull_request")
-            marks = _commit_marks(root, sha, base, pr.get("body") if isinstance(pr, dict) else None)
+            local, marks = local_now, marks_now
 
-    result = decide(sha or commit_ref, platform, local_verdict=local, agent_marks=marks)
+    result = decide(sha or commit_ref, platform, local_verdict=local, agent_marks=marks,
+                    waited_minutes=wait_minutes if wait_on_none else None)
+    if progress is not None:
+        progress.close("passed" if result.exit_code == 0 else "failed", result.verdict)
 
     if step_summary and not _write_github_step_summary(result.summary_markdown)[0]:
         click.echo("warning: GITHUB_STEP_SUMMARY is not set; step summary not written.", err=True)
