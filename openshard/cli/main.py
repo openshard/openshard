@@ -55,6 +55,8 @@ from openshard.cli.run_output import (
 from openshard.cli.run_output import (
     _Spinner as _Spinner,
 )
+from openshard.cli.setup_output import configured_agent_names as _configured_agent_names
+from openshard.cli.setup_output import render_components as _render_setup_components
 from openshard.cli.signing_cmd import signature_mode as _signature_mode
 from openshard.config.settings import (
     find_config_path,
@@ -615,7 +617,9 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
             raise SystemExit(1)
         return
 
-    _render_setup_result(result)
+    from openshard.cli.setup_output import render_setup_result
+
+    render_setup_result(result)
     if result.readiness == "not_ready":
         raise SystemExit(1)
 
@@ -661,113 +665,11 @@ def _telemetry_after_setup(result) -> None:
         pass
 
 
-def _render_setup_result(result) -> None:
-    """Human-readable rendering of a claude_setup.SetupResult for `openshard setup`."""
-    click.echo("\nOpenShard Setup\n")
-    _render_setup_components(result)
-    _render_setup_readiness(result)
-
-
-def _render_setup_components(result) -> None:
-    """One line per component of a claude_setup.SetupResult, as the installers reported it."""
-    click.echo(f"  Repository:    {'git repository' if result.is_git else 'not a git repository'}")
-    if result.is_git:
-        cli_label = "detected" if result.claude_cli.available else "not found"
-        click.echo(f"  Claude Code:   {cli_label}")
-    from openshard.adapters.claude_setup import HISTORY_RELPATH
-
-    history_label = "writable" if result.history_writable else "not writable"
-    click.echo(f"  Local history: {history_label} ({HISTORY_RELPATH.as_posix()})")
-
-    if result.mcp is not None:
-        mcp_state = {
-            "installed": "installed", "updated": "updated", "already_installed": "already configured",
-        }.get(result.mcp.status, result.mcp.status)
-        click.echo(f"  MCP:           {mcp_state}")
-    if result.hooks is not None:
-        hooks_state = {
-            "installed": "installed", "updated": "updated", "already_installed": "already configured",
-        }.get(result.hooks.status, result.hooks.status)
-        click.echo(f"  Auto-capture:  {hooks_state}")
-    if result.statusline is not None:
-        statusline_state = {
-            "installed": "installed", "already_installed": "already configured",
-            "skipped_existing": "skipped (custom status line present)",
-        }.get(result.statusline.status, result.statusline.status)
-        click.echo(f"  Enrichment:    {statusline_state}")
-    if result.capture_service is not None:
-        from openshard.adapters.capture_refresh import setup_service_line
-
-        click.echo(f"  Capture:       {setup_service_line(result.capture_service)}")
-    ignore_status = (getattr(result, "history_ignore", None) or {}).get("status")
-    if ignore_status in ("added", "already_ignored"):
-        where = "added to .git/info/exclude" if ignore_status == "added" else "already ignored"
-        click.echo(f"  Git ignore:    .openshard/ local state ({where})")
-    _commit_trailers.echo_setup_line(result, click.echo)
-    click.echo(f"  Improve OpenShard: {_telemetry_line(_telemetry_status())}")
-    # PR12: one line per additional agent, whether or not it was found.
-    _agent_state_labels = {
-        "installed": "installed", "updated": "updated", "already_installed": "already configured",
-        "skipped": "not found (skipped)", "skipped_existing": "skipped (custom file present)",
-        "skipped_optin": "detected; run `openshard capture install hermes`",
-        "error": "NOT configured",
-    }
-    for key, label in (
-        ("codex", "Codex:        "), ("opencode", "OpenCode:     "), ("cursor", "Cursor:       "),
-        ("antigravity", "Antigravity:  "), ("grok_build", "Grok Build:   "),
-        ("hermes", "Hermes:       "),
-    ):
-        agent_result = (result.agents or {}).get(key)
-        if agent_result is None:
-            continue
-        click.echo(f"  {label} {_agent_state_labels.get(agent_result.status, agent_result.status)}")
-
-
 def _display_next_steps(result) -> list[str]:
     from openshard.adapters.claude_setup import display_next_steps
 
     return display_next_steps(result)
 
-
-def _configured_agent_names(result) -> list[str]:
-    """Display names of the agents whose capture the installers actually configured."""
-    from openshard.adapters.agent_setup import agent_label as _agent_label
-
-    return ["Claude Code" if k == "claude_code" else _agent_label(k) for k in result.configured_agents()]
-
-
-def _render_setup_readiness(result) -> None:
-    """The readiness verdict and next steps of a claude_setup.SetupResult."""
-    agent_names = _configured_agent_names(result)
-    use_line = f"Use {', '.join(agent_names)} normally." if agent_names else "Use your coding agent normally."
-    open_line = (
-        f"Open {' or '.join(agent_names)} in this repository." if agent_names
-        else "Open your coding agent in this repository."
-    )
-
-    click.echo("")
-    if result.readiness == "ready":
-        click.echo(f"OpenShard is ready. {use_line}")
-        click.echo("\nNext steps:")
-        click.echo(f"  1. {open_line}")
-        click.echo("  2. Complete a normal coding task.")
-        click.echo("  3. Run `openshard last` to see the captured Receipt.")
-        for step in _display_next_steps(result):
-            click.echo(f"  ! {step}")
-    elif result.readiness == "ready_partial":
-        click.echo("OpenShard is ready, with limitations (see below).")
-        click.echo(f"{use_line} Shards and receipts are still recorded.")
-        click.echo("\nNext steps:")
-        click.echo(f"  1. {open_line}")
-        click.echo("  2. Complete a normal coding task.")
-        click.echo("  3. Run `openshard last` to see the captured Receipt.")
-        for step in _display_next_steps(result):
-            click.echo(f"  ! {step}")
-    else:
-        click.echo("OpenShard setup is incomplete.")
-        click.echo("\nNext step:")
-        for step in _display_next_steps(result):
-            click.echo(f"  - {step}")
 
 
 _LINK_CHECK_LABELS = {
@@ -892,7 +794,7 @@ def _connect_next_steps(link, check, result) -> list[str]:
 def _render_connect_result(link, stored: bool, check, result, next_steps: list[str], *, source_env: bool) -> None:
     from openshard.sync.config import CONFIG_FILENAME
 
-    click.echo("\nOpenShard Connect\n")
+    click.echo("\nOpenshard connect\n")
     click.echo(f"  Platform:      {link.endpoint}")
     click.echo(f"  Organisation:  {link.organisation_id}")
     where = "from OPENSHARD_PLATFORM_* environment variables" if source_env else (
@@ -7478,7 +7380,11 @@ def sync_group() -> None:
 def _render_sync_status(doc: dict) -> None:
     link = doc.get("link") or {}
     if not doc.get("connected"):
-        click.echo("Platform sync: not connected  (openshard sync connect --endpoint ... --org ... --api-key ...)")
+        captured = doc.get("platform_link") or {}
+        if captured.get("kind") == "connected":  # connected capture sends Receipts without an API key link
+            click.echo(f"Platform: {captured.get('text')}  (`openshard remote status` shows each session)")
+        else:
+            click.echo("Platform sync: not connected; Receipts stay on this machine  (run `openshard login`)")
         return
     state = "on"
     if doc.get("disabled"):
@@ -7562,10 +7468,11 @@ def sync_disconnect(as_json: bool) -> None:
 @_telemetry_command("sync.status")
 def sync_status(as_json: bool) -> None:
     """Show where Receipts sync to and what this repository still has to send."""
+    from openshard.onboarding.platform_link import platform_link
     from openshard.sync.client import status
 
     loc = _locate_history()
-    doc = status(loc.root)
+    doc = {**status(loc.root), "platform_link": platform_link(loc.root).to_dict()}
     if as_json:
         click.echo(json.dumps(doc, indent=2))
     else:
