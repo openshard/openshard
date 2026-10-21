@@ -3485,7 +3485,7 @@ def _fold(buf: dict, repo_root: Path, *, finalize: bool = False) -> tuple[dict, 
     from openshard.history.jsonl_store import upsert_jsonl_with
 
     fidelity.flush_event_archive(repo_root / ".openshard", buf)  # the record counts only what the log holds
-    fidelity.note_coverage_gaps(buf)  # transcript work no hook delivered, judged at settled points
+    fidelity.note_coverage_gaps(buf, repo_root)  # transcript work no hook delivered, judged at settled points
     if finalize:
         stored = buf.get("git_outcome") if isinstance(buf.get("git_outcome"), dict) else None
         git_outcome = _merge_git_outcome(_session_git_outcome(buf, repo_root, previous=stored), stored)
