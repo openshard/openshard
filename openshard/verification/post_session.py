@@ -378,17 +378,33 @@ def commit_tree(repo_root: Path, sha: str) -> str | None:
     return out if re.fullmatch(r"[0-9a-f]{40,64}", out) else None
 
 
+# What a check must never inherit: the live agent session and workspace it was
+# started from, and the Platform connection. The automatic re-check is started
+# by the capture service, which Claude Code launched with CLAUDE_PROJECT_DIR set
+# to the real workspace; a checked project's tests that run Openshard hooks would
+# otherwise record fake Receipts into that workspace, under the live session.
+_SESSION_ENV = frozenset({
+    "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_REMOTE_SESSION_ID",
+    "OPENSHARD_TASK_ID", "OPENSHARD_PARENT_TASK_ID", "OPENSHARD_CORRELATION_CONTEXT", "OPENSHARD_CAPTURE_PORT",
+})
+_SESSION_ENV_PREFIXES = ("OPENSHARD_CONNECTED_", "OPENSHARD_PLATFORM_", "OPENSHARD_REMOTE_", "OPENSHARD_GATE_")
+
+
 def check_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
-    """The environment a check runs in: OpenShard's own, plus *extra*, minus the Windows venv launcher hint.
+    """The environment a check runs in: OpenShard's own, plus *extra*, minus what must not cross over.
 
     A venv's ``python.exe`` on Windows sets ``__PYVENV_LAUNCHER__``; a child
     interpreter that inherits it adopts *that* venv's site-packages. A
     project's own ``.venv`` Python would then test against OpenShard's
     packages instead of the project's -- so the hint never crosses over.
+    Nor does the live session, workspace or Platform connection
+    (``_SESSION_ENV``), and a check never starts another automatic re-check.
     """
     import os
 
-    env = {k: v for k, v in os.environ.items() if k != "__PYVENV_LAUNCHER__"}
+    env = {k: v for k, v in os.environ.items()
+           if k != "__PYVENV_LAUNCHER__" and k not in _SESSION_ENV and not k.startswith(_SESSION_ENV_PREFIXES)}
+    env["OPENSHARD_NO_AUTO_VERIFY"] = "1"
     env.update(extra or {})
     return env
 

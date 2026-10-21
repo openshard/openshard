@@ -24,6 +24,18 @@ _LIVE_CREDENTIAL_ENV = (
     "OPENSHARD_REMOTE_CAPTURE_URL",
     "OPENSHARD_REMOTE_TOKEN",
 )
+# The live agent session and workspace this suite may run under (an agent's
+# shell, or Openshard's automatic re-check started by its capture service). A
+# hook a test runs would otherwise record into that real workspace and session.
+_LIVE_SESSION_ENV = (
+    "CLAUDE_PROJECT_DIR",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_REMOTE_SESSION_ID",
+    "OPENSHARD_TASK_ID",
+    "OPENSHARD_PARENT_TASK_ID",
+    "OPENSHARD_CORRELATION_CONTEXT",
+    "OPENSHARD_CAPTURE_PORT",
+)
 
 def _isolate_user_home() -> tuple[str, str]:
     """Point every home-directory variable at a throw-away directory, for the whole run.
@@ -53,7 +65,7 @@ def _isolate_user_home() -> tuple[str, str]:
     drive, rest = os.path.splitdrive(home)
     if drive:
         os.environ["HOMEDRIVE"], os.environ["HOMEPATH"] = drive, rest
-    for name in _LIVE_CREDENTIAL_ENV:
+    for name in (*_LIVE_CREDENTIAL_ENV, *_LIVE_SESSION_ENV):
         os.environ.pop(name, None)
     return real, home
 
