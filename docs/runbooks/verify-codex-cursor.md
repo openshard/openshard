@@ -36,3 +36,4 @@ Use a git repository with a small, fast test suite (pytest installed in its
 **Send back:** the output of `openshard doctor --json`, `openshard last --json`,
 `openshard verdict --commit <sha> --json`, `openshard sync status --json`, the agent and
 its version (`codex --version`, or Cursor → About), and the Receipt link from the app if it appeared.
+Last checked by an automated proof run on 21 October 2026.
