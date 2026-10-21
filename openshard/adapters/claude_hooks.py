@@ -3042,7 +3042,12 @@ def _refresh_git_outcome_on_stop(buf: dict, repo_root: Path) -> None:
         return
     try:
         stored = buf.get("git_outcome") if isinstance(buf.get("git_outcome"), dict) else None
-        if stored is not None:
+        # A commit-making command reported after the stored outcome was computed
+        # (Codex delivers PostToolUse asynchronously, so it can land after the
+        # turn's Stop) is new corroboration: recompute even when HEAD is unchanged.
+        writes = [w for w in (buf.get("git_write_at") or []) if isinstance(w, str)]
+        last_write = writes[-1] if writes else None
+        if stored is not None and last_write == buf.get("git_outcome_last_write"):
             head = _sha_or_none(run_git(repo_root, ["rev-parse", "HEAD"]))
             if head is None:
                 return
@@ -3051,6 +3056,7 @@ def _refresh_git_outcome_on_stop(buf: dict, repo_root: Path) -> None:
         merged = _merge_git_outcome(_session_git_outcome(buf, repo_root, previous=stored), stored)
         if merged is not None:
             buf["git_outcome"] = merged
+            buf["git_outcome_last_write"] = last_write
     except Exception:
         pass
 
