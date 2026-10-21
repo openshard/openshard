@@ -199,11 +199,13 @@ def poll(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     wait_on_none: bool = False,
+    on_wait: Callable[[dict[str, Any] | PlatformError], None] | None = None,
 ) -> dict[str, Any] | PlatformError:
     """Fetch until the verdict is final, a permanent error, or *wait_seconds* pass.
 
     *wait_on_none* treats ``none`` like ``pending`` until the deadline, then
-    returns the ``none`` answer itself (not a timeout error).
+    returns the ``none`` answer itself (not a timeout error). *on_wait* sees
+    each answer the poll is about to wait on (for progress output only).
     """
     deadline = monotonic() + max(0.0, wait_seconds)
     last: dict[str, Any] | None = None
@@ -229,6 +231,8 @@ def poll(
                     f"Verification incomplete (partial) after {minutes} min: the Receipt's verification is "
                     f"{_incomplete(result)}, not a verified pass or failure."), last=result)
             return PlatformError(ERROR_TIMEOUT, f"Verification did not finish in {minutes} min.", last=result)
+        if on_wait is not None:
+            on_wait(result)
         sleep(min(interval, remaining))
 
 

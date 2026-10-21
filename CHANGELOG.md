@@ -10,7 +10,8 @@ All notable changes to OpenShard are documented here.
   (`uses: openshard/openshard@<ref>`) and `openshard ci gate --commit <sha>`.
   It reads the head commit's Receipt from the Openshard Platform with a
   GitHub OIDC token (or an organisation API key) and only passes or fails:
-  verified passes; failed fails; pending waits up to `wait-minutes` and then
+  verified passes; failed fails; pending waits up to `wait-minutes` (default
+  15, with a progress line a minute in the log) and then
   fails; no Receipt, when the pull request's commits carry Openshard agent
   trailers, waits up to `wait-minutes` for the Receipt to arrive and then
   fails, and otherwise is decided at once and follows the team's `require_receipt` policy

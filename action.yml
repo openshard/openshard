@@ -10,9 +10,9 @@ branding:
 
 inputs:
   wait-minutes:
-    description: "How long to wait while verification is pending, or while an agent change has no Receipt yet, before failing."
+    description: "How long to wait while verification is pending, or while an agent change has no Receipt yet, before failing. Keep the job's timeout-minutes at least 5 above it."
     required: false
-    default: "10"
+    default: "15"
   api:
     description: "Openshard Platform API base."
     required: false

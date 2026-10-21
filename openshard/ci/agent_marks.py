@@ -43,6 +43,8 @@ _CLAUDE_SESSION_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _CANONICAL = {k.lower(): k for k in _METADATA_KEYS}
+_AGENT_RE = re.compile(r"^Openshard-Agent:[ \t]*(\S[^\r\n]*)$", re.IGNORECASE | re.MULTILINE)
+_MAX_NAME = 40
 
 
 def agent_marks(text: object) -> list[str]:
@@ -59,4 +61,16 @@ def agent_marks(text: object) -> list[str]:
     return found
 
 
-__all__ = ["agent_marks"]
+def agent_name(text: object) -> str | None:
+    """The agent a change names, for display only: the first ``Openshard-Agent`` value, else
+    ``Claude Code`` for a ``Claude-Session`` trailer, else None. A claim, never attribution. Never raises."""
+    if not isinstance(text, str) or not text:
+        return None
+    match = _AGENT_RE.search(text)
+    if match:
+        name = "".join(ch for ch in match.group(1) if ch.isprintable()).strip()
+        return name[:_MAX_NAME] or None
+    return "Claude Code" if _CLAUDE_SESSION_RE.search(text) else None
+
+
+__all__ = ["agent_marks", "agent_name"]
