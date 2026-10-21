@@ -3228,7 +3228,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         tokens_current = dict(transcript_usage.get("totals") or {})
         tokens_source = TOKENS_SOURCE_TRANSCRIPT
     elif buf.get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
-        tokens_current = None
+        tokens_current = estimated_cost = cost_provenance = None  # a status-line cost here is the owner's too
         tokens_not_recorded = USAGE_ELSEWHERE_REASON
     elif buf.get("tokens_scope") == "last_call":
         # Only the status line's last-call figures are known: never recorded
