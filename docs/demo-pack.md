@@ -4,7 +4,7 @@ This guide covers everything you need to record or present a 60-second or 3-minu
 
 ## What OpenShard is
 
-OpenShard is a control layer for AI coding and infrastructure agents. It routes tasks to the right model, records every action in a run receipt, gates risky changes behind approval and dry-run steps, and gives developers a verifiable audit trail for every AI-assisted change.
+Openshard is receipts for AI coding agents: what changed, whether it was independently verified, and what it cost. When Openshard runs a task itself (the native run shown in this demo), it also routes the task to a model and gates risky changes behind approval and dry-run steps.
 
 ## The demo premise
 

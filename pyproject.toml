@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openshard"
 version = "0.4.18"
-description = "Receipts for AI coding agents: what ran, what changed, what was verified and what it cost."
+description = "Receipts for AI coding agents: what changed, whether it was independently verified, and what it cost."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]

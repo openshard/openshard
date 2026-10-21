@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/openshard-wordmark-white.png">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/openshard-wordmark-black.png">
-    <img src="docs/assets/openshard-wordmark-black.png" alt="Openshard" width="700">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/openshard/openshard/main/docs/assets/openshard-wordmark-white.png">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/openshard/openshard/main/docs/assets/openshard-wordmark-black.png">
+    <img src="https://raw.githubusercontent.com/openshard/openshard/main/docs/assets/openshard-wordmark-black.png" alt="Openshard" width="700">
   </picture>
 </p>
 
@@ -11,365 +11,103 @@
 </p>
 
 <p align="center">
-  Use Claude Code, Codex, Cursor, OpenCode, Google Antigravity, Hermes Agent, Grok Build or Grok Bot normally. Openshard keeps a clear record of what happened: what ran, what changed, what was verified, what it cost, and what it could not establish.
+  Proof of what every agent change did, whether it was independently verified, and what it cost, before it merges.
 </p>
 
 <p align="center">
-  <strong>Agents write code. Openshard keeps the receipt.</strong>
-</p>
-
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge" alt="License"></a>
+  <a href="https://github.com/openshard/openshard/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge" alt="License"></a>
   <a href="https://pypi.org/project/openshard/"><img src="https://img.shields.io/pypi/v/openshard?style=for-the-badge&label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge" alt="Status"></a>
+  <img src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge" alt="Status">
 </p>
 
-<p align="center">
-  <a href="docs/">Docs</a> ·
-  <a href="CHANGELOG.md">Changelog</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a> ·
-  <a href="SECURITY.md">Security</a>
-</p>
+Keep using Claude Code, Codex, Cursor or another supported agent the way you do now. When it finishes, Openshard gives you a receipt: what ran, what changed, whether the checks were re-run by something other than the agent, what it cost, and what could not be established.
 
----
-
-## See Openshard in action
-
-Getting your first receipt takes a couple of commands:
+## Quickstart
 
 ```bash
-pip install openshard
-cd my-project
-openshard setup
-```
-
-Now use your coding agent (Claude Code, Codex, Cursor, OpenCode, Google Antigravity or Grok Build; Hermes Agent and Grok Bot need one extra step, see [Supported coding agents](#supported-coding-agents)) as you normally would. When the agent finishes:
-
-```bash
-openshard last
-```
-
-Openshard records the available evidence from the run and turns it into a receipt you can inspect locally.
-
-```text
-your coding agent
-       ↓
-does the work
-       ↓
-Openshard captures the available evidence
-       ↓
-receipt
-```
-
-You keep your existing coding workflow and Openshard gives that work a record.
-
-<!--
-Add the short product demo here once recorded.
-
-Recommended length: 15 to 25 seconds.
-
-Show:
-1. openshard setup
-2. a normal task in one of the supported coding agents
-3. openshard last
-4. the resulting receipt
-
-One demo is enough. The supported agents section below shows that the same receipt layer works across every supported integration.
--->
-
----
-
-## What does a receipt tell you?
-
-A receipt is the saved record of an AI coding run.
-
-Depending on what the agent and its integration expose, Openshard can record the task, coding agent, model, inspected files, file changes, checks, estimated token usage and cost, actions taken during the run, capture completeness, result state, and integrity information.
-
-Each new receipt also has a globally unique `receipt_id`, while the existing `shard_id` remains available for compatibility with local repo history.
-
-The important part is not simply collecting more fields. It is being clear about what Openshard actually knows.
-
----
-
-## Why receipts?
-
-AI coding agents have long moved past autocomplete and now carry out significant work in real production workflows. They inspect repositories, edit files, run commands, execute tests, call tools, and increasingly work on tasks that previously belonged entirely to developers.
-
-Git gives us a durable history of code changes, but it does not always tell us what happened during the AI work around those changes. Which agent handled the task? Which model was used? What did the agent report changing? Which checks actually ran? What failed? What did the run cost? Was any evidence missed? Can we still trust the record we are looking at later?
-
-Openshard exists to preserve that context.
-The coding agent still does the coding and Openshard keeps the receipt.
-
-Over time, your receipts become a system of record for AI engineering.
-
----
-
-## Openshard doesn't guess
-
-Receipts stop being useful if uncertain information is presented as fact.
-
-Openshard is deliberately conservative about what it claims. If the model is unknown, it says `unknown`. If cost was not captured, it says `not recorded`. If part of a session was missed, the receipt records a partial capture.
-
-The same principle applies to code changes. A working tree might already contain human edits, another agent might be active at the same time, or Git might show that a file changed without providing enough evidence to establish who caused it.
-
-Openshard therefore separates files an agent reported changing from changes that were only observed by Git, pre-existing changes, and changes associated with another recorded session. If Openshard cannot establish the actor, it says so.
-
-A finished agent turn is also not automatically treated as proof that the code is correct. An agent can finish successfully while its work remains unverified, so Openshard can report the turn as `Turn completed (unverified)`.
-
-The aim is simple: record the evidence that exists without filling the gaps with guesses.
-
----
-
-## Receipt identity and integrity
-
-Every new receipt receives a globally unique `receipt_id` when it is created.
-
-Unlike the existing repo-local `shard_id`, the receipt ID is designed to remain unique across repositories, machines, developers, and organisations.
-
-Receipts can also carry a content fingerprint. Openshard can use that fingerprint to check whether the stored record still matches the content from which it was produced.
-
-This is an integrity check on the receipt itself. It is not a claim that the underlying code is correct.
-
-Each finished receipt is also sealed with an Ed25519 key kept on your machine (`~/.openshard/keys/`), so a sealed receipt can't be changed afterwards without its seal showing it, by anyone who does not have that key. The limit, stated plainly: a coding agent running as your OS user can read that key and seal a forged record, and a seal does not make anything the agent said true. Signing is on by default; set `OPENSHARD_RECEIPT_SIGNING=off` to turn it off. `openshard verify --signature` checks a receipt's seals offline and runs nothing; `--bundle OUT.json` writes a file anyone can check with `--file`. Older receipts read "Checksum only (not signed)". See [Signed Receipts](docs/signing.md).
-
----
-
-## Supported coding agents
-
-Openshard currently captures receipts from:
-
-| Coding agent | Receipt capture |
-| --- | --- |
-| Claude Code | Supported |
-| Codex | Supported |
-| Cursor | Supported |
-| OpenCode | Supported |
-| Google Antigravity | Supported (hooks; see [agent capture](docs/agent-capture.md#google-antigravity-integration)) |
-| Grok Build | Supported (native hooks; see [agent capture](docs/agent-capture.md#grok-build-integration)) |
-| Hermes Agent | Supported (shell hooks, observation only; `openshard capture install hermes`; see [agent capture](docs/agent-capture.md#hermes-agent-integration)) |
-| Grok Bot (Cursor) | Enterprise: Cursor Action Recording via OpenTelemetry (platform-observed). Other plans: self-report skill (agent-reported only). See [Grok Bot](docs/grok-bot.md) |
-
-All of them can contribute to the same local Openshard history in a repo. You can move between supported agents without creating separate receipt stores or changing the way you normally use those tools.
-
-Run:
-
-```bash
-openshard doctor
-```
-
-to see which integrations are configured and what Openshard can currently capture.
-
----
-
-## Getting around your receipt history
-
-The basic workflow is intentionally small.
-
-See the most recent receipt:
-
-```bash
-openshard last
-```
-
-See more detail:
-
-```bash
-openshard last --more
-openshard last --full
-```
-
-Browse recent AI coding work in the repo:
-
-```bash
-openshard history
-```
-
-See repo-level statistics:
-
-```bash
-openshard stats
-```
-
-Check the installation and agent integrations:
-
-```bash
-openshard doctor
-```
-
-The main receipt commands also support JSON, which makes them useful in scripts and other tooling:
-
-```bash
-openshard last --json
-openshard history --json
-openshard stats --json
-```
-
----
-
-## How capture works
-
-`openshard setup` detects whatever supported coding agents are available for the repo and configures their supported integration points.
-
-The implementation differs slightly between agents. Openshard can use hooks, plugins, local configuration, and MCP-based integration depending on what each tool exposes. Those events are normalised into the same receipt history and passed through a local authenticated capture service.
-
-That means every supported agent can leave receipts in the same repo history even though the agents themselves work differently.
-
-For the deeper implementation details, see [Agent capture](docs/agent-capture.md).
-
----
-
-## Local-first
-
-The open-source receipt layer is local-first. Your receipt history stays with the repo and can be inspected offline.
-
-You do not need a hosted Openshard account to create or inspect local receipts.
-
-Raw developer content is not sent to Openshard by default. Basic privacy-safe product telemetry may be collected after setup, such as versions, counts, timings, and error categories. It does not include code, prompts, file names, or receipt contents.
-
-Telemetry can be disabled at any time:
-
-```bash
-openshard telemetry off
-```
-
-See [Telemetry](docs/telemetry.md) for the full behaviour.
-
----
-
-## Optional hosted sync
-
-Receipts stay local by default. If you want them visible beyond your own
-machine, `openshard sync` sends copies of this repository's Receipts to an
-Openshard Platform organisation:
-
-```bash
-openshard login
-openshard sync now
-openshard sync status
-```
-
-`openshard login` is the easiest path: it shows a short code, opens the
-Platform's approval page, and once an organisation owner or admin approves
-it, stores the organisation key and then does everything `openshard connect`
-does. Nothing to copy. It talks to `https://api.openshard.dev` unless you
-pass `--endpoint`; use `--no-browser` on a machine without one.
-
-With an API key instead, `openshard connect --endpoint <url> --org <org-id>`
-stores the link, checks that the Platform accepts the
-key for that organisation, and runs the same agent setup as `openshard
-setup`, so it is also the one command to run on a fresh machine.
-`openshard sync connect` still stores the link on its own.
-
-Sync is off until you run `login` or `connect`, sends only the same bounded fields
-`openshard history --json` already prints (no prompts, transcripts, diffs,
-or file contents), and is retry-safe and idempotent: replaying `sync now`
-never duplicates a Receipt. See [Platform sync](docs/platform-sync.md) for
-the full contract.
-
-Synced Receipts appear in the hosted Platform at
-[app.openshard.dev](https://app.openshard.dev), grouped into tasks.
-
----
-
-## Installation
-
-The standard installation is:
-
-```bash
-pip install openshard
-```
-
-Then move into a Git repo and run:
-
-```bash
+pip install openshard        # or: pipx install openshard / uv tool install openshard
 cd your-project
-openshard setup
+openshard setup              # detects your agents and installs capture
+# ...use your coding agent as normal...
+openshard last               # the receipt for the latest run
 ```
 
-`pipx` and `uv` are also supported:
+`openshard doctor` shows which agents are set up and what can be captured.
+
+## What a receipt shows
+
+- **What changed.** Files the agent reported changing, kept apart from changes Git only observed, changes that were already there, and changes from another session. If the actor can't be established, the receipt says so.
+- **Whether it was verified.** An agent saying "tests pass" is recorded as agent-reported, not verified. `openshard verify` re-runs your checks and records the result Openshard observed; `openshard verify --ci` attaches the GitHub check result for the exact commit.
+- **What it cost.** Model, tokens and estimated cost when the agent exposes them; `not recorded` when it doesn't.
+- **What's missing.** Unknown stays `unknown`. A partial capture is marked partial. A finished turn is `Turn completed (unverified)` until something checks it.
+
+For CI and scripts, `openshard verdict --commit <sha>` answers "is this verified?" from recorded evidence (exit 0 verified, 1 failed, 2 unknown). See [verdict](https://github.com/openshard/openshard/blob/main/docs/verdict.md).
+
+<!-- MERGE GATE (new): keep this section only if the merge-gate PR (docs/merge-gate.md, root action.yml) has merged. Otherwise delete it. -->
+## Merge gate (new)
+
+A GitHub Action that reads the head commit's receipt from the Openshard Platform and passes or fails the pull request: verified passes; failed, unfinished, or agent work with no receipt fails. Mark "Openshard gate" as a required check to stop that work from merging. Setup and exact behaviour: [docs/merge-gate.md](https://github.com/openshard/openshard/blob/main/docs/merge-gate.md).
+<!-- /MERGE GATE -->
+
+## Supported agents
+
+| Agent | Capture |
+| --- | --- |
+| Claude Code, Codex, Cursor, OpenCode | Hooks/plugins, set up by `openshard setup` |
+| Google Antigravity, Grok Build | Native hooks |
+| Hermes Agent | Shell hooks (`openshard capture install hermes`) |
+| Grok Bot (Cursor cloud) | Enterprise: Cursor OpenTelemetry export. Other plans: self-report skill (agent-reported only). See [Grok Bot](https://github.com/openshard/openshard/blob/main/docs/grok-bot.md) |
+| Cloud agents (Codex cloud, Claude Code on the web, CI) | [Remote capture](https://github.com/openshard/openshard/blob/main/docs/remote-capture.md) streams evidence out before the environment is destroyed |
+
+Openshard observes these agents. It does not run, sandbox or block them. Details: [Agent capture](https://github.com/openshard/openshard/blob/main/docs/agent-capture.md).
+
+## How trustworthy is a receipt?
+
+Each receipt is sealed with an Ed25519 key in `~/.openshard/keys/` on the machine the agent runs on. That catches later edits by anyone without the key. It does not stop the agent itself: an agent running as your OS user can read that key and seal a forged record.
+
+A receipt is only tamper-evident against the agent when its events were witnessed by the Openshard Platform: sent off the machine as they happened, with the Platform recording when they arrived. Witnessed still isn't verified; only a re-run or CI makes a result verified. See [Signed Receipts and the hosted witness](https://github.com/openshard/openshard/blob/main/docs/signing.md).
+
+## Local first, hosted optional
+
+Receipts live in your repo (`.openshard/`) and work offline with no account. To see them across machines and your team at [app.openshard.dev](https://app.openshard.dev):
 
 ```bash
-pipx install openshard
+openshard login       # approve this computer in the browser
+openshard sync now
 ```
+
+Sync sends only the bounded fields `openshard history --json` prints: no prompts, transcripts, diffs or file contents. See [Platform sync](https://github.com/openshard/openshard/blob/main/docs/platform-sync.md).
+
+Privacy-safe usage telemetry (versions, counts, timings, error categories; never code, prompts, file names or receipt contents) can be turned off with `openshard telemetry off`. See [Telemetry](https://github.com/openshard/openshard/blob/main/docs/telemetry.md).
+
+## Everyday commands
 
 ```bash
-uv tool install openshard
+openshard last [--more | --full]   # latest receipt
+openshard history                  # recent agent work in this repo
+openshard verify                   # re-run checks for the latest receipt
+openshard verify --signature       # check a receipt's seal offline
+openshard stats                    # repo-level counts
 ```
 
-To upgrade later:
+Most commands take `--json`. Full list: [CLI reference](https://github.com/openshard/openshard/blob/main/docs/cli-reference.md).
 
-```bash
-pip install -U openshard
-```
+## Advanced / experimental
 
-or:
+These live beside the receipt path. Receipts don't depend on them, and they may change.
 
-```bash
-pipx upgrade openshard
-```
+- **Openshard Native (OSN):** Openshard runs a task itself (`openshard run`, `openshard osn`) with sandboxing, approvals and verification it actually controls. See [OSN](https://github.com/openshard/openshard/blob/main/docs/osn-run.md).
+- **Model routing** for native runs. See [Routing](https://github.com/openshard/openshard/blob/main/docs/architecture/routing.md).
+- **Learning** from verified past runs. See [Learning](https://github.com/openshard/openshard/blob/main/docs/learning.md).
+- **Evals** (`openshard eval`) and **Trust Score** (`openshard trust`, a diagnostic heuristic, not a receipt signal).
 
-See [Installation](docs/install.md) for additional installation guidance.
+## Status and links
 
----
+Alpha, Apache-2.0, built in the open. CI runs Ruff, mypy and pytest on Linux and Windows.
 
-## Project status
-
-Openshard is currently a working tool available for use, and the core local receipt loop is working across Claude Code, Codex, Cursor, OpenCode, Google Antigravity, Hermes Agent and Grok Build, with Grok Bot captured through Cursor's OpenTelemetry export or a self-report skill.
-
-The project has automated CI, Ruff and mypy checks, a large pytest suite, Linux and Windows validation, authenticated local capture, receipt integrity checks, explicit capture-completeness handling, and real integration testing across supported agent paths.
-
-Sending Receipts to the Openshard Platform is live and retry-safe (`openshard sync`), and that local-to-hosted path has passed real end-to-end testing. Synced Receipts show up in the hosted Platform at [app.openshard.dev](https://app.openshard.dev) as receipt history and task views. Insights and team controls are being rolled out on the same receipt primitive rather than replacing the local workflow.
-
-For now, the focus is straightforward: making the receipt layer reliable, useful, and easy enough to fit naturally into the way developers already work.
-
----
-
-## Why open source?
-
-We believe that evidence infrastructure should be inspectable.
-
-If Openshard says a coding agent changed a file, a check passed, a session was incomplete, or an actor could not be established, developers should be able to understand how that conclusion was reached.
-
-Keeping the local receipt layer open source makes the capture model, integrations, and integrity behaviour available for inspection and improvement.
-
-Openshard is licensed under Apache-2.0.
-
----
-
-## Documentation
-
-- [Installation](docs/install.md)
-- [Agent capture](docs/agent-capture.md)
-- [Remote capture (cloud agents)](docs/remote-capture.md)
-- [What is a Receipt?](docs/what-is-a-shard.md)
-- [Architecture](docs/architecture.md)
-- [Platform sync](docs/platform-sync.md)
-- [Signed Receipts](docs/signing.md)
-- [CLI reference](docs/cli-reference.md)
-- [Telemetry](docs/telemetry.md)
-- [Changelog](CHANGELOG.md)
-- [Security](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
-
----
-
-## Contributing
-
-Contributions are welcome across receipt capture, coding-agent integrations, provenance, verification, CLI experience, platform compatibility, security, tests, documentation, and examples.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
-
----
-
-## Security
-
-If you find a security issue, please report it privately before opening a public issue.
-
-See [SECURITY.md](SECURITY.md).
-
----
-
-## License
-
-Apache-2.0
+[Docs](https://github.com/openshard/openshard/tree/main/docs) ·
+[Architecture](https://github.com/openshard/openshard/blob/main/docs/architecture.md) ·
+[Changelog](https://github.com/openshard/openshard/blob/main/CHANGELOG.md) ·
+[Contributing](https://github.com/openshard/openshard/blob/main/CONTRIBUTING.md) ·
+[Security](https://github.com/openshard/openshard/blob/main/SECURITY.md) (report issues privately)
