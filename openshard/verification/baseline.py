@@ -17,7 +17,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from openshard.verification.post_session import PlannedCheck, tree_state
+from openshard.verification.post_session import PlannedCheck, check_environment, tree_state
 
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 MAX_TESTS = 100_000
@@ -146,7 +146,7 @@ def run_baseline_comparison(repo: Path, base_ref: str, planned: list[PlannedChec
                         reports.append({"status": "incomplete", "reason": "tested_tree_changed"})
                         continue
                     report = root / f"{path.name}-{index}.xml"
-                    env = dict(os.environ)
+                    env = check_environment()
                     env["PYTHONPATH"] = os.pathsep.join((str(path), str(path / "src")))
                     env.pop("PYTEST_ADDOPTS", None)
                     try:
