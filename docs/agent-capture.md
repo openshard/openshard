@@ -433,6 +433,36 @@ never invented evidence.
   both and sends them on its own header (`X-OpenShard-Agent-Env`), since
   the capture service does not share Claude Code's environment; the first
   observation in a session wins.
+* **Billing basis** (`capture.billing_basis`, `billing_basis` in
+  `history --json` and the sync envelope): how the run's usage is paid for,
+  so the Platform can label a cost *billed · API key* or *covered by your
+  subscription*. The same client header carries it. It comes from presence
+  checks only: no credential value is read into the Receipt or logged.
+  Claude Code, in its documented credential order: a Bedrock / Vertex /
+  Foundry flag or a non-Anthropic `ANTHROPIC_BASE_URL` is unknown (that
+  account's terms are not visible); a cloud session (`CLAUDE_CODE_REMOTE`)
+  is `subscription`; `ANTHROPIC_AUTH_TOKEN` is unknown; `ANTHROPIC_API_KEY`
+  is `api_billed` when non-interactive (`CLAUDE_CODE_ENTRYPOINT`
+  `sdk-cli`/`sdk-ts`/`sdk-py`). An interactive session may have declined
+  the key, and declining it leaves a subscription login as the only way to
+  run, so there it is `api_billed` only when no login exists: no
+  `CLAUDE_CODE_OAUTH_TOKEN`, no `claudeAiOauth` entry in
+  `.credentials.json`, and a readable `.claude.json` (in
+  `CLAUDE_CONFIG_DIR` or the home directory) without `oauthAccount`. That
+  last check covers a macOS Keychain login without reading it. Any login
+  signal, or a config that cannot be read, is unknown; `apiKeyHelper` in the user, project or managed settings
+  file is `api_billed`; `CLAUDE_CODE_OAUTH_TOKEN` is `subscription`; an
+  Anthropic profile or federation credential is unknown; otherwise a
+  claude.ai login in `.credentials.json` with a `subscriptionType` is
+  `subscription` (on macOS that login is in the Keychain, which is not read,
+  so it stays unknown). Codex: only `auth_mode` in `$CODEX_HOME/auth.json`
+  is read, `apikey` -> `api_billed`, `chatgpt` -> `subscription` unless
+  `OPENAI_API_KEY`/`CODEX_API_KEY` is also set; a non-OpenAI
+  `model_provider` or `OPENAI_BASE_URL` is unknown. Cursor, OpenCode and
+  every other agent: unknown. Unknown is never written; the field is simply
+  absent, as it is on older Receipts. Not observable, so not checked:
+  settings passed with `--settings`, server-managed settings and a Claude
+  apps gateway session.
 * **A turn that stopped on an error**: Claude Code fires `StopFailure`
   instead of `Stop` when a turn ends on an API error. It is folded as a
   `SessionIdle` snapshot (never a completed turn) and adds the completeness

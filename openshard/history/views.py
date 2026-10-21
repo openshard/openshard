@@ -299,6 +299,11 @@ def _recorded_evidence_to_dict(receipt: ShardReceipt) -> dict[str, Any]:
     rates = _rates(receipt)
     if rates:
         out["rates"] = rates
+    # Additive, same rule: how usage is paid for, only when capture recorded it
+    # (Platform ``billing_basis``; absent is unknown), so older records keep their shape.
+    billing = evidence.get("billing_basis")
+    if billing:
+        out["billing_basis"] = billing
     return out
 
 
