@@ -314,7 +314,8 @@ class TestEvalScoringCLI(unittest.TestCase):
         with patch("openshard.cli.main.load_config", return_value={"approval_mode": "smart", "eval_scoring": True}), \
              patch("openshard.run.pipeline.ExecutionGenerator", return_value=mock_gen), \
              patch("openshard.run.pipeline.ProviderManager"), \
-             patch("openshard.run.pipeline.analyze_repo", return_value=None):
+             patch("openshard.run.pipeline.analyze_repo", return_value=None), \
+             runner.isolated_filesystem():  # a run records history in the cwd: never this checkout's
             result = runner.invoke(cli, ["run", "--more", "--dry-run", "hello"])
 
         self.assertIn("eval scoring: enabled", result.output)
