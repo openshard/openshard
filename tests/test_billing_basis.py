@@ -9,7 +9,9 @@ back and give it their own directory.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import jsonschema
@@ -26,6 +28,7 @@ from openshard.adapters.agent_env import (
     format_agent_env,
     parse_agent_env,
 )
+from openshard.adapters.billing_basis import _claude_keychain_item as _real_keychain_item
 from openshard.adapters.billing_basis import _home as _real_home
 from openshard.adapters.claude_hooks import handle_claude_hook, handle_hook
 from openshard.cli.main import cli
@@ -264,6 +267,126 @@ class TestClaudeInteractiveKey:
         jsonschema.validate(envelope, RECEIPT_SCHEMA)
         for blob in ((repo / ".openshard" / "runs.jsonl").read_text(encoding="utf-8"), text, json.dumps(envelope)):
             assert SECRET not in blob
+
+
+class FakeSecurity:
+    """Stands in for ``subprocess.run`` of ``/usr/bin/security``; records every call."""
+
+    def __init__(self, outcome: object) -> None:
+        self.outcome = outcome
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, args, **kwargs):
+        self.calls.append((list(args), kwargs))
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return subprocess.CompletedProcess(args, self.outcome)
+
+
+class TestMacosKeychain:
+    KEY = {"ANTHROPIC_API_KEY": SECRET, "CLAUDE_CODE_ENTRYPOINT": "cli"}
+
+    @pytest.fixture(autouse=True)
+    def macos(self, monkeypatch):
+        monkeypatch.setattr(bb, "_claude_keychain_item", _real_keychain_item)
+        monkeypatch.setattr(bb, "_is_macos", lambda: True)
+
+    def _security(self, monkeypatch, outcome: object) -> FakeSecurity:
+        fake = FakeSecurity(outcome)
+        monkeypatch.setattr(bb.subprocess, "run", fake)
+        return fake
+
+    def _config(self, root: Path, **fields: object) -> None:
+        _write(root / ".claude.json", {"numStartups": 1, **fields})
+
+    @staticmethod
+    def _assert_existence_only(fake: FakeSecurity, service: str = "Claude Code-credentials") -> None:
+        assert fake.calls
+        for args, kwargs in fake.calls:
+            assert args == ["/usr/bin/security", "find-generic-password", "-s", service]
+            assert "-w" not in args and "-g" not in args
+            assert kwargs["stdout"] is subprocess.DEVNULL and kwargs["stderr"] is subprocess.DEVNULL
+            assert kwargs["timeout"] <= 1 and "shell" not in kwargs
+
+    def test_key_and_no_keychain_login_is_api_billed(self, home, monkeypatch):
+        fake = self._security(monkeypatch, 44)
+        self._config(home)
+        assert bb.claude_billing_basis(_env(home, **self.KEY)) == "api_billed"
+        self._assert_existence_only(fake)
+
+    def test_key_and_a_keychain_login_is_unknown(self, home, monkeypatch):
+        fake = self._security(monkeypatch, 0)
+        self._config(home)
+        assert bb.claude_billing_basis(_env(home, **self.KEY)) == "unknown"
+        self._assert_existence_only(fake)
+
+    @pytest.mark.parametrize("outcome", [
+        subprocess.TimeoutExpired(["security"], 1), FileNotFoundError("security"), PermissionError("x"), 36, 51, 1,
+    ])
+    def test_anything_but_a_clear_answer_is_unknown(self, home, monkeypatch, outcome):
+        fake = self._security(monkeypatch, outcome)
+        self._config(home)
+        assert bb.claude_billing_basis(_env(home, **self.KEY)) == "unknown"
+        self._config(home, oauthAccount={"accountUuid": "a"})
+        assert bb.claude_billing_basis(_env(home)) == "unknown"
+        self._assert_existence_only(fake)
+
+    def test_the_file_checks_still_apply_when_the_keychain_is_empty(self, home, monkeypatch):
+        self._security(monkeypatch, 44)
+        self._config(home, oauthAccount={"accountUuid": "a"})
+        assert bb.claude_billing_basis(_env(home, **self.KEY)) == "unknown"
+
+    def test_a_keychain_login_beside_a_claude_ai_account_is_subscription(self, home, monkeypatch):
+        fake = self._security(monkeypatch, 0)
+        self._config(home, oauthAccount={"accountUuid": "a"})
+        assert bb.claude_billing_basis(_env(home)) == "subscription"
+        self._assert_existence_only(fake)
+
+    @pytest.mark.parametrize("fields", [{}, {"oauthAccount": {"accountUuid": "a"}, "primaryApiKey": SECRET}])
+    def test_the_item_alone_is_not_a_subscription(self, home, monkeypatch, fields):
+        # The same item holds MCP servers' OAuth tokens; a Console key may be the login.
+        self._security(monkeypatch, 0)
+        self._config(home, **fields)
+        assert bb.claude_billing_basis(_env(home)) == "unknown"
+
+    def test_no_keychain_item_and_no_file_login_is_unknown(self, home, monkeypatch):
+        self._security(monkeypatch, 44)
+        self._config(home, oauthAccount={"accountUuid": "a"})
+        assert bb.claude_billing_basis(_env(home)) == "unknown"
+
+    def test_a_config_dir_suffixes_the_name_and_its_absence_proves_nothing(self, home, monkeypatch, tmp_path):
+        config = tmp_path / "work-config"
+        self._config(config, oauthAccount={"accountUuid": "a"})
+        suffix = hashlib.sha256(str(config).encode("utf-8")).hexdigest()[:8]
+        fake = self._security(monkeypatch, 0)
+        assert bb.claude_billing_basis(_env(home, CLAUDE_CONFIG_DIR=str(config))) == "subscription"
+        self._assert_existence_only(fake, f"Claude Code-credentials-{suffix}")
+        self._config(config)
+        fake = self._security(monkeypatch, 44)
+        assert bb.claude_billing_basis(_env(home, **self.KEY, CLAUDE_CONFIG_DIR=str(config))) == "unknown"
+        self._assert_existence_only(fake, f"Claude Code-credentials-{suffix}")
+
+    @pytest.mark.parametrize(("value", "service"), [
+        ("", "Claude Code-credentials"),
+        ("/Users/me/.claude-work",
+         "Claude Code-credentials-" + hashlib.sha256(b"/Users/me/.claude-work").hexdigest()[:8]),
+    ])
+    def test_the_secure_storage_dir_names_the_item_exactly(self, home, monkeypatch, value, service):
+        fake = self._security(monkeypatch, 44)
+        self._config(home)
+        env = _env(home, **self.KEY, CLAUDE_SECURESTORAGE_CONFIG_DIR=value, CLAUDE_CONFIG_DIR=str(home / "x"))
+        _write(home / "x" / ".claude.json", {"numStartups": 1})
+        assert bb.claude_billing_basis(env) == "api_billed"
+        self._assert_existence_only(fake, service)
+
+    def test_never_asked_off_macos(self, home, monkeypatch):
+        fake = self._security(monkeypatch, 0)
+        monkeypatch.setattr(bb, "_is_macos", lambda: False)
+        self._config(home, oauthAccount={"accountUuid": "a"})
+        assert bb.claude_billing_basis(_env(home)) == "unknown"
+        self._config(home)
+        assert bb.claude_billing_basis(_env(home, **self.KEY)) == "api_billed"
+        assert fake.calls == []
 
 
 # ---------------------------------------------------------------------------

@@ -24,8 +24,9 @@ authentication precedence:
    login as the only way to run, so ``api_billed`` when none exists: no
    ``CLAUDE_CODE_OAUTH_TOKEN``, no ``claudeAiOauth`` entry in
    ``.credentials.json``, and a readable global config (``.claude.json`` in
-   ``CLAUDE_CONFIG_DIR`` or the home directory) without ``oauthAccount``.
-   Any login signal, or a config that cannot be read: ``unknown``.
+   ``CLAUDE_CONFIG_DIR`` or the home directory) without ``oauthAccount``,
+   and on macOS the Keychain reporting no Claude Code login item. Any login
+   signal, or anything that cannot be told: ``unknown``.
 5. ``apiKeyHelper`` in the user, project or managed settings file:
    ``api_billed``; a gateway sign-in required there: ``unknown``.
 6. ``CLAUDE_CODE_OAUTH_TOKEN`` (``claude setup-token``): ``subscription``.
@@ -33,8 +34,11 @@ authentication precedence:
    ``ANTHROPIC_FEDERATION_RULE_ID`` + ``ANTHROPIC_ORGANIZATION_ID``, or a
    profile in the Anthropic configuration directory): ``unknown``.
 8. ``.credentials.json`` in the Claude configuration directory holding a
-   claude.ai login with a ``subscriptionType``: ``subscription``. On macOS the
-   login normally lives in the Keychain, which is not read: ``unknown``.
+   claude.ai login with a ``subscriptionType``: ``subscription``. On macOS,
+   where the login lives in the Keychain: its Claude Code login item existing
+   (asked without ever requesting the secret) beside an ``oauthAccount`` and
+   no ``primaryApiKey`` in ``.claude.json``: ``subscription``. The item alone
+   is not enough, since it also holds MCP servers' OAuth tokens.
 
 Codex (``codex_billing_basis``): ``auth.json`` in ``CODEX_HOME`` (default
 ``~/.codex``), its ``auth_mode`` field only: ``apikey`` -> ``api_billed``,
@@ -48,9 +52,12 @@ command-hook client calls it on every hook.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import subprocess
 import sys
+import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -156,6 +163,72 @@ def _anthropic_profile_configured(env: Mapping[str, str], home: Path | None) -> 
         return False
 
 
+# macOS: Claude Code keeps its login in a Keychain item named "Claude Code" +
+# "-credentials", suffixed with the first 8 hex of sha256(NFC config dir) when
+# CLAUDE_CONFIG_DIR (or CLAUDE_SECURESTORAGE_CONFIG_DIR) names one (Claude Code 2.1.305).
+_KEYCHAIN_SERVICE = "Claude Code-credentials"
+_SECURITY = "/usr/bin/security"
+_KEYCHAIN_ITEM_NOT_FOUND = 44  # errSecItemNotFound
+_KEYCHAIN_TIMEOUT_SECONDS = 1.0
+
+
+def _is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def _keychain_service(env: Mapping[str, str]) -> tuple[str, bool]:
+    """The Keychain service name, and whether its absence can be trusted.
+
+    ``CLAUDE_SECURESTORAGE_CONFIG_DIR`` is hashed as given, so either answer
+    holds. A name derived from ``CLAUDE_CONFIG_DIR`` depends on how Claude Code
+    resolves that directory, which is not verified: finding it proves a login,
+    not finding it proves nothing.
+    """
+    secure, config = env.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"), env.get("CLAUDE_CONFIG_DIR")
+    source, trusted = (secure, True) if isinstance(secure, str) else (config, not config)
+    if not isinstance(source, str) or not source:
+        return _KEYCHAIN_SERVICE, trusted
+    digest = hashlib.sha256(unicodedata.normalize("NFC", source).encode("utf-8")).hexdigest()[:8]
+    return f"{_KEYCHAIN_SERVICE}-{digest}", trusted
+
+
+def _claude_keychain_item(env: Mapping[str, str]) -> bool | None:
+    """macOS only: does Claude Code's login item exist? None when that cannot be told.
+
+    Asks ``security find-generic-password -s <service>`` without ``-w`` / ``-g``,
+    so the secret is never requested, and discards every byte of output: only
+    the exit status is used (0 present, 44 absent). Any other status, a
+    timeout or a missing ``security`` is None. Elsewhere: None.
+    """
+    if not _is_macos():
+        return None
+    service, absence_trusted = _keychain_service(env)
+    try:
+        status = subprocess.run(
+            [_SECURITY, "find-generic-password", "-s", service],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=_KEYCHAIN_TIMEOUT_SECONDS, check=False,
+        ).returncode
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if status == 0:
+        return True
+    return False if status == _KEYCHAIN_ITEM_NOT_FOUND and absence_trusted else None
+
+
+def _keychain_subscription(env: Mapping[str, str], global_config: Path | None) -> bool:
+    """A Keychain login item counts as a subscription only beside a claude.ai account.
+
+    The item also holds MCP servers' OAuth tokens, so on its own it does not
+    prove a claude.ai login: the global config must name an ``oauthAccount`` and
+    hold no stored Console key (``primaryApiKey``). Key presence only.
+    """
+    if global_config is None or _claude_keychain_item(env) is not True:
+        return False
+    config = _json_object(global_config, _MAX_GLOBAL_CONFIG_BYTES) or {}
+    return "oauthAccount" in config and "primaryApiKey" not in config
+
+
 def _claude_login_subscription(config_dir: Path | None) -> bool:
     """A claude.ai login in ``.credentials.json``: only ``subscriptionType`` is looked at."""
     if config_dir is None:
@@ -170,8 +243,8 @@ def _no_claude_login(env: Mapping[str, str], config_dir: Path | None, global_con
     No ``CLAUDE_CODE_OAUTH_TOKEN``; no ``claudeAiOauth`` entry (any plan) in
     ``.credentials.json``; and Claude Code's global config (``.claude.json``)
     present, readable and without the ``oauthAccount`` it writes at a
-    claude.ai login. That last check is what makes the answer hold on macOS,
-    whose login token sits in the Keychain (never read). Key presence only.
+    claude.ai login; and on macOS, no Claude Code login item in the Keychain
+    (``_claude_keychain_item``: existence only, the secret is never read).
     """
     if _present(env, "CLAUDE_CODE_OAUTH_TOKEN") or config_dir is None or global_config is None:
         return False
@@ -184,7 +257,10 @@ def _no_claude_login(env: Mapping[str, str], config_dir: Path | None, global_con
     except OSError:
         return False
     config = _json_object(global_config, _MAX_GLOBAL_CONFIG_BYTES)
-    return config is not None and "oauthAccount" not in config
+    if config is None or "oauthAccount" in config:
+        return False
+    # macOS: the login lives in the Keychain; its item must be known absent too.
+    return not _is_macos() or _claude_keychain_item(env) is False
 
 
 def claude_billing_basis(env: Mapping[str, str] | None) -> str:
@@ -204,14 +280,14 @@ def claude_billing_basis(env: Mapping[str, str] | None) -> str:
         home = _home(env)
         custom_dir = Path(env["CLAUDE_CONFIG_DIR"].strip()) if _present(env, "CLAUDE_CONFIG_DIR") else None
         config_dir = custom_dir or (home / ".claude" if home is not None else None)
+        config_root = custom_dir or home
+        global_config = config_root / ".claude.json" if config_root is not None else None
         if _present(env, "ANTHROPIC_API_KEY"):
             entrypoint = str(env.get("CLAUDE_CODE_ENTRYPOINT") or "").strip()
             if entrypoint in _NON_INTERACTIVE_ENTRYPOINTS:
                 return API_BILLED
             # Interactive: the key is used once approved, and the only way to decline it and
             # still run is a subscription login. None on the machine: the key is what bills.
-            config_root = custom_dir or home
-            global_config = config_root / ".claude.json" if config_root is not None else None
             return API_BILLED if _no_claude_login(env, config_dir, global_config) else UNKNOWN
         from_settings = _claude_settings_basis(env, config_dir)
         if from_settings is not None:
@@ -220,7 +296,9 @@ def claude_billing_basis(env: Mapping[str, str] | None) -> str:
             return SUBSCRIPTION
         if _anthropic_profile_configured(env, home):
             return UNKNOWN
-        return SUBSCRIPTION if _claude_login_subscription(config_dir) else UNKNOWN
+        if _claude_login_subscription(config_dir) or _keychain_subscription(env, global_config):
+            return SUBSCRIPTION
+        return UNKNOWN
     except Exception:
         return UNKNOWN
 
