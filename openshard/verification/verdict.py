@@ -105,6 +105,20 @@ def error(kind: str, ident: str, message: str) -> dict[str, Any]:
     }, message=message, evidence=[], receipts=[])
 
 
+def commit_evidence(sha: str, attestations: list[dict], *, tree_oid: str | None = None
+                    ) -> tuple[list[dict], str | None]:
+    """The attestations a verdict on *sha* uses, and how they match (``commit``, ``tree`` or None)."""
+    items = [item for item in attestations if isinstance(item, dict) and _bound_sha(item)]
+    matched = [item for item in items if _bound_sha(item) == sha]
+    if matched:
+        return matched, MATCH_COMMIT
+    if tree_oid:
+        matched = [item for item in items if item.get("tree_oid") == tree_oid]
+        if matched:
+            return matched, MATCH_TREE
+    return [], None
+
+
 def commit_verdict(sha: str, attestations: list[dict], *, tree_oid: str | None = None) -> dict[str, Any]:
     """The verdict for *sha* (a full lowercase commit id) from *attestations*.
 
@@ -113,12 +127,7 @@ def commit_verdict(sha: str, attestations: list[dict], *, tree_oid: str | None =
     to another commit with that same tree is used (``match: tree``): the same
     content under a different commit id, e.g. after a squash merge.
     """
-    items = [item for item in attestations if isinstance(item, dict) and _bound_sha(item)]
-    matched = [item for item in items if _bound_sha(item) == sha]
-    match = MATCH_COMMIT if matched else None
-    if not matched and tree_oid:
-        matched = [item for item in items if item.get("tree_oid") == tree_oid]
-        match = MATCH_TREE if matched else None
+    matched, match = commit_evidence(sha, attestations, tree_oid=tree_oid)
     summaries = [summarize_attestation(item) for item in matched]
     truth = interpret_evidence(None, post_session_verification={"evidence": summaries})
     result = _from_truth(truth, reason=None if summaries else REASON_NOT_CHECKED)
@@ -156,6 +165,7 @@ __all__ = [
     "EXIT_CODES",
     "SCHEMA",
     "SCHEMA_VERSION",
+    "commit_evidence",
     "commit_verdict",
     "error",
     "task_verdict",

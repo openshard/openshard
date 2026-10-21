@@ -1,0 +1,86 @@
+name: Openshard gate
+description: >-
+  Gate a pull request on its head commit's recorded verification: fail when it
+  failed, warn when it is unknown, pass when it was observed to pass.
+author: Openshard
+branding:
+  icon: check-circle
+  color: gray-dark
+
+inputs:
+  strict:
+    description: "Fail on unknown too (no evidence, or only the agent says it passed). Default: warn and pass."
+    required: false
+    default: "false"
+  commit:
+    description: "Commit to gate. Default: the pull request's head commit, else the commit that triggered the run."
+    required: false
+    default: ""
+  python-version:
+    description: "Python used to run Openshard (3.11 or later)."
+    required: false
+    default: "3.12"
+
+outputs:
+  status:
+    description: "pass, warn or fail"
+    value: ${{ steps.gate.outputs.openshard_gate_status }}
+  verdict:
+    description: "verified, failed, unknown or error (docs/verdict.md)"
+    value: ${{ steps.gate.outputs.openshard_gate_verdict }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    # Openshard is installed from this action's own checkout, so the gate is
+    # exactly the version the workflow pinned with `uses: ...@<ref>`. It goes
+    # into its own virtualenv so the job's Python environment is untouched.
+    - name: Install Openshard
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        venv="$RUNNER_TEMP/openshard-gate"
+        python -m venv "$venv"
+        "$venv/bin/python" -m pip install --quiet --disable-pip-version-check "$ACTION_PATH" \
+          || "$venv/Scripts/python" -m pip install --quiet --disable-pip-version-check "$ACTION_PATH"
+
+    - name: Openshard gate
+      id: gate
+      shell: bash
+      env:
+        INPUT_COMMIT: ${{ inputs.commit }}
+        INPUT_STRICT: ${{ inputs.strict }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -uo pipefail
+        venv="$RUNNER_TEMP/openshard-gate"
+        bin="$venv/bin/openshard"
+        [[ -x "$bin" ]] || bin="$venv/Scripts/openshard"
+        commit="${INPUT_COMMIT:-${PR_HEAD_SHA:-$GITHUB_SHA}}"
+        args=(ci gate --commit "$commit" --github-step-summary --github-output)
+        case "$(printf '%s' "$INPUT_STRICT" | tr '[:upper:]' '[:lower:]')" in
+          true|1|yes) args+=(--strict) ;;
+          false|0|no|"") ;;
+          *) echo "::error title=Openshard gate::strict must be true or false (got '$INPUT_STRICT')."; exit 1 ;;
+        esac
+        rc=0
+        out=$("$bin" "${args[@]}") || rc=$?
+        printf '%s\n' "$out"
+        status=$(printf '%s\n' "$out" | sed -n 's/^Openshard gate: //p' | head -1)
+        headline=$(printf '%s\n' "$out" | sed -n '2p')
+        case "$status" in
+          pass) ;;
+          warn) echo "::warning title=Openshard gate::$headline" ;;
+          *)
+            echo "::error title=Openshard gate::${headline:-The gate could not run.}"
+            # Any other exit is a crash, never a pass.
+            [[ $rc -ne 0 ]] || rc=1
+            ;;
+        esac
+        exit "$rc"

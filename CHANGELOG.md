@@ -2,6 +2,20 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Added
+
+- A merge gate for pull requests: a GitHub Action at the repository root
+  (`uses: openshard/openshard@<ref>`) and `openshard ci gate --commit <sha>`.
+  It fails when verification failed for the pull request's head commit,
+  warns without blocking when verification is unknown (`strict: true` fails
+  on unknown too), and fails with the reason when it cannot answer. The job
+  summary lists the result, agent, model, checks, cost and whether the
+  Receipt is Platform-witnessed, with anything not recorded shown as unknown.
+  History files committed to the repository are not used as evidence. Setup
+  and making it a required check: `docs/merge-gate.md`.
+
 ## 0.4.18 - 2026-10-18
 
 <!-- release-title: Openshard v0.4.18 - Receipts That Add Up -->
