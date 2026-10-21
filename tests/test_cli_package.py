@@ -55,7 +55,9 @@ class TestCliPackage(unittest.TestCase):
 
     def test_run_dry_run_no_config_crash(self):
         """Config loading must not crash; any failure should be API-related, not config-related."""
-        result = CliRunner().invoke(cli, ["run", "test task", "--dry-run"])
+        runner = CliRunner()
+        with runner.isolated_filesystem():  # a run records history in the cwd: never this checkout's
+            result = runner.invoke(cli, ["run", "test task", "--dry-run"])
         output = result.output or ""
         self.assertNotIn("Config file not found", output)
         self.assertNotIn("dist-packages/config.yml", output)
