@@ -1,0 +1,61 @@
+{
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "command": "sh -c 'OPENSHARD_REPO_HOOK=1; OS=$(command -v openshard 2>/dev/null || echo \"$HOME/.local/bin/openshard\"); if [ -x \"$OS\" ]; then exec \"$OS\" hooks cursor; fi; echo \"openshard: not installed; this event was not captured\" >&2; echo \"{}\"; exit 0'",
+        "timeout": 15,
+        "failClosed": false
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "type": "command",
+        "command": "sh -c 'OPENSHARD_REPO_HOOK=1; OS=$(command -v openshard 2>/dev/null || echo \"$HOME/.local/bin/openshard\"); if [ -x \"$OS\" ]; then exec \"$OS\" hooks cursor; fi; echo \"openshard: not installed; this event was not captured\" >&2; echo \"{\\\"continue\\\": true}\"; exit 0'",
+        "timeout": 5,
+        "failClosed": false
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "command": "sh -c 'OPENSHARD_REPO_HOOK=1; OS=$(command -v openshard 2>/dev/null || echo \"$HOME/.local/bin/openshard\"); if [ -x \"$OS\" ]; then exec \"$OS\" hooks cursor; fi; echo \"openshard: not installed; this event was not captured\" >&2; echo \"{}\"; exit 0'",
+        "timeout": 5,
+        "failClosed": false
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "type": "command",
+        "command": "sh -c 'OPENSHARD_REPO_HOOK=1; OS=$(command -v openshard 2>/dev/null || echo \"$HOME/.local/bin/openshard\"); if [ -x \"$OS\" ]; then exec \"$OS\" hooks cursor; fi; echo \"openshard: not installed; this event was not captured\" >&2; echo \"{}\"; exit 0'",
+        "timeout": 5,
+        "failClosed": false
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "type": "command",
+        "command": "sh -c 'OPENSHARD_REPO_HOOK=1; OS=$(command -v openshard 2>/dev/null || echo \"$HOME/.local/bin/openshard\"); if [ -x \"$OS\" ]; then exec \"$OS\" hooks cursor; fi; echo \"openshard: not installed; this event was not captured\" >&2; echo \"{}\"; exit 0'",
+        "timeout": 5,
+        "failClosed": false
+      }
+    ],
+    "stop": [
+      {
+        "type": "command",
+        "command": "sh -c 'OPENSHARD_REPO_HOOK=1; OS=$(command -v openshard 2>/dev/null || echo \"$HOME/.local/bin/openshard\"); if [ -x \"$OS\" ]; then exec \"$OS\" hooks cursor; fi; echo \"openshard: not installed; this event was not captured\" >&2; echo \"{}\"; exit 0'",
+        "timeout": 5,
+        "failClosed": false
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "command": "sh -c 'OPENSHARD_REPO_HOOK=1; OS=$(command -v openshard 2>/dev/null || echo \"$HOME/.local/bin/openshard\"); if [ -x \"$OS\" ]; then exec \"$OS\" hooks cursor --no-spawn; fi; echo \"openshard: not installed; this event was not captured\" >&2; echo \"{}\"; exit 0'",
+        "timeout": 3,
+        "failClosed": false
+      }
+    ]
+  },
+  "version": 1
+}

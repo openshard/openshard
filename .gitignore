@@ -54,7 +54,9 @@ Master_Coding_Prompt.txt
 Master Coding Prompt.txt
 OpenShard MasterFile*.txt
 OpenShard Progress Reports*
-.claude/
+.claude/*
+# Shared capture hooks so cloud agents make receipts (openshard setup --repo)
+!.claude/settings.json
 yc-*.md
 *.private.md
 
