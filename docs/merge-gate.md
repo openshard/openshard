@@ -169,3 +169,5 @@ you choose, and review changes to `.github/` (for example with CODEOWNERS).
 The action does not post a separate check run through the Checks API: the
 job already is a check run with a stable name, and `GITHUB_TOKEN` is
 read-only on fork pull requests.
+
+<!-- gate e2e test, safe to close -->
