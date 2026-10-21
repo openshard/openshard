@@ -47,7 +47,7 @@ For CI and scripts, `openshard verdict --commit <sha>` answers "is this verified
 <!-- MERGE GATE (new): keep this section only if the merge-gate PR (docs/merge-gate.md, root action.yml) has merged. Otherwise delete it. -->
 ## Merge gate (new)
 
-A GitHub Action that stops agent work whose receipt shows failed verification from merging. Setup and exact behaviour: [docs/merge-gate.md](https://github.com/openshard/openshard/blob/main/docs/merge-gate.md).
+A GitHub Action that fails a pull request when the receipt for its head commit shows failed verification, and warns without blocking when verification is unknown. Mark "Openshard gate" as a required check to stop failed agent work from merging. Setup and exact behaviour: [docs/merge-gate.md](https://github.com/openshard/openshard/blob/main/docs/merge-gate.md).
 <!-- /MERGE GATE -->
 
 ## Supported agents
