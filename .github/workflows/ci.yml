@@ -10,7 +10,8 @@ name: Fast PR Gate
 #   Plan ─┬─ Lint + types
 #         ├─ Tests (shard 1/N .. N/N)       parallel-safe files, pytest-xdist
 #         ├─ Tests (capture services 1/2 ..)  serial within each job, never on Windows
-#         └─ Tests (Windows smoke)           curated slice, only when relevant
+#         ├─ Tests (Windows smoke)           curated slice, only when relevant
+#         └─ Tests (macOS smoke)             same slice + two service files, serial
 #                                  └──────── Fast PR Gate (the one required check)
 #
 # scripts/ci/select_tests.py decides, from the changed files, which of those
@@ -49,6 +50,9 @@ jobs:
       run_shards: ${{ steps.plan.outputs.run_shards }}
       run_service: ${{ steps.plan.outputs.run_service }}
       windows: ${{ steps.plan.outputs.windows }}
+      macos: ${{ steps.plan.outputs.macos }}
+      macos_files: ${{ steps.plan.outputs.macos_files }}
+      macos_service_files: ${{ steps.plan.outputs.macos_service_files }}
       service_matrix: ${{ steps.plan.outputs.service_matrix }}
       windows_files: ${{ steps.plan.outputs.windows_files }}
       shard_matrix: ${{ steps.plan.outputs.shard_matrix }}
@@ -195,12 +199,45 @@ jobs:
         # shellcheck disable=SC2086
         run: python -m pytest -n auto --durations=15 $FILES
 
+  # The same platform slice on macOS (Apple silicon), plus the capture-service
+  # files that cover the detached service spawn, its fcntl start lock and the
+  # loopback bind, run serially after the xdist step exactly as on Linux.
+  # Runs when the plan says the change can reach them; the full suite runs on
+  # macOS after merge.
+  test-macos:
+    name: Tests (macOS smoke)
+    needs: plan
+    if: needs.plan.outputs.macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: astral-sh/setup-uv@v10.2.0  # no v10 major alias is published yet
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install
+        run: uv pip install -e ".[dev]"
+      - name: Test (macOS smoke slice, pytest-xdist)
+        env:
+          FILES: ${{ needs.plan.outputs.macos_files }}
+        # shellcheck disable=SC2086
+        run: python -m pytest -n auto --durations=15 $FILES
+      - name: Test (capture services, serial)
+        env:
+          FILES: ${{ needs.plan.outputs.macos_service_files }}
+        # shellcheck disable=SC2086
+        run: python -m pytest --durations=15 $FILES
+
   # The single check to require in branch protection. Skipped jobs are fine
   # (that is the plan doing its job); anything that failed or was cancelled
   # fails the gate.
   gate:
     name: Fast PR Gate
-    needs: [plan, lint, test, test-service, test-windows]
+    needs: [plan, lint, test, test-service, test-windows, test-macos]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
