@@ -95,7 +95,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -1071,11 +1071,11 @@ class CaptureServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", port), _Handler)
 
     def server_bind(self) -> None:
-        if sys.platform == "win32":
-            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
-            if exclusive is not None:
-                self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
-        super().server_bind()
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)  # Windows only
+        if sys.platform == "win32" and exclusive is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        super(HTTPServer, self).server_bind()  # TCPServer's: HTTPServer's adds a getfqdn() reverse-DNS lookup, 35 s on macOS CI
+        self.server_name, self.server_port = str(self.server_address[0]), int(self.server_address[1])
 
     @property
     def port(self) -> int:

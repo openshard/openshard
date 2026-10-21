@@ -5,9 +5,9 @@ proves enough to merge safely; `main` and releases get everything.
 
 | Tier | Workflow | Runs on | What it proves |
 |------|----------|---------|----------------|
-| 1 | **Fast PR Gate** (`ci.yml`) | every PR | ruff + mypy, the invariant suite, every test that can reach the change, Windows smoke slice when relevant |
-| 2 | **Fast PR Gate**, full plan | PRs touching evidence-critical or CI paths | the whole PR suite: all parallel-safe files sharded, all serial capture-service files, Windows smoke |
-| 3 | **Full Main Validation** (`main.yml`) | push to `main` | the complete suite, serial and unmodified, on Ubuntu and Windows x Python 3.11 and 3.12 |
+| 1 | **Fast PR Gate** (`ci.yml`) | every PR | ruff + mypy, the invariant suite, every test that can reach the change, Windows and macOS smoke slices when relevant |
+| 2 | **Fast PR Gate**, full plan | PRs touching evidence-critical or CI paths | the whole PR suite: all parallel-safe files sharded, all serial capture-service files, Windows and macOS smoke |
+| 3 | **Full Main Validation** (`main.yml`) | push to `main` | the complete suite, serial and unmodified, on Ubuntu, Windows and macOS x Python 3.11 and 3.12 |
 | 4 | **Release** (`release.yml`) | `v*` tag | the same exhaustive matrix again from the tagged commit, then build, twine check, publish |
 
 The one check to require in branch protection is the job named
@@ -67,7 +67,8 @@ python scripts/ci/select_tests.py plan --base origin/main --head HEAD
 Plan ─┬─ Lint + types                             ruff, mypy, selector self-check
       ├─ Tests (shard 1/N .. N/N)                 parallel-safe files, pytest-xdist
       ├─ Tests (capture services, serial 1/2, 2/2) real HTTP capture service; serial within each job, never Windows
-      └─ Tests (Windows smoke)                    curated platform-sensitive slice
+      ├─ Tests (Windows smoke)                    curated platform-sensitive slice
+      └─ Tests (macOS smoke)                      same slice + 2 capture-service files, serial
                                   └──────── Fast PR Gate                    the required check
 ```
 
@@ -92,6 +93,15 @@ Plan ─┬─ Lint + types                             ruff, mypy, selector sel
   the JSONL store's atomic replace, hook path/CRLF handling, sandbox
   diff/apply, repo-map git calls, CLI entrypoints. It runs when the plan
   says the change can reach one of those files.
+* **macOS smoke** (`MACOS_SMOKE_TEST_FILES`, `MACOS_SERVICE_SMOKE_TEST_FILES`)
+  runs the same platform slice on `macos-latest` (Apple silicon) under
+  xdist, then `tests/test_claude_capture_service.py` and
+  `tests/test_v044_capture_auth.py` serially in the same job: those cover
+  what differs on macOS in the capture service (the detached
+  `start_new_session` spawn, the `fcntl` start lock, the loopback bind under
+  BSD socket semantics, SIGTERM drain, the 0600 token file). It runs when
+  the plan says the change can reach any of those files, and on every full
+  plan. The full suite runs on macOS after merge.
 * **Dependencies** are installed with `uv` (`astral-sh/setup-uv` with its
   cache) into the interpreter from `actions/setup-python`.
 * A new push to a PR cancels the previous run; pushes to `main` never
@@ -126,7 +136,7 @@ derived from it; each job prints `--durations=15` to refine them):
 | small isolated Python change (one test file, a leaf module) | targeted, 1 shard | Plan, Lint, 1 shard (invariants + affected), Gate | 45 to 60 s |
 | normal Core feature (routing, TUI, scoring ...) | targeted, 2 shards, or full | Plan, Lint, 2 to 3 shards, 2 capture-service jobs, Windows smoke, Gate | 75 to 95 s |
 | capture / verification / evidence-sensitive change | full | Plan, Lint, 3 shards, 2 capture-service jobs, Windows smoke, Gate | 85 to 100 s (measured 1:43 with one service job) |
-| merge to main | Full Main Validation | Lint, 4 full serial matrix jobs | unchanged, 12 to 17 min, dominated by Windows |
+| merge to main | Full Main Validation | Lint, 6 full serial matrix jobs | 12 to 17 min, dominated by Windows (macOS runs in parallel) |
 | release | Release | verify, 4 matrix jobs, build, publish | unchanged |
 
 Why a "normal Core" change often runs most of the suite: `openshard/cli/main.py`
@@ -144,4 +154,5 @@ CI work.
 * The capture-service tests keep the serialisation they need; nothing
   about their execution order or isolation changed, they only moved to
   their own job.
-* `release.yml` is untouched.
+* `release.yml` runs the same OS x Python matrix as `main.yml` (Ubuntu,
+  Windows and macOS) before building.

@@ -33,7 +33,7 @@ openshard setup              # detects your agents and installs capture
 openshard last               # the receipt for the latest run
 ```
 
-`openshard doctor` shows which agents are set up and what can be captured.
+`openshard doctor` shows which agents are set up and what can be captured. Needs Python 3.11+ and git; for macOS, Windows, Linux and cloud/VM sandboxes (a one-line setup script) see [docs/install.md](docs/install.md).
 
 ## What a receipt shows
 
@@ -104,7 +104,7 @@ These live beside the receipt path. Receipts don't depend on them, and they may 
 
 ## Status and links
 
-Alpha, Apache-2.0, built in the open. CI runs Ruff, mypy and pytest on Linux and Windows.
+Alpha, Apache-2.0, built in the open. CI runs Ruff, mypy and pytest on Linux, macOS and Windows.
 
 [Docs](https://github.com/openshard/openshard/tree/main/docs) ·
 [Architecture](https://github.com/openshard/openshard/blob/main/docs/architecture.md) ·

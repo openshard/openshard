@@ -152,6 +152,22 @@ class TestLifecycle:
         finally:
             blocker.close()
 
+    def test_binding_does_no_reverse_dns_lookup(self, capture_env, monkeypatch):
+        # http.server.HTTPServer.server_bind calls socket.getfqdn(host); on a
+        # macOS runner that took 35 s, so a spawned service answered /health
+        # long after ensure_service() had given up ("unavailable").
+        def _slow_lookup(*_a, **_k):
+            raise AssertionError("capture service must not resolve its host name")
+
+        monkeypatch.setattr(socket, "getfqdn", _slow_lookup)
+        running = _Service(capture_env)
+        try:
+            assert running.server.server_name == "127.0.0.1"
+            assert running.server.server_port == running.port
+            assert client.health(running.port) is not None
+        finally:
+            running.stop()
+
     def test_pinned_port_env_is_used_by_service_and_client(self, capture_env, monkeypatch):
         port = _free_port()
         monkeypatch.setenv("OPENSHARD_CAPTURE_PORT", str(port))

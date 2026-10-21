@@ -53,12 +53,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Windows runs of the serial suite took 23-40 min across 2026-10-12..15
     # and two were cancelled at the old 40 min cap; 75 gives headroom while
-    # still catching a hang. Ubuntu finishes in ~8-13 min and keeps 40.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 40 }}
+    # still catching a hang. macOS (3-core Apple silicon runners) gets 60;
+    # Ubuntu finishes in ~8-13 min and keeps 40.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || matrix.os == 'macos-latest' && 60 || 40 }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v7

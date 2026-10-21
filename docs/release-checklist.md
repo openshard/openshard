@@ -26,7 +26,7 @@ On a branch, in one pull request to `main`:
 - [ ] Bump `version` in `pyproject.toml`.
 - [ ] Give the version a dated `## X.Y.Z - YYYY-MM-DD` section in
       `CHANGELOG.md` (the workflow refuses `Unreleased`).
-- [ ] CI green (ruff, mypy, full pytest on Linux and Windows).
+- [ ] CI green (ruff, mypy, full pytest on Linux, macOS and Windows).
 - [ ] Manual smoke tests done where the change needs them (a fresh install
       with each affected agent; see `docs/demo-smoke-checklist.md`).
 - [ ] Capture upgrade smoke: with a pre-upgrade `.claude/settings.local.json`
@@ -51,7 +51,7 @@ The workflow then, in order:
 
 1. checks out the tag and verifies `vX.Y.Z` == `pyproject.toml` version and
    that the tagged commit is on `main`;
-2. runs ruff, mypy and the full test suite on Linux and Windows;
+2. runs ruff, mypy and the full test suite on Linux, macOS and Windows;
 3. builds the wheel and sdist, checks the build left the tree untouched,
    runs `twine check --strict`, and checks the artifact names carry the
    tagged version;

@@ -25,7 +25,7 @@ Design (see docs/ci.md for the developer-facing description):
   Unknown means "run everything", never "run nothing".
 
 The plan also says which of the serial capture/service test files to run and
-whether the Windows smoke job is needed, and it splits the parallel-safe files
+whether the Windows and macOS smoke jobs are needed, and it splits the parallel-safe files
 into balanced shards (by file size, a cheap and stable proxy for runtime).
 
 Usage::
@@ -96,6 +96,20 @@ WINDOWS_SMOKE_TEST_FILES: tuple[str, ...] = (
     "tests/test_sandbox_diff.py",
     "tests/test_adapters_wrap_exec.py",
     "tests/test_billing_basis.py",  # Claude/Codex login files under HOME vs USERPROFILE / APPDATA
+)
+
+# macOS runs the same platform slice (POSIX paths, but /var -> /private/var
+# temp directories, case-insensitive APFS and a BSD userland under git and
+# the sandbox), plus the two capture-service files that exercise what is
+# macOS-specific in the service: spawning the detached background process
+# (start_new_session), the fcntl start lock, binding the loopback port with
+# BSD SO_REUSEADDR semantics, SIGTERM drain, and the 0600 token file. The
+# parallel-safe files run under xdist; the service files run serially after
+# them in the same job. The full suite runs on macOS after merge.
+MACOS_SMOKE_TEST_FILES: tuple[str, ...] = WINDOWS_SMOKE_TEST_FILES
+MACOS_SERVICE_SMOKE_TEST_FILES: tuple[str, ...] = (
+    "tests/test_claude_capture_service.py",
+    "tests/test_v044_capture_auth.py",
 )
 
 # The invariant suite: evidence-critical guarantees that run on *every*
@@ -399,6 +413,7 @@ class Plan:
     windows: bool
     changed: list[str]
     affected_modules: list[str] = field(default_factory=list)
+    macos: bool = False
 
     @property
     def run_code(self) -> bool:
@@ -433,6 +448,7 @@ class Plan:
             "fast_files": self.fast_files,
             "service_files": self.service_files,
             "windows": self.windows,
+            "macos": self.macos,
             "affected_modules": self.affected_modules,
             "shards": shards,
             # Ready-made `strategy.matrix` value for the shard job.
@@ -496,7 +512,7 @@ def make_plan(changed: list[str], graph: ModuleGraph | None = None, root: Path |
     service_all = list(SERVICE_TEST_FILES)
 
     def full(reasons: list[str]) -> Plan:
-        return Plan("full", reasons, fast_all, service_all, True, changed)
+        return Plan("full", reasons, fast_all, service_all, True, changed, macos=True)
 
     if not changed:
         return full(["no changed files reported -- cannot narrow, running everything"])
@@ -543,6 +559,9 @@ def make_plan(changed: list[str], graph: ModuleGraph | None = None, root: Path |
 
     windows_seeds = {m for m, rel in tests.items() if rel in WINDOWS_SMOKE_TEST_FILES}
     windows = bool(windows_seeds & (affected | {m for m in seeds if m in windows_seeds}))
+    macos_slice = set(MACOS_SMOKE_TEST_FILES) | set(MACOS_SERVICE_SMOKE_TEST_FILES)
+    macos_seeds = {m for m, rel in tests.items() if rel in macos_slice}
+    macos = bool(macos_seeds & (affected | seeds))
 
     if len(fast) > FULL_ESCALATION_RATIO * len(fast_all):
         return full([f"{len(fast)}/{len(fast_all)} parallel-safe files affected -- running everything"])
@@ -556,6 +575,7 @@ def make_plan(changed: list[str], graph: ModuleGraph | None = None, root: Path |
         windows,
         changed,
         affected_modules=sorted(seeds | affected),
+        macos=macos,
     )
 
 
@@ -578,6 +598,8 @@ def check_lists(root: Path | None = None) -> list[str]:
     for name, files in (
         ("SERVICE_TEST_FILES", SERVICE_TEST_FILES),
         ("WINDOWS_SMOKE_TEST_FILES", WINDOWS_SMOKE_TEST_FILES),
+        ("MACOS_SMOKE_TEST_FILES", MACOS_SMOKE_TEST_FILES),
+        ("MACOS_SERVICE_SMOKE_TEST_FILES", MACOS_SERVICE_SMOKE_TEST_FILES),
         ("INVARIANT_TEST_FILES", INVARIANT_TEST_FILES),
     ):
         for f in files:
@@ -586,6 +608,12 @@ def check_lists(root: Path | None = None) -> list[str]:
     overlap = set(SERVICE_TEST_FILES) & set(WINDOWS_SMOKE_TEST_FILES)
     if overlap:
         problems.append(f"service files must not be in the Windows smoke set: {sorted(overlap)}")
+    overlap = set(SERVICE_TEST_FILES) & set(MACOS_SMOKE_TEST_FILES)
+    if overlap:
+        problems.append(f"service files must not be in the parallel macOS smoke set: {sorted(overlap)}")
+    stray = set(MACOS_SERVICE_SMOKE_TEST_FILES) - set(SERVICE_TEST_FILES)
+    if stray:
+        problems.append(f"macOS service smoke files must be capture-service files: {sorted(stray)}")
     overlap = set(SERVICE_TEST_FILES) & set(INVARIANT_TEST_FILES)
     if overlap:
         problems.append(f"service files must not be in the invariant set: {sorted(overlap)}")
@@ -602,6 +630,9 @@ def _write_github_output(path: str, plan: dict) -> None:
         fh.write(f"service_files={' '.join(plan['service_files'])}\n")
         fh.write(f"service_matrix={json.dumps(plan['service_matrix'])}\n")
         fh.write(f"windows_files={' '.join(WINDOWS_SMOKE_TEST_FILES)}\n")
+        fh.write(f"macos={'true' if plan['macos'] else 'false'}\n")
+        fh.write(f"macos_files={' '.join(MACOS_SMOKE_TEST_FILES)}\n")
+        fh.write(f"macos_service_files={' '.join(MACOS_SERVICE_SMOKE_TEST_FILES)}\n")
         fh.write(f"shard_matrix={json.dumps(plan['shard_matrix'])}\n")
 
 
@@ -616,7 +647,7 @@ def _print_summary(plan: dict, stream=sys.stdout) -> None:
     print(
         f"parallel-safe test files: {len(plan['fast_files'])} in {n_shards} shard(s); "
         f"serial service files: {len(plan['service_files'])} in {len(plan['service_shards'])} job(s); "
-        f"windows smoke: {plan['windows']}",
+        f"windows smoke: {plan['windows']}; macos smoke: {plan['macos']}",
         file=stream,
     )
 

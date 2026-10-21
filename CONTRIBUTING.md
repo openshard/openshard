@@ -22,8 +22,8 @@ python -m mypy openshard/ --ignore-missing-imports
 python -m pytest
 ```
 
-That is exactly what CI runs after merge (Linux and Windows, Python 3.11
-and 3.12). Use the virtual environment rather than the system interpreter's
+That is exactly what CI runs after merge (Linux, macOS and Windows, Python
+3.11 and 3.12). Use the virtual environment rather than the system interpreter's
 `pip`: the pr13 benchmark tests (`tests/test_pr13_benchmark.py`,
 `tests/test_pr13_scenarios_2to7.py`) launch the `openshard` console script
 they find beside the running interpreter, because that is how the Claude

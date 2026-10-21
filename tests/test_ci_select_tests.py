@@ -9,7 +9,8 @@ Two layers:
   fail open to the full suite, and shards are balanced and deterministic.
 * Assertions against the real repository pin the *curated lists*: every
   listed file exists, service files never leak into a parallel shard or
-  the Windows slice, and the invariant floor is present in every code plan.
+  the Windows/macOS parallel slices, and the invariant floor is present in
+  every code plan.
 """
 from __future__ import annotations
 
@@ -111,6 +112,8 @@ def fake_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(st, "INVARIANT_TEST_FILES", ("tests/test_invariant_a.py",))
     monkeypatch.setattr(st, "SERVICE_TEST_FILES", ("tests/test_service_a.py",))
     monkeypatch.setattr(st, "WINDOWS_SMOKE_TEST_FILES", ("tests/test_win_a.py", "tests/test_win_b.py"))
+    monkeypatch.setattr(st, "MACOS_SMOKE_TEST_FILES", ("tests/test_win_a.py", "tests/test_win_b.py"))
+    monkeypatch.setattr(st, "MACOS_SERVICE_SMOKE_TEST_FILES", ("tests/test_service_a.py",))
     return root
 
 
@@ -162,6 +165,7 @@ class TestTiers:
         assert plan.tier == "docs"
         assert plan.run_code is False
         assert plan.fast_files == [] and plan.service_files == [] and plan.windows is False
+        assert plan.macos is False
         assert plan.shards() == []
 
     def test_no_changed_files_fails_open_to_full(self, fake_repo):
@@ -186,6 +190,7 @@ class TestTiers:
         plan = _plan(fake_repo, rel, "README.md")
         assert plan.tier == "full", plan.reasons
         assert plan.windows is True
+        assert plan.macos is True
         assert plan.service_files == ["tests/test_service_a.py"]
         # Every parallel-safe test file, and never a service file in a shard.
         assert "tests/test_service_a.py" not in plan.fast_files
@@ -211,15 +216,28 @@ class TestTargeted:
         assert {"tests/test_invariant_a.py", "tests/test_unmapped.py"} <= selected
         # unrelated leaf test is not selected
         assert "tests/test_other.py" not in selected
-        # nothing reaches the service test or the Windows slice
+        # nothing reaches the service test or the Windows/macOS slices
         assert plan.service_files == []
         assert plan.windows is False
+        assert plan.macos is False
 
     def test_change_reaching_a_windows_smoke_file_enables_windows(self, fake_repo):
         plan = _plan(fake_repo, "openshard/leaf/other.py")
         assert plan.tier == "targeted"
         assert "tests/test_win_b.py" in plan.fast_files
         assert plan.windows is True
+        assert plan.macos is True
+
+    def test_change_reaching_only_a_macos_service_file_enables_macos(self, fake_repo, monkeypatch):
+        monkeypatch.setattr(st, "SERVICE_TEST_FILES", ("tests/test_service_a.py", "tests/test_patched.py"))
+        monkeypatch.setattr(st, "WINDOWS_SMOKE_TEST_FILES", ())
+        monkeypatch.setattr(st, "MACOS_SMOKE_TEST_FILES", ())
+        monkeypatch.setattr(st, "MACOS_SERVICE_SMOKE_TEST_FILES", ("tests/test_patched.py",))
+        plan = _plan(fake_repo, "openshard/leaf/calc.py")
+        assert plan.tier == "targeted"
+        assert plan.service_files == ["tests/test_patched.py"]
+        assert plan.windows is False
+        assert plan.macos is True
 
     def test_changed_test_file_runs_itself_plus_floor(self, fake_repo):
         plan = _plan(fake_repo, "tests/test_other.py")
@@ -319,6 +337,9 @@ class TestCli:
         assert json.loads(kv["service_matrix"]) == {"include": []}
         assert kv["windows"] == "false"
         assert kv["windows_files"] == "tests/test_win_a.py tests/test_win_b.py"
+        assert kv["macos"] == "false"
+        assert kv["macos_files"] == "tests/test_win_a.py tests/test_win_b.py"
+        assert kv["macos_service_files"] == "tests/test_service_a.py"
         matrix = json.loads(kv["shard_matrix"])
         assert matrix["include"][0]["files"].split() == plan["fast_files"]
 
@@ -332,7 +353,12 @@ class TestCli:
         assert kv["run_shards"] == "false"
         assert kv["run_service"] == "false"
         assert kv["windows"] == "false"
+        assert kv["macos"] == "false"
         assert json.loads(kv["shard_matrix"]) == {"include": []}
+
+    def test_check_rejects_a_macos_service_file_that_is_not_a_service_file(self, fake_repo, monkeypatch):
+        monkeypatch.setattr(st, "MACOS_SERVICE_SMOKE_TEST_FILES", ("tests/test_calc.py",))
+        assert any("macOS service smoke" in p for p in st.check_lists(fake_repo))
 
     def test_check_reports_missing_curated_file(self, fake_repo, monkeypatch, capsys):
         monkeypatch.setattr(st, "INVARIANT_TEST_FILES", ("tests/test_missing.py",))
@@ -367,6 +393,8 @@ class TestRealRepository:
     def test_service_files_are_isolated(self, real_graph):
         service = set(st.SERVICE_TEST_FILES)
         assert not service & set(st.WINDOWS_SMOKE_TEST_FILES)
+        assert not service & set(st.MACOS_SMOKE_TEST_FILES)
+        assert set(st.MACOS_SERVICE_SMOKE_TEST_FILES) <= service
         assert not service & set(st.INVARIANT_TEST_FILES)
         graph = real_graph
         assert not service & set(st.all_fast_files(graph))
@@ -387,6 +415,7 @@ class TestRealRepository:
             assert plan.tier == "full", (rel, plan.reasons)
             assert plan.service_files == list(st.SERVICE_TEST_FILES)
             assert plan.windows is True
+            assert plan.macos is True
             assert set(plan.fast_files) == set(st.all_fast_files(graph))
 
     def test_every_code_plan_includes_the_invariant_floor(self, real_graph):
