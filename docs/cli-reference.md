@@ -88,7 +88,7 @@ openshard verify --strict                          # Same, but exit 1 when a che
 openshard verify --ci                              # Attach the GitHub check-run verdict for this Shard's exact commit (independent evidence; needs gh)
 openshard verdict --commit <sha> --json            # Verified / failed / unknown for one commit, from recorded evidence (exit 0/1/2; 3 error; docs/verdict.md)
 openshard verdict --task <task_id> --json          # Same for a task: its latest Receipt decides
-openshard ci gate --commit <sha> [--strict]        # Merge gate: fail on failed verification, warn on unknown (docs/merge-gate.md)
+openshard ci gate --commit <sha> [--base <sha>]    # Merge gate: pass or fail from the commit's Receipt in the Platform (docs/merge-gate.md)
 openshard remote create --agent codex              # Open a hosted remote capture for a cloud agent environment; prints its short-lived token (trusted machine)
 openshard remote attach                            # In the environment: attach to the capture named by $OPENSHARD_REMOTE_CAPTURE_URL / $OPENSHARD_REMOTE_TOKEN
 openshard remote status | flush | detach           # What is attached and queued; send now; forget

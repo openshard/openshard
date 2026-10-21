@@ -1,0 +1,550 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openshard.dev/schemas/gate-verdict.v1.json",
+  "title": "OpenShard merge gate verdict v1",
+  "description": "The Platform's response to Core's merge gate: what it knows about one commit's Receipts. See packages/contracts/src/gate-verdict.ts.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "openshard.gate_verdict.v1"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "repository": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "failed",
+        "pending",
+        "none"
+      ]
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "require_receipt": {
+          "type": "string",
+          "enum": [
+            "agent_prs",
+            "all_prs"
+          ]
+        }
+      },
+      "required": [
+        "require_receipt"
+      ],
+      "additionalProperties": false
+    },
+    "receipts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "receipt_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "failed",
+              "pending"
+            ]
+          },
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "files_changed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lines_added": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lines_removed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "outcome",
+                "source"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "verification": {
+            "type": "object",
+            "properties": {
+              "result": {
+                "type": "string"
+              },
+              "verified_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 64
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "bound_commit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "result",
+              "verified_at",
+              "bound_commit"
+            ],
+            "additionalProperties": false
+          },
+          "cost": {
+            "type": "object",
+            "properties": {
+              "usd": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "usd",
+              "source"
+            ],
+            "additionalProperties": false
+          },
+          "approvals": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "requires_approval": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "request_source": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 64
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "request_action": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 64
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "request_reason": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "proposed_files": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "decision_source": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 64
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "granted": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "decision_action": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 64
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "decision_reason": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 300
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "witnessed": {
+            "type": "boolean"
+          },
+          "signature_verified": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "merge_check": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "base_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                  },
+                  "base_sha": {
+                    "type": "string",
+                    "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+                    "description": "Tip of the base at check time."
+                  },
+                  "head_sha": {
+                    "type": "string",
+                    "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                  },
+                  "checked_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  "behind_by": {
+                    "description": "Commits on base not in head; null when unknown, never 0.",
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "base_commits": {
+                    "description": "Commits base gained since the merge-base, newest first.",
+                    "anyOf": [
+                      {
+                        "maxItems": 20,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "sha": {
+                              "type": "string",
+                              "pattern": "^[0-9a-f]{7,64}$"
+                            },
+                            "author": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                            },
+                            "subject": {
+                              "type": "string",
+                              "maxLength": 200,
+                              "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$",
+                              "description": "The commit subject line only. Never the body or diff."
+                            },
+                            "committed_at": {
+                              "type": "string",
+                              "format": "date-time",
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                            }
+                          },
+                          "required": [
+                            "sha",
+                            "author",
+                            "subject",
+                            "committed_at"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "conflicts": {
+                    "description": "[] = checked and clean; null or absent = could not determine.",
+                    "anyOf": [
+                      {
+                        "maxItems": 50,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 512,
+                              "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$",
+                              "description": "Repository-relative path of a file changed on both sides."
+                            },
+                            "lines": {
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 9007199254740991
+                              },
+                              "description": "1-based line numbers in the HEAD version where the conflicting hunks start. Numbers only, never the lines."
+                            },
+                            "base_author": {
+                              "description": "Git author name of the base-side commit that last touched those lines; null when blame could not tell.",
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "maxLength": 256,
+                                  "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "base_sha": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "pattern": "^[0-9a-f]{7,64}$"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "lines"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "base_ref",
+                  "base_sha",
+                  "head_sha",
+                  "checked_at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "receipt_id",
+          "url",
+          "status",
+          "agent",
+          "model",
+          "task",
+          "files_changed",
+          "lines_added",
+          "lines_removed",
+          "checks",
+          "verification",
+          "cost",
+          "approvals",
+          "witnessed",
+          "signature_verified",
+          "merge_check"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "merge_group": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "requested_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "pull_request": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "head_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "requested_sha",
+            "pull_request",
+            "head_sha"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "checked_at": {
+      "type": "string",
+      "maxLength": 64
+    }
+  },
+  "required": [
+    "schema",
+    "sha",
+    "repository",
+    "status",
+    "policy",
+    "receipts",
+    "merge_group",
+    "reason",
+    "checked_at"
+  ],
+  "additionalProperties": false
+}

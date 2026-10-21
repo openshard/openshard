@@ -442,3 +442,46 @@ class TestOwnCommitUnderALaterAgentsCommit:
             "source": "git_observed", "shas": [lead], "result": other}}) is None
         assert commit_value({"git_end_head": other, "session_commits": {
             "source": "git_observed", "shas": [lead], "result": lead}}) == lead
+
+
+class TestSyncAfterAutoVerify:
+    """The automatic per-commit verification sends its Receipt to the Platform at once (merge gate)."""
+
+    def _flushes(self, monkeypatch) -> list[tuple]:
+        from openshard.sync import client
+
+        calls: list[tuple] = []
+        monkeypatch.setattr(client, "flush", lambda root, **kw: calls.append((Path(root), kw.get("receipt_ids"))))
+        return calls
+
+    def test_an_auto_verification_flushes_its_receipt(self, captured, monkeypatch):
+        from openshard.verification import commit_run as cr
+
+        root, head, entry = captured
+        real = cr.verify_commit
+        # The fixture's commit came after the session; let the unattended run proceed anyway.
+        monkeypatch.setattr(cr, "verify_commit", lambda *a, **kw: real(*a, **{**kw, "unattended": False}))
+        calls = self._flushes(monkeypatch)
+        out = _verify("--receipt", entry["receipt_id"], "--commit", head, "--auto")
+        assert out["status"] == "ok"
+        assert calls == [(root, frozenset({entry["receipt_id"]}))]
+
+    def test_a_flush_failure_never_fails_the_verification(self, captured, monkeypatch):
+        from openshard.sync import client
+        from openshard.verification import commit_run as cr
+
+        root, head, entry = captured
+        real = cr.verify_commit
+        monkeypatch.setattr(cr, "verify_commit", lambda *a, **kw: real(*a, **{**kw, "unattended": False}))
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(client, "flush", boom)
+        assert _verify("--receipt", entry["receipt_id"], "--commit", head, "--auto")["status"] == "ok"
+
+    def test_a_manual_verification_does_not_flush(self, captured, monkeypatch):
+        root, head, entry = captured
+        calls = self._flushes(monkeypatch)
+        assert _verify("--receipt", entry["receipt_id"], "--commit", head)["status"] == "ok"
+        assert calls == []

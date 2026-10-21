@@ -8,14 +8,20 @@ All notable changes to OpenShard are documented here.
 
 - A merge gate for pull requests: a GitHub Action at the repository root
   (`uses: openshard/openshard@<ref>`) and `openshard ci gate --commit <sha>`.
-  It fails when verification failed for the pull request's head commit,
-  warns without blocking when verification is unknown (`strict: true` fails
-  on unknown too), and fails with the reason when it cannot answer. The job
-  summary lists the result, agent, model, checks, cost and whether the
-  Receipt is Platform-witnessed, with anything not recorded shown as unknown.
-  History committed to the repository, or reached through a symlink, is not
-  used as evidence. Setup and making it a required check:
-  `docs/merge-gate.md`.
+  It reads the head commit's Receipt from the Openshard Platform with a
+  GitHub OIDC token (or an organisation API key) and only passes or fails:
+  verified passes; failed fails; pending waits up to `wait-minutes` and then
+  fails; no Receipt fails when the pull request's commits carry Openshard
+  agent trailers and otherwise follows the team's `require_receipt` policy
+  (a human change passes under `agent_prs`). An unreachable Platform,
+  refused credentials or a fork pull request fails with the reason. The job
+  summary shows every Receipt field the Platform returns, with anything not
+  recorded shown as unknown. Committed or symlinked `.openshard/` history is
+  never used as evidence. Setup: `docs/merge-gate.md`.
+- The automatic per-commit verification sends its Receipt and commit
+  evidence to the Platform as soon as it is recorded, instead of waiting
+  for the next periodic sync, so the merge gate finds it sooner. Failures
+  there change nothing for the developer.
 
 ## 0.4.18 - 2026-10-18
 

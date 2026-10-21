@@ -1,9 +1,12 @@
 """``openshard ci gate``: the merge gate for one commit (docs/merge-gate.md).
 
-Reads the same evidence ``openshard verdict --commit`` reads, reduces it with
-``ci/merge_gate.evaluate_gate`` and, in GitHub Actions, writes the job
-summary and outputs. Nothing runs and nothing is written to the history.
-Exit 1 only when the gate fails; a warning (unknown) exits 0.
+Asks the Openshard Platform for the commit's gate verdict
+(``ci/gate_platform.py``), waiting while verification is pending, reads the
+agent marks on the pull request's commits (``ci/agent_marks.py``) and this
+runner's own trusted evidence, and reduces them with
+``ci/merge_gate.decide`` to pass or fail. In GitHub Actions it writes the
+job summary and outputs. Nothing runs and nothing is written to the
+history. Exit 0 pass, 1 fail; there is no third outcome.
 """
 
 from __future__ import annotations
@@ -15,16 +18,10 @@ from pathlib import Path
 
 import click
 
-# Said on every summary: the evidence is whatever this job's checkout holds,
-# so it is only as trustworthy as whoever wrote those files.
-EVIDENCE_SOURCE = (
-    "the Openshard history (.openshard/) available to this job. It is not independently witnessed "
-    "unless the Platform-witnessed row says yes."
-)
-
-
 UNTRUSTED_HISTORY = "untrusted_history"
 _EVIDENCE_FILES = ("runs.jsonl", "verifications.jsonl")
+_ZERO_SHA = "0" * 40
+POLL_SECONDS = 15.0
 
 
 def _tracked_history() -> bool:
@@ -61,135 +58,155 @@ def _tracked_history() -> bool:
     return bool(out.strip())
 
 
-def _receipt_summary(loc, receipt_id: str | None):
-    """The ``GateReceipt`` for *receipt_id* from this repository's history, or None. Never raises."""
-    from openshard.ci.merge_gate import WITNESS_UNKNOWN, WITNESS_YES, GateReceipt
-
-    if not receipt_id:
-        return None
+def _local_verdict(sha: str) -> str | None:
+    """``verified`` / ``failed`` from this runner's own trusted history, else None. Never raises."""
     try:
-        from openshard.history.merge_check import merge_check_block
-        from openshard.history.shard_contract import build_shard_receipt
-        from openshard.history.store import load_history
-        from openshard.remote.witness import WITNESS_PLATFORM, witness_for_entry
+        from openshard.cli.verdict_cmd import _answer
 
-        entries = load_history(loc.runs_path, coerce=False) if loc.runs_path.exists() else []
-        found = [(i, e) for i, e in enumerate(entries) if e.get("receipt_id") == receipt_id]
-        if not found:
-            return GateReceipt(receipt_id=receipt_id)
-        index, entry = found[-1]
-        receipt = build_shard_receipt(entry, index=index)
-        block = witness_for_entry(entry)
-        if block.get("capture_witness") == WITNESS_PLATFORM:
-            witness = WITNESS_YES
-            detail = f"{block['events_witnessed']} of {block['events_in_receipt']} events acknowledged"
-        else:
-            # The spool on this machine holds no acknowledgement. On a CI runner
-            # that says nothing about the Platform, so it is unknown, never "no".
-            witness, detail = WITNESS_UNKNOWN, "no acknowledgement recorded on this machine"
-        return GateReceipt(
-            receipt_id=receipt_id,
-            agent=receipt.agent or None,
-            model=None if receipt.model_display == "Not recorded" else receipt.model_display,
-            cost=None if receipt.cost_raw is None else receipt.cost_display,
-            witness=witness,
-            witness_detail=detail,
-            merge_check=_merge_check_line(merge_check_block(entry)),
-        )
+        doc = _answer(sha, None)
+        if doc.get("verdict") in ("verified", "failed") and not _tracked_history():
+            return str(doc["verdict"])
     except Exception:
-        return GateReceipt(receipt_id=receipt_id)
+        pass
+    return None
 
 
-def _merge_check_line(block: dict | None) -> str | None:
-    """One informational line from the Receipt's ``merge_check``; never a gate criterion."""
-    if not block:
-        return None
-    base = block["base_ref"]
-    conflicts = block.get("conflicts")
-    if conflicts is None:
-        text = f"conflicts with {base}: unknown"
-    elif conflicts:
-        text = f"{len(conflicts)} conflicting path(s) with {base}"
-    else:
-        text = f"no conflicts with {base}"
-    behind = block.get("behind_by")
-    if isinstance(behind, int):
-        text += f", {behind} commit(s) behind"
-    return f"{text} (checked {block['checked_at']})"
-
-
-def _checks(doc: dict, loc, sha: str) -> tuple[str | None, tuple[str, ...]]:
-    """Check counts and failed names for the evidence the verdict used. Never raises."""
+def _event(env) -> dict:
+    """The GitHub Actions event payload, or {} outside GitHub Actions. Never raises."""
+    path = env.get("GITHUB_EVENT_PATH")
     try:
-        from openshard.history.verification_truth import counts_phrase, interpret_evidence
-        from openshard.verification.post_session import (
-            commit_tree,
-            load_attestations,
-            summarize_attestation,
-        )
-        from openshard.verification.verdict import commit_evidence
+        data = json.loads(Path(path).read_text(encoding="utf-8")) if path else {}
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
-        matched, _ = commit_evidence(sha, load_attestations(loc.runs_path.parent),
-                                     tree_oid=commit_tree(loc.root, sha))
-        if not matched:
-            return None, ()
-        truth = interpret_evidence(None, post_session_verification={
-            "evidence": [summarize_attestation(item) for item in matched]})
-        phrase = counts_phrase(truth.checks_passed, truth.checks_failed, truth.checks_attempted)
-        return phrase or None, tuple(truth.failed_checks)
-    except Exception:
-        return None, ()
+
+def _event_base(event: dict) -> str | None:
+    """The commit the change starts from: the PR base, the merge queue base, or the push's ``before``."""
+    from openshard.ci.gate_platform import is_sha
+
+    for block, key in (("pull_request", "base"), ("merge_group", None)):
+        raw = event.get(block)
+        if isinstance(raw, dict):
+            value = (raw.get(key) or {}).get("sha") if key else raw.get("base_sha")
+            if is_sha(value):
+                return str(value)
+    before = event.get("before")
+    return str(before) if is_sha(before) and before != _ZERO_SHA else None
+
+
+def _is_fork(event: dict) -> bool:
+    pr = event.get("pull_request")
+    if not isinstance(pr, dict):
+        return False
+    head = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
+    base = ((pr.get("base") or {}).get("repo") or {}).get("full_name")
+    return isinstance(head, str) and isinstance(base, str) and head != base
+
+
+def _commit_marks(root: Path, head: str, base: str | None, pr_body: object) -> list[str] | None:
+    """Agent marks on the change's commits (and PR body); None when the commits could not be read."""
+    from openshard.ci.agent_marks import agent_marks
+    from openshard.util.git import run_git
+
+    args = ["log", "--format=%B%x00", f"{base}..{head}"] if base else ["log", "-1", "--format=%B", head]
+    messages = run_git(root, args)
+    if messages is None:
+        return None
+    marks = agent_marks(messages)
+    for name in agent_marks(pr_body if isinstance(pr_body, str) else ""):
+        if name not in marks:
+            marks.append(name)
+    return marks
+
+
+def _resolve(root: Path, ref: str) -> str | None:
+    from openshard.ci.gate_platform import is_sha
+    from openshard.cli.verdict_cmd import _resolve_commit
+
+    sha = _resolve_commit(root, ref)
+    return sha if is_sha(sha) else None
+
+
+def _platform_verdict(api: str, sha: str, env, *, wait_minutes: float, poll_seconds: float):
+    import httpx
+
+    from openshard.ci import gate_platform as gp
+
+    creds = gp.credentials_from_env(env)
+    if isinstance(creds, gp.PlatformError):
+        return creds
+    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=False) as http:
+        return gp.poll(lambda: gp.fetch_once(api, sha, creds, http),
+                       wait_seconds=wait_minutes * 60, interval=poll_seconds)
 
 
 @click.command("gate")
 @click.option("--commit", "commit_ref", required=True, metavar="SHA",
               help="The commit to gate: for a pull request, its head commit.")
-@click.option("--strict", is_flag=True, default=False,
-              help="Fail on unknown too (default: unknown is a warning and exits 0).")
+@click.option("--base", "base_ref", default=None, metavar="SHA",
+              help="Where the change starts (default: from the GitHub event). Its commits are checked for agent marks.")
+@click.option("--api", default=None, metavar="URL",
+              help="Openshard Platform API base (default: $OPENSHARD_GATE_API, else https://api.openshard.dev).")
+@click.option("--wait-minutes", type=click.FloatRange(min=0, max=360), default=10.0, show_default=True,
+              help="How long to wait while verification is pending before failing.")
+@click.option("--poll-seconds", type=click.FloatRange(min=0.1), default=POLL_SECONDS, hidden=True)
+@click.option("--strict", is_flag=True, default=False, hidden=True,
+              help="Deprecated, no effect: the gate only passes or fails.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
 @click.option("--github-step-summary", "step_summary", is_flag=True, default=False,
               help="Append the gate summary to $GITHUB_STEP_SUMMARY.")
 @click.option("--github-output", "github_output", is_flag=True, default=False,
               help="Write openshard_gate_status and openshard_gate_verdict to $GITHUB_OUTPUT.")
-def ci_gate(commit_ref: str, strict: bool, as_json: bool, step_summary: bool, github_output: bool) -> None:
-    """Gate a merge on one commit's recorded verification.
+def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes: float, poll_seconds: float,
+            strict: bool, as_json: bool, step_summary: bool, github_output: bool) -> None:
+    """Gate a merge on the commit's Receipt in the Openshard Platform: pass or fail, nothing in between.
 
-    Fail when verification failed for the commit, or when the gate could not
-    answer. Warn (exit 0) when it is unknown, for example a human-written
-    change with no Receipt; --strict fails on that too. Pass when an
-    Openshard re-run or CI observed the checks pass. Nothing runs.
+    Pass when the Platform says the commit was verified, or when it has no
+    Receipt, no commit carries an agent mark and the team only requires
+    Receipts for agent changes. Fail otherwise, including when the Platform
+    cannot be reached or refuses the credentials. Credentials: a GitHub
+    Actions OIDC token (the job needs `id-token: write`), or
+    $OPENSHARD_GATE_API_KEY with $OPENSHARD_GATE_ORG.
     """
-    from openshard.ci.merge_gate import evaluate_gate
+    from openshard.ci import gate_platform as gp
+    from openshard.ci.merge_gate import decide
     from openshard.cli.main import (
         _machine_envelope,
         _write_github_output,
         _write_github_step_summary,
     )
-    from openshard.cli.verdict_cmd import _answer
-    from openshard.verification import verdict
+    from openshard.history.locate import locate_history
 
+    env = dict(os.environ)
+    if strict:
+        click.echo("warning: --strict is deprecated and has no effect: the gate only passes or fails.", err=True)
     try:
-        doc = _answer(commit_ref, None)
-    except Exception as exc:  # an unreadable store fails the gate, never passes it
-        doc = verdict.error("commit", commit_ref, type(exc).__name__)
-    if doc.get("verdict") != "error" and _tracked_history():
-        # History files committed to the repository arrive with the change
-        # under review, so its author wrote them: never evidence for it.
-        doc = {**doc, "verdict": "unknown", "exit_code": 2, "reason": UNTRUSTED_HISTORY, "evidence": []}
+        root = locate_history(with_identity=False).root
+    except Exception:
+        root = Path.cwd()
+    event = _event(env)
+    if _is_fork(event):
+        env["OPENSHARD_GATE_FORK"] = "true"
+    api_base = (api or env.get("OPENSHARD_GATE_API") or gp.DEFAULT_API).strip()
 
-    receipt = checks = None
-    failed: tuple[str, ...] = ()
-    if doc.get("verdict") != "error":
-        from openshard.history.locate import locate_history
+    sha = _resolve(root, commit_ref)
+    marks: list[str] | None = None
+    local: str | None = None
+    platform: dict | gp.PlatformError
+    if sha is None:
+        platform = gp.PlatformError("error", f"{commit_ref!r} is not a full commit id in this repository.")
+    elif not api_base.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+        platform = gp.PlatformError("error", "The Platform API base must be an https:// URL.")
+    else:
+        platform = _platform_verdict(api_base, sha, env, wait_minutes=wait_minutes, poll_seconds=poll_seconds)
+        if isinstance(platform, dict) and platform.get("status") == "none":
+            local = _local_verdict(sha)
+            base = base_ref or _event_base(event)
+            pr = event.get("pull_request")
+            marks = _commit_marks(root, sha, base, pr.get("body") if isinstance(pr, dict) else None)
 
-        loc = locate_history(with_identity=False)
-        sha = doc["subject"]["id"]
-        rows = [r for r in doc.get("evidence") or [] if isinstance(r, dict)]
-        receipt = _receipt_summary(loc, rows[-1].get("receipt_id") if rows else None)
-        checks, failed = _checks(doc, loc, sha)
-
-    result = evaluate_gate(doc, strict=strict, receipt=receipt, checks=checks, failed_checks=failed,
-                           evidence_source=EVIDENCE_SOURCE)
+    result = decide(sha or commit_ref, platform, local_verdict=local, agent_marks=marks)
 
     if step_summary and not _write_github_step_summary(result.summary_markdown)[0]:
         click.echo("warning: GITHUB_STEP_SUMMARY is not set; step summary not written.", err=True)
@@ -200,8 +217,9 @@ def ci_gate(commit_ref: str, strict: bool, as_json: bool, step_summary: bool, gi
 
     if as_json:
         click.echo(json.dumps(_machine_envelope(
-            "ci gate", result.status, exit_code=result.exit_code, strict=strict, verdict=doc,
-            headline=result.headline, reasons=result.reasons,
+            "ci gate", result.status, exit_code=result.exit_code, commit=sha, verdict=result.verdict,
+            headline=result.headline, reasons=result.reasons, agent_marks=marks, local_verdict=local,
+            platform=platform if isinstance(platform, dict) else None,
         ), indent=2))
     else:
         click.echo(f"Openshard gate: {result.status}")
