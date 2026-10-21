@@ -15,7 +15,7 @@ jobs:
   gate:
     name: Openshard gate
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15  # above wait-minutes (10) plus setup, so the gate reports instead of being cancelled
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7

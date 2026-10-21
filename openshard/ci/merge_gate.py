@@ -13,8 +13,10 @@ Decision (docs/merge-gate.md):
   error.
 * ``none`` (no Receipt for the commit):
   - this runner's trusted local evidence decides when it is conclusive;
-  - agent marks on the pull request's commits -> fail (an agent changed
-    code and left no Receipt); the commits could not be read -> fail;
+  - agent marks on the pull request's commits -> the caller keeps asking
+    within ``wait-minutes`` (the Receipt may still be on its way), then
+    fail (an agent changed code and left no Receipt); the commits could
+    not be read -> fail;
   - team policy ``agent_prs`` -> pass, labelled as a human change;
   - team policy ``all_prs`` -> fail.
 * Any error (unreachable, credentials refused, fork, timeout, malformed
@@ -198,8 +200,13 @@ def decide(
     *,
     local_verdict: str | None = None,
     agent_marks: list[str] | None = None,
+    waited_minutes: float | None = None,
 ) -> GateResult:
-    """The gate outcome for *sha*. *agent_marks* is None when the commits could not be read. Never raises."""
+    """The gate outcome for *sha*. Never raises.
+
+    *agent_marks* is None when the commits could not be read; *waited_minutes*
+    is how long the caller waited for an agent change's Receipt.
+    """
     receipts: list[dict] = []
     answer = platform.last if isinstance(platform, PlatformError) else platform
     if isinstance(platform, PlatformError):
@@ -226,7 +233,9 @@ def decide(
                                              "(check out with `fetch-depth: 0`).")
         elif agent_marks:
             names = ", ".join(agent_marks[:_MAX_MARKS])
-            status, headline = STATUS_FAIL, f"Failed: an agent changed code but there is no Receipt (found {names})."
+            waited = f" The gate waited {waited_minutes:g} min for one." if waited_minutes else ""
+            status, headline = STATUS_FAIL, (f"Failed: an agent changed code but there is no Receipt "
+                                             f"(found {names}).{waited}")
         elif policy == "agent_prs":
             status, headline = STATUS_PASS, HUMAN_CHANGE
         else:

@@ -11,8 +11,9 @@ All notable changes to OpenShard are documented here.
   It reads the head commit's Receipt from the Openshard Platform with a
   GitHub OIDC token (or an organisation API key) and only passes or fails:
   verified passes; failed fails; pending waits up to `wait-minutes` and then
-  fails; no Receipt fails when the pull request's commits carry Openshard
-  agent trailers and otherwise follows the team's `require_receipt` policy
+  fails; no Receipt, when the pull request's commits carry Openshard agent
+  trailers, waits up to `wait-minutes` for the Receipt to arrive and then
+  fails, and otherwise is decided at once and follows the team's `require_receipt` policy
   (a human change passes under `agent_prs`). An unreachable Platform,
   refused credentials or a fork pull request fails with the reason. The job
   summary shows every Receipt field the Platform returns, with anything not

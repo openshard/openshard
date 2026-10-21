@@ -70,7 +70,11 @@ class TestDecision:
     def test_none_with_agent_marks_fails(self):
         r = decide(SHA, _verdict("none"), agent_marks=["Openshard-Agent"])
         assert r.status == "fail" and "an agent changed code but there is no Receipt" in r.headline
-        assert "Openshard-Agent" in r.headline
+        assert "Openshard-Agent" in r.headline and "waited" not in r.headline
+
+    def test_none_with_agent_marks_says_how_long_it_waited(self):
+        r = decide(SHA, _verdict("none"), agent_marks=["Openshard-Agent"], waited_minutes=10)
+        assert r.status == "fail" and r.headline.endswith("The gate waited 10 min for one.")
 
     def test_none_without_marks_under_agent_prs_passes_as_human(self):
         r = decide(SHA, _verdict("none", policy="agent_prs"), agent_marks=[])
@@ -346,6 +350,23 @@ class TestPoll:
         out, _ = self._poll([blip] * 10, wait=30)
         assert isinstance(out, gp.PlatformError) and out.kind == gp.ERROR_UNREACHABLE and "Still failing" in out.message
 
+    def test_none_is_final_by_default(self):
+        out, clock = self._poll([_verdict("none"), _verdict("verified")])
+        assert out["status"] == "none" and clock.sleeps == []
+
+    def test_wait_on_none_until_a_receipt_appears(self):
+        clock = _Clock()
+        calls = iter([_verdict("none"), _verdict("none"), _verdict("pending"), _verdict("verified")])
+        out = gp.poll(lambda: next(calls), wait_seconds=600, interval=15, sleep=clock.sleep,
+                      monotonic=lambda: clock.now, wait_on_none=True)
+        assert out["status"] == "verified" and clock.sleeps == [15, 15, 15]
+
+    def test_wait_on_none_returns_none_at_the_deadline(self):
+        clock = _Clock()
+        out = gp.poll(lambda: _verdict("none"), wait_seconds=40, interval=15, sleep=clock.sleep,
+                      monotonic=lambda: clock.now, wait_on_none=True)
+        assert isinstance(out, dict) and out["status"] == "none" and sum(clock.sleeps) == 40
+
     def test_permanent_errors_stop_at_once(self):
         auth = gp.PlatformError(gp.ERROR_AUTH, "no")
         out, clock = self._poll([auth])
@@ -436,16 +457,47 @@ class TestCli:
         _commit(repo, "agent work\n\nOpenshard-Agent: Codex")
         head = _commit(repo, "plain follow-up")  # the mark is on an earlier commit in the range
         _serve(monkeypatch, [(200, _verdict("none", sha=head))])
-        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--json")
+        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--json", "--wait-minutes", "0")
         body = json.loads(res.output)
         assert res.exit_code == 1 and body["agent_marks"] == ["Openshard-Agent"]
+
+    def test_agent_change_waits_for_its_receipt(self, repo, monkeypatch):
+        # The race seen on #630: the gate asks before Cloud Receipts has delivered.
+        base = _git(repo, "rev-parse", "HEAD")
+        head = _commit(repo, "agent work\n\nOpenshard-Agent: Claude Code")
+        seen: list = []
+        _serve(monkeypatch, [(200, _verdict("none", sha=head)), (200, _verdict("none", sha=head)),
+                             (200, _verdict("verified", sha=head, receipts=[{**FULL_RECEIPT}]))], seen)
+        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--wait-minutes", "1")
+        assert res.exit_code == 0 and res.output.startswith("Openshard gate: pass")
+        assert [s[0] for s in seen].count("api") == 3
+
+    def test_agent_change_still_without_receipt_fails_after_the_wait(self, repo, monkeypatch):
+        base = _git(repo, "rev-parse", "HEAD")
+        head = _commit(repo, "agent work\n\nOpenshard-Agent: Claude Code")
+        seen: list = []
+        _serve(monkeypatch, [(200, _verdict("none", sha=head))], seen)
+        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--wait-minutes", "0.01")
+        assert res.exit_code == 1 and "an agent changed code but there is no Receipt" in res.output
+        assert "The gate waited 0.01 min for one." in res.output
+        assert [s[0] for s in seen].count("api") > 1
+
+    @pytest.mark.parametrize("policy,code", [("agent_prs", 0), ("all_prs", 1)])
+    def test_human_change_is_decided_at_once(self, repo, monkeypatch, policy, code):
+        base = _git(repo, "rev-parse", "HEAD")
+        head = _commit(repo, "a human change")
+        seen: list = []
+        _serve(monkeypatch, [(200, _verdict("none", sha=head, policy=policy)),
+                             (200, _verdict("verified", sha=head))], seen)
+        res = _gate(repo, monkeypatch, "--commit", head, "--base", base, "--wait-minutes", "10")
+        assert res.exit_code == code and [s[0] for s in seen].count("api") == 1
 
     def test_agent_mark_in_the_pr_body_counts(self, repo, monkeypatch, tmp_path):
         base = _git(repo, "rev-parse", "HEAD")
         head = _commit(repo, "change")
         _serve(monkeypatch, [(200, _verdict("none", sha=head))])
         event = {"pull_request": {"base": {"sha": base}, "head": {"sha": head}, "body": "Openshard-Agent: Claude Code"}}
-        assert _gate(repo, monkeypatch, "--commit", head, event=event, tmp=tmp_path).exit_code == 1
+        assert _gate(repo, monkeypatch, "--commit", head, "--wait-minutes", "0", event=event, tmp=tmp_path).exit_code == 1
 
     def test_unreadable_commit_range_fails(self, repo, monkeypatch):
         head = _commit(repo, "change")

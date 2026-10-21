@@ -10,7 +10,7 @@ branding:
 
 inputs:
   wait-minutes:
-    description: "How long to wait while verification is pending before failing."
+    description: "How long to wait while verification is pending, or while an agent change has no Receipt yet, before failing."
     required: false
     default: "10"
   api:

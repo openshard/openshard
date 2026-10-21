@@ -36,7 +36,7 @@ ref.
 
 | Input | Default | Meaning |
 | --- | --- | --- |
-| `wait-minutes` | `10` | How long to wait while verification is pending, then fail |
+| `wait-minutes` | `10` | How long to wait while verification is pending, or while an agent change has no Receipt yet, then fail |
 | `api` | `https://api.openshard.dev` | Platform API base |
 | `api-key`, `org` | none | Organisation API key (from a secret) and organisation id, for CI without GitHub OIDC |
 | `commit` | the pull request head commit | The commit to gate |
@@ -66,9 +66,9 @@ Receipts whose verification is bound to that commit.
 | `verified` | **pass** |
 | `failed` | **fail** |
 | `pending` (a Receipt exists, verification not final) | waits up to `wait-minutes`, asking again every 15 s; then pass or fail. Still pending: **fail**. With a Receipt the reason is "Verification incomplete (partial) after N min" and names its verification state (a partial or agent-reported pass is never `verified`); without one, "Verification did not finish in N min" |
-| `none`, and an agent mark on the pull request's commits | **fail**: an agent changed code but there is no Receipt |
-| `none`, no agent mark, team policy `agent_prs` | **pass**: "Human change — no agent activity recorded" |
-| `none`, team policy `all_prs` | **fail** |
+| `none`, and an agent mark on the pull request's commits | waits up to `wait-minutes`, asking again every 15 s, because the Receipt may still be on its way; a Receipt that appears is decided as above. Still none: **fail**: "an agent changed code but there is no Receipt", with how long the gate waited |
+| `none`, no agent mark, team policy `agent_prs` | **pass** at once: "Human change — no agent activity recorded" |
+| `none`, no agent mark, team policy `all_prs` | **fail** at once |
 | `none`, and the commits could not be read | **fail** (check out with `fetch-depth: 0`) |
 | Platform unreachable, credentials refused, no credentials, malformed answer | **fail**, with the reason |
 | Pull request from a fork | **fail**: "Fork PRs can't be verified: GitHub gives them no credentials" |
@@ -76,6 +76,15 @@ Receipts whose verification is bound to that commit.
 Transient failures (network, HTTP 429 or 5xx) are retried within
 `wait-minutes`; a refused credential fails at once. A fresh OIDC token is
 minted for every request.
+
+**Why an agent change waits.** On a push, the gate and the workflow that
+creates the Receipt (for example Openshard Cloud Receipts, which runs the
+checks first) start together, so the gate's first answer is often `none`.
+The gate keeps asking within `wait-minutes`. A human change has nothing to
+wait for and is decided at once. Set `wait-minutes` above the time your
+Receipt workflow takes from push to delivery, and keep the gate job's
+`timeout-minutes` above `wait-minutes` plus about a minute of setup, or the
+job is cancelled before it can report.
 
 **Agent marks** are the trailers Openshard already defines, in any commit
 from the pull request's base to its head, or in the pull request body:
