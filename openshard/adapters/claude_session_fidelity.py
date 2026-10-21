@@ -127,11 +127,11 @@ def start_metadata(agent: str, repo_root: Path) -> dict[str, str]:
     return {"hook_config_hash": digest} if digest else {}
 
 
-def note_coverage_gaps(buf: dict) -> None:
+def note_coverage_gaps(buf: dict, repo_root: Path | None = None) -> None:
     """Record work the transcript shows but no hook delivered (see claude_hook_coverage). Never raises."""
     from openshard.adapters.claude_hook_coverage import note_gaps
 
-    note_gaps(buf)
+    note_gaps(buf, repo_root)
 
 
 def _hook_config_hash(buf: dict) -> str | None:

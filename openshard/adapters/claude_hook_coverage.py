@@ -16,7 +16,9 @@ still in flight is never counted as missing:
   received. Failed, denied or interrupted calls are not counted (they may
   legitimately reach no PostToolUse hook); sub-agent transcripts are not
   read, and their hooks only make the hook count larger, so the count can
-  miss gaps but never invents one.
+  miss gaps but never invents one. A Receipt that shares its session with
+  other checkouts (a multi-repository workspace) counts only the calls made
+  in its own checkout: the others' calls reached their own Receipts.
 * ``hook_events_stopped``: when the session ended or was sealed idle, the
   transcript kept recording the conversation more than two minutes after the
   last hook arrived.
@@ -32,11 +34,13 @@ judgement: unknown stays unknown, no reason is recorded.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
+from openshard.adapters.claude_cross_checkout import ATTR as SHARED_ATTR
 from openshard.adapters.claude_transcript_usage import (
     _file_head,
     _parse_utc,
@@ -73,7 +77,25 @@ def _new_state(since: object) -> dict[str, Any]:
     return {"since": since, "offset": 0, "head": None, "pending": {}, "ok": [], "ok_settled": 0, "last_at": None}
 
 
-def _note_line(state: dict[str, Any], rec: dict, since: int | None) -> None:
+def _in_checkout(rec: dict, block: dict, root: Path) -> bool:
+    """Whether a transcript tool call worked in *root*: its file path, else the record's ``cwd``."""
+    tool_input = block.get("input")
+    raw = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+    if not isinstance(raw, str) or not raw:
+        raw = rec.get("cwd")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        path = Path(raw)
+        if not path.is_absolute() and isinstance(rec.get("cwd"), str):
+            path = Path(rec["cwd"]) / path
+        path = Path(os.path.realpath(path))
+        return path == root or path.is_relative_to(root)
+    except (OSError, ValueError):
+        return False
+
+
+def _note_line(state: dict[str, Any], rec: dict, since: int | None, root: Path | None = None) -> None:
     kind = rec.get("type")
     if kind not in ("assistant", "user") or rec.get("isMeta") is True:
         return
@@ -88,7 +110,8 @@ def _note_line(state: dict[str, Any], rec: dict, since: int | None) -> None:
     for block in content if isinstance(content, list) else []:
         if not isinstance(block, dict):
             continue
-        if kind == "assistant" and block.get("type") == "tool_use" and block.get("name") in COUNTED_TOOLS:
+        if (kind == "assistant" and block.get("type") == "tool_use" and block.get("name") in COUNTED_TOOLS
+                and (root is None or _in_checkout(rec, block, root))):
             tool_id = block.get("id")
             if isinstance(tool_id, str) and tool_id:
                 while len(pending) >= _MAX_PENDING:  # a call that never got a result: forget the oldest
@@ -104,7 +127,7 @@ def _note_line(state: dict[str, Any], rec: dict, since: int | None) -> None:
                 state["ok"].append(at)
 
 
-def refresh(buf: dict) -> dict[str, Any] | None:
+def refresh(buf: dict, repo_root: Path | None = None) -> dict[str, Any] | None:
     """Read what the session's main transcript gained since the last call. Returns the state, or None. Never raises."""
     try:
         if (buf.get("agent") or AGENT_CLAUDE_CODE) != AGENT_CLAUDE_CODE:
@@ -114,6 +137,8 @@ def refresh(buf: dict) -> dict[str, Any] | None:
             return None
         path = Path(raw)
         since = buf.get("started_at")
+        # Shared with other checkouts: only this checkout's calls are expected here.
+        root = Path(os.path.realpath(repo_root)) if repo_root is not None and buf.get(SHARED_ATTR) is True else None
         state = buf.get(STATE_KEY)
         head = _file_head(path)
         if (not isinstance(state, dict) or state.get("since") != since
@@ -139,7 +164,7 @@ def refresh(buf: dict) -> dict[str, Any] | None:
                 except (ValueError, RecursionError):
                     continue
                 if isinstance(rec, dict):
-                    _note_line(state, rec, since_at)
+                    _note_line(state, rec, since_at, root)
         buf[STATE_KEY] = state
         return state
     except (OSError, ValueError, TypeError):
@@ -183,10 +208,10 @@ def evaluate(buf: dict, state: dict[str, Any] | None) -> list[dict[str, Any]] | 
     return reasons
 
 
-def note_gaps(buf: dict) -> None:
+def note_gaps(buf: dict, repo_root: Path | None = None) -> None:
     """Refresh the transcript view and replace this session's coverage gaps in ``capture_losses``. Never raises."""
     try:
-        reasons = evaluate(buf, refresh(buf))
+        reasons = evaluate(buf, refresh(buf, repo_root))
         if reasons is None:
             return
         kept = [r for r in (buf.get("capture_losses") or []) if isinstance(r, dict) and r.get("kind") not in GAP_KINDS]

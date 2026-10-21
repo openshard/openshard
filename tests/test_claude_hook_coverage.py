@@ -57,10 +57,12 @@ class Transcript:
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
 
-    def tool(self, name: str, at: datetime, *, is_error: bool = False, result: bool = True) -> None:
+    def tool(self, name: str, at: datetime, *, is_error: bool = False, result: bool = True,
+             cwd: Path | None = None) -> None:
         self.n += 1
         tid = f"toolu_{self.n:04d}"
-        self._append({"type": "assistant", "sessionId": SID, "timestamp": _stamp(at), "message": {
+        self._append({"type": "assistant", "sessionId": SID, "timestamp": _stamp(at),
+                      **({"cwd": str(cwd)} if cwd is not None else {}), "message": {
             "id": f"msg_{self.n}", "role": "assistant", "model": "claude-opus-5-5",
             "content": [{"type": "tool_use", "id": tid, "name": name, "input": {"command": "SECRET INPUT"}}],
             "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0,
@@ -150,6 +152,28 @@ def test_tool_calls_that_reached_no_hook_are_a_gap(repo):
             "detail": "3 tool calls in the transcript reached no hook"} in as_json["capture_completeness"]["reasons"]
     # Never a claim of control or enforcement.
     assert "block" not in json.dumps(as_json["capture_completeness"]).lower()
+
+
+def test_a_receipt_sharing_its_session_counts_only_its_own_checkouts_calls(repo, tmp_path):
+    """Multi-repository workspace: the other checkout's calls reached that checkout's Receipt."""
+    other = tmp_path / "other"
+    other.mkdir()
+    transcript = Transcript()
+    start = _now() - timedelta(minutes=1)
+    for _ in range(3):
+        transcript.tool("Bash", _now(), cwd=other)
+    transcript.tool("Bash", _now(), cwd=repo)
+    transcript.tool("Bash", _now(), cwd=repo / "src")
+    stamp = _stamp(_now() + timedelta(seconds=5))[:19] + "Z"
+    buf = {"agent": "claude_code", "session_id": SID, "transcript_path": str(_transcript_path()),
+           "started_at": _stamp(start)[:19] + "Z", "session_task_shared": True, "tool_call_count": 1,
+           "last_activity_at": stamp, "last_stop_at": stamp}
+    reasons = coverage.evaluate(buf, coverage.refresh(buf, repo))
+    assert [(r["kind"], r["count"]) for r in reasons] == [("tool_calls_without_hook", 1)]
+    # Without the shared-session marker every transcript call is this Receipt's.
+    alone = {k: v for k, v in buf.items() if k not in ("session_task_shared", coverage.STATE_KEY)}
+    reasons = coverage.evaluate(alone, coverage.refresh(alone, repo))
+    assert [(r["kind"], r["count"]) for r in reasons] == [("tool_calls_without_hook", 4)]
 
 
 def test_gap_reaches_openshard_last_and_history_json(repo, monkeypatch):
