@@ -24,7 +24,7 @@ from openshard.history.shard_hash import integrity_as_stored, verify_shard_hash
 from openshard.history.task_edges import task_edges_block
 from openshard.history.task_identity import stored_task_id
 from openshard.history.task_title import derive_task_title, resolve_task_title
-from openshard.history.usage_evidence import effective_usage
+from openshard.history.usage_evidence import billing_basis_value, effective_usage
 from openshard.history.verification import (
     REASON_OUTCOME_NOT_OBSERVED,
     SOURCE_AGENT_REPORTED,
@@ -1573,7 +1573,7 @@ def build_shard_receipt(
         changes=_changes_summary(_changes_block),
         agent_reported_in_git=_g if isinstance(_g := (_changes_block or {}).get("agent_reported_in_git"), int) and _g > 0 else 0,
         files_excluded=_files_excluded,
-        recorded_evidence={**project_entry_evidence(entry), "gaming_signals": gaming_signals_block(entry), "task_edges": task_edges_block(entry), "merge_check": merge_check_block(entry)},
+        recorded_evidence={**project_entry_evidence(entry), "gaming_signals": gaming_signals_block(entry), "task_edges": task_edges_block(entry), "merge_check": merge_check_block(entry), "billing_basis": billing_basis_value(entry)},
         usage=effective_usage(entry, _own_usage_attestations(entry, usage_attestations)),
         shard=build_shard(
             entry,

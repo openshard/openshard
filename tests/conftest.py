@@ -193,8 +193,18 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
     # lookup must never call a real ``gh``; tests that need it opt back in.
     for var in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
                 "ANTHROPIC_BASE_URL", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CONFIG_DIR",
-                "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_REMOTE_SESSION_ID"):
+                "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_REMOTE_SESSION_ID",
+                # billing basis (adapters/billing_basis.py) reads presence of these
+                "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_PROFILE",
+                "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "OPENAI_API_KEY", "CODEX_API_KEY",
+                "CODEX_HOME", "OPENAI_BASE_URL"):
         monkeypatch.delenv(var, raising=False)
+    # ... and the developer's real ~/.claude, ~/.codex and managed settings must
+    # never decide it; tests/test_billing_basis.py passes its own fake homes.
+    from openshard.adapters import billing_basis as _billing
+
+    monkeypatch.setattr(_billing, "_home", lambda env: None)
+    monkeypatch.setattr(_billing, "_MANAGED_SETTINGS", {})
     monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "off")
     # Commit verification is on by default for captured sessions: no test may
     # start a real detached ``openshard verify``. Tests of the trigger pass

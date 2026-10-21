@@ -72,7 +72,7 @@ import time
 from pathlib import Path
 
 from openshard.adapters import capture_auth as _auth
-from openshard.adapters.agent_env import claude_agent_env, format_agent_env
+from openshard.adapters.agent_env import agent_environment, format_agent_env
 from openshard.history.correlation import launch_correlation
 from openshard.history.task_identity import launch_task_id
 from openshard.util.home import openshard_home
@@ -886,9 +886,9 @@ def _run_hook_raw(
     # unset/malformed value is simply "no declaration") and forwarded on its
     # own header, or handed to the in-process fold -- never read from ``raw``.
     task_id = launch_task_id(env)
-    # Provider/surface of the Claude Code process that ran this hook, from
+    # Provider/surface/billing basis of the agent process that ran this hook, from
     # the environment it handed us (the service never sees that environment).
-    agent_env = claude_agent_env(env) if agent == "claude_code" else None
+    agent_env = agent_environment(agent, env)
     agent_env_header = format_agent_env(agent_env)
     try:
         if not disabled(env):

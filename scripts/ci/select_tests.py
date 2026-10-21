@@ -95,6 +95,7 @@ WINDOWS_SMOKE_TEST_FILES: tuple[str, ...] = (
     "tests/test_sandbox_apply_receipts.py",
     "tests/test_sandbox_diff.py",
     "tests/test_adapters_wrap_exec.py",
+    "tests/test_billing_basis.py",  # Claude/Codex login files under HOME vs USERPROFILE / APPDATA
 )
 
 # The invariant suite: evidence-critical guarantees that run on *every*

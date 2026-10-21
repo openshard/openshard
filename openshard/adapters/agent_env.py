@@ -1,4 +1,4 @@
-"""Where a coding agent runs: provider and surface, read from its hook environment.
+"""Where a coding agent runs: provider, surface and billing basis, read from its hook environment.
 
 Claude Code hands its hook processes its own environment, which is where
 its provider selection lives (``CLAUDE_CODE_USE_BEDROCK`` / ``_VERTEX`` /
@@ -13,6 +13,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+
+from openshard.adapters.billing_basis import (
+    UNKNOWN,
+    billing_basis_or_none,
+    claude_billing_basis,
+    codex_billing_basis,
+)
 
 PROVIDER_SOURCE_AGENT_ENV = "agent_env"
 _CLAUDE_PROVIDER_FLAGS: tuple[tuple[str, str], ...] = (
@@ -49,7 +56,7 @@ def _env_flag(value: object) -> bool:
 
 
 def claude_agent_env(env: Mapping[str, str] | None) -> dict[str, str]:
-    """``{"provider", "surface", "cloud_session"}`` (each only when known) from Claude Code's hook environment.
+    """``{"provider", "surface", "cloud_session", "billing_basis"}`` (each only when known) from Claude Code's hook environment.
 
     Exactly one ``CLAUDE_CODE_USE_*`` flag names its cloud provider; none
     set means the Anthropic API -- unless ``ANTHROPIC_BASE_URL`` points
@@ -58,7 +65,9 @@ def claude_agent_env(env: Mapping[str, str] | None) -> dict[str, str]:
     validated ``CLAUDE_CODE_ENTRYPOINT`` (``cli``, ``sdk-cli``,
     ``claude-vscode`` ...). ``cloud_session`` is the claude.ai cloud session
     id in ``session_`` form, only inside a cloud session (``CLAUDE_CODE_REMOTE``).
-    Never raises.
+    ``billing_basis`` is ``api_billed`` or ``subscription`` when
+    ``adapters/billing_basis`` can tell from presence checks alone; absent
+    (unknown) otherwise. Never raises.
     """
     out: dict[str, str] = {}
     if not isinstance(env, Mapping):
@@ -77,7 +86,25 @@ def claude_agent_env(env: Mapping[str, str] | None) -> dict[str, str]:
             out["cloud_session"] = f"session_{match.group(1)}"
     except Exception:
         return {}
+    billing = claude_billing_basis(env)
+    if billing != UNKNOWN:
+        out["billing_basis"] = billing
     return out
+
+
+def codex_agent_env(env: Mapping[str, str] | None) -> dict[str, str]:
+    """``{"billing_basis"}`` when Codex's own login state settles it (``adapters/billing_basis``), else ``{}``."""
+    billing = codex_billing_basis(env)
+    return {} if billing == UNKNOWN else {"billing_basis": billing}
+
+
+def agent_environment(agent: str, env: Mapping[str, str] | None) -> dict[str, str] | None:
+    """The hook-environment facts recorded for *agent*; None for agents with none."""
+    if agent == "claude_code":
+        return claude_agent_env(env)
+    if agent == "codex":
+        return codex_agent_env(env)
+    return None
 
 
 def format_agent_env(agent_env: Mapping[str, str] | None) -> str | None:
@@ -94,6 +121,9 @@ def format_agent_env(agent_env: Mapping[str, str] | None) -> str | None:
     cloud_session = cloud_session_or_none(agent_env.get("cloud_session"))
     if cloud_session:
         parts.append(f"cloud_session={cloud_session}")
+    billing = billing_basis_or_none(agent_env.get("billing_basis"))
+    if billing and billing != UNKNOWN:
+        parts.append(f"billing={billing}")
     return ";".join(parts) or None
 
 
@@ -117,4 +147,8 @@ def parse_agent_env(value: object) -> dict[str, str]:
             cloud_session = cloud_session_or_none(raw.strip())
             if cloud_session:
                 out["cloud_session"] = cloud_session
+        elif key == "billing":
+            billing = billing_basis_or_none(raw.strip())
+            if billing and billing != UNKNOWN:
+                out["billing_basis"] = billing
     return out

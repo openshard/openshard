@@ -559,8 +559,25 @@ def usage_line(block: dict[str, Any] | None) -> str:
     return " · ".join(p for p in parts if p)
 
 
+BILLING_BASES: frozenset[str] = frozenset({"api_billed", "subscription", "unknown"})
+
+
+def billing_basis_value(entry: Any) -> str | None:
+    """How the run's usage is paid for, as capture recorded it (``capture.billing_basis``).
+
+    ``api_billed`` / ``subscription`` / ``unknown``, read at capture time from
+    presence checks on the agent's own environment and login state
+    (``adapters/billing_basis``). None when the record carries none: older
+    records and agents without a signal stay unknown. Never inferred here.
+    """
+    capture = entry.get("capture") if isinstance(entry, dict) else None
+    value = capture.get("billing_basis") if isinstance(capture, dict) else None
+    return value if isinstance(value, str) and value in BILLING_BASES else None
+
+
 __all__ = [
     "ATTESTATION_VERSION",
+    "BILLING_BASES",
     "KIND_USAGE",
     "SOURCES",
     "SOURCE_AGENT",
@@ -582,6 +599,7 @@ __all__ = [
     "SURFACE_RECORD",
     "TOKEN_KEYS",
     "USAGE_VERSION",
+    "billing_basis_value",
     "effective_usage",
     "load_usage_attestations",
     "record_usage_attestation",
