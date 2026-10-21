@@ -37,7 +37,7 @@ cd C:\Users\Michael\HarbourDocs\harbourdocs-infra
 ### Beat 1 — Hook (~12 seconds)
 
 **Say:**
-> "AI agents can write code and run commands. But do you know what changed, what it cost, or whether it was safe? OpenShard is the control layer for that."
+> "AI agents can write code and run commands. But do you know what changed, what it cost, or whether it was safe? Openshard keeps the receipt."
 
 **Viewer sees:** Empty terminal prompt.
 
