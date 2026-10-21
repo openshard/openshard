@@ -1,90 +1,61 @@
 """Pure decision for the Openshard merge gate (the root ``action.yml``).
 
-No I/O. Takes the ``openshard verdict --commit`` document for a pull
-request's head commit (docs/verdict.md), the ``strict`` flag and an optional
-summary of the Receipt the evidence names, and returns pass / warn / fail
-plus the markdown for the job summary.
+No I/O. Takes the Platform's gate verdict for a pull request's head commit
+(``openshard.gate_verdict.v1``, read by ``ci/gate_platform.py``) or the
+reason it could not be read, this runner's own trusted verdict (if any),
+and the agent marks on the pull request's commits, and returns pass or
+fail plus the markdown for the job summary. There is no third outcome.
 
 Decision (docs/merge-gate.md):
 
-* ``verified`` -> ``pass``.
-* ``failed``   -> ``fail``: verification failed for this commit.
-* ``unknown``  -> ``warn`` (exit 0): no evidence, or only the agent says it
-  passed. Could be a human-written PR, so it never blocks by default.
-  ``strict`` turns it into ``fail``.
-* ``error``, or a document this module cannot read -> ``fail``. A gate that
-  could not answer never passes silently.
+* Platform ``verified`` -> pass; ``failed`` -> fail.
+* ``pending`` never reaches here: the caller polls, and a timeout is an
+  error.
+* ``none`` (no Receipt for the commit):
+  - this runner's trusted local evidence decides when it is conclusive;
+  - agent marks on the pull request's commits -> fail (an agent changed
+    code and left no Receipt); the commits could not be read -> fail;
+  - team policy ``agent_prs`` -> pass, labelled as a human change;
+  - team policy ``all_prs`` -> fail.
+* Any error (unreachable, credentials refused, fork, timeout, malformed
+  answer, not a commit) -> fail with its reason. Never a silent pass.
 
-Wording rules: unknown stays unknown (never zero), and a Receipt is called
-tamper-evident only when the Platform witness acknowledged its capture.
+Wording rules: unknown is shown as unknown, never zero, and a Receipt is
+called tamper-evident only when the Platform says it witnessed it.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
+
+from openshard.ci.gate_platform import PlatformError
 
 STATUS_PASS = "pass"
-STATUS_WARN = "warn"
 STATUS_FAIL = "fail"
 
-WITNESS_YES = "yes"
-WITNESS_NO = "no"
-WITNESS_UNKNOWN = "unknown"
-
 UNKNOWN = "unknown"
-_MAX_CELL = 120
-_MAX_FAILED_NAMES = 5
+HUMAN_CHANGE = "Human change — no agent activity recorded."
+_MAX_CELL = 160
+_MAX_RECEIPTS = 10
+_MAX_CHECKS = 50
+_MAX_APPROVALS = 10
+_MAX_MARKS = 5
 
-_AUTHORITY_WORDS = {
-    "directly_observed": "an Openshard re-run",
-    "independently_verified": "independent CI",
-    "git_verified": "git",
-    "agent_reported": "the agent's own report",
-}
-
-_UNKNOWN_REASONS = {
-    "not_checked": "No verification evidence for this commit was available to this job.",
-    "no_receipt": "No Receipt was found for this work.",
-    "integrity_mismatch": "The Receipt changed after its hash was written, so its evidence is not used.",
-    "agent_reported_passed": "Only the agent says the checks passed; nothing independent observed them.",
-    "agent_reported_partial": "Only the agent reported a partial result; nothing independent observed it.",
-    "attempted_unverified": "Checks were attempted but their outcome was not observed.",
-    "verified_partial": "Only some checks completed.",
-    "not_run": "No checks were run.",
-    "skipped": "Verification was skipped.",
-    "manual_review": "Verification needs manual review.",
-    "not_observed": "Verification was not observed.",
-    "untrusted_history": ("Openshard history is committed to the repository or reached through a symlink, so "
-                          "it may have come with this change and is not used as evidence."),
-}
-
-
-@dataclass(frozen=True)
-class GateReceipt:
-    """What the job summary says about the Receipt behind the evidence. None means unknown."""
-
-    receipt_id: str | None = None
-    agent: str | None = None
-    model: str | None = None
-    cost: str | None = None
-    witness: str = WITNESS_UNKNOWN
-    witness_detail: str | None = None
-    merge_check: str | None = None  # informational only, never a gate criterion
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ]+")
+_MD_SPECIAL_RE = re.compile(r"([\\`*_\[\]#!|~$])")
+_URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(?::\d+)?(?:/[A-Za-z0-9._~%/+=&?:@-]*)?$")
 
 
 @dataclass(frozen=True)
 class GateResult:
     status: str
     exit_code: int
-    verdict: str
+    verdict: str  # the Platform status, or the error kind
     headline: str
-    reasons: list[str] = field(default_factory=list)
     summary_markdown: str = ""
-
-
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
-_MD_SPECIAL_RE = re.compile(r"([\\`*_\[\]#!|~$])")
+    reasons: list[str] = field(default_factory=list)
 
 
 def _cell(value: object) -> str:
@@ -99,126 +70,193 @@ def _cell(value: object) -> str:
 
 
 def _short(sha: object) -> str:
-    return sha[:12] if isinstance(sha, str) and sha else UNKNOWN
+    return sha[:12] if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{7,64}", sha) else UNKNOWN
 
 
-def _checks_text(checks: str | None, failed: tuple[str, ...]) -> str:
-    text = checks or UNKNOWN
-    if failed:
-        names = ", ".join(failed[:_MAX_FAILED_NAMES]) + (" …" if len(failed) > _MAX_FAILED_NAMES else "")
-        text += f" (failed: {names})"
+def _count(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _yes_no(value: object) -> str:
+    return "yes" if value is True else "no" if value is False else UNKNOWN
+
+
+def _cost(cost: object) -> str:
+    if not isinstance(cost, dict):
+        return UNKNOWN
+    usd = cost.get("usd")
+    if not isinstance(usd, int | float) or isinstance(usd, bool) or usd < 0:
+        return UNKNOWN
+    source = cost.get("source")
+    amount = f"${usd:.2f}" if usd >= 0.01 else f"${usd:.4f}"
+    return f"{amount} ({source})" if isinstance(source, str) and source else f"{amount} (source unknown)"
+
+
+def _lines(receipt: dict) -> str:
+    added, removed = _count(receipt.get("lines_added")), _count(receipt.get("lines_removed"))
+    if added is None and removed is None:
+        return UNKNOWN
+    return f"+{added if added is not None else UNKNOWN} / -{removed if removed is not None else UNKNOWN}"
+
+
+def _verification(block: object) -> str:
+    if not isinstance(block, dict):
+        return UNKNOWN
+    raw = block.get("result")
+    text = raw if isinstance(raw, str) and raw else UNKNOWN
+    at = block.get("verified_at")
+    bound = block.get("bound_commit")
+    text += f", at {at}" if isinstance(at, str) and at else ", time unknown"
+    text += f", bound to commit {_short(bound)}" if isinstance(bound, str) and bound else ", bound commit unknown"
     return text
 
 
-def _witness_text(receipt: GateReceipt | None) -> str:
-    if receipt is None:
+def _approvals(value: object) -> str:
+    if value is None:
         return UNKNOWN
-    if receipt.witness == WITNESS_YES:
-        detail = f", {receipt.witness_detail}" if receipt.witness_detail else ""
-        return f"yes{detail}"
-    if receipt.witness == WITNESS_NO:
-        return "no"
-    return UNKNOWN
-
-
-def evaluate_gate(
-    doc: object,
-    *,
-    strict: bool = False,
-    receipt: GateReceipt | None = None,
-    checks: str | None = None,
-    failed_checks: tuple[str, ...] = (),
-    evidence_source: str | None = None,
-) -> GateResult:
-    """Reduce one verdict document to the gate outcome. Never raises."""
-    data = doc if isinstance(doc, dict) else {}
-    verdict = data.get("verdict")
-    reason = data.get("reason") if isinstance(data.get("reason"), str) else None
-    raw_subject = data.get("subject")
-    sha = raw_subject.get("id") if isinstance(raw_subject, dict) else None
-    authority = _AUTHORITY_WORDS.get(str(data.get("authority")), None)
-    reasons: list[str] = []
-
-    if verdict == "verified":
-        status = STATUS_PASS
-        headline = f"Verified: the recorded evidence says {authority or 'a verifier'} observed the checks pass."
-    elif verdict == "failed":
-        status = STATUS_FAIL
-        who = f" (reported by {authority})" if authority else ""
-        headline = f"Verification failed for this commit{who}."  # a failure stands whoever reported it
-        reasons.append(headline)
-    elif verdict == "unknown":
-        status = STATUS_FAIL if strict else STATUS_WARN
-        detail = _UNKNOWN_REASONS.get(reason or "", "Verification is unknown for this commit.")
-        if strict:
-            headline = f"Unknown, and strict mode requires verified evidence. {detail}"
-            reasons.append(headline)
+    if not isinstance(value, list):
+        return UNKNOWN
+    if not value:
+        return "none recorded"
+    parts = []
+    for item in value[:_MAX_APPROVALS]:
+        if isinstance(item, dict):
+            parts.append(", ".join(f"{k}: {v}" for k, v in item.items() if isinstance(v, str | int | float | bool)))
         else:
-            headline = f"Unknown. {detail} This may be a human-written change; this check does not fail on unknown."
+            parts.append(str(item))
+    more = f" (+{len(value) - _MAX_APPROVALS} more)" if len(value) > _MAX_APPROVALS else ""
+    return "; ".join(parts) + more
+
+
+def _merge_check(block: object) -> str | None:
+    """One informational line from a ``merge_check`` block; never a gate criterion."""
+    from openshard.history.merge_check import normalize
+
+    norm = normalize(block)
+    if norm is None:
+        return None
+    conflicts = norm.get("conflicts")
+    base = norm["base_ref"]
+    if conflicts is None:
+        text = f"conflicts with {base}: unknown"
+    elif conflicts:
+        text = f"{len(conflicts)} conflicting path(s) with {base}"
     else:
-        status = STATUS_FAIL
-        message = data.get("message") if isinstance(data.get("message"), str) else None
-        headline = "The gate could not answer, so it fails rather than pass silently" + (
-            f": {message}" if message else "."
-        )
-        reasons.append(headline)
+        text = f"no conflicts with {base}"
+    if norm.get("behind_by") is not None:
+        text += f", {norm['behind_by']} commit(s) behind"
+    return f"{text} (checked {norm['checked_at']})"
 
-    match_note = ""
-    if data.get("match") == "tree":
-        match_note = (
-            f"Evidence is bound to commit {_short(data.get('artifact_sha'))}, which has the same content "
-            "(same tree) as this commit."
-        )
 
-    title = {STATUS_PASS: "passed", STATUS_WARN: "warning: unknown", STATUS_FAIL: "failed"}[status]
-    shown = verdict if verdict in ("verified", "failed", "unknown", "error") else "error"
+def render_receipt(receipt: dict) -> list[str]:
+    """Markdown for one Receipt from the gate verdict: every field the Platform sent, unknown as unknown."""
+    rid = receipt.get("receipt_id") if isinstance(receipt.get("receipt_id"), str) else None
+    title = f"#### Receipt {_cell(rid)}"
+    url = receipt.get("url")
+    if isinstance(url, str) and _URL_RE.match(url):
+        title += f" · [open in Openshard]({url})"
     rows = [
-        ("Result", shown + (f" ({reason})" if reason and reason != shown else "")),
-        ("Agent", receipt.agent if receipt else None),
-        ("Model", receipt.model if receipt else None),
-        ("Checks", _checks_text(checks, failed_checks)),
-        ("Cost", receipt.cost if receipt else None),
-        ("Platform-witnessed", _witness_text(receipt)),
+        ("Status", receipt.get("status")),
+        ("Agent", receipt.get("agent")),
+        ("Model", receipt.get("model")),
+        ("Task", receipt.get("task")),
+        ("Files changed", _count(receipt.get("files_changed"))),
+        ("Lines", _lines(receipt)),
+        ("Verification", _verification(receipt.get("verification"))),
+        ("Cost", _cost(receipt.get("cost"))),
+        ("Approvals", _approvals(receipt.get("approvals"))),
+        ("Platform-witnessed", _yes_no(receipt.get("witnessed"))),
+        ("Signature verified", _yes_no(receipt.get("signature_verified"))),
     ]
-    if receipt and receipt.receipt_id:
-        rows.append(("Receipt", receipt.receipt_id))
-    if receipt and receipt.merge_check:
-        rows.append(("Merge check (at capture, informational)", receipt.merge_check))
+    merge = _merge_check(receipt.get("merge_check"))
+    if merge:
+        rows.append(("Merge check (informational)", merge))
+    out = [title, "", "| | |", "| --- | --- |"]
+    out += [f"| {name} | {_cell(value)} |" for name, value in rows]
+    checks = receipt.get("checks")
+    out.append("")
+    if isinstance(checks, list) and checks:
+        out += ["| Check | Outcome | Source |", "| --- | --- | --- |"]
+        for check in checks[:_MAX_CHECKS]:
+            c = check if isinstance(check, dict) else {}
+            out.append(f"| {_cell(c.get('name'))} | {_cell(c.get('outcome'))} | {_cell(c.get('source'))} |")
+        if len(checks) > _MAX_CHECKS:
+            out.append(f"| … {len(checks) - _MAX_CHECKS} more | | |")
+    elif isinstance(checks, list):
+        out.append("Checks: none recorded.")
+    else:
+        out.append("Checks: unknown.")
+    if receipt.get("witnessed") is True:
+        out += ["", "The Platform witnessed this Receipt's capture, so a later rewrite of the local record is "
+                    "detectable. Being witnessed is not being verified."]
+    return out
 
-    lines = [
-        f"### Openshard gate: {title}",
-        "",
-        f"Commit `{_short(sha)}`. {headline}",
-    ]
-    if match_note:
-        lines += ["", match_note]
-    if evidence_source:
-        lines += ["", f"Evidence source: {evidence_source}"]
-    lines += ["", "| | |", "| --- | --- |"]
-    lines += [f"| {name} | {_cell(value)} |" for name, value in rows]
-    if receipt and receipt.witness == WITNESS_YES:
-        lines += ["", "The Platform acknowledged this Receipt's capture, so a later local rewrite of it is "
-                      "detectable. Being witnessed is not being verified."]
-    lines += ["", "Unknown means not recorded or not available to this job, never zero."]
 
+def decide(
+    sha: str,
+    platform: dict[str, Any] | PlatformError,
+    *,
+    local_verdict: str | None = None,
+    agent_marks: list[str] | None = None,
+) -> GateResult:
+    """The gate outcome for *sha*. *agent_marks* is None when the commits could not be read. Never raises."""
+    receipts: list[dict] = []
+    answer = platform.last if isinstance(platform, PlatformError) else platform
+    if isinstance(platform, PlatformError):
+        verdict, status = platform.kind, STATUS_FAIL
+        headline = f"Failed: {platform.message}"
+    else:
+        verdict = str(platform.get("status"))
+        receipts = [r for r in platform.get("receipts") or [] if isinstance(r, dict)]
+        policy = (platform.get("policy") or {}).get("require_receipt")
+        if verdict == "verified":
+            status, headline = STATUS_PASS, "Verified: the Platform's evidence for this commit says its checks passed."
+        elif verdict == "failed":
+            status, headline = STATUS_FAIL, "Failed: verification failed for this commit."
+        elif verdict == "pending":
+            status, headline = STATUS_FAIL, "Failed: verification had not finished when the gate stopped waiting."
+        elif local_verdict == "verified":
+            status, headline = STATUS_PASS, ("Verified by evidence on this runner (the Platform has no Receipt "
+                                             "for this commit).")
+        elif local_verdict == "failed":
+            status, headline = STATUS_FAIL, "Failed: evidence on this runner says verification failed."
+        elif agent_marks is None:
+            status, headline = STATUS_FAIL, ("Failed: no Receipt for this commit, and the pull request's commits "
+                                             "could not be read to tell whether an agent made them "
+                                             "(check out with `fetch-depth: 0`).")
+        elif agent_marks:
+            names = ", ".join(agent_marks[:_MAX_MARKS])
+            status, headline = STATUS_FAIL, f"Failed: an agent changed code but there is no Receipt (found {names})."
+        elif policy == "agent_prs":
+            status, headline = STATUS_PASS, HUMAN_CHANGE
+        else:
+            status, headline = STATUS_FAIL, ("Failed: no Receipt for this commit, and the team requires one for "
+                                             "every pull request.")
+
+    title = "passed" if status == STATUS_PASS else "failed"
+    lines = [f"### Openshard gate: {title}", "", f"Commit `{_short(sha)}`. {_cell(headline)}"]
+    if isinstance(answer, dict):
+        receipts = [r for r in answer.get("receipts") or [] if isinstance(r, dict)]
+        lines += ["", f"Platform answer: {_cell(answer.get('status'))}, checked {_cell(answer.get('checked_at'))}."]
+        group = answer.get("merge_group")
+        if isinstance(group, dict):
+            lines += ["", f"Merge queue: PR \\#{_cell(group.get('pull_request'))} head `{_short(group.get('head_sha'))}` "
+                          f"(queue commit `{_short(group.get('requested_sha'))}`)."]
+        if answer.get("status") == "none" and isinstance(answer.get("reason"), str):
+            lines += ["", f"Platform reason: {_cell(answer['reason'])}"]
+        for receipt in receipts[:_MAX_RECEIPTS]:
+            lines += [""] + render_receipt(receipt)
+        if len(receipts) > _MAX_RECEIPTS:
+            lines += ["", f"{len(receipts) - _MAX_RECEIPTS} more Receipt(s) not shown."]
+    lines += ["", "Unknown means the Platform does not record it, never zero."]
     return GateResult(
         status=status,
-        exit_code=1 if status == STATUS_FAIL else 0,
-        verdict=shown,
+        exit_code=0 if status == STATUS_PASS else 1,
+        verdict=verdict,
         headline=headline,
-        reasons=reasons,
         summary_markdown="\n".join(lines) + "\n",
+        reasons=[] if status == STATUS_PASS else [headline],
     )
 
 
-__all__ = [
-    "STATUS_FAIL",
-    "STATUS_PASS",
-    "STATUS_WARN",
-    "WITNESS_NO",
-    "WITNESS_UNKNOWN",
-    "WITNESS_YES",
-    "GateReceipt",
-    "GateResult",
-    "evaluate_gate",
-]
+__all__ = ["HUMAN_CHANGE", "STATUS_FAIL", "STATUS_PASS", "GateResult", "decide", "render_receipt"]

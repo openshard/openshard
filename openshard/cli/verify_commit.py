@@ -34,6 +34,26 @@ def _print_plan(sha: str, receipt_label: str):
     return show
 
 
+def _sync_receipt_now(root, entry: dict) -> None:
+    """Send this Receipt and its new commit evidence to the Platform now, if linked. Never raises.
+
+    The automatic per-commit verification runs detached, after the agent
+    committed and usually before it pushes; sending here lets a pull
+    request's merge gate find the verdict without waiting for the capture
+    service's next periodic sync. ``flush`` honours the link and every
+    sync opt-out, and a failure here changes nothing: the gate waits while
+    the Platform reports the commit as pending.
+    """
+    try:
+        from openshard.sync.client import flush
+
+        rid = entry.get("receipt_id")
+        if isinstance(rid, str) and rid:
+            flush(root, receipt_ids=frozenset({rid}))
+    except Exception:
+        pass
+
+
 def run_verify_commit(entry: dict, loc, receipt_label: str, commit_ref: str, *, approve: bool, unattended: bool,
                       dry_run: bool, timeout: float, as_json: bool, strict: bool) -> None:
     from openshard.cli.main import (
@@ -85,6 +105,8 @@ def run_verify_commit(entry: dict, loc, receipt_label: str, commit_ref: str, *, 
             ), indent=2))
         return
     _remote_request_delivery(loc.root)
+    if unattended:
+        _sync_receipt_now(loc.root, entry)
     attestation = run.attestation or {}
     summary = summarize_attestation(attestation)
     strict_exit = _strict_verify_exit_code(run.results) if strict else 0

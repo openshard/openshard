@@ -2,14 +2,14 @@ name: Openshard gate
 
 # Dogfoods the merge gate (root action.yml, docs/merge-gate.md) on this
 # repository's own pull requests. Non-blocking: it is not a required check
-# and continue-on-error keeps a gate failure from failing the run. GitHub
-# runners hold no .openshard/ history, so it normally reports unknown.
+# and continue-on-error keeps a gate failure from failing the run.
 
 on:
   pull_request:
 
 permissions:
   contents: read
+  id-token: write  # OIDC token for the Platform's gate verdict (read-only audience)
 
 jobs:
   gate:
