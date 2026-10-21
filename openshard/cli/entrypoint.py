@@ -252,6 +252,21 @@ def _try_fast_path(argv: list[str]) -> bool:
     return False
 
 
+def _try_git_hook(argv: list[str]) -> bool:
+    """``hooks git-commit-msg <message file> [source] [sha]``: git's prepare-commit-msg hook. Returns True if handled.
+
+    Only reached inside an agent session (the hook script checks first). No
+    Click command exists for it: anything else falls through to the full
+    CLI. Never prints, always exits 0.
+    """
+    if argv[:2] != ["hooks", "git-commit-msg"] or not 3 <= len(argv) <= 5:
+        return False
+    from openshard.adapters.agent_commit_trailer import run_git_hook
+
+    run_git_hook(argv[2:])
+    return True
+
+
 def main() -> None:
     _harden_stdio_encoding()
     if sys.argv[1:] == ["--version"]:
@@ -261,7 +276,7 @@ def main() -> None:
 
         sys.stdout.write(f"openshard, version {__version__}\n")
         return
-    if _try_fast_path(sys.argv[1:]):
+    if _try_fast_path(sys.argv[1:]) or _try_git_hook(sys.argv[1:]):
         return
     from openshard.cli.main import cli
 

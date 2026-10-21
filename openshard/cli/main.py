@@ -9,6 +9,7 @@ from pathlib import Path
 import click
 
 from openshard import __version__
+from openshard.adapters import agent_commit_trailer as _commit_trailers
 from openshard.cli.run_output import (
     _PUBLIC_MODE_LABEL,
     _RATIONALE_SHORT,
@@ -516,9 +517,10 @@ def env_cmd() -> None:
 @click.option("--dry-run", is_flag=True, default=False, help="With --repo: print what would change; write nothing.")
 @click.option("--agents", default=None, help="With --repo: claude,cursor,copilot,openhands,devcontainer (default) "
               "or devin,amp,replicas,boat (printed snippets).")
+@click.option("--no-commit-trailers", is_flag=True, help="Don't mark agent commits (docs/commit-trailers.md).")
 @_telemetry_command("setup")
 def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path | None,
-              repo_level: bool, dry_run: bool, agents: str | None) -> None:
+              repo_level: bool, dry_run: bool, agents: str | None, no_commit_trailers: bool = False) -> None:
     """Set up OpenShard for this repository: the one command a new user needs.
 
     Detects the environment, configures Claude Code capture for this
@@ -604,6 +606,7 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
     from openshard.adapters.claude_setup import run_setup
 
     result = run_setup(repo_path=repo_path)
+    _commit_trailers.opt_out_from_setup(result, no_commit_trailers)
     _after_setup(result)
 
     if as_json:
@@ -628,6 +631,7 @@ def _after_setup(result) -> None:
     recorded while OPENSHARD_TELEMETRY=off, DO_NOT_TRACK or a CI variable is
     set. Then the ``setup.completed`` event. Never raises.
     """
+    _commit_trailers.apply_to_setup(result)  # mark agent commits by default (docs/commit-trailers.md)
     try:
         from openshard.telemetry.state import consent_after_notice
 
@@ -699,6 +703,7 @@ def _render_setup_components(result) -> None:
     if ignore_status in ("added", "already_ignored"):
         where = "added to .git/info/exclude" if ignore_status == "added" else "already ignored"
         click.echo(f"  Git ignore:    .openshard/ local state ({where})")
+    _commit_trailers.echo_setup_line(result, click.echo)
     click.echo(f"  Improve OpenShard: {_telemetry_line(_telemetry_status())}")
     # PR12: one line per additional agent, whether or not it was found.
     _agent_state_labels = {
@@ -7166,6 +7171,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
         state[key] = status.to_dict()
     state["telemetry"] = telemetry = _telemetry_status()
     state["receipt_signing"] = signing = _signing.doctor_state(base_dir)
+    state["commit_trailers"] = (trailers := _commit_trailers.commit_hook_status(root)).to_dict()
     if as_json:
         click.echo(json.dumps(state, indent=2))
         return
@@ -7233,6 +7239,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
                 "custom status line present" if claude_status.statusline_state == "custom" else "not configured"
             ),
         ),
+        *_commit_trailers.doctor_rows(trailers),
     ]
     # Installed hooks are structural evidence only; a recorded session is
     # proof of delivery. Surface that as its own line rather than letting the

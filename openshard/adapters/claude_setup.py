@@ -275,6 +275,8 @@ class SetupResult:
     # Codex / OpenCode capture integrations, keyed by agent
     # ("codex", "opencode"); each configured only when its CLI is installed.
     agents: dict = field(default_factory=dict)
+    # The Openshard-Agent commit trailer hook, set after setup (agent_commit_trailer.apply_to_setup)
+    commit_trailers: dict | None = None
 
     @property
     def claude_configured(self) -> bool:
@@ -303,6 +305,7 @@ class SetupResult:
             "history_ignore": self.history_ignore,
             "capture_service": self.capture_service if self.capture_service is not None else {"status": "skipped"},
             "agents": {k: r.to_dict() for k, r in self.agents.items()},
+            "commit_trailers": self.commit_trailers if self.commit_trailers is not None else {"state": "skipped"},
             "configured_agents": self.configured_agents(),
             "readiness": self.readiness,
             "ready": self.readiness == "ready",
