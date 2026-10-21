@@ -3230,6 +3230,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     elif buf.get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
         tokens_current = None
         tokens_not_recorded = USAGE_ELSEWHERE_REASON
+        # Any status-line cost seen here belongs to the owner too: never counted twice.
+        estimated_cost = cost_provenance = None
     elif buf.get("tokens_scope") == "last_call":
         # Only the status line's last-call figures are known: never recorded
         # as session totals. Unknown, with the reason, beats an undercount.

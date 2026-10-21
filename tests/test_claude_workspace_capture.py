@@ -247,6 +247,34 @@ def test_multi_repository_cloud_session_produces_receipts_in_the_touched_checkou
     assert identities == ["github.com/openshard/core", "github.com/openshard/platform", "github.com/openshard/platform"]
 
 
+def test_a_turn_prices_its_usage_where_it_committed_not_where_it_first_ran_a_command(workspace):
+    """A turn that ran setup in platform, then committed in core, is priced on core's Receipt."""
+    service = _Service({**os.environ})
+    try:
+        ws.install_workspace(workspace, port=service.port)
+        claude = _Claude(workspace)
+        core, platform = (workspace / "core").resolve(), (workspace / "platform").resolve()
+        claude.send("SessionStart", source="startup")
+        claude.send("UserPromptSubmit", prompt="Fix core")
+        claude.reply(input_tokens=100, output_tokens=10)
+        claude.send("PostToolUse", cwd=platform, tool_name="Bash", tool_input={"command": "openshard setup -y"},
+                    tool_response={"stdout": "ok"})
+        claude.reply(input_tokens=200, output_tokens=20)
+        claude.send("PostToolUse", cwd=core, tool_name="Bash", tool_input={"command": "git commit -q -m fix"},
+                    tool_response={"stdout": ""})
+        claude.send("Stop")
+        assert _wait_for(lambda: _sealed(core, 1) and _sealed(platform, 1))
+    finally:
+        service.stop()
+    (core_turn,) = _receipts(core)
+    (platform_turn,) = _receipts(platform)
+    assert core_turn["prompt_tokens"] == 300 and core_turn["completion_tokens"] == 30
+    assert core_turn["estimated_cost"] is not None
+    assert "tokens_not_recorded_reason" not in core_turn["capture"]
+    assert "prompt_tokens" not in platform_turn and platform_turn.get("estimated_cost") is None
+    assert platform_turn["capture"]["cost_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
+
+
 def test_a_local_workspace_session_records_into_the_touched_checkout(workspace, monkeypatch):
     """Without the cloud surface the parent is an ordinary project; its edits still land where they happened."""
     monkeypatch.delenv(cconfig.SURFACE_ENV)
