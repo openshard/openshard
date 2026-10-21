@@ -11,6 +11,7 @@ configuration on the machine running these tests is never touched.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import unittest
 from pathlib import Path
@@ -48,6 +49,7 @@ from openshard.adapters.claude_mcp_install import (
     detect_openshard_cli,
     find_repo_root,
     install_claude_mcp,
+    uninstall_claude_mcp,
 )
 from openshard.cli.main import cli
 
@@ -258,6 +260,26 @@ class TestInstallClaudeMcp(unittest.TestCase):
             # everything after "--" is the exact server launch command
             tail = argv[argv.index("--") + 1 :]
             self.assertEqual(tail, ["openshard", "mcp", "serve", "--repo-path", str(root.resolve())])
+
+    def test_claude_commands_never_inherit_the_live_session(self):
+        """A nested ``claude`` with the live session's id ends that session on exit (seen live from doctor)."""
+        live = {"CLAUDE_CODE_SESSION_ID": "2f5cbe60-3d40-5c3e-b2c9-dcb6038c28ad",
+                "CLAUDE_CODE_REMOTE_SESSION_ID": "session_live", "CLAUDE_PROJECT_DIR": "/home/user"}
+        with CliRunner().isolated_filesystem() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            run = _subprocess_run_router(existing_repo_path="/some/other/repo")
+            with patch.dict(os.environ, live), \
+                 patch(f"{_MODULE}.shutil.which", side_effect=self._which), \
+                 patch(f"{_MODULE}.subprocess.run", side_effect=run) as mock_run:
+                install_claude_mcp(repo_path=root)
+                uninstall_claude_mcp(repo_path=root)
+            calls = [c for c in mock_run.call_args_list if c.args[0][:2] == ["/usr/local/bin/claude", "mcp"]]
+            self.assertEqual({c.args[0][2] for c in calls}, {"get", "remove", "add"})
+            for call in calls:
+                env = call.kwargs["env"]
+                self.assertFalse(set(live) & set(env), call.args[0])
+                self.assertEqual(env.get("PATH"), os.environ.get("PATH"))
 
     def test_fresh_install_never_uses_shell(self):
         with CliRunner().isolated_filesystem() as tmp:

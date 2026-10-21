@@ -29,6 +29,7 @@ Design constraints:
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,17 @@ MCP_TOOLS: tuple[str, ...] = (
 )
 
 _CLAUDE_TIMEOUT_SECONDS = 15.0
+
+# A ``claude`` command started from inside a live Claude Code session inherits
+# that session's id and project, and on exit Claude Code ends the live session
+# (``SessionEnd`` reason ``other``): its Receipt was cut short and later work went
+# unrecorded. Seen live from ``openshard doctor``'s ``claude mcp get``.
+_LIVE_SESSION_ENV = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_REMOTE_SESSION_ID", "CLAUDE_PROJECT_DIR")
+
+
+def _claude_cli_env() -> dict[str, str]:
+    """The environment for a ``claude mcp`` query or change: never the live session's."""
+    return {k: v for k, v in os.environ.items() if k not in _LIVE_SESSION_ENV}
 
 _INSTALL_GUIDANCE_WIN32: list[str] = [
     "irm https://claude.ai/install.ps1 | iex",
@@ -188,7 +200,7 @@ def get_existing_entry(claude_bin: str, name: str = SERVER_NAME) -> ClaudeMcpEnt
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=_CLAUDE_TIMEOUT_SECONDS,
+            timeout=_CLAUDE_TIMEOUT_SECONDS, env=_claude_cli_env(),
         )
     except Exception:
         return None
@@ -305,7 +317,7 @@ def install_claude_mcp(*, repo_path: Path | None = None) -> ClaudeMcpInstallResu
                     [claude_bin, "mcp", "remove", SERVER_NAME, "-s", SCOPE],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, encoding="utf-8", errors="replace",
-                    timeout=_CLAUDE_TIMEOUT_SECONDS,
+                    timeout=_CLAUDE_TIMEOUT_SECONDS, env=_claude_cli_env(),
                 )
             except Exception as exc:
                 return _error(f"Failed to replace existing Claude Code MCP configuration: {exc}")
@@ -318,7 +330,7 @@ def install_claude_mcp(*, repo_path: Path | None = None) -> ClaudeMcpInstallResu
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=_CLAUDE_TIMEOUT_SECONDS,
+            timeout=_CLAUDE_TIMEOUT_SECONDS, env=_claude_cli_env(),
         )
     except Exception as exc:
         return _error(f"Failed to run 'claude mcp add': {exc}")
@@ -394,7 +406,7 @@ def uninstall_claude_mcp(*, repo_path: Path | None = None) -> ClaudeMcpUninstall
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=_CLAUDE_TIMEOUT_SECONDS,
+            timeout=_CLAUDE_TIMEOUT_SECONDS, env=_claude_cli_env(),
         )
     except Exception as exc:
         return ClaudeMcpUninstallResult(
