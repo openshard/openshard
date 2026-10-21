@@ -448,14 +448,22 @@ never invented evidence.
   run, so there it is `api_billed` only when no login exists: no
   `CLAUDE_CODE_OAUTH_TOKEN`, no `claudeAiOauth` entry in
   `.credentials.json`, and a readable `.claude.json` (in
-  `CLAUDE_CONFIG_DIR` or the home directory) without `oauthAccount`. That
-  last check covers a macOS Keychain login without reading it. Any login
-  signal, or a config that cannot be read, is unknown; `apiKeyHelper` in the user, project or managed settings
+  `CLAUDE_CONFIG_DIR` or the home directory) without `oauthAccount`, and
+  on macOS the Keychain reporting no Claude Code login item. Any login
+  signal, or anything that cannot be told, is unknown; `apiKeyHelper` in the user, project or managed settings
   file is `api_billed`; `CLAUDE_CODE_OAUTH_TOKEN` is `subscription`; an
   Anthropic profile or federation credential is unknown; otherwise a
   claude.ai login in `.credentials.json` with a `subscriptionType` is
-  `subscription` (on macOS that login is in the Keychain, which is not read,
-  so it stays unknown). Codex: only `auth_mode` in `$CODEX_HOME/auth.json`
+  `subscription`, and so, on macOS, is the Keychain login item existing
+  beside an `oauthAccount` and no `primaryApiKey` in `.claude.json` (the
+  item alone is not enough: it also holds MCP servers' OAuth tokens). The
+  Keychain is asked only whether the item exists:
+  `/usr/bin/security find-generic-password -s "Claude Code-credentials"`
+  (suffixed `-<first 8 hex of sha256(config dir)>` when
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CLAUDE_CONFIG_DIR` names one), never
+  with `-w` or `-g`, no shell, a 1 s timeout, output discarded; exit 0 is
+  present, 44 absent, anything else unknown. A name derived from
+  `CLAUDE_CONFIG_DIR` is not verified, so not finding it proves nothing. Codex: only `auth_mode` in `$CODEX_HOME/auth.json`
   is read, `apikey` -> `api_billed`, `chatgpt` -> `subscription` unless
   `OPENAI_API_KEY`/`CODEX_API_KEY` is also set; a non-OpenAI
   `model_provider` or `OPENAI_BASE_URL` is unknown. Cursor, OpenCode and

@@ -205,6 +205,8 @@ def _isolate_capture_service(tmp_path_factory, monkeypatch):
 
     monkeypatch.setattr(_billing, "_home", lambda env: None)
     monkeypatch.setattr(_billing, "_MANAGED_SETTINGS", {})
+    # The real macOS Keychain is never asked: on a Mac it reads as "no login item".
+    monkeypatch.setattr(_billing, "_claude_keychain_item", lambda env: False if _billing._is_macos() else None)
     monkeypatch.setenv("OPENSHARD_PR_LOOKUP", "off")
     # Commit verification is on by default for captured sessions: no test may
     # start a real detached ``openshard verify``. Tests of the trigger pass
