@@ -303,6 +303,10 @@ class _Turn:
     # checkout worked in, so a turn that only looked around in one repository
     # before changing another prices the change where it happened.
     changed: list[Path] = field(default_factory=list)
+    # When the last turn's Stop arrived. A turn the agent opens without a new prompt
+    # (a sub-agent finishing, a blocked Stop) counts usage from here, not from the
+    # previous turn's prompt, which that turn's Receipt already counted.
+    ended_at: str | None = None
 
 
 class WorkspaceRouter:
@@ -370,6 +374,7 @@ class WorkspaceRouter:
                 turn.turn_owner, turn.worked, turn.changed = None, set(), []
                 if event == EVENT_SESSION_START:
                     turn.session_start, turn.prompt, turn.touched, turn.opened = (payload, at), None, [], set()
+                    turn.ended_at = None
                     turn.task_prompt = None
                 else:
                     turn.prompt, turn.touched = (payload, at), []
@@ -410,6 +415,7 @@ class WorkspaceRouter:
                 if turn.touched:
                     turn.last_owner = turn.turn_owner or turn.touched[0]
                 turn.touched, turn.turn_owner, turn.worked, turn.changed = [], None, set(), []
+                turn.ended_at = claude_cross_checkout.end_of_second(at)  # where its Receipt's usage ends
                 if event == EVENT_SESSION_END:
                     self._sessions.pop((str(workspace), key), None)
                     if self._owner_dir is not None:
@@ -456,7 +462,7 @@ class WorkspaceRouter:
             for item in held:
                 if item is not None and item[0] is not payload:
                     replayed = WorkspaceRouter._for(turn, repo, item[0])
-                    if turn.prompt is not None and item[1] < turn.prompt[1]:
+                    if (start := _window_start(turn)) is not None and item[1] < start:
                         # An earlier start/prompt opening this checkout dates its buffer before
                         # this turn: its usage window still starts at this turn.
                         replayed = _dated(turn, replayed, copy=True)
@@ -495,14 +501,21 @@ def _owning(payload: Any) -> Any:
     return replace(payload, attrs={**(payload.attrs or {}), "usage_owner": True})
 
 
+def _window_start(turn: _Turn) -> str | None:
+    """When this turn began: its prompt, or the previous turn's Stop for a turn opened without one."""
+    starts = [t for t in (turn.prompt[1] if turn.prompt else None, turn.ended_at) if t]
+    return max(starts) if starts else None
+
+
 def _dated(turn: _Turn, payload: Any, *, copy: bool) -> Any:
-    """Stamp *payload* with this turn's prompt time: its checkout's usage window starts no earlier.
+    """Stamp *payload* with this turn's start (``_window_start``): its checkout's usage window starts no earlier.
 
     Per-turn Receipts only (``claude_cross_checkout.usage_since``); the window only ever narrows.
     """
-    if not turn.turn_scoped or turn.prompt is None:
+    start = _window_start(turn)
+    if not turn.turn_scoped or start is None:
         return payload
-    attrs = {**(payload.attrs or {}), claude_cross_checkout.SINCE_ATTR: turn.prompt[1]}
+    attrs = {**(payload.attrs or {}), claude_cross_checkout.SINCE_ATTR: start}
     if copy:
         return replace(payload, attrs=attrs)
     payload.attrs = attrs

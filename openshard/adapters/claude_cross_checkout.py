@@ -76,8 +76,13 @@ def usage_until(buf: dict) -> str | None:
     sealed = buf.get("turn_sealed_at")
     if buf.get("receipt_scope") != "turn" or not isinstance(sealed, str):
         return None
+    return end_of_second(sealed)
+
+
+def end_of_second(stamp: str) -> str | None:
+    """The end of the whole second *stamp* falls in (hook times are whole seconds), or None."""
     try:
-        at = datetime.fromisoformat(sealed.replace("Z", "+00:00")).astimezone(UTC).replace(microsecond=0)
+        at = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(UTC).replace(microsecond=0)
     except ValueError:
         return None
     return (at + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
