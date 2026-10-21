@@ -1344,6 +1344,10 @@ The GitHub fallback is provider-neutral. A captured cloud commit must name the
 agent explicitly with commit trailers; Openshard does not guess Codex, Claude
 Code, Cursor or any other harness from GitHub alone.
 
+Local agent commits get `Openshard-Agent` from the hook `openshard setup`
+installs, and only inside a session Openshard observed: see
+[Agent commit trailers](commit-trailers.md).
+
 ```text
 Openshard-Agent: Claude Code
 Openshard-Model: claude-sonnet-5.5

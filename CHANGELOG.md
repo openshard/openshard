@@ -23,6 +23,17 @@ All notable changes to OpenShard are documented here.
   for the next periodic sync, so the merge gate finds it sooner. Failures
   there change nothing for the developer.
 
+- `openshard setup` marks agent commits by default: a `prepare-commit-msg`
+  hook adds `Openshard-Agent: Claude Code` when the commit is made inside a
+  Claude Code session Openshard observed in that repository, and nothing
+  otherwise (human commits, unknown sessions, rebases, cloud sessions that
+  already add `Claude-Session`). Never duplicated, never blocks a commit, and
+  existing hooks keep running; under husky, `core.hooksPath`, lefthook or
+  pre-commit setup prints the line to add instead. `openshard doctor` reports
+  a missing hook. Opt out with `openshard setup --no-commit-trailers`
+  (`git config openshard.commitTrailers false`). See
+  `docs/commit-trailers.md`.
+
 ## 0.4.18 - 2026-10-18
 
 <!-- release-title: Openshard v0.4.18 - Receipts That Add Up -->

@@ -14,6 +14,7 @@ Set up and check Claude Code capture:
 openshard setup                                    # Configure Claude Code capture for this repo (safe to re-run)
 openshard setup --json                             # Same, with a machine-readable result
 openshard setup --agent --json                     # Read-only status snapshot; never writes (CI/agents)
+openshard setup --no-commit-trailers               # Don't mark agent commits with Openshard-Agent (docs/commit-trailers.md)
 openshard doctor                                   # Health check: repo, history, Claude Code, MCP, hooks, enrichment
 openshard mcp install claude                       # Lower-level: MCP server + hooks + status line only
 openshard capture rotate-token                     # Replace the local capture token (then re-run setup per repo)

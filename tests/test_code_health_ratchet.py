@@ -46,7 +46,9 @@ BROAD_EXCEPT_CEILING = 5
 # Shrink the numbers; delete an entry once its
 # unit is under the ceiling.
 MODULE_LINE_BUDGETS = {
-    "openshard/cli/main.py": 8454,
+    # +7: `setup --no-commit-trailers` and the setup/doctor lines for agent commit trailers;
+    # the logic lives in adapters/agent_commit_trailer.py.
+    "openshard/cli/main.py": 8461,
     "openshard/adapters/claude_hooks.py": 4556,
     "openshard/native/context.py": 3742,
     # +3: the compact Receipt says agent-reported files are also in git's diff (ShardReceipt.agent_reported_in_git).
