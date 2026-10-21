@@ -298,6 +298,11 @@ class _Turn:
     turn_owner: Path | None = None
     worked: set[Path] = field(default_factory=set)
     skip: set[Path] = field(default_factory=set)
+    # Checkouts this turn changed (a file edit, or a commit/push command), in
+    # order. At Stop the first of them takes the turn's usage from the first
+    # checkout worked in, so a turn that only looked around in one repository
+    # before changing another prices the change where it happened.
+    changed: list[Path] = field(default_factory=list)
 
 
 class WorkspaceRouter:
@@ -362,7 +367,7 @@ class WorkspaceRouter:
                 # Every checkout this session reaches shares its Task (claude_cross_checkout).
                 payload.attrs = {**payload.attrs, claude_cross_checkout.ATTR: True}
             if event in (EVENT_SESSION_START, EVENT_USER_PROMPT_SUBMIT):
-                turn.turn_owner, turn.worked = None, set()
+                turn.turn_owner, turn.worked, turn.changed = None, set(), []
                 if event == EVENT_SESSION_START:
                     turn.session_start, turn.prompt, turn.touched, turn.opened = (payload, at), None, [], set()
                     turn.task_prompt = None
@@ -384,6 +389,9 @@ class WorkspaceRouter:
                     self._own(turn, workspace, key, checkout)  # where the session's first turn began
                 return self._deliver(turn, checkout, payload, at)
             if event in (EVENT_STOP, EVENT_SESSION_END):
+                moved_to = None
+                if turn.turn_scoped and turn.changed and turn.changed[0] != turn.turn_owner:
+                    turn.turn_owner = moved_to = turn.changed[0]
                 targets = list(turn.touched)
                 if event == EVENT_SESSION_END:
                     # The session ends in every checkout it was opened in, not
@@ -393,14 +401,15 @@ class WorkspaceRouter:
                     # service no longer remembers it: it must see the end and fold its usage.
                     if turn.session_owner is not None and turn.session_owner not in targets:
                         targets.append(turn.session_owner)
-                out = [(repo, self._for(turn, repo, payload), at) for repo in targets]
+                out = [(repo, _owning(self._for(turn, repo, payload)) if repo == moved_to else self._for(turn, repo, payload), at)
+                       for repo in targets]
                 if turn.turn_scoped and turn.turn_owner is not None:
                     # Every other checkout that may hold an open buffer counts from a later turn.
                     others = {*turn.opened, *turn.touched, *([turn.session_owner] if turn.session_owner else [])}
                     turn.skip |= others - turn.worked - {turn.turn_owner}
                 if turn.touched:
                     turn.last_owner = turn.turn_owner or turn.touched[0]
-                turn.touched, turn.turn_owner, turn.worked = [], None, set()
+                turn.touched, turn.turn_owner, turn.worked, turn.changed = [], None, set(), []
                 if event == EVENT_SESSION_END:
                     self._sessions.pop((str(workspace), key), None)
                     if self._owner_dir is not None:
@@ -409,6 +418,8 @@ class WorkspaceRouter:
             repo = checkout if checkout is not None else checkout_for(workspace, payload)
             if repo is None:
                 return []
+            if turn.turn_scoped and repo not in turn.changed and _changes(payload):
+                turn.changed.append(repo)
             if home_is_checkout:
                 if _only_reads(payload):
                     # Looking at another checkout (``git log``, ``ls``...) is not
@@ -479,6 +490,11 @@ class WorkspaceRouter:
         return replace(payload, attrs=attrs)
 
 
+def _owning(payload: Any) -> Any:
+    """*payload* telling its checkout it owns this turn's usage after all (``note_usage_owner``)."""
+    return replace(payload, attrs={**(payload.attrs or {}), "usage_owner": True})
+
+
 def _dated(turn: _Turn, payload: Any, *, copy: bool) -> Any:
     """Stamp *payload* with this turn's prompt time: its checkout's usage window starts no earlier.
 
@@ -507,6 +523,20 @@ def _is_notification(payload: Any) -> bool:
 
     prompt = getattr(payload, "prompt", None)
     return isinstance(prompt, str) and prompt_source(prompt) is not None
+
+
+_COMMITTING = re.compile(r"\bgit\b[^|;&\n]*\s(?:commit|push)\b")
+
+
+def _changes(payload: Any) -> bool:
+    """True for a file edit, or a shell command that commits or pushes."""
+    from openshard.adapters.claude_hooks import COMMAND_TOOLS, FILE_TOOLS
+
+    tool = getattr(payload, "tool_name", None)
+    if tool in FILE_TOOLS:
+        return True
+    command = getattr(payload, "command", None)
+    return tool in COMMAND_TOOLS and isinstance(command, str) and _COMMITTING.search(command) is not None
 
 
 def _only_reads(payload: Any) -> bool:
@@ -560,6 +590,8 @@ def note_usage_owner(buf: dict, payload: Any) -> None:
     """
     if (payload.attrs or {}).get("usage_elsewhere") == USAGE_ELSEWHERE_REASON:
         buf["usage_elsewhere"] = USAGE_ELSEWHERE_REASON
+    elif (payload.attrs or {}).get("usage_owner") is True:
+        buf.pop("usage_elsewhere", None)  # a per-turn Receipt whose turn moved its usage here at Stop
     claude_cross_checkout.note(buf, payload.attrs)  # routed by the capture service: share the session's Task
     if payload.transcript_path:
         # Transient: read at fold for usage and model identity (claude_hooks._transcript_usage).
