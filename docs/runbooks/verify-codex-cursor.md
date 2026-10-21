@@ -17,7 +17,7 @@ Use a git repository with a small, fast test suite (pytest installed in its
 4. **End the session:** quit Codex (`/quit`), or close the Cursor agent chat.
 5. **Check locally** (wait about 30 seconds for the re-run to finish):
    ```sh
-   openshard last                                   # "Verified  Passed (OpenShard re-ran ...)"
+   openshard last                                   # "Verified  Passed (Openshard re-ran ...)"
    openshard verdict --commit "$(git rev-parse HEAD)" --json; echo "exit=$?"   # exit=0 means verified
    ```
 6. **Send it to the Platform:** `openshard sync now`, then open app.openshard.dev and
@@ -29,8 +29,8 @@ Use a git repository with a small, fast test suite (pytest installed in its
 |---|---|---|
 | `openshard last` shows no new Receipt | the hooks did not fire | `openshard doctor`; Codex: is the project trusted? |
 | Receipt exists, `verdict` exit 2, Verified "not checked" | no commit was linked to the session, or the re-run is still going | wait a minute, then run `openshard verify --receipt <id> --commit <sha>` yourself |
-| `verdict` exit 1 | OpenShard re-ran the tests and they failed on that commit | correct result, not a bug |
-| Re-run says "unknown" / setup could not run | the test runner is not installed where OpenShard looks (`.venv`) | install pytest into the repo's `.venv` |
+| `verdict` exit 1 | Openshard re-ran the tests and they failed on that commit | correct result, not a bug |
+| Re-run says "unknown" / setup could not run | the test runner is not installed where Openshard looks (`.venv`) | install pytest into the repo's `.venv` |
 | Local shows Verified, the app does not | sync has not sent it yet | `openshard sync status`, then `openshard sync now` again |
 
 **Send back:** the output of `openshard doctor --json`, `openshard last --json`,
