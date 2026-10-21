@@ -80,9 +80,9 @@ class TestSummary:
         assert "| Agent | Claude Code (external) |" in md
         assert "| Model | Claude Opus 5.5 |" in md
         assert "| Checks | 12/12 passed |" in md
-        assert "| Cost | $0.42 est. |" in md
+        assert "| Cost | \\$0.42 est. |" in md
         assert "| Platform-witnessed | yes, 3 of 3 events acknowledged |" in md
-        assert "| Receipt | rcpt_1 |" in md
+        assert "| Receipt | rcpt\\_1 |" in md
         assert "detectable" in md and "not being verified" in md
 
     @pytest.mark.parametrize("witness,shown", [(WITNESS_NO, "no"), (WITNESS_UNKNOWN, "unknown")])
@@ -98,7 +98,19 @@ class TestSummary:
 
     def test_cells_cannot_break_the_table(self):
         md = evaluate_gate(_doc("verified"), receipt=GateReceipt(agent="a|b\n`c`")).summary_markdown
-        assert "| Agent | a\\|b 'c' |" in md
+        assert "| Agent | a\\|b \\`c\\` |" in md
+
+    def test_cells_cannot_inject_markdown_or_html(self):
+        hostile = "[click](https://x.test) <img src=x onerror=1> **bold** \x1b[31m\u2028# h"
+        md = evaluate_gate(_doc("verified"), receipt=GateReceipt(model=hostile)).summary_markdown
+        row = next(line for line in md.splitlines() if line.startswith("| Model |"))
+        assert "<" not in row and "\x1b" not in row and "\u2028" not in row
+        assert "\\[click\\]" in row and "\\*\\*bold\\*\\*" in row and "\\# h" in row
+
+    def test_cells_are_bounded(self):
+        md = evaluate_gate(_doc("verified"), receipt=GateReceipt(agent="x" * 500)).summary_markdown
+        row = next(line for line in md.splitlines() if line.startswith("| Agent |"))
+        assert len(row) < 140 and row.endswith("… |")
 
     def test_merge_check_is_informational(self):
         receipt = GateReceipt(merge_check="2 conflicting path(s) with origin/main")
@@ -191,7 +203,7 @@ class TestCli:
         res = _gate(repo, monkeypatch, "--commit", "HEAD", "--github-step-summary", summary=summary)
         assert res.exit_code == 1 and res.output.startswith("Openshard gate: fail")
         md = summary.read_text(encoding="utf-8")
-        assert "(failed: pytest)" in md and "| Receipt | rcpt_" in md
+        assert "(failed: pytest)" in md and "| Receipt | rcpt\\_" in md
 
     def test_passing_ci_passes_and_summarises_the_receipt(self, repo, monkeypatch, tmp_path):
         _write_runs(repo)
@@ -201,7 +213,7 @@ class TestCli:
         assert res.exit_code == 0 and res.output.startswith("Openshard gate: pass")
         md = summary.read_text(encoding="utf-8")
         assert "| Checks | 1/1 passed |" in md
-        assert "| Cost | $0.4200 |" in md
+        assert "| Cost | \\$0.4200 |" in md
         # A runner's spool holds no acknowledgement: unknown, never "no", never tamper-evident.
         assert "| Platform-witnessed | unknown |" in md and "detectable" not in md
 
@@ -219,6 +231,48 @@ class TestCli:
         body = json.loads(res.output)
         assert res.exit_code == 0 and body["status"] == "warn"
         assert body["verdict"]["reason"] == "untrusted_history"
+
+    def _passing_ci_through_symlink(self, repo, target: str) -> None:
+        _write_runs(repo)
+        _ci(repo, "success")
+        (repo / target).parent.mkdir(parents=True, exist_ok=True)
+        (repo / ".openshard").rename(repo / target)
+        (repo / ".openshard").symlink_to(target, target_is_directory=True)
+
+    def test_a_committed_symlinked_history_dir_is_not_evidence(self, repo, monkeypatch):
+        # The reviewer's bypass: .openshard -> evil/, both committed.
+        self._passing_ci_through_symlink(repo, "evil")
+        _git(repo, "add", "-f", ".openshard", "evil")
+        _git(repo, "commit", "-q", "-m", "evidence")
+        _ci(repo, "success")
+        body = json.loads(_gate(repo, monkeypatch, "--commit", "HEAD", "--json").output)
+        assert body["status"] == "warn" and body["verdict"]["reason"] == "untrusted_history"
+
+    def test_an_untracked_symlinked_history_dir_is_not_evidence(self, repo, monkeypatch):
+        self._passing_ci_through_symlink(repo, "elsewhere")
+        body = json.loads(_gate(repo, monkeypatch, "--commit", "HEAD", "--json").output)
+        assert body["status"] == "warn" and body["verdict"]["reason"] == "untrusted_history"
+
+    def test_a_symlinked_evidence_file_is_not_evidence(self, repo, monkeypatch):
+        _write_runs(repo)
+        _ci(repo, "success")
+        real = repo / ".openshard" / "verifications.jsonl"
+        real.rename(repo / "v.jsonl")
+        real.symlink_to(repo / "v.jsonl")
+        body = json.loads(_gate(repo, monkeypatch, "--commit", "HEAD", "--json").output)
+        assert body["status"] == "warn" and body["verdict"]["reason"] == "untrusted_history"
+
+    def test_a_committed_case_variant_history_dir_is_not_evidence(self, repo, monkeypatch):
+        # On a case-insensitive filesystem .OpenShard/ is the .openshard/ the verdict reads.
+        variant = repo / ".OpenShard"
+        variant.mkdir()
+        (variant / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+        _git(repo, "add", "-f", ".OpenShard")
+        _git(repo, "commit", "-q", "-m", "variant")
+        _write_runs(repo)
+        _ci(repo, "success")
+        body = json.loads(_gate(repo, monkeypatch, "--commit", "HEAD", "--json").output)
+        assert body["status"] == "warn" and body["verdict"]["reason"] == "untrusted_history"
 
     def test_json_carries_the_verdict_document(self, repo, monkeypatch):
         res = _gate(repo, monkeypatch, "--commit", "HEAD", "--json")

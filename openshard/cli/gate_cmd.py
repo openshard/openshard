@@ -9,7 +9,9 @@ Exit 1 only when the gate fails; a warning (unknown) exits 0.
 from __future__ import annotations
 
 import json
+import os
 import sys
+from pathlib import Path
 
 import click
 
@@ -22,11 +24,17 @@ EVIDENCE_SOURCE = (
 
 
 UNTRUSTED_HISTORY = "untrusted_history"
-_EVIDENCE_FILES = (".openshard/runs.jsonl", ".openshard/verifications.jsonl")
+_EVIDENCE_FILES = ("runs.jsonl", "verifications.jsonl")
 
 
 def _tracked_history() -> bool:
-    """True when the history files the verdict reads are committed to git (or git cannot tell)."""
+    """True when the history the verdict reads could have come with the change (or git cannot tell).
+
+    Untrusted when the history directory or either evidence file is a symlink,
+    or when git tracks the directory, either file, or the real path either
+    file resolves to. Paths are matched case-insensitively (``:(icase)``) so a
+    committed ``.OpenShard/`` on a case-insensitive filesystem counts too.
+    """
     from openshard.history.locate import locate_history
     from openshard.util.git import run_git
 
@@ -34,9 +42,22 @@ def _tracked_history() -> bool:
         loc = locate_history(with_identity=False)
     except Exception:
         return False
-    out = run_git(loc.root, ["ls-files", "--", *_EVIDENCE_FILES])
+    root, history = loc.root, loc.runs_path.parent
+    files = [history / name for name in _EVIDENCE_FILES]
+    try:
+        if any(path.is_symlink() for path in (history, *files)):
+            return True
+        real_root = os.path.realpath(root)
+        paths = {os.path.relpath(history, root)}
+        for path in files:
+            rel = os.path.relpath(os.path.realpath(path), real_root)
+            if not rel.startswith(os.pardir):
+                paths.add(rel)
+    except (OSError, ValueError):
+        return True
+    out = run_git(root, ["ls-files", "--", *sorted(f":(icase){Path(x).as_posix()}" for x in paths)])
     if out is None:
-        return (loc.root / ".git").exists()
+        return (root / ".git").exists()
     return bool(out.strip())
 
 

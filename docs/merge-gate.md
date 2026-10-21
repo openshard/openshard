@@ -13,6 +13,7 @@ does not stop an agent from running or committing anything.
 name: Openshard gate
 on:
   pull_request:
+  merge_group:                    # only needed if you use a merge queue
 permissions:
   contents: read
 jobs:
@@ -21,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0          # lets evidence for a same-content commit count (see below)
       - uses: openshard/openshard@<release tag or commit sha>
         # with:
         #   strict: true          # also fail when verification is unknown
@@ -28,6 +31,17 @@ jobs:
 
 Pin `@<ref>` to a release tag or a full commit sha. The action installs
 Openshard from that same ref, so the gate is exactly the version you pinned.
+
+**A pull request can change its own gate.** On `pull_request` events
+GitHub runs the workflow file from the pull request's merge commit, so a
+pull request that edits `.github/workflows/openshard-gate.yml` (removes the
+gate, drops `strict`, swaps the action) is checked by its own edited copy.
+Branch protection then only sees a green "Openshard gate" check. To enforce
+the gate on everyone, require the workflow through a repository or
+organisation **ruleset** ("Require workflows to pass before merging"),
+which runs the workflow from the repository and ref you choose rather than from the
+pull request, and review changes to `.github/` (for example with
+CODEOWNERS).
 
 | Input | Default | Meaning |
 | --- | --- | --- |
@@ -68,9 +82,23 @@ Earlier commits in the branch are work in progress: gating each of them would
 block on a failure the head has already fixed. A new push changes the head,
 so the gate runs again on the new commit.
 
-For a merge queue (`merge_group`) or `push` event, the commit that triggered
-the run is gated. It has no evidence of its own unless it has the same tree
-as a verified commit, so expect `unknown` there.
+Matching a commit with the same tree needs the head commit's objects in the
+checkout. The default `actions/checkout` fetches only the temporary merge
+commit (depth 1), so without `fetch-depth: 0` only evidence bound to exactly
+the head commit counts.
+
+For a `push` event, the commit that was pushed is gated.
+
+### Merge queues
+
+In a merge queue (`merge_group` event) GitHub tests a temporary commit that
+combines the pull request with the queue ahead of it. No evidence names that
+commit, so the result there is `unknown` (a warning). For that reason
+`strict` is **not** applied in a merge queue: it would fail every merge. A
+failed result still fails. Strict is enforced on the pull request itself, so
+mark "Openshard gate" required for pull requests, and add `merge_group:` to
+`on:` as above so the required check also reports in the queue (without it,
+the queue waits for a check that never runs).
 
 ## Where the evidence comes from, and its limits
 
@@ -84,10 +112,15 @@ checkout. Two consequences:
   that reached the job says verification failed. A step earlier in the same
   job that records evidence (for example on a self-hosted runner that keeps
   its history) is read.
-- **History files committed to the repository are ignored.** They arrive
-  with the change under review, so its author wrote them. When either file
-  is tracked by git, the result is `unknown` (`untrusted_history`), never
-  `verified`.
+- **History committed to the repository is ignored.** It arrives with the
+  change under review, so its author wrote it. When git tracks `.openshard/`
+  or either file (matched case-insensitively, so `.OpenShard/` counts), when
+  `.openshard/` or either file is a symlink, or when a file's real path is
+  tracked, the result is `unknown` (`untrusted_history`), never `verified`.
+  This applies to a committed `failed` result too: it becomes `unknown`
+  (a warning, or a failure under `strict`), because evidence the author
+  wrote is not used either way. A self-hosted runner that keeps its history
+  behind a symlink is treated the same; use a real directory.
 
 Reading the hosted Platform's Receipts from the gate is not built yet.
 

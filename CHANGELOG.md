@@ -13,8 +13,9 @@ All notable changes to OpenShard are documented here.
   on unknown too), and fails with the reason when it cannot answer. The job
   summary lists the result, agent, model, checks, cost and whether the
   Receipt is Platform-witnessed, with anything not recorded shown as unknown.
-  History files committed to the repository are not used as evidence. Setup
-  and making it a required check: `docs/merge-gate.md`.
+  History committed to the repository, or reached through a symlink, is not
+  used as evidence. Setup and making it a required check:
+  `docs/merge-gate.md`.
 
 ## 0.4.18 - 2026-10-18
 

@@ -13,7 +13,7 @@ inputs:
     required: false
     default: "false"
   commit:
-    description: "Commit to gate. Default: the pull request's head commit, else the commit that triggered the run."
+    description: "Commit to gate. Default: the pull request's head commit, else the commit that triggered the run (in a merge queue, the queue commit)."
     required: false
     default: ""
   python-version:
@@ -65,7 +65,15 @@ runs:
         commit="${INPUT_COMMIT:-${PR_HEAD_SHA:-$GITHUB_SHA}}"
         args=(ci gate --commit "$commit" --github-step-summary --github-output)
         case "$(printf '%s' "$INPUT_STRICT" | tr '[:upper:]' '[:lower:]')" in
-          true|1|yes) args+=(--strict) ;;
+          true|1|yes)
+            if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
+              # The queue's temporary commit never has evidence of its own, so
+              # strict would fail every merge. Failed verification still fails.
+              echo "::notice title=Openshard gate::strict is not applied in a merge queue: the queue commit has no evidence of its own. Strict applies on the pull request."
+            else
+              args+=(--strict)
+            fi
+            ;;
           false|0|no|"") ;;
           *) echo "::error title=Openshard gate::strict must be true or false (got '$INPUT_STRICT')."; exit 1 ;;
         esac

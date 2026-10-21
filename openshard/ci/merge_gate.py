@@ -21,6 +21,7 @@ tamper-evident only when the Platform witness acknowledged its capture.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 STATUS_PASS = "pass"
@@ -54,8 +55,8 @@ _UNKNOWN_REASONS = {
     "skipped": "Verification was skipped.",
     "manual_review": "Verification needs manual review.",
     "not_observed": "Verification was not observed.",
-    "untrusted_history": ("Openshard history files are committed to the repository, so they came with this "
-                          "change and are not used as evidence."),
+    "untrusted_history": ("Openshard history is committed to the repository or reached through a symlink, so "
+                          "it may have come with this change and is not used as evidence."),
 }
 
 
@@ -82,11 +83,19 @@ class GateResult:
     summary_markdown: str = ""
 
 
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+_MD_SPECIAL_RE = re.compile(r"([\\`*_\[\]#!|~$])")
+
+
 def _cell(value: object) -> str:
+    """*value* as one bounded table cell: no control characters, no HTML, markdown escaped."""
     if value is None or (isinstance(value, str) and not value.strip()):
         return UNKNOWN
-    text = " ".join(str(value).split()).replace("|", "\\|").replace("`", "'")
-    return text if len(text) <= _MAX_CELL else text[: _MAX_CELL - 1] + "…"
+    text = " ".join(_CONTROL_RE.sub(" ", str(value)).split())
+    if len(text) > _MAX_CELL:
+        text = text[: _MAX_CELL - 1] + "…"
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return _MD_SPECIAL_RE.sub(r"\\\1", text)
 
 
 def _short(sha: object) -> str:
