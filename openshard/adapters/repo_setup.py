@@ -22,9 +22,11 @@ Rules
   stays local to wherever the agent runs, and the setup step says so.
 * Fail open: every hook command exits 0 and never blocks the agent. When
   OpenShard is not installed the event is skipped with a note on stderr (a
-  gap, not a failure). Only in Claude Code on the web (``CLAUDE_CODE_REMOTE``)
-  or with ``OPENSHARD_REPO_BOOTSTRAP=1`` does the Claude SessionStart hook
-  start a background install; a teammate's machine never gets one silently.
+  gap, not a failure). Only in a recognised cloud sandbox
+  (``CLOUD_SANDBOX_MARKERS``: Claude Code on the web, Replicas, E2B, GitHub
+  Codespaces, Gitpod) or with ``OPENSHARD_REPO_BOOTSTRAP=1`` does the Claude
+  SessionStart hook start a background install; a teammate's machine never
+  gets one silently. ``OPENSHARD_REPO_BOOTSTRAP=0`` turns it off anywhere.
 
 Copilot and OpenHands have no OpenShard hook adapter in Core: their hooks only
 deliver what OpenShard already recorded in that environment (for example an
@@ -116,8 +118,36 @@ _LINK = (
 SETUP_LINES: tuple[str, ...] = (SETUP_MARKER, _INSTALL, _RESOLVE, _LINK)
 SETUP_ONE_LINE = "(" + "; ".join(SETUP_LINES) + ") || true"
 
+# Environment variables that only a cloud sandbox sets: (name, required value or None for "any
+# non-empty value", sandbox). Each is the provider's own documented or observed marker; an
+# unknown sandbox can opt in with OPENSHARD_REPO_BOOTSTRAP=1.
+CLOUD_SANDBOX_MARKERS: tuple[tuple[str, str | None, str], ...] = (
+    ("CLAUDE_CODE_REMOTE", "true", "Claude Code on the web"),
+    ("REPLICAS_WORKSPACE_ID", None, "Replicas"),
+    ("E2B_SANDBOX", "true", "E2B"),
+    ("CODESPACES", "true", "GitHub Codespaces"),
+    ("GITPOD_WORKSPACE_ID", None, "Gitpod"),
+)
+
+
+def cloud_sandbox(env: dict[str, str] | None = None) -> str | None:
+    """The cloud sandbox this process runs in, by its own marker variable, or None."""
+    env = dict(os.environ) if env is None else env
+    for name, value, label in CLOUD_SANDBOX_MARKERS:
+        got = env.get(name) or ""  # exactly the shell test the hook runs: non-empty, or this exact value
+        if got if value is None else got == value:
+            return label
+    return None
+
+
+def _shell_test(name: str, value: str | None) -> str:
+    return f'[ -n "${{{name}:-}}" ]' if value is None else f'[ "${{{name}:-}}" = "{value}" ]'
+
+
+_IN_CLOUD = " || ".join([_shell_test(n, v) for n, v, _ in CLOUD_SANDBOX_MARKERS]
+                        + ['[ "${OPENSHARD_REPO_BOOTSTRAP:-}" = "1" ]'])
 _BOOTSTRAP = (
-    'if { [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || [ "${OPENSHARD_REPO_BOOTSTRAP:-}" = "1" ]; }'
+    "if { " + _IN_CLOUD + "; }"
     ' && [ "${OPENSHARD_REPO_BOOTSTRAP:-}" != "0" ] && mkdir "${TMPDIR:-/tmp}/openshard-bootstrap" 2>/dev/null; then '
     "( " + _INSTALL_CHAIN + " ) </dev/null >/dev/null 2>&1 & "
     'echo "openshard: installing in the background; events before it finishes are not captured" >&2; '
@@ -573,8 +603,9 @@ _PLANNERS: dict[str, Callable[[Path], list[FileChange]]] = {
 _NOTES = {
     "claude": (
         "Claude Code: hooks run `openshard hooks claude` when OpenShard is installed and stand aside when this "
-        "clone has local hooks (.claude/settings.local.json). In Claude Code on the web a missing install starts "
-        "a background install; events before it finishes are not captured. Multi-repository cloud sessions load "
+        "clone has local hooks (.claude/settings.local.json). In a recognised cloud sandbox (Claude Code on the "
+        "web, Replicas, E2B, Codespaces, Gitpod) a missing install starts a background install; events before it "
+        "finishes are not captured. Multi-repository cloud sessions load "
         "hooks from the parent directory only (docs/claude-cloud-prelaunch.md), so these do not fire there."
     ),
     "cursor": (
