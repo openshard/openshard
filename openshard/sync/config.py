@@ -18,9 +18,12 @@ workspace identity token from ``replicas identity token`` (OIDC, issuer
 https://api.replicas.dev), sent to ``/v1/cloud/replicas/...`` on
 ``OPENSHARD_PLATFORM_ENDPOINT`` (default ``https://api.openshard.dev``). The
 Platform decides which Openshard organisation trusts that Replicas
-organisation; such a link can only send Receipts and evidence, so features
-that read the organisation (capabilities, policy) stay off. An explicit key
-(environment or file) always wins. ``OPENSHARD_PLATFORM_SYNC=off``
+organisation. Such a link can only send Receipts and evidence, so only the
+sync client sees it (``resolve_sync_link``): ``resolve_link``, which every
+other Platform feature uses (capabilities, policy, hosted learning,
+connected capture, remote captures, login), never returns it, and those
+features stay off exactly as with no link. An explicit key (environment or
+file) always wins. ``OPENSHARD_PLATFORM_SYNC=off``
 and ``platform: {sync: false}`` in a repository's ``.openshard/config.yml``
 turn sync off without forgetting the link.
 
@@ -247,8 +250,17 @@ def link_from_replicas(env: dict | os._Environ | None = None) -> PlatformLink | 
 
 
 def resolve_link(env: dict | os._Environ | None = None) -> PlatformLink | None:
-    """Environment first (all three variables), then the stored file, then a Replicas workspace. Never raises."""
-    return link_from_env(env) or load_link(env) or link_from_replicas(env)
+    """Environment first (all three variables), then the stored file. Never raises.
+
+    Never the key-less Replicas link: callers here read or act on the
+    organisation, which that link cannot do.
+    """
+    return link_from_env(env) or load_link(env)
+
+
+def resolve_sync_link(env: dict | os._Environ | None = None) -> PlatformLink | None:
+    """The link Receipts and evidence sync over: ``resolve_link``, else this Replicas workspace. Never raises."""
+    return resolve_link(env) or link_from_replicas(env)
 
 
 def sync_disabled(env: dict | os._Environ | None = None, repo_config: dict | None = None) -> str | None:

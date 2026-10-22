@@ -215,6 +215,9 @@ class HttpsPlatformTransport:
 
     def register_signing_key(self, public_key: dict) -> SendResult:
         """Register this install's public key (seal v2). A Platform without the route is ``unsupported``."""
+        if self._replicas:
+            # A workspace token may not bind a key to an organisation: no request, the seal reads "key not registered".
+            return SendResult(KIND_UNSUPPORTED, None)
         base = self.url[: -len("/receipts")] if self.url.endswith("/receipts") else self.url
         return self._post(f"{base}/signing-keys", public_key, classify_evidence_status)
 
