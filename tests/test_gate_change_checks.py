@@ -36,7 +36,10 @@ def _clean_env(monkeypatch):
                  "OPENSHARD_GATE_API_KEY", "OPENSHARD_GATE_ORG", "OPENSHARD_GATE_FORK", "GITHUB_EVENT_PATH",
                  "GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(dependency_age, "fetch_json", lambda url: None)  # never the network
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("the gate must not contact a package registry")
+
+    monkeypatch.setattr(dependency_age, "fetch_json", no_network)
 
 
 @pytest.fixture
@@ -97,7 +100,7 @@ def test_findings_are_shown_and_the_result_is_the_platforms(repo, monkeypatch, t
     kinds = [f["kind"] for f in data["change_findings"]]
     assert kinds == ["grader_touched", "new_dependencies"]
     deps = data["change_findings"][1]
-    assert deps["packages"][0]["recent"] is None and deps["unknown_age"] == 1  # lookup failed: unknown
+    assert deps["packages"][0]["name"] == "leftpad-py" and "recent" not in deps["packages"][0]  # no lookup
     assert "#### Change checks" in summary and "Information only" in summary
     assert "tests/test\\_a.py" in summary
 

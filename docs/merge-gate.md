@@ -139,7 +139,7 @@ and do not change pass or fail.
 | `junk_files` | added backups, merge leftovers, logs, bytecode or OS metadata files |
 | `grader_touched` | existing tests edited, deleted or renamed, or CI, lint, type-check, test or coverage settings changed |
 | `fix_by_deletion`, `removed_public_code` | public functions or classes, endpoints or tests removed; `fix_by_deletion` when a commit subject or the title reads as a bug fix |
-| `new_dependencies` | packages added to `pyproject.toml`, `requirements*.txt` or `package.json`, with their first and latest publish dates from PyPI or npm (unknown when the lookup fails) |
+| `new_dependencies` | packages added to `pyproject.toml`, `requirements*.txt` or `package.json`, and the lockfiles changed. The gate does not look up publish dates; `openshard ci findings --registry-lookup` does, sending the package names to PyPI or npm |
 
 Without a base commit (and `fetch-depth: 0`) they read "not checked". The
 same findings are in `--json` as `change_findings`.

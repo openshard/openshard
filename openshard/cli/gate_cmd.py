@@ -124,12 +124,16 @@ def _commit_marks(root: Path, head: str, base: str | None, pr_body: object) -> t
 
 
 def _change_findings(root: Path, base: str | None, head: str, pr: object) -> list[dict] | None:
-    """The PR findings for base..head (with registry publish dates), or None when not checked. Never raises."""
+    """The PR findings for base..head, or None when not checked. Never raises.
+
+    No registry lookup: the gate sends nothing about the change anywhere (`openshard ci findings
+    --registry-lookup` is the opt-in way to read publish dates).
+    """
     from openshard.verification.pr_findings import pr_findings
 
     title = pr.get("title") if isinstance(pr, dict) and isinstance(pr.get("title"), str) else None
     try:
-        found = pr_findings(root, base, head, title=title, registry_lookup=True) if base else None
+        found = pr_findings(root, base, head, title=title) if base else None
     except Exception:
         return None
     return [f.to_dict() for f in found] if found is not None else None
