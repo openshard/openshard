@@ -113,6 +113,19 @@ def flush_event_archive(history_dir: Path, buf: dict) -> None:
     buf.pop("events_archive_pending", None)
 
 
+# Claude Code waits for these hooks before it goes on, so one arriving after a SessionEnd
+# is work done after it (seen live: the session "ended" mid-turn and the turn went on),
+# never a late echo of the ended session: it opens the next segment instead of being lost.
+_CLAUDE_WORK_EVENTS = frozenset({"PostToolUse", "PostToolUseFailure"})
+
+
+def work_after_end(agent: str, first_hook: str) -> bool:
+    """True when *first_hook* after an ended session is new work, not a late hook of that session."""
+    from openshard.adapters.capture_agents import AGENT_CLAUDE_CODE
+
+    return agent == AGENT_CLAUDE_CODE and first_hook in _CLAUDE_WORK_EVENTS
+
+
 def note_agent_notification(buf: dict) -> int:
     buf["agent_notification_count"] = int(buf.get("agent_notification_count") or 0) + 1
     return buf["agent_notification_count"]

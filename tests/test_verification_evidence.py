@@ -334,13 +334,11 @@ class TestCapturePaths:
         block = entry["verification"]
         assert _runs(repo)[0] == sealed
         assert sealed["verification"]["status"] == "failed"
-        if receipt_scope == "turn":  # the agent continued: the next turn has its own Receipt and its own check
-            assert len(_runs(repo)) == 2 and entry["capture"]["turn_index"] == 2
-            assert block["status"] == "passed" and (block["checks_passed"], block["checks_failed"]) == (1, 0)
-            return
-        # A late tool hook without a new prompt does not replace the sealed run.
-        assert block["status"] == "failed" and (block["checks_passed"], block["checks_failed"]) == (0, 1)
-        assert entry["capture"]["check_runs"] == {"passed": 0, "failed": 1}
+        # The agent continued: that work has its own Receipt and its own check; the sealed one is unchanged.
+        assert len(_runs(repo)) == 2
+        if receipt_scope == "turn":
+            assert entry["capture"]["turn_index"] == 2
+        assert block["status"] == "passed" and (block["checks_passed"], block["checks_failed"]) == (1, 0)
 
     def test_import_is_not_observable_not_no_checks_run(self, repo):
         from openshard.adapters.claude_code_import import build_claude_code_import_entry

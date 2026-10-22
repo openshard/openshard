@@ -2206,9 +2206,9 @@ _SEGMENT_OPENING_EVENTS = frozenset({EVENT_SESSION_START, EVENT_USER_PROMPT_SUBM
 _LATE_HOOK_GRACE_SECONDS = 60
 
 
-def _late_hook_for_ended(persisted: dict, first_hook: str, now: str | None) -> bool:
-    """True for a non-opening hook arriving within the grace period after *persisted* ended."""
-    if first_hook in _SEGMENT_OPENING_EVENTS or turns.continues_after_seal(persisted.get("capture"), first_hook):
+def _late_hook_for_ended(persisted: dict, first_hook: str, now: str | None, agent: str = AGENT_CLAUDE_CODE) -> bool:
+    """True for a non-opening, non-work hook arriving within the grace period after *persisted* ended."""
+    if first_hook in _SEGMENT_OPENING_EVENTS or fidelity.work_after_end(agent, first_hook) or turns.continues_after_seal(persisted.get("capture"), first_hook):
         return False  # after a sealed turn, Claude's ordered hooks are the agent continuing
     raw_capture = persisted.get("capture")
     capture: dict = raw_capture if isinstance(raw_capture, dict) else {}
@@ -2234,7 +2234,7 @@ def _load_or_create_buffer(
     persisted = _find_persisted_entry(repo_root, session_id, profile_for(agent).executor)
     if persisted is not None:
         if _entry_ended(persisted):
-            if _late_hook_for_ended(persisted, first_hook, now):
+            if _late_hook_for_ended(persisted, first_hook, now, agent):
                 return None
             return _resumed_segment(
                 persisted, repo_root, session_id, first_hook, now=now, agent=agent, baseline=baseline,
