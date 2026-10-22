@@ -126,7 +126,7 @@ class TestSetupNotice:
         assert state.load_state() is None
         with patch("shutil.which", return_value=None):
             out = CliRunner().invoke(cli, ["setup", "--yes", "--repo-path", str(repo)])
-        assert "Improve OpenShard: on" in out.output and "privacy-safe" in out.output
+        assert "Improve Openshard: on" in out.output and "privacy-safe" in out.output
         assert "anonymous" not in out.output.lower()
         assert "Never code, prompts" in out.output and "openshard telemetry off" in out.output
         assert "Richer development data: off" in out.output
@@ -186,7 +186,7 @@ class TestSetupNotice:
         with patch("shutil.which", return_value=None):
             human = runner.invoke(cli, ["setup", "--yes", "--repo-path", str(repo)])
             data = json.loads(runner.invoke(cli, ["setup", "--yes", "--json", "--repo-path", str(repo)]).output)
-        assert "Improve OpenShard: off (disabled by DO_NOT_TRACK)" in human.output
+        assert "Improve Openshard: off (disabled by DO_NOT_TRACK)" in human.output
         assert data["telemetry"]["enabled"] is False and data["telemetry"]["reason"] == "disabled by DO_NOT_TRACK"
         assert state.load_state() is None or state.load_state().improve == "unset"
         assert _drain(telemetry_on) == []
@@ -197,7 +197,7 @@ class TestSetupNotice:
         with patch("shutil.which", return_value=None):
             human = runner.invoke(cli, ["setup", "--yes", "--repo-path", str(repo)])
             data = json.loads(runner.invoke(cli, ["setup", "--yes", "--json", "--repo-path", str(repo)]).output)
-        assert "Improve OpenShard: off (disabled by OPENSHARD_TELEMETRY)" in human.output
+        assert "Improve Openshard: off (disabled by OPENSHARD_TELEMETRY)" in human.output
         assert data["telemetry"]["enabled"] is False
         assert data["telemetry"]["reason"] == "disabled by OPENSHARD_TELEMETRY"
         assert state.load_state() is None or state.load_state().improve == "unset"
@@ -222,7 +222,7 @@ class TestSetupNotice:
         state.set_consent("off", source="cli")
         with patch("shutil.which", return_value=None):
             out = CliRunner().invoke(cli, ["setup", "--yes", "--repo-path", str(repo)])
-        assert "Improve OpenShard: off (off" in out.output
+        assert "Improve Openshard: off (off" in out.output
         assert state.load_state().improve == "off"  # the notice never overrides a decision
 
     def test_doctor_reports_telemetry(self, telemetry_on, repo):

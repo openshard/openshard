@@ -150,13 +150,15 @@ class TestCaptureStatusVersion:
 
 class TestSetupOutput:
     def _render(self, result) -> str:
-        from openshard.cli.main import _render_setup_components, _render_setup_readiness
+        from openshard.cli.setup_output import _render_readiness, render_components
+        from openshard.onboarding.platform_link import KIND_NONE, PlatformLinkStatus
 
+        link = PlatformLinkStatus(KIND_NONE, "none", "not linked; Receipts stay on this machine")
         with patch("openshard.cli.main._telemetry_status", return_value={}), \
              patch("openshard.cli.main._telemetry_line", return_value="off"), \
-             patch("openshard.cli.main.click.echo") as echo:
-            _render_setup_components(result)
-            _render_setup_readiness(result)
+             patch("openshard.cli.setup_output.click.echo") as echo:
+            render_components(result, link)
+            _render_readiness(result, link)
         return "\n".join(str(c.args[0]) for c in echo.call_args_list if c.args)
 
     def _result(self, **fields) -> SetupResult:

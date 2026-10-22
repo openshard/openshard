@@ -401,7 +401,7 @@ class TestConnectSetupLifecycle:
         out = _run(
             ["connect", "--endpoint", _endpoint(server), "--org", ORG, "--api-key", KEY], repo, monkeypatch)
         assert out.exit_code == 0, out.output
-        assert "Improve OpenShard: on" in out.output and "openshard telemetry off" in out.output
+        assert "Improve Openshard: on" in out.output and "openshard telemetry off" in out.output
         st = state.load_state()
         assert st is not None and st.improve == "on" and st.improve_source == "setup" and st.richer == "off"
         events = self._events(telemetry_on)
@@ -432,10 +432,10 @@ class TestConnectSetupLifecycle:
         state.set_consent("off", source="cli")
         out = _run(["connect", "--endpoint", _endpoint(server), "--org", ORG, "--api-key", KEY],
                                         repo, monkeypatch)
-        assert out.exit_code == 0 and "Improve OpenShard: off" in out.output
+        assert out.exit_code == 0 and "Improve Openshard: off" in out.output
         assert state.load_state().improve == "off"
         (home / "telemetry.json").unlink()
         monkeypatch.setenv("DO_NOT_TRACK", "1")
         out = _run(["connect"], repo, monkeypatch)
-        assert out.exit_code == 0 and "Improve OpenShard: off" in out.output
+        assert out.exit_code == 0 and "Improve Openshard: off" in out.output
         assert state.load_state().improve == "unset"
