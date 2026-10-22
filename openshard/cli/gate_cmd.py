@@ -123,6 +123,18 @@ def _commit_marks(root: Path, head: str, base: str | None, pr_body: object) -> t
     return marks, agent_name(messages) or agent_name(body)
 
 
+def _change_findings(root: Path, base: str | None, head: str, pr: object) -> list[dict] | None:
+    """The PR findings for base..head (with registry publish dates), or None when not checked. Never raises."""
+    from openshard.verification.pr_findings import pr_findings
+
+    title = pr.get("title") if isinstance(pr, dict) and isinstance(pr.get("title"), str) else None
+    try:
+        found = pr_findings(root, base, head, title=title, registry_lookup=True) if base else None
+    except Exception:
+        return None
+    return [f.to_dict() for f in found] if found is not None else None
+
+
 def _resolve(root: Path, ref: str) -> str | None:
     from openshard.ci.gate_platform import is_sha
     from openshard.cli.verdict_cmd import _resolve_commit
@@ -199,6 +211,7 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
     api_base = (api or env.get("OPENSHARD_GATE_API") or gp.DEFAULT_API).strip()
 
     sha = _resolve(root, commit_ref)
+    findings: list[dict] | None = None
     marks: list[str] | None = None
     local: str | None = None
     wait_on_none = False
@@ -216,6 +229,7 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
         local_now = _local_verdict(sha)
         base = base_ref or _event_base(event)
         pr = event.get("pull_request")
+        findings = _change_findings(root, base, sha, pr)
         marks_now, agent = _commit_marks(root, sha, base, pr.get("body") if isinstance(pr, dict) else None)
         wait_on_none = bool(marks_now) and local_now not in ("verified", "failed")
         progress = GateWait(agent=agent, wait_minutes=wait_minutes, env=env)
@@ -225,7 +239,7 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
             local, marks = local_now, marks_now
 
     result = decide(sha or commit_ref, platform, local_verdict=local, agent_marks=marks,
-                    waited_minutes=wait_minutes if wait_on_none else None)
+                    waited_minutes=wait_minutes if wait_on_none else None, change_findings=findings)
     if progress is not None:
         progress.close("passed" if result.exit_code == 0 else "failed", result.verdict)
 
@@ -241,6 +255,7 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
             "ci gate", result.status, exit_code=result.exit_code, commit=sha, verdict=result.verdict,
             headline=result.headline, reasons=result.reasons, agent_marks=marks, local_verdict=local,
             platform=platform if isinstance(platform, dict) else None,
+            change_findings=findings,
         ), indent=2))
     else:
         click.echo(f"Openshard gate: {result.status}")
