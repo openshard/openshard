@@ -53,3 +53,38 @@ def test_the_cli_says_not_checked_and_exits_2_for_an_unknown_base(tmp_path, monk
     monkeypatch.chdir(root)
     result = CliRunner().invoke(cli, ["ci", "findings", "--base", "no-such-branch"])
     assert result.exit_code == 2 and "not checked" in result.output
+
+
+def _dependency_change(tmp_path: Path) -> tuple[Path, str]:
+    root, base = _repo(tmp_path)
+    _commit(root, {"requirements.txt": "click\n"})
+    return root, base
+
+
+def test_publish_dates_are_not_looked_up_without_the_flag(tmp_path, monkeypatch):
+    from openshard.verification import dependency_age
+
+    def no_network(*_args, **_kwargs):
+        raise AssertionError("no registry lookup without --registry-lookup")
+
+    monkeypatch.setattr(dependency_age, "fetch_json", no_network)
+    root, base = _dependency_change(tmp_path)
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(cli, ["ci", "findings", "--base", base, "--json"])
+    assert result.exit_code == 0, result.output
+    (finding,) = json.loads(result.output)["findings"]
+    assert finding["kind"] == "new_dependencies" and "recent_dependencies" not in finding
+
+
+def test_the_flag_looks_up_publish_dates(tmp_path, monkeypatch):
+    from openshard.verification import dependency_age
+
+    asked: list[str] = []
+    monkeypatch.setattr(dependency_age, "fetch_json", lambda url, timeout=5.0: asked.append(url))
+    root, base = _dependency_change(tmp_path)
+    monkeypatch.chdir(root)
+    result = CliRunner().invoke(cli, ["ci", "findings", "--base", base, "--registry-lookup", "--json"])
+    assert result.exit_code == 0, result.output
+    (finding,) = json.loads(result.output)["findings"]
+    assert asked == ["https://pypi.org/pypi/click/json"]
+    assert finding["unknown_age"] == 1 and finding["packages"][0]["recent"] is None

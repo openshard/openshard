@@ -12,8 +12,11 @@ import click
 @click.option("--base", "base_ref", required=True, metavar="REF",
               help="The branch or commit the change will merge into (the PR base).")
 @click.option("--head", "head_ref", default="HEAD", show_default=True, metavar="REF", help="The change's head.")
+@click.option("--registry-lookup", is_flag=True, default=False,
+              help="Also ask PyPI / npm when each new dependency was published. Sends the package names to the "
+                   "public registry; 15 s in total. Off by default.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
-def ci_findings(base_ref: str, head_ref: str, as_json: bool) -> None:
+def ci_findings(base_ref: str, head_ref: str, registry_lookup: bool, as_json: bool) -> None:
     """Fixed, model-free findings for the change from BASE's merge-base to HEAD.
 
     Findings are observations, never a pass or fail: exit 0 when the change
@@ -25,7 +28,7 @@ def ci_findings(base_ref: str, head_ref: str, as_json: bool) -> None:
 
     root = Path.cwd()
     base, head = _resolve(root, base_ref), _resolve(root, head_ref)
-    findings = pr_findings(root, base, head) if base and head else None
+    findings = pr_findings(root, base, head, registry_lookup=registry_lookup) if base and head else None
     if as_json:
         click.echo(json.dumps({
             "schema": "openshard.pr_findings.v1",
