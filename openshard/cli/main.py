@@ -8443,8 +8443,7 @@ cli.add_command(learn_group)
 cli.add_command(usage_group)
 cli.add_command(login_cmd)
 
-from openshard.cli.findings_cmd import ci_findings  # noqa: E402
-from openshard.cli.gate_cmd import ci_gate  # noqa: E402
+from openshard.cli.ci_commands import register_ci_commands  # noqa: E402
 from openshard.cli.signing_cmd import keys_group  # noqa: E402
 from openshard.cli.verdict_cmd import verdict_cmd  # noqa: E402
 from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
@@ -8452,8 +8451,7 @@ from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
 cli.add_command(workflow_group)
 cli.add_command(keys_group)
 cli.add_command(verdict_cmd)
-ci_group.add_command(ci_gate)
-ci_group.add_command(ci_findings)
+register_ci_commands(ci_group)
 
 if __name__ == "__main__":
     from openshard.cli.entrypoint import _harden_stdio_encoding
