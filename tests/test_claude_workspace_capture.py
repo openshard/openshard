@@ -303,6 +303,34 @@ def test_a_turn_opened_without_a_prompt_counts_only_its_own_usage(workspace):
     assert (second["prompt_tokens"], second["completion_tokens"]) == (200, 20)
 
 
+def test_work_after_an_early_session_end_is_recorded_not_dropped(workspace):
+    """Seen live: Claude Code ended the session mid-turn (SessionEnd reason other) and the turn went
+    on; the edit and commit after it were dropped as late hooks and the Receipt showed no gaps."""
+    from openshard.adapters.claude_hooks_install import install_claude_hooks
+
+    repo = (workspace / "core").resolve()
+    service = _Service({**os.environ})
+    try:
+        install_claude_hooks(repo_root=repo, port=service.port)
+        claude = _Claude(repo)
+        claude.send("SessionStart", source="startup", cwd=repo)
+        claude.send("UserPromptSubmit", prompt="do the work", cwd=repo)
+        claude.send("PostToolUse", cwd=repo, tool_name="Bash", tool_input={"command": "ls"}, tool_response={"stdout": "x"})
+        claude.send("SessionEnd", reason="other", cwd=repo)
+        assert _wait_for(lambda: len(_receipts(repo)) == 1)
+        _edit(claude, repo / "a.py", "A = 1\n")  # within the late-hook grace period
+        claude.send("Stop", cwd=repo)
+        assert _wait_for(lambda: len(_receipts(repo)) == 2
+                         and _receipts(repo)[1]["capture"].get("task_status") == "turn_completed")
+    finally:
+        service.stop()
+    ended, after = _receipts(repo)
+    assert ended["capture"]["session_end_reason"] == "other"
+    assert {f["path"] for f in after["files_detail"] if f.get("attribution") != "pre_existing"} == {"a.py"}
+    assert after["task_id"] == ended["task_id"]
+
+
+
 def test_a_local_workspace_session_records_into_the_touched_checkout(workspace, monkeypatch):
     """Without the cloud surface the parent is an ordinary project; its edits still land where they happened."""
     monkeypatch.delenv(cconfig.SURFACE_ENV)
