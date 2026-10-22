@@ -18,18 +18,31 @@ Findings so far:
 * ``junk_files`` -- the change adds files that are almost never meant to be
   committed: merge and patch leftovers, editor swap and backup files, OS
   metadata, logs, bytecode and coverage data.
+* ``grader_touched`` -- the change edits what grades it: an existing test
+  file (lines changed or removed, or the file deleted or renamed; only adding
+  lines, or adding a new test file, is writing tests, not touching them),
+  test runner and coverage setup, CI configuration, or lint and type-check
+  configuration, including the tool tables of ``pyproject.toml`` and
+  ``setup.cfg`` and the check scripts and tool keys of ``package.json``.
+  Thresholds (``fail_under``, ``--cov-fail-under``, ``coverageThreshold``)
+  live in those files, so they are covered too.
 """
 
 from __future__ import annotations
 
+import configparser
 import fnmatch
-from collections.abc import Iterable
+import json
+import re
+import tomllib
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 KIND_LARGE_CHANGE = "large_change"
 KIND_JUNK_FILES = "junk_files"
+KIND_GRADER_TOUCHED = "grader_touched"
 
 LARGE_CHANGE_LINES = 400
 MAX_PATHS = 5
@@ -46,6 +59,28 @@ JUNK_PATTERNS: tuple[str, ...] = (
     "*.orig", "*.rej", "*.bak", "*.swp", "*.swo", "*~", ".DS_Store", "Thumbs.db", "desktop.ini",
     "*.log", "nohup.out", "*.pyc", "*.pyo", "__pycache__/", ".coverage", ".coverage.*", "*.tmp",
 )
+
+
+GitShow = Callable[[str, str], "str | None"]  # (rev, posix path) -> file text at rev, or None
+
+# CI configuration: any change to these changes how the change is checked.
+CI_CONFIG_PATTERNS: tuple[str, ...] = (
+    ".github/workflows/*", ".github/actions/*", ".gitlab-ci.yml", ".gitlab/ci/*", ".circleci/*",
+    "azure-pipelines.yml", "bitbucket-pipelines.yml", "Jenkinsfile", ".buildkite/*", ".travis.yml",
+    ".pre-commit-config.yaml", "noxfile.py", "tox.ini",
+)
+# Whole files that configure linting, type checking, test running or coverage.
+CHECK_CONFIG_NAMES: tuple[str, ...] = (
+    "ruff.toml", ".ruff.toml", ".flake8", "mypy.ini", ".mypy.ini", "pyrightconfig.json", ".pylintrc", "pylintrc",
+    ".eslintrc*", "eslint.config.*", ".eslintignore", "biome.json", "biome.jsonc", ".prettierrc*", "tsconfig*.json",
+    "pytest.ini", "conftest.py", ".coveragerc", "codecov.yml", ".codecov.yml", "jest.config.*", "vitest.config.*",
+    "vitest.workspace.*", "karma.conf.*", ".mocharc*", "phpunit.xml*", ".golangci.yml", ".golangci.yaml",
+    ".rubocop.yml", "clippy.toml", "rustfmt.toml",
+)
+_PYPROJECT_TOOLS = ("ruff", "mypy", "pytest", "coverage", "pyright", "pylint", "flake8", "black", "isort")
+_SETUP_CFG_SECTION = re.compile(r"^(flake8|mypy.*|tool:pytest|coverage:.*|pylint.*|isort)$")
+_PACKAGE_JSON_KEYS = ("eslintConfig", "jest", "prettier", "vitest", "c8", "nyc", "mocha")
+_CHECK_SCRIPT = re.compile(r"^(pre|post)?(test|lint|typecheck|type-check|check|coverage)(:.*)?$")
 
 
 @dataclass(frozen=True)
@@ -198,22 +233,113 @@ def junk_files(files: Iterable[ChangedFile]) -> Finding | None:
     )
 
 
-def findings_for(files: list[ChangedFile]) -> list[Finding]:
+def _matches(path: str, patterns: tuple[str, ...]) -> bool:
+    name = PurePosixPath(path).name
+    return any(fnmatch.fnmatchcase(path, p) if "/" in p else fnmatch.fnmatchcase(name, p) for p in patterns)
+
+
+def _pyproject_tools(text: str | None) -> dict[str, Any] | None:
+    try:
+        tool = tomllib.loads(text or "").get("tool", {})
+    except (tomllib.TOMLDecodeError, AttributeError):
+        return None
+    return {k: tool.get(k) for k in _PYPROJECT_TOOLS} if isinstance(tool, dict) else None
+
+
+def _setup_cfg_sections(text: str | None) -> dict[str, dict[str, str]] | None:
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read_string(text or "")
+    except configparser.Error:
+        return None
+    return {s: dict(parser[s]) for s in parser.sections() if _SETUP_CFG_SECTION.match(s)}
+
+
+def _package_json_checks(text: str | None) -> dict[str, Any] | None:
+    try:
+        data = json.loads(text or "{}")
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("scripts")
+    scripts: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    return {"scripts": {k: v for k, v in scripts.items() if _CHECK_SCRIPT.match(k)},
+            **{k: data.get(k) for k in _PACKAGE_JSON_KEYS}}
+
+
+_TOOL_SECTIONS: dict[str, Callable[[str | None], Any]] = {
+    "pyproject.toml": _pyproject_tools,
+    "setup.cfg": _setup_cfg_sections,
+    "package.json": _package_json_checks,
+}
+
+
+def _grader_category(f: ChangedFile, show: GitShow | None, base_rev: str | None, head_rev: str | None) -> str | None:
+    """Why *f* is part of what grades the change, or None."""
+    from openshard.verification.gaming_signals import is_test_path
+
+    if _matches(f.path, CI_CONFIG_PATTERNS) or (f.old_path and _matches(f.old_path, CI_CONFIG_PATTERNS)):
+        return "ci_config"
+    if _matches(f.path, CHECK_CONFIG_NAMES) or (f.old_path and _matches(f.old_path, CHECK_CONFIG_NAMES)):
+        return "check_config"
+    reader = _TOOL_SECTIONS.get(PurePosixPath(f.path).name)
+    if reader is not None:
+        if show is None or base_rev is None or head_rev is None:
+            return None
+        before = reader(show(base_rev, f.old_path or f.path)) if f.status != "A" else reader(None)
+        after = reader(show(head_rev, f.path)) if f.status != "D" else reader(None)
+        # A file that cannot be parsed on either side is not proof of anything; the diff is still visible.
+        return "check_config" if before is not None and after is not None and before != after else None
+    if is_test_path(f.old_path or f.path):
+        if f.status in "DR":
+            return "tests_removed" if f.status == "D" else "tests_renamed"
+        if f.status == "M" and (f.removed is None or f.removed > 0):
+            return "tests_edited"
+    return None
+
+
+def grader_touched(files: Iterable[ChangedFile], show: GitShow | None = None, base_rev: str | None = None,
+                   head_rev: str | None = None) -> Finding | None:
+    """A finding when the change edits its own tests, CI, or lint, type-check or coverage settings."""
+    hits = [(f.path, c) for f in files if (c := _grader_category(f, show, base_rev, head_rev))]
+    if not hits:
+        return None
+    categories = sorted({c for _, c in hits})
+    return Finding(
+        kind=KIND_GRADER_TOUCHED,
+        detail=f"the change edits what checks it ({', '.join(c.replace('_', ' ') for c in categories)})",
+        paths=tuple(p for p, _ in hits[:MAX_PATHS]),
+        count=len(hits),
+        extra={"categories": categories},
+    )
+
+
+def findings_for(files: list[ChangedFile], show: GitShow | None = None, base_rev: str | None = None,
+                 head_rev: str | None = None) -> list[Finding]:
     """Every finding for one change, in a fixed order."""
-    found = [large_change(files), junk_files(files)]
+    found = [large_change(files), junk_files(files), grader_touched(files, show, base_rev, head_rev)]
     return [f for f in found if f is not None]
 
 
 def pr_findings(root: Path, base: str, head: str) -> list[Finding] | None:
     """Findings for the change from *base* to *head* in the checkout at *root*; None when not checked."""
+    from openshard.util.git import run_git
+
     files = changed_files(root, base, head)
-    if files is None:
+    fork = run_git(root, ["merge-base", base, head])
+    if files is None or not fork:
         return None
-    return findings_for(files)
+
+    def show(rev: str, path: str) -> str | None:
+        return run_git(root, ["show", f"{rev}:{path}"])
+
+    return findings_for(files, show, fork.strip(), head)
 
 
 __all__ = [
     "JUNK_PATTERNS",
+    "KIND_GRADER_TOUCHED",
     "KIND_JUNK_FILES",
     "KIND_LARGE_CHANGE",
     "LARGE_CHANGE_LINES",
@@ -222,6 +348,7 @@ __all__ = [
     "Finding",
     "changed_files",
     "findings_for",
+    "grader_touched",
     "is_lockfile",
     "junk_files",
     "large_change",
