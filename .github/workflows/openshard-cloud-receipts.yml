@@ -299,11 +299,11 @@ jobs:
 
             git checkout --force "$sha" >/dev/null 2>&1
 
-            # Fixed PR findings for this commit's own change (parent..sha): observations
+            # Fixed PR findings for this commit's own change (parent..sha), no registry lookup: observations
             # recorded on the Receipt, never part of its verdict. Empty when not checked.
             change_findings=""
             if [[ -n "$parent" ]]; then
-              change_findings=$(BASE_SHA="$parent" HEAD_SHA="$sha" python -c 'import json, os; from pathlib import Path; from openshard.verification.pr_findings import pr_findings; b, h = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]; f = pr_findings(Path("."), b, h, registry_lookup=True); print("" if f is None else json.dumps({"base_sha": b, "head_sha": h, "findings": [x.to_dict() for x in f][:10]}))' 2>/dev/null || true)
+              change_findings=$(BASE_SHA="$parent" HEAD_SHA="$sha" python -c 'import json, os; from pathlib import Path; from openshard.verification.pr_findings import pr_findings; b, h = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]; f = pr_findings(Path("."), b, h); print("" if f is None else json.dumps({"base_sha": b, "head_sha": h, "findings": [x.to_dict() for x in f][:10]}))' 2>/dev/null || true)
             fi
 
             verify_started=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
