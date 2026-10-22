@@ -49,18 +49,19 @@ def test_a_test_that_fails_before_the_fix_proves_it_and_one_that_passes_does_not
     })
     result = fwf.run_fail_without_fix(root, base, timeout=120)
     assert result["status"] == "complete", result
-    assert result["counts"] == {"new_or_changed": 2, "proves_fix": 1, "passes_without_fix": 1,
-                                "fails_on_head": 0, "not_run": 0}
+    assert result["counts"] == {"new_or_changed": 2, "proves_fix": 1, "cannot_load_on_base": 0,
+                                "passes_without_fix": 1, "fails_on_head": 0, "not_run": 0}
     assert result["passes_without_fix_tests"] == ["tests/test_calc.py::test_add_zero_right"]
     assert result["base_commit"] == base and result["raw_output_stored"] is False
 
 
-def test_a_new_test_for_a_new_module_fails_to_import_on_base_and_proves_the_change(tmp_path):
+def test_a_new_test_for_a_new_module_cannot_load_on_base_which_is_not_proof(tmp_path):
     root, base = _repo(tmp_path)
     _commit(root, {"shapes.py": "def area(w, h):\n    return w * h\n",
                    "tests/test_shapes.py": "from shapes import area\n\n\ndef test_area():\n    assert area(2, 3) == 6\n"})
     result = fwf.run_fail_without_fix(root, base, timeout=120)
-    assert result["counts"]["proves_fix"] == 1 and result["counts"]["new_or_changed"] == 1
+    assert result["counts"]["cannot_load_on_base"] == 1 and result["counts"]["proves_fix"] == 0
+    assert result["cannot_load_on_base_tests"] == ["tests/test_shapes.py::test_area"]
 
 
 def test_a_new_test_that_fails_on_head_is_reported_as_such(tmp_path):
@@ -142,3 +143,37 @@ def test_the_cli_reports_json_and_exit_codes(tmp_path, monkeypatch):
     assert data["schema"] == "openshard.fail_without_fix.v1" and data["counts"]["proves_fix"] == 1
     bad = CliRunner().invoke(cli, ["ci", "fail-without-fix", "--base", "nope"])
     assert bad.exit_code == 2 and "not established" in bad.output
+
+
+def test_an_import_of_a_missing_helper_inside_the_test_cannot_load_on_base(tmp_path):
+    root, base = _repo(tmp_path)
+    _commit(root, {"calc.py": FIXED + "\n\ndef double(x):\n    return 2 * x\n",
+                   "tests/test_calc.py": OLD_TESTS + ("\n\ndef test_double():\n    from calc import double\n\n"
+                                                      "    assert double(2) == 4\n")})
+    result = fwf.run_fail_without_fix(root, base, timeout=120)
+    assert result["counts"]["cannot_load_on_base"] == 1 and result["counts"]["proves_fix"] == 0
+
+
+def test_a_missing_fixture_on_base_cannot_load_but_a_real_assertion_failure_proves_the_fix(tmp_path):
+    root, base = _repo(tmp_path)
+    _commit(root, {"calc.py": FIXED,
+                   "tests/conftest.py": "import pytest\n\n\n@pytest.fixture\ndef pair():\n    return (2, 3)\n",
+                   "tests/test_calc.py": OLD_TESTS + ("\n\ndef test_with_fixture(pair):\n    assert add(*pair) == 5\n"
+                                                      "\n\ndef test_plain():\n    assert add(2, 3) == 5\n")})
+    result = fwf.run_fail_without_fix(root, base, timeout=120)
+    assert result["counts"]["cannot_load_on_base"] == 1  # conftest.py is not copied: its fixture is missing on base
+    assert result["counts"]["proves_fix"] == 1  # add(2, 3) == -1 on base: a real failure
+    assert result["cannot_load_on_base_tests"] == ["tests/test_calc.py::test_with_fixture"]
+
+
+def test_read_outcomes_tells_load_failures_from_real_failures(tmp_path):
+    report = tmp_path / "r.xml"
+    report.write_text('<testsuite>'
+                      '<testcase classname="tests.test_x" name="test_a"><failure message="ImportError: cannot import name"/></testcase>'
+                      '<testcase classname="tests.test_x" name="test_b"><failure message="AssertionError: assert 1 == 2"/></testcase>'
+                      '<testcase classname="tests.test_x" name="test_c"><error message="fixture \'pair\' not found"/></testcase>'
+                      '<testcase classname="tests.test_x" name="test_d[1]"><error message="setup"/></testcase>'
+                      '<testcase classname="tests.test_x" name="test_d[2]"><failure message="assert 0"/></testcase>'
+                      '</testsuite>', encoding="utf-8")
+    assert fwf.read_outcomes(report) == {("tests.test_x", "test_a"): "cannot_load", ("tests.test_x", "test_b"): "failed",
+                                         ("tests.test_x", "test_c"): "cannot_load", ("tests.test_x", "test_d"): "failed"}

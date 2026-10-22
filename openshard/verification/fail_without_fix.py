@@ -8,7 +8,12 @@ there with pytest. Then it runs them on a clean worktree of head.
 
 Each new or changed test ends in one of:
 
-* ``proves_fix`` -- failed (or could not be collected) on base, passed on head;
+* ``proves_fix`` -- failed on base (a real test failure), passed on head;
+* ``cannot_load_on_base`` -- on base it could not even load: its file failed
+  to import, a fixture or helper it needs is missing (a setup error), or it
+  failed with ``ImportError`` / ``ModuleNotFoundError``. It passes on head,
+  but this shows only that the code it imports is new, not that it tests
+  the fix;
 * ``passes_without_fix`` -- passed on base: it does not show the change matters;
 * ``fails_on_head`` -- failed on head too;
 * ``not_run`` -- no result for it in either report (skipped, deselected, renamed).
@@ -24,6 +29,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -36,6 +42,9 @@ MAX_TEST_FILES = 20
 MAX_NAMES = 5
 DEFAULT_TIMEOUT_SECONDS = 600.0
 MAX_REPORT_BYTES = 8 * 1024 * 1024
+OUTCOMES = ("proves_fix", "cannot_load_on_base", "passes_without_fix", "fails_on_head", "not_run")
+_LOAD_FAILURE = re.compile(r"^\s*(?:E\s+)?(?:ImportError|ModuleNotFoundError)\b")
+_RANK = {"failed": 3, "cannot_load": 2, "skipped": 1, "passed": 0}
 
 
 def _git(repo: Path, *args: str, timeout: float = 30) -> str | None:
@@ -92,9 +101,11 @@ def changed_tests(repo: Path, fork: str, head: str) -> dict[str, list[str]] | No
 
 
 def read_outcomes(report: Path) -> dict[tuple[str, str], str] | None:
-    """``{(module path, test name): passed|failed|skipped}`` from a pytest JUnit report; None if unreadable.
+    """``{(module path, test name): passed|failed|cannot_load|skipped}`` from a pytest JUnit report; None if unreadable.
 
-    Parametrised cases fold into their function: any failed case fails it.
+    ``cannot_load``: an error outside the test body (collection, fixture setup) or a failure raised as
+    ``ImportError`` / ``ModuleNotFoundError``. Parametrised cases fold into their function: a real failure
+    wins, then ``cannot_load``.
     """
     try:
         if report.stat().st_size > MAX_REPORT_BYTES:
@@ -110,13 +121,19 @@ def read_outcomes(report: Path) -> dict[tuple[str, str], str] | None:
         classname, name = case.get("classname") or "", (case.get("name") or "").split("[", 1)[0]
         if not name:
             continue
-        status = ("failed" if case.find("failure") is not None or case.find("error") is not None
-                  else "skipped" if case.find("skipped") is not None else "passed")
+        failure, error = case.find("failure"), case.find("error")
+        if error is not None:
+            status = "cannot_load"
+        elif failure is not None:
+            message = failure.get("message") or ""
+            status = "cannot_load" if _LOAD_FAILURE.match(message) else "failed"
+        else:
+            status = "skipped" if case.find("skipped") is not None else "passed"
         parts = classname.split(".")
         cls = parts[-1] if parts and parts[-1].startswith("Test") else None
         module = ".".join(parts[:-1] if cls else parts)
         key = (module, f"{cls}.{name}" if cls else name)
-        if out.get(key) != "failed":
+        if _RANK[status] >= _RANK.get(out.get(key, "passed"), 0):
             out[key] = status
     return out
 
@@ -147,8 +164,8 @@ def _outcome(module: str, name: str, outcomes: dict | None) -> str | None:
     if (module, name) in outcomes:
         return outcomes[(module, name)]
     # A test file that failed to import reports one collection error for the module
-    # (empty classname, the module as the name), not one per test. Only that counts.
-    return "failed" if outcomes.get(("", module)) == "failed" else None
+    # (empty classname, the module as the name), not one per test.
+    return "cannot_load" if outcomes.get(("", module)) == "cannot_load" else None
 
 
 def run_fail_without_fix(repo: Path, base_ref: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
@@ -163,8 +180,7 @@ def run_fail_without_fix(repo: Path, base_ref: str, *, timeout: float = DEFAULT_
     if tests is None:
         return {**result, "reason": "git_unavailable"}
     if not tests:
-        return {**result, "status": "complete", "counts": dict.fromkeys(
-            ("new_or_changed", "proves_fix", "passes_without_fix", "fails_on_head", "not_run"), 0)}
+        return {**result, "status": "complete", "counts": dict.fromkeys(("new_or_changed", *OUTCOMES), 0)}
     with tempfile.TemporaryDirectory(prefix="openshard-fwf-") as temp:
         root, trees = Path(temp), []
         try:
@@ -191,25 +207,28 @@ def run_fail_without_fix(repo: Path, base_ref: str, *, timeout: float = DEFAULT_
                 _git(repo, "worktree", "remove", "--force", str(path))
     if on_head is None or base_code is None:
         return {**result, "reason": "tests_not_completed"}
-    rows: dict[str, list[str]] = {"proves_fix": [], "passes_without_fix": [], "fails_on_head": [], "not_run": []}
+    rows: dict[str, list[str]] = {k: [] for k in OUTCOMES}
     for rel, names in tests.items():
         module = _module(rel)
         for name in names:
             before = _outcome(module, name, on_base)
             after = on_head.get((module, name))
             label = f"{rel}::{name.replace('.', '::')}"
-            if after == "failed":
+            if after in ("failed", "cannot_load"):
                 rows["fails_on_head"].append(label)
             elif after != "passed" or before is None or before == "skipped":
                 rows["not_run"].append(label)
             elif before == "failed":
                 rows["proves_fix"].append(label)
+            elif before == "cannot_load":
+                rows["cannot_load_on_base"].append(label)
             else:
                 rows["passes_without_fix"].append(label)
     total = sum(len(v) for v in rows.values())
     return {**result, "status": "complete", "head_exit_code": head_code,
             "counts": {"new_or_changed": total, **{k: len(v) for k, v in rows.items()}},
             "passes_without_fix_tests": rows["passes_without_fix"][:MAX_NAMES],
+            "cannot_load_on_base_tests": rows["cannot_load_on_base"][:MAX_NAMES],
             "fails_on_head_tests": rows["fails_on_head"][:MAX_NAMES]}
 
 

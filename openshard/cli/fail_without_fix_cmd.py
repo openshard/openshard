@@ -29,7 +29,8 @@ def ci_fail_without_fix(base_ref: str, timeout: float, as_json: bool) -> None:
     else:
         c = result["counts"]
         click.echo(f"Fail-without-fix: {c['new_or_changed']} new or changed test(s): {c['proves_fix']} fail without "
-                   f"the change, {c['passes_without_fix']} pass without it, {c['fails_on_head']} fail on head, "
+                   f"the change, {c['cannot_load_on_base']} cannot load without it, "
+                   f"{c['passes_without_fix']} pass without it, {c['fails_on_head']} fail on head, "
                    f"{c['not_run']} not run.")
         for name in result["passes_without_fix_tests"]:
             click.echo(f"  passes without the change: {name}")
