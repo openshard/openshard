@@ -77,7 +77,7 @@ def test_the_finding_counts_recent_and_unknown_packages(monkeypatch):
     files = [pf.ChangedFile(path="requirements.txt", status="M", added=2, removed=0)]
     texts = {("base", "requirements.txt"): "click\n", ("head", "requirements.txt"): "click\nnewpkg\nmystery\n"}
     monkeypatch.setattr(da, "fetch_json",
-                        lambda url: _pypi("2026-10-21T00:00:00Z") if "newpkg" in url else None)
+                        lambda url, timeout=5.0: _pypi("2026-10-21T00:00:00Z") if "newpkg" in url else None)
     finding = pf.added_dependencies(files, lambda rev, path: texts.get((rev, path)), "base", "head",
                                     registry_lookup=True)
     assert finding is not None
@@ -85,3 +85,36 @@ def test_the_finding_counts_recent_and_unknown_packages(monkeypatch):
     assert finding.extra["recent_days"] == 14
     plain = pf.added_dependencies(files, lambda rev, path: texts.get((rev, path)), "base", "head")
     assert plain is not None and "recent_dependencies" not in plain.extra
+
+
+def test_all_lookups_together_stop_at_the_total_limit():
+    """Each lookup 'takes' 6 s on a fake clock: within 15 s only the first three are asked; the rest stay unknown."""
+    now = [0.0]
+    calls: list[str] = []
+
+    def slow(url: str):
+        calls.append(url)
+        now[0] += 6.0
+        return _pypi("2019-01-01T00:00:00Z")
+
+    packages = [{"name": f"p{i}", "ecosystem": "pypi", "manifest": "m"} for i in range(6)]
+    rows = da.with_ages(packages, fetch=slow, now=NOW, clock=lambda: now[0])
+    assert len(calls) == 3 and da.TOTAL_SECONDS == 15.0
+    assert [r["recent"] for r in rows] == [False, False, False, None, None, None]
+
+
+def test_the_default_fetch_never_waits_past_the_total_limit(monkeypatch):
+    timeouts: list[float] = []
+    monkeypatch.setattr(da, "fetch_json", lambda url, timeout=5.0: timeouts.append(timeout))
+    now = [0.0]
+    da.with_ages([{"name": "a", "ecosystem": "pypi", "manifest": "m"}], now=NOW, clock=lambda: now[0] + 12.0 * len(timeouts))
+    assert timeouts and timeouts[0] <= 5.0
+
+
+def test_lookups_are_off_unless_asked(monkeypatch):
+    from openshard.verification import pr_findings as pf
+
+    monkeypatch.setattr(da, "fetch_json", lambda *a, **k: (_ for _ in ()).throw(AssertionError("network")))
+    files = [pf.ChangedFile(path="requirements.txt", status="A", added=1, removed=0)]
+    finding = pf.added_dependencies(files, lambda rev, path: "click\n" if rev == "head" else None, "base", "head")
+    assert finding is not None and "recent_dependencies" not in finding.extra

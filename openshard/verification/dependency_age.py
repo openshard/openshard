@@ -6,16 +6,20 @@ account publishes a new version). For each package a change adds, this asks
 the public registry (PyPI's JSON API, the npm registry) when the package
 first appeared and when its newest release was published.
 
-Opt-in and network-bound: it is never run unless a caller asks. A lookup that
-fails, times out or returns something unexpected leaves the dates ``None``
-and ``recent`` ``None`` (unknown), never "not recent". Only public package
-names are sent; nothing from the repository.
+Off by default and network-bound: it runs only when a caller asks
+(``openshard ci findings --registry-lookup``). Each new package's name is
+sent to its public registry (https://pypi.org, https://registry.npmjs.org);
+nothing else from the repository is. All lookups together get
+``TOTAL_SECONDS`` (15 s); a lookup that fails, times out, is not reached in
+time or returns something unexpected leaves the dates ``None`` and
+``recent`` ``None`` (unknown), never "not recent".
 """
 
 from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable
@@ -23,18 +27,19 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 RECENT_DAYS = 14
-TIMEOUT_SECONDS = 5.0
+TIMEOUT_SECONDS = 5.0  # one lookup
+TOTAL_SECONDS = 15.0  # every lookup for one change, together
 MAX_LOOKUPS = 10
 _SAFE_NAME = re.compile(r"^(@[a-z0-9][a-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]{0,213}$")
 
 Fetch = Callable[[str], "Any | None"]  # url -> parsed JSON, or None
 
 
-def fetch_json(url: str) -> Any | None:
+def fetch_json(url: str, timeout: float = TIMEOUT_SECONDS) -> Any | None:
     """GET *url* and parse JSON; None on any failure."""
     request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "openshard"})
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:  # noqa: S310 - fixed https hosts
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - fixed https hosts
             return json.loads(response.read(8_000_000))
     except Exception:
         return None
@@ -84,15 +89,28 @@ def _iso(stamp: datetime | None) -> str | None:
 
 
 def with_ages(packages: Iterable[dict[str, str]], *, fetch: Fetch | None = None, now: datetime | None = None,
-              recent_days: int = RECENT_DAYS) -> list[dict[str, Any]]:
-    """Each package with ``first_published``, ``latest_published`` and ``recent`` (True, False or None)."""
-    fetch = fetch or fetch_json
+              recent_days: int = RECENT_DAYS, total_seconds: float = TOTAL_SECONDS,
+              clock: Callable[[], float] = time.monotonic) -> list[dict[str, Any]]:
+    """Each package with ``first_published``, ``latest_published`` and ``recent`` (True, False or None).
+
+    Lookups stop once *total_seconds* have passed; the rest stay unknown.
+    """
+    deadline = clock() + total_seconds
+
+    def remaining() -> float:
+        return deadline - clock()
+
+    def default_fetch(url: str) -> Any | None:
+        return fetch_json(url, timeout=max(0.1, min(TIMEOUT_SECONDS, remaining())))
+
+    fetch = fetch or default_fetch
     now = now or datetime.now(UTC)
     cutoff = now - timedelta(days=recent_days)
     out: list[dict[str, Any]] = []
     for i, package in enumerate(packages):
         row: dict[str, Any] = {**package, "first_published": None, "latest_published": None, "recent": None}
-        url = _url(package.get("ecosystem", ""), package.get("name", "")) if i < MAX_LOOKUPS else None
+        in_time = i < MAX_LOOKUPS and remaining() > 0
+        url = _url(package.get("ecosystem", ""), package.get("name", "")) if in_time else None
         data = fetch(url) if url else None
         if data is not None:
             first, latest = (_pypi if package["ecosystem"] == "pypi" else _npm)(data)
@@ -103,4 +121,4 @@ def with_ages(packages: Iterable[dict[str, str]], *, fetch: Fetch | None = None,
     return out
 
 
-__all__ = ["MAX_LOOKUPS", "RECENT_DAYS", "fetch_json", "with_ages"]
+__all__ = ["MAX_LOOKUPS", "RECENT_DAYS", "TOTAL_SECONDS", "fetch_json", "with_ages"]

@@ -32,7 +32,8 @@ Findings so far:
   fix (``fix_basis`` says which), else ``removed_public_code``.
 * ``new_dependencies`` -- packages the change adds to ``pyproject.toml``,
   ``requirements*.txt`` or ``package.json`` (``pr_dependencies``), plus the
-  lockfiles it changed. With ``registry_lookup`` each package also carries
+  lockfiles it changed. With ``registry_lookup`` (off by default; it sends the
+  package names to PyPI or npm) each package also carries
   its first and latest publish dates and ``recent`` (``dependency_age``);
   ``recent_dependencies`` counts those published within ``RECENT_DAYS``.
 """
@@ -411,7 +412,8 @@ def pr_findings(root: Path, base: str, head: str, title: str | None = None,
     """Findings for the change from *base* to *head* in the checkout at *root*; None when not checked.
 
     *title* (a pull request title) is read with the commit subjects to tell whether the change is a fix.
-    *registry_lookup* asks public package registries when each new dependency was published (network).
+    *registry_lookup* (off by default) sends each new dependency's name to its public registry
+    (pypi.org, registry.npmjs.org) to read when it was published; 15 s in total.
     """
     from openshard.util.git import run_git
 
