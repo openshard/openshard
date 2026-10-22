@@ -30,6 +30,9 @@ Findings so far:
   functions or classes, endpoints or tests (``pr_deletions``). It is
   ``fix_by_deletion`` when a commit subject or the given title reads as a bug
   fix (``fix_basis`` says which), else ``removed_public_code``.
+* ``new_dependencies`` -- packages the change adds to ``pyproject.toml``,
+  ``requirements*.txt`` or ``package.json`` (``pr_dependencies``), plus the
+  lockfiles it changed.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ KIND_JUNK_FILES = "junk_files"
 KIND_GRADER_TOUCHED = "grader_touched"
 KIND_FIX_BY_DELETION = "fix_by_deletion"
 KIND_REMOVED_PUBLIC_CODE = "removed_public_code"
+KIND_NEW_DEPENDENCIES = "new_dependencies"
 
 LARGE_CHANGE_LINES = 400
 MAX_PATHS = 5
@@ -344,11 +348,33 @@ def removed_code(files: Iterable[ChangedFile], show: GitShow | None, base_rev: s
                    extra=extra)
 
 
+def added_dependencies(files: list[ChangedFile], show: GitShow | None, base_rev: str | None,
+                       head_rev: str | None) -> Finding | None:
+    """A finding naming each package the change adds, and the lockfiles it changed."""
+    from openshard.verification.pr_dependencies import MAX_PACKAGES, new_dependencies
+
+    if show is None or base_rev is None or head_rev is None:
+        return None
+    packages = new_dependencies(files, show, base_rev, head_rev)
+    if not packages:
+        return None
+    lockfiles = [f.path for f in files if is_lockfile(f.path)]
+    names = ", ".join(p["name"] for p in packages[:MAX_PACKAGES])
+    return Finding(
+        kind=KIND_NEW_DEPENDENCIES,
+        detail=f"the change adds {len(packages)} package{'' if len(packages) == 1 else 's'}: {names}",
+        paths=tuple(dict.fromkeys(p["manifest"] for p in packages)),
+        count=len(packages),
+        extra={"packages": packages[:MAX_PACKAGES], "lockfiles": lockfiles[:MAX_PATHS]},
+    )
+
+
 def findings_for(files: list[ChangedFile], show: GitShow | None = None, base_rev: str | None = None,
                  head_rev: str | None = None, subjects: Iterable[str] = ()) -> list[Finding]:
     """Every finding for one change, in a fixed order."""
     found = [large_change(files), junk_files(files), grader_touched(files, show, base_rev, head_rev),
-             removed_code(files, show, base_rev, head_rev, subjects)]
+             removed_code(files, show, base_rev, head_rev, subjects),
+             added_dependencies(files, show, base_rev, head_rev)]
     return [f for f in found if f is not None]
 
 
@@ -378,10 +404,12 @@ __all__ = [
     "KIND_GRADER_TOUCHED",
     "KIND_JUNK_FILES",
     "KIND_LARGE_CHANGE",
+    "KIND_NEW_DEPENDENCIES",
     "KIND_REMOVED_PUBLIC_CODE",
     "LARGE_CHANGE_LINES",
     "LOCKFILE_NAMES",
     "ChangedFile",
+    "added_dependencies",
     "Finding",
     "changed_files",
     "findings_for",
