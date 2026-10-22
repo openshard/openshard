@@ -188,9 +188,13 @@ def discover(
 
 
 def _capture_buffer_open(root: Path, entry: dict) -> bool:
-    """True while the capture staging buffer of *entry*'s hook session still exists."""
+    """True while the capture staging buffer of *entry*'s hook session still holds *entry*.
+
+    A buffer that names another Receipt is the session's next turn: the turn
+    *entry* records already closed (a hosted runtime's Stop), so it is final.
+    """
     try:
-        from openshard.adapters.claude_hooks import buffer_path
+        from openshard.adapters.claude_hooks import _read_buffer, buffer_path
 
         capture = entry.get("capture")
         if not isinstance(capture, dict) or capture.get("session_end_observed") is True:
@@ -198,7 +202,11 @@ def _capture_buffer_open(root: Path, entry: dict) -> bool:
         sid, agent = capture.get("session_id"), capture.get("agent")
         if not isinstance(sid, str) or not isinstance(agent, str):
             return False
-        return buffer_path(root, sid, agent).is_file()
+        path = buffer_path(root, sid, agent)
+        if not path.is_file():
+            return False
+        held = ((_read_buffer(path) or {}).get("record") or {}).get("receipt_id")
+        return not (isinstance(held, str) and held != stored_receipt_id(entry))
     except Exception:
         return False
 

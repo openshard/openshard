@@ -585,6 +585,21 @@ class TestFlush:
         again = client.flush(repo, env=env, now=later + timedelta(hours=3))
         assert again.sent == 0 and again.stale == 0
 
+    def test_a_closed_cloud_turn_syncs_while_the_next_turn_is_open(self, repo, env, link, recording, monkeypatch):
+        # Seen live: a hosted session's turn closed at its Stop, the next turn
+        # opened at once, and the closed turn's Receipt waited behind it until
+        # the merge gate had given up on finding one.
+        monkeypatch.setenv("OPENSHARD_CONNECTED_SURFACE", "claude-code-web")
+        _hook(repo, _sid(9), "SessionStart", source="startup")
+        _hook(repo, _sid(9), "UserPromptSubmit", prompt="commit the fix")
+        _hook(repo, _sid(9), "Stop")
+        (closed,) = _entries(repo)
+        _hook(repo, _sid(9), "UserPromptSubmit", prompt="now watch CI")
+        assert list((repo / ".openshard").rglob(f"{_sid(9)}.json"))  # the next turn's buffer is open
+        report = client.flush(repo, env=env)
+        assert report.created == 1
+        assert recording.envelopes[-1]["receipt"]["receipt_id"] == closed["receipt_id"]
+
     def test_quiet_record_with_newer_buffered_activity_waits(self, repo, env, link, recording):
         _antigravity_session(repo, _sid(8))
         buffers = list((repo / ".openshard").rglob(f"antigravity.{_sid(8)}.json"))
