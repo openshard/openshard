@@ -190,8 +190,11 @@ class HttpsPlatformTransport:
     name = "https"
 
     def __init__(self, link: PlatformLink, *, user_agent: str, timeout: float = TOTAL_TIMEOUT_SECONDS) -> None:
+        from openshard.sync.config import SOURCE_REPLICAS
+
         self.url = link.ingest_url()
         self._api_key = link.api_key
+        self._replicas = link.source == SOURCE_REPLICAS
         self.user_agent = user_agent
         self.timeout = timeout
 
@@ -219,6 +222,10 @@ class HttpsPlatformTransport:
         import urllib.error
         import urllib.request
 
+        bearer = replicas_identity_token() if self._replicas else self._api_key
+        if not bearer:
+            return SendResult(KIND_UNAVAILABLE, None)  # no token could be minted: try again later
+
         body = json.dumps(envelope, separators=(",", ":"), ensure_ascii=True, default=str).encode("utf-8")
         request = urllib.request.Request(
             url,
@@ -227,7 +234,7 @@ class HttpsPlatformTransport:
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "Authorization": f"Bearer {self._api_key}",
+                "Authorization": f"Bearer {bearer}",
                 "User-Agent": self.user_agent,
             },
         )
@@ -242,6 +249,34 @@ class HttpsPlatformTransport:
             return classify(int(exc.code), raw)
         except Exception:
             return SendResult(KIND_UNAVAILABLE, None)
+
+
+def replicas_identity_token(env: dict | os._Environ | None = None, *, timeout: float = 10.0) -> str | None:
+    """A fresh Replicas workspace identity token for the Openshard audience, or None. Never raises.
+
+    Minted per request by the workspace's own ``replicas`` CLI and never
+    stored, logged or written anywhere.
+    """
+    import shutil
+    import subprocess
+
+    from openshard.sync.config import REPLICAS_AUDIENCE, REPLICAS_AUDIENCE_ENV
+
+    env = os.environ if env is None else env
+    exe = shutil.which("replicas", path=env.get("PATH"))
+    if exe is None:
+        return None
+    audience = str(env.get(REPLICAS_AUDIENCE_ENV) or REPLICAS_AUDIENCE).strip()
+    try:
+        out = subprocess.run([exe, "identity", "token", "--audience", audience], capture_output=True, text=True,
+                             timeout=timeout, check=False, stdin=subprocess.DEVNULL, env=dict(env))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    token = out.stdout.strip()
+    # A JWT: three base64url parts. Anything else (an error message) is never sent as a credential.
+    if out.returncode != 0 or token.count(".") != 2 or any(c.isspace() for c in token) or len(token) > 8192:
+        return None
+    return token
 
 
 # --- failure backoff (user-global: one Platform link, one wait) --------------

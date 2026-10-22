@@ -10,7 +10,17 @@ stored. Environment variables override it for CI and scripted use:
 * ``OPENSHARD_PLATFORM_API_KEY``   ``osk_...``
 
 All three must be present in the environment for the override to apply; a
-partial set is ignored rather than mixed with the file. ``OPENSHARD_PLATFORM_SYNC=off``
+partial set is ignored rather than mixed with the file.
+
+In a Replicas cloud workspace, ``OPENSHARD_PLATFORM_AUTH=replicas`` links
+with no stored secret at all: each request carries a fresh, short-lived
+workspace identity token from ``replicas identity token`` (OIDC, issuer
+https://api.replicas.dev), sent to ``/v1/cloud/replicas/...`` on
+``OPENSHARD_PLATFORM_ENDPOINT`` (default ``https://api.openshard.dev``). The
+Platform decides which Openshard organisation trusts that Replicas
+organisation; such a link can only send Receipts and evidence, so features
+that read the organisation (capabilities, policy) stay off. An explicit key
+(environment or file) always wins. ``OPENSHARD_PLATFORM_SYNC=off``
 and ``platform: {sync: false}`` in a repository's ``.openshard/config.yml``
 turn sync off without forgetting the link.
 
@@ -38,6 +48,10 @@ ENDPOINT_ENV = "OPENSHARD_PLATFORM_ENDPOINT"
 ORG_ENV = "OPENSHARD_PLATFORM_ORG_ID"
 API_KEY_ENV = "OPENSHARD_PLATFORM_API_KEY"
 DISABLE_ENV = "OPENSHARD_PLATFORM_SYNC"  # "off"/"0"/"false" disables; nothing enables
+AUTH_ENV = "OPENSHARD_PLATFORM_AUTH"  # "replicas": the Replicas workspace identity token, no key
+REPLICAS_AUDIENCE_ENV = "OPENSHARD_REPLICAS_AUDIENCE"
+REPLICAS_AUDIENCE = "openshard-capture"
+DEFAULT_ENDPOINT = "https://api.openshard.dev"
 
 API_KEY_PREFIX = "osk_"
 _API_KEY_RE = re.compile(r"^osk_[A-Za-z0-9_-]{8,200}$")
@@ -46,6 +60,7 @@ _FALSEY = frozenset({"0", "off", "false", "no", "disabled"})
 
 SOURCE_ENV = "env"
 SOURCE_FILE = "file"
+SOURCE_REPLICAS = "replicas_workspace"
 
 
 @dataclass(frozen=True)
@@ -62,6 +77,8 @@ class PlatformLink:
         return redact_api_key(self.api_key)
 
     def ingest_url(self) -> str:
+        if self.source == SOURCE_REPLICAS:
+            return f"{self.endpoint}/v1/cloud/replicas/receipts"
         return f"{self.endpoint}/v1/orgs/{self.organisation_id}/receipts"
 
     def capabilities_url(self) -> str:
@@ -218,9 +235,20 @@ def link_from_env(env: dict | os._Environ | None = None) -> PlatformLink | None:
     )
 
 
+def link_from_replicas(env: dict | os._Environ | None = None) -> PlatformLink | None:
+    """A key-less link for this Replicas workspace when ``OPENSHARD_PLATFORM_AUTH=replicas``, else None."""
+    env = os.environ if env is None else env
+    if str(env.get(AUTH_ENV) or "").strip().lower() != "replicas" or not env.get("REPLICAS_WORKSPACE_ID"):
+        return None
+    endpoint = normalise_endpoint(env.get(ENDPOINT_ENV) or DEFAULT_ENDPOINT)
+    if endpoint is None:
+        return None
+    return PlatformLink(endpoint=endpoint, organisation_id="", api_key="", linked_at=None, source=SOURCE_REPLICAS)
+
+
 def resolve_link(env: dict | os._Environ | None = None) -> PlatformLink | None:
-    """Environment first (all three variables), then the stored file. Never raises."""
-    return link_from_env(env) or load_link(env)
+    """Environment first (all three variables), then the stored file, then a Replicas workspace. Never raises."""
+    return link_from_env(env) or load_link(env) or link_from_replicas(env)
 
 
 def sync_disabled(env: dict | os._Environ | None = None, repo_config: dict | None = None) -> str | None:
