@@ -392,7 +392,7 @@ class TestFirstRunAndSmallBugs:
         assert "Agent mode:    no" in out and "NO_COLOR" not in out
 
     def test_setup_renders_antigravity_once(self):
-        from openshard.cli.main import _render_setup_result
+        from openshard.cli.setup_output import render_setup_result as _render_setup_result
 
         class _R:
             status = "skipped"

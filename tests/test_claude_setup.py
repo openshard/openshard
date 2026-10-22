@@ -300,7 +300,12 @@ class TestSetupCli(_RepoCase):
              patch(f"{_MCP_MODULE}.subprocess.run", side_effect=_subprocess_router()):
             result = runner.invoke(cli, ["setup", "--repo-path", str(self.root), "--yes"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenShard is ready. Use Claude Code normally.", result.output)
+        # No Platform link here: capture works, but "ready" waits for a delivered Receipt.
+        self.assertIn("Openshard is capturing on this machine. Use Claude Code normally.", result.output)
+        self.assertIn("Receipts stay on this machine", result.output)
+        self.assertIn("openshard login", result.output)
+        self.assertNotIn("is ready", result.output)
+        self.assertNotIn("OpenShard", result.output)
         self.assertIn("openshard last", result.output)
         self.assertIn("to see the captured Receipt.", result.output)
         self.assertNotIn("Shard receipt", result.output)
