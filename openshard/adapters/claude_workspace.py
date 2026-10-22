@@ -30,7 +30,9 @@ replayed ``SessionStart`` keeps the launch environment (provider, surface, cloud
 session) its own command hook declared (``stamp_declared``).
 
 Workspace routing is used only where hosted turns are sealed at ``Stop``
-(``OPENSHARD_CONNECTED_SURFACE=claude-code-web``): a buffer then never spans a
+(``OPENSHARD_CONNECTED_SURFACE=claude-code-web``, or ``replicas`` for a
+Replicas workspace, which also starts Claude Code in the parent of its
+checkouts, ``~/workspaces``): a buffer then never spans a
 turn it did not observe. Nothing here invents an event, a repository, an agent
 or usage; prompts stay in memory and are never written by this module.
 
@@ -66,7 +68,7 @@ from openshard.adapters.claude_cross_checkout import (
 )
 
 WORKSPACE_MARKER = Path(".openshard") / "workspace.json"
-WORKSPACE_SURFACES = frozenset({"claude-code-web"})
+WORKSPACE_SURFACES = frozenset({"claude-code-web", "replicas"})
 USAGE_ELSEWHERE_REASON = "workspace_usage_attributed_to_other_repository"
 _MAX_SESSIONS = 256
 _MAX_CHECKOUTS = 32
