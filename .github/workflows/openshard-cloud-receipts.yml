@@ -299,6 +299,13 @@ jobs:
 
             git checkout --force "$sha" >/dev/null 2>&1
 
+            # Fixed PR findings for this commit's own change (parent..sha): observations
+            # recorded on the Receipt, never part of its verdict. Empty when not checked.
+            change_findings=""
+            if [[ -n "$parent" ]]; then
+              change_findings=$(BASE_SHA="$parent" HEAD_SHA="$sha" python -c 'import json, os; from pathlib import Path; from openshard.verification.pr_findings import pr_findings; b, h = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]; f = pr_findings(Path("."), b, h, registry_lookup=True); print("" if f is None else json.dumps({"base_sha": b, "head_sha": h, "findings": [x.to_dict() for x in f][:10]}))' 2>/dev/null || true)
+            fi
+
             verify_started=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             start_epoch=$(date +%s)
 
@@ -339,7 +346,7 @@ jobs:
             files_truncated=false
             [[ "$file_count" -gt 50 ]] && files_truncated=true
 
-            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --argjson attach_only "$attach_only"               --arg claude_session "$claude_session"               '{
+            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --argjson attach_only "$attach_only"               --arg claude_session "$claude_session"               --argjson change_findings "${change_findings:-null}"               '{
                 head_sha: $head_sha,
                 before_sha: (if $before_sha == "" then null else $before_sha end),
                 created_at: $created_at,
@@ -370,7 +377,7 @@ jobs:
                 files_truncated: $files_truncated,
                 diff_added: $diff_added,
                 diff_removed: $diff_removed
-              } + (if $attach_only then {attach_only: true} else {} end) + (if $claude_session == "" then {} else {claude_session_id: $claude_session} end)')
+              } + (if $attach_only then {attach_only: true} else {} end) + (if $claude_session == "" then {} else {claude_session_id: $claude_session} end) + (if $change_findings == null then {} else {change_findings: $change_findings} end)')
 
             # A cloud session's Receipt is sealed when its turn ends, which can
             # be shortly after the push. Wait a bounded time, once per run.
