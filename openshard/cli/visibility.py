@@ -69,6 +69,16 @@ _CAPTURE_TEXT: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
+def echo_outcome(entry: dict, summary: str | None) -> None:
+    """``openshard last``'s outcome heading and summary: a captured turn still running is not "Done"."""
+    import click
+
+    capture = entry.get("capture") if isinstance(entry.get("capture"), dict) else {}
+    click.echo("\nIn progress" if (capture or {}).get("task_status") == "in_progress" else "\nDone")
+    if summary:
+        click.echo(summary)
+
+
 def _row(label: str, value: str, width: int = _COL) -> str:
     return f"{_INDENT}{label:<{width}}{value}"
 

@@ -377,6 +377,19 @@ class TestRendering:
                                "previous_receipt_id": first.receipt_id}
         assert "turn" not in receipt_to_dict(second, extended=True)  # history --json / sync: in ``session``
 
+    def test_last_never_says_done_for_a_turn_still_running(self, repo, turn_flag, monkeypatch):
+        from click.testing import CliRunner
+
+        from openshard.cli.main import cli
+
+        _hook(repo, "UserPromptSubmit", prompt="add a")
+        _write(repo, "a.py")  # no Stop yet: the turn is still running
+        monkeypatch.chdir(repo)
+        running = CliRunner().invoke(cli, ["last"]).output
+        assert "\nIn progress\n" in running and "\nDone\n" not in running
+        _hook(repo, "Stop")
+        assert "\nDone\n" in CliRunner().invoke(cli, ["last"]).output
+
     def test_session_receipts_render_without_a_turn_row(self, repo, flag_off):
         from openshard.history.receipt_render import render_compact_shard_receipt
         from openshard.history.views import receipt_to_dict

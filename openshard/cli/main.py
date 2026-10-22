@@ -1821,9 +1821,8 @@ def _render_log_entry(
                 is_evidence=True,
             ))
     else:
-        click.echo("\nDone")
-        if summary:
-            click.echo(summary)
+        from openshard.cli.visibility import echo_outcome
+        echo_outcome(entry, summary)
 
     # Model line — only in default mode; receipt shows model in --more / --full.
     # Prefer routing_selected_model (scored routing) over routing_model (keyword
