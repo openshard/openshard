@@ -26,6 +26,10 @@ Findings so far:
   ``setup.cfg`` and the check scripts and tool keys of ``package.json``.
   Thresholds (``fail_under``, ``--cov-fail-under``, ``coverageThreshold``)
   live in those files, so they are covered too.
+* ``fix_by_deletion`` / ``removed_public_code`` -- the change removes public
+  functions or classes, endpoints or tests (``pr_deletions``). It is
+  ``fix_by_deletion`` when a commit subject or the given title reads as a bug
+  fix (``fix_basis`` says which), else ``removed_public_code``.
 """
 
 from __future__ import annotations
@@ -43,6 +47,8 @@ from typing import Any
 KIND_LARGE_CHANGE = "large_change"
 KIND_JUNK_FILES = "junk_files"
 KIND_GRADER_TOUCHED = "grader_touched"
+KIND_FIX_BY_DELETION = "fix_by_deletion"
+KIND_REMOVED_PUBLIC_CODE = "removed_public_code"
 
 LARGE_CHANGE_LINES = 400
 MAX_PATHS = 5
@@ -315,15 +321,42 @@ def grader_touched(files: Iterable[ChangedFile], show: GitShow | None = None, ba
     )
 
 
+def removed_code(files: Iterable[ChangedFile], show: GitShow | None, base_rev: str | None, head_rev: str | None,
+                 subjects: Iterable[str] = ()) -> Finding | None:
+    """A finding when the change removes public code, endpoints or tests; ``fix_by_deletion`` for a fix."""
+    from openshard.verification.pr_deletions import describe, reads_as_fix, removals
+
+    if show is None or base_rev is None or head_rev is None:
+        return None
+    removed = removals(files, show, base_rev, head_rev)
+    if removed is None:
+        return None
+    basis = reads_as_fix(subjects)
+    kind = KIND_FIX_BY_DELETION if basis else KIND_REMOVED_PUBLIC_CODE
+    lead = "a change that reads as a bug fix removes " if basis else "the change removes "
+    total = sum(removed[k] for k in ("removed_functions", "removed_endpoints", "removed_tests", "deleted_test_files"))
+    extra = {k: removed[k] for k in ("removed_functions", "removed_endpoints", "removed_tests", "deleted_test_files",
+                                     "names")}
+    extra["reads_as_fix"] = basis is not None
+    if basis:
+        extra["fix_basis"] = basis
+    return Finding(kind=kind, detail=lead + describe(removed), paths=tuple(removed["paths"]), count=total,
+                   extra=extra)
+
+
 def findings_for(files: list[ChangedFile], show: GitShow | None = None, base_rev: str | None = None,
-                 head_rev: str | None = None) -> list[Finding]:
+                 head_rev: str | None = None, subjects: Iterable[str] = ()) -> list[Finding]:
     """Every finding for one change, in a fixed order."""
-    found = [large_change(files), junk_files(files), grader_touched(files, show, base_rev, head_rev)]
+    found = [large_change(files), junk_files(files), grader_touched(files, show, base_rev, head_rev),
+             removed_code(files, show, base_rev, head_rev, subjects)]
     return [f for f in found if f is not None]
 
 
-def pr_findings(root: Path, base: str, head: str) -> list[Finding] | None:
-    """Findings for the change from *base* to *head* in the checkout at *root*; None when not checked."""
+def pr_findings(root: Path, base: str, head: str, title: str | None = None) -> list[Finding] | None:
+    """Findings for the change from *base* to *head* in the checkout at *root*; None when not checked.
+
+    *title* (a pull request title) is read with the commit subjects to tell whether the change is a fix.
+    """
     from openshard.util.git import run_git
 
     files = changed_files(root, base, head)
@@ -334,14 +367,18 @@ def pr_findings(root: Path, base: str, head: str) -> list[Finding] | None:
     def show(rev: str, path: str) -> str | None:
         return run_git(root, ["show", f"{rev}:{path}"])
 
-    return findings_for(files, show, fork.strip(), head)
+    log = run_git(root, ["log", "--format=%s", f"{fork.strip()}..{head}"]) or ""
+    subjects = ([title] if title else []) + log.splitlines()
+    return findings_for(files, show, fork.strip(), head, subjects)
 
 
 __all__ = [
     "JUNK_PATTERNS",
+    "KIND_FIX_BY_DELETION",
     "KIND_GRADER_TOUCHED",
     "KIND_JUNK_FILES",
     "KIND_LARGE_CHANGE",
+    "KIND_REMOVED_PUBLIC_CODE",
     "LARGE_CHANGE_LINES",
     "LOCKFILE_NAMES",
     "ChangedFile",
@@ -354,4 +391,5 @@ __all__ = [
     "large_change",
     "parse_changes",
     "pr_findings",
+    "removed_code",
 ]
