@@ -275,6 +275,34 @@ def test_a_turn_prices_its_usage_where_it_committed_not_where_it_first_ran_a_com
     assert platform_turn["capture"]["cost_not_recorded_reason"] == ws.USAGE_ELSEWHERE_REASON
 
 
+def test_a_turn_opened_without_a_prompt_counts_only_its_own_usage(workspace):
+    """Seen live: a sub-agent finishing after Stop opened turn 2, which re-counted turn 1's usage."""
+    from openshard.adapters.claude_hooks_install import install_claude_hooks
+
+    repo = (workspace / "core").resolve()
+    service = _Service({**os.environ})
+    try:
+        install_claude_hooks(repo_root=repo, port=service.port)
+        claude = _Claude(repo)
+        claude.send("SessionStart", source="startup", cwd=repo)
+        claude.send("UserPromptSubmit", prompt="add a", cwd=repo)
+        claude.reply(input_tokens=100, output_tokens=10)
+        _edit(claude, repo / "a.py", "A = 1\n")
+        claude.send("Stop", cwd=repo)
+        assert _wait_for(lambda: len(_receipts(repo)) == 1)
+        time.sleep(1.1)  # hook times are whole seconds: turn 2 starts after turn 1's Stop
+        claude.send("SubagentStop", cwd=repo)
+        claude.reply(input_tokens=200, output_tokens=20)
+        _edit(claude, repo / "b.py", "B = 1\n")
+        claude.send("Stop", cwd=repo)
+        assert _wait_for(lambda: len(_receipts(repo)) == 2 and _sealed(repo, 2))
+    finally:
+        service.stop()
+    first, second = _receipts(repo)
+    assert (first["prompt_tokens"], first["completion_tokens"]) == (100, 10)
+    assert (second["prompt_tokens"], second["completion_tokens"]) == (200, 20)
+
+
 def test_a_local_workspace_session_records_into_the_touched_checkout(workspace, monkeypatch):
     """Without the cloud surface the parent is an ordinary project; its edits still land where they happened."""
     monkeypatch.delenv(cconfig.SURFACE_ENV)
