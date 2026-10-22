@@ -102,3 +102,67 @@ def test_poetry_tables_are_read_and_python_itself_is_not_a_package(tmp_path):
     head = _commit(root, {"pyproject.toml": PYPROJECT + '\n[tool.poetry.dependencies]\npython = "^3.11"\nattrs = "*"\n'})
     finding = _deps(root, base, head)
     assert finding is not None and [p["name"] for p in finding.extra["packages"]] == ["attrs"]
+
+
+# --- valid TOML in the wrong shape is "not checked", never a crash or a guess --------------------------
+
+import pytest  # noqa: E402
+
+from openshard.verification import pr_dependencies as pd  # noqa: E402
+
+WRONG_SHAPES = [
+    '[project]\nname = "x"\noptional-dependencies = ["rich"]\n',  # a list, not a table of extras
+    'dependency-groups = 3\n',
+    'tool = 1\n',
+    '[project]\nname = "x"\ndependencies = "abc"\n',  # a string, not packages a, b and c
+    '[project]\ndependencies = [1, 2]\n',
+    'project = "x"\n',
+    '[tool]\npoetry = []\n',
+    '[tool.poetry]\ndependencies = "attrs"\n',
+    '[tool.poetry]\ngroup = 5\n',
+]
+
+
+@pytest.mark.parametrize("text", WRONG_SHAPES)
+def test_a_wrongly_shaped_pyproject_is_not_checked(text):
+    assert pd._pyproject(text) is None
+
+
+def test_dependency_group_includes_are_not_packages():
+    text = '[dependency-groups]\ntest = ["pytest"]\nall = [{include-group = "test"}, "hypothesis"]\n'
+    assert pd._pyproject(text) == {"pytest", "hypothesis"}
+
+
+@pytest.mark.parametrize("text", ['{"dependencies": ["react"]}', '{"devDependencies": "vitest"}', "[]"])
+def test_a_wrongly_shaped_package_json_is_not_checked(text):
+    assert pd._package_json(text) is None
+
+
+def test_a_change_to_a_wrongly_shaped_manifest_is_skipped_not_misread(tmp_path):
+    root, base = _repo(tmp_path)
+    head = _commit(root, {"pyproject.toml": '[project]\nname = "x"\ndependencies = "abc"\n'})
+    assert _deps(root, base, head) is None
+
+
+# --- the finding's text stays within the Platform's 400-character limit -------------------------------
+
+
+def test_ten_long_scoped_npm_names_are_listed_within_400_characters(tmp_path):
+    root, base = _repo(tmp_path)
+    added = {f"@acme-platform-engineering/very-long-internal-package-name-number-{i:02d}": "1.0.0" for i in range(10)}
+    pkg = {**PACKAGE, "dependencies": {"react": "^19", **added}}
+    head = _commit(root, {"web/package.json": json.dumps(pkg)})
+    finding = _deps(root, base, head)
+    assert finding is not None and finding.count == 10
+    detail = finding.to_dict()["detail"]
+    assert len(detail) <= 400
+    assert detail.startswith("the change adds 10 packages: @acme-platform-engineering/very-long-internal-package-name-number-00")
+    shown = detail.count("@acme-platform-engineering/")
+    assert 1 <= shown < 10 and detail.endswith(f" +{10 - shown} more")
+    assert len(finding.extra["packages"]) == 10  # every name is still in the structured list
+
+
+def test_names_within_never_exceeds_its_budget():
+    assert pf.names_within(["a", "b"], 100) == "a, b"
+    assert pf.names_within(["x" * 50, "y"], 20) == "+2 more"
+    assert len(pf.names_within(["x" * 50] * 30, 120)) <= 120

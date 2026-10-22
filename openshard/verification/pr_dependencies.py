@@ -47,27 +47,53 @@ def _python_name(spec: object) -> str | None:
     return normalize_python(m.group(1)) if m else None
 
 
+class _Shape(Exception):
+    """A manifest that parses but is not shaped as the standard says: not checked, never guessed."""
+
+
+def _table(value: object) -> dict:
+    """An optional TOML/JSON table: absent is empty; anything but a table is the wrong shape."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise _Shape
+    return value
+
+
+def _specs(value: object, *, allow_tables: bool = False) -> list[str]:
+    """An optional list of requirement strings (``dependency-groups`` may also hold ``{include-group}`` tables)."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise _Shape  # e.g. dependencies = "abc" is not a list of three packages
+    out = []
+    for item in value:
+        if isinstance(item, str):
+            out.append(item)
+        elif not (allow_tables and isinstance(item, dict)):
+            raise _Shape
+    return out
+
+
 def _pyproject(text: str) -> set[str] | None:
+    """Every dependency name the file declares; None when it does not parse or is the wrong shape."""
     try:
         data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
-        return None
-    specs: list[object] = []
-    raw = data.get("project")
-    project: dict[str, Any] = raw if isinstance(raw, dict) else {}
-    specs += project.get("dependencies") or []
-    for group in (project.get("optional-dependencies") or {}).values():
-        specs += group if isinstance(group, list) else []
-    for group in (data.get("dependency-groups") or {}).values():
-        specs += group if isinstance(group, list) else []
-    names = {n for s in specs if (n := _python_name(s))}
-    poetry = (data.get("tool") or {}).get("poetry") or {}
-    tables = [poetry.get("dependencies"), poetry.get("dev-dependencies")]
-    tables += [g.get("dependencies") for g in (poetry.get("group") or {}).values() if isinstance(g, dict)]
-    for table in tables:
-        if isinstance(table, dict):
+        project = _table(data.get("project"))
+        specs = _specs(project.get("dependencies"))
+        for group in _table(project.get("optional-dependencies")).values():
+            specs += _specs(group)
+        for group in _table(data.get("dependency-groups")).values():
+            specs += _specs(group, allow_tables=True)
+        names = {n for spec in specs if (n := _python_name(spec))}
+        poetry = _table(_table(data.get("tool")).get("poetry"))
+        tables = [_table(poetry.get("dependencies")), _table(poetry.get("dev-dependencies"))]
+        tables += [_table(_table(group).get("dependencies")) for group in _table(poetry.get("group")).values()]
+        for table in tables:
             names |= {normalize_python(k) for k in table if k not in _POETRY_SKIP}
-    return names
+        return names
+    except (tomllib.TOMLDecodeError, _Shape):
+        return None
 
 
 def _requirements(text: str) -> set[str]:
@@ -86,7 +112,10 @@ def _package_json(text: str) -> set[str] | None:
         return None
     if not isinstance(data, dict):
         return None
-    return {k for f in _NPM_FIELDS if isinstance(data.get(f), dict) for k in data[f]}
+    try:
+        return {k for f in _NPM_FIELDS for k in _table(data.get(f))}
+    except _Shape:
+        return None
 
 
 def manifest_kind(path: str) -> str | None:
