@@ -8,7 +8,7 @@ Use a git repository with a small, fast test suite (pytest installed in its
 2. **Set up capture**, in the repository: `openshard setup`, then `openshard doctor`.
    Codex or Cursor should be listed as configured.
    - **Codex:** open `codex` in the repository once and trust the project.
-     Codex does not capture this first session. Then quit and reopen Codex.
+     Openshard does not record this first Codex session. Then quit and reopen Codex.
      If Codex asks you to review hooks (`/hooks`), approve the `openshard hooks codex` entries.
    - **Cursor:** open the repository in the Cursor app and trust the workspace. Use the Agent chat.
 3. **Run one small task** and ask the agent to commit it, for example:
