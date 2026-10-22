@@ -69,6 +69,20 @@ jobs:
             # trailers or in the associated PR body. Inspect every pushed commit
             # and fail closed later when neither source names an agent.
             shas=$(jq -c '[.commits[]?.id]' "$GITHUB_EVENT_PATH")
+            # Actions push payloads can omit the commits array. Recover the
+            # pushed range from the full checkout instead of silently skipping.
+            if [[ "$(jq 'length' <<<"$shas")" -eq 0 ]]; then
+              before=$(jq -r '.before // empty' "$GITHUB_EVENT_PATH")
+              if [[ "$before" == "0000000000000000000000000000000000000000" ]]; then
+                shas=$(jq -cn --arg sha "$GITHUB_SHA" '[$sha]')
+              elif [[ "$before" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$before^{commit}"; then
+                pushed=$(git rev-list --reverse "$before..$GITHUB_SHA") || exit 1
+                shas=$(printf '%s\n' "$pushed" | jq -Rsc 'split("\n") | map(select(length > 0))')
+              else
+                echo "Cannot recover pushed commits: missing or unavailable before SHA."
+                exit 1
+              fi
+            fi
           fi
 
           pr_body_for_sha() {
