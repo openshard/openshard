@@ -22,9 +22,9 @@ Rules
   stays local to wherever the agent runs, and the setup step says so.
 * Fail open: every hook command exits 0 and never blocks the agent. When
   OpenShard is not installed the event is skipped with a note on stderr (a
-  gap, not a failure). Only in a recognised cloud sandbox
-  (``CLOUD_SANDBOX_MARKERS``: Claude Code on the web, Replicas, E2B, GitHub
-  Codespaces, Gitpod) or with ``OPENSHARD_REPO_BOOTSTRAP=1`` does the Claude
+  gap, not a failure). Only in a recognised agent sandbox
+  (``CLOUD_SANDBOX_MARKERS``: Claude Code on the web, Replicas, E2B) or with
+  ``OPENSHARD_REPO_BOOTSTRAP=1`` does the Claude
   SessionStart hook start a background install; a teammate's machine never
   gets one silently. ``OPENSHARD_REPO_BOOTSTRAP=0`` turns it off anywhere.
 
@@ -118,15 +118,14 @@ _LINK = (
 SETUP_LINES: tuple[str, ...] = (SETUP_MARKER, _INSTALL, _RESOLVE, _LINK)
 SETUP_ONE_LINE = "(" + "; ".join(SETUP_LINES) + ") || true"
 
-# Environment variables that only a cloud sandbox sets: (name, required value or None for "any
-# non-empty value", sandbox). Each is the provider's own documented or observed marker; an
-# unknown sandbox can opt in with OPENSHARD_REPO_BOOTSTRAP=1.
+# Environment variables that only an agent sandbox sets: (name, required value or None for "any
+# non-empty value", sandbox). Each is the provider's own documented or observed marker. Human
+# cloud dev environments (Codespaces, Gitpod) are deliberately absent: a person works there, so
+# nothing installs silently; they, and any unknown sandbox, can opt in with OPENSHARD_REPO_BOOTSTRAP=1.
 CLOUD_SANDBOX_MARKERS: tuple[tuple[str, str | None, str], ...] = (
     ("CLAUDE_CODE_REMOTE", "true", "Claude Code on the web"),
     ("REPLICAS_WORKSPACE_ID", None, "Replicas"),
     ("E2B_SANDBOX", "true", "E2B"),
-    ("CODESPACES", "true", "GitHub Codespaces"),
-    ("GITPOD_WORKSPACE_ID", None, "Gitpod"),
 )
 
 
@@ -603,8 +602,8 @@ _PLANNERS: dict[str, Callable[[Path], list[FileChange]]] = {
 _NOTES = {
     "claude": (
         "Claude Code: hooks run `openshard hooks claude` when OpenShard is installed and stand aside when this "
-        "clone has local hooks (.claude/settings.local.json). In a recognised cloud sandbox (Claude Code on the "
-        "web, Replicas, E2B, Codespaces, Gitpod) a missing install starts a background install; events before it "
+        "clone has local hooks (.claude/settings.local.json). In a recognised agent sandbox (Claude Code on the "
+        "web, Replicas, E2B) a missing install starts a background install; events before it "
         "finishes are not captured. Multi-repository cloud sessions load "
         "hooks from the parent directory only (docs/claude-cloud-prelaunch.md), so these do not fire there."
     ),

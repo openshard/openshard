@@ -1,4 +1,4 @@
-"""The committed SessionStart hook installs Openshard in any recognised cloud sandbox, never on a teammate's machine."""
+"""The committed SessionStart hook installs Openshard in a recognised agent sandbox, never where a person works."""
 
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ CLOUDS = [
     ({"CLAUDE_CODE_REMOTE": "true"}, "Claude Code on the web"),
     ({"REPLICAS_WORKSPACE_ID": "5d0cde5e-3464-48f3-b2fd-58d0019eac25"}, "Replicas"),
     ({"E2B_SANDBOX": "true"}, "E2B"),
-    ({"CODESPACES": "true"}, "GitHub Codespaces"),
-    ({"GITPOD_WORKSPACE_ID": "openshard-abc123"}, "Gitpod"),
 ]
-NOT_CLOUD = [{}, {"CLAUDE_CODE_REMOTE": "false"}, {"CLAUDE_CODE_REMOTE": "TRUE"}, {"E2B_SANDBOX": "0"}, {"CODESPACES": ""},
-             {"REPLICAS_WORKSPACE_ID": ""}]
+NOT_CLOUD = [{}, {"CLAUDE_CODE_REMOTE": "false"}, {"CLAUDE_CODE_REMOTE": "TRUE"}, {"E2B_SANDBOX": "0"},
+             {"REPLICAS_WORKSPACE_ID": ""},
+             # Human cloud dev environments: a person works there, so nothing installs silently.
+             {"CODESPACES": "true"}, {"GITPOD_WORKSPACE_ID": "openshard-abc123"}]
 
 
 @pytest.mark.parametrize(("env", "label"), CLOUDS)
