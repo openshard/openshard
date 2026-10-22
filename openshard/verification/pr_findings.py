@@ -32,7 +32,9 @@ Findings so far:
   fix (``fix_basis`` says which), else ``removed_public_code``.
 * ``new_dependencies`` -- packages the change adds to ``pyproject.toml``,
   ``requirements*.txt`` or ``package.json`` (``pr_dependencies``), plus the
-  lockfiles it changed.
+  lockfiles it changed. With ``registry_lookup`` each package also carries
+  its first and latest publish dates and ``recent`` (``dependency_age``);
+  ``recent_dependencies`` counts those published within ``RECENT_DAYS``.
 """
 
 from __future__ import annotations
@@ -366,7 +368,7 @@ def names_within(names: list[str], budget: int) -> str:
 
 
 def added_dependencies(files: list[ChangedFile], show: GitShow | None, base_rev: str | None,
-                       head_rev: str | None) -> Finding | None:
+                       head_rev: str | None, registry_lookup: bool = False) -> Finding | None:
     """A finding naming each package the change adds, and the lockfiles it changed."""
     from openshard.verification.pr_dependencies import MAX_PACKAGES, new_dependencies
 
@@ -377,28 +379,39 @@ def added_dependencies(files: list[ChangedFile], show: GitShow | None, base_rev:
         return None
     lockfiles = [f.path for f in files if is_lockfile(f.path)]
     lead = f"the change adds {len(packages)} package{'' if len(packages) == 1 else 's'}: "
+    extra: dict[str, Any] = {"packages": packages[:MAX_PACKAGES], "lockfiles": lockfiles[:MAX_PATHS]}
+    if registry_lookup:
+        from openshard.verification.dependency_age import RECENT_DAYS, with_ages
+
+        aged = with_ages(packages[:MAX_PACKAGES])
+        extra.update(packages=aged, recent_days=RECENT_DAYS,
+                     recent_dependencies=sum(1 for p in aged if p["recent"] is True),
+                     unknown_age=sum(1 for p in aged if p["recent"] is None))
     return Finding(
         kind=KIND_NEW_DEPENDENCIES,
         detail=lead + names_within([p["name"] for p in packages], MAX_DETAIL - len(lead)),
         paths=tuple(dict.fromkeys(p["manifest"] for p in packages)),
         count=len(packages),
-        extra={"packages": packages[:MAX_PACKAGES], "lockfiles": lockfiles[:MAX_PATHS]},
+        extra=extra,
     )
 
 
 def findings_for(files: list[ChangedFile], show: GitShow | None = None, base_rev: str | None = None,
-                 head_rev: str | None = None, subjects: Iterable[str] = ()) -> list[Finding]:
+                 head_rev: str | None = None, subjects: Iterable[str] = (),
+                 registry_lookup: bool = False) -> list[Finding]:
     """Every finding for one change, in a fixed order."""
     found = [large_change(files), junk_files(files), grader_touched(files, show, base_rev, head_rev),
              removed_code(files, show, base_rev, head_rev, subjects),
-             added_dependencies(files, show, base_rev, head_rev)]
+             added_dependencies(files, show, base_rev, head_rev, registry_lookup)]
     return [f for f in found if f is not None]
 
 
-def pr_findings(root: Path, base: str, head: str, title: str | None = None) -> list[Finding] | None:
+def pr_findings(root: Path, base: str, head: str, title: str | None = None,
+                registry_lookup: bool = False) -> list[Finding] | None:
     """Findings for the change from *base* to *head* in the checkout at *root*; None when not checked.
 
     *title* (a pull request title) is read with the commit subjects to tell whether the change is a fix.
+    *registry_lookup* asks public package registries when each new dependency was published (network).
     """
     from openshard.util.git import run_git
 
@@ -412,7 +425,7 @@ def pr_findings(root: Path, base: str, head: str, title: str | None = None) -> l
 
     log = run_git(root, ["log", "--format=%s", f"{fork.strip()}..{head}"]) or ""
     subjects = ([title] if title else []) + log.splitlines()
-    return findings_for(files, show, fork.strip(), head, subjects)
+    return findings_for(files, show, fork.strip(), head, subjects, registry_lookup)
 
 
 __all__ = [
