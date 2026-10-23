@@ -148,13 +148,10 @@ from openshard.verification.executor import confirm_or_abort
 from openshard.verification.executor import (  # noqa: F401
     run_verification_plan as _run_verification_plan,
 )
-from openshard.verification.plan import (
-    CommandSafety,
-    build_verification_plan,
-    safe_check_label,
-)
+from openshard.verification.plan import CommandSafety, build_verification_plan, safe_check_label
 from openshard.verification.setup_failure import (
     detect_setup_failure,
+    gate_refusal,
     setup_failure_metadata,
     setup_failure_reason,
 )
@@ -2056,7 +2053,7 @@ class RunPipeline:
 
         if write and verify:
             click.echo("")
-            code = _run_verification_plan(_verification_plan, workspace, gate=gate, detail=detail)
+            code = _run_verification_plan(_verification_plan, workspace, gate=gate, detail=detail, outcome_sink=(_first := []))
             # Escalation loop: try each model in chain until verification passes.
             # Direct mode uses ESCALATION_CHAIN (sonnet → opus).
             # OpenCode mode uses a single fixer-model retry (no chain).
@@ -2065,12 +2062,12 @@ class RunPipeline:
             # One record per escalation actually made. Usage is summed over all of
             # them (it used to be overwritten, so only the last attempt survived).
             _retry_attempts: list[dict] = []
-            # Set when the verifier could not run at all (missing module, command not
-            # found). That is an environment problem, not a verdict on the model's work.
-            _setup_failure: str | None = None
+            # Set when the verifier could not run at all (missing module, command not found, or the
+            # command gate refused it). That is not a verdict on the model's work.
+            _setup_failure: str | None = gate_refusal(_first)
             _can_escalate = (
                 _verification_plan.has_commands
-                and _verification_plan.commands[0].safety != CommandSafety.blocked
+                and _verification_plan.commands[0].safety != CommandSafety.blocked and _setup_failure is None
             )
             if _can_escalate:
                 for _esc_model in _escalation:

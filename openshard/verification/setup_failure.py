@@ -21,6 +21,11 @@ from dataclasses import dataclass
 
 KIND_MISSING_MODULE = "missing_module"
 KIND_COMMAND_NOT_FOUND = "command_not_found"
+# The check never started because OpenShard's own command gate refused it
+# (blocked by policy, or it needed an approval nobody gave): not a verdict either.
+KIND_BLOCKED_BY_POLICY = "blocked_by_policy"
+KIND_APPROVAL_MISSING = "approval_missing"
+_NOT_RUN_KINDS = frozenset({KIND_BLOCKED_BY_POLICY, KIND_APPROVAL_MISSING})
 
 # Shell convention: 127 = command not found, 126 = found but not executable.
 _TOOLING_EXIT_CODES = frozenset({126, 127})
@@ -63,8 +68,24 @@ def detect_setup_failure(exit_code: int | None, output: str | None) -> str | Non
     return None
 
 
+def gate_refusal(outcomes: list | None) -> str | None:
+    """``blocked_by_policy`` / ``approval_missing`` when the command gate refused the check, else ``None``.
+
+    *outcomes* is the ``outcome_sink`` of ``run_verification_plan``: its last
+    ``CommandOutcome`` says whether the check was permitted at all.
+    """
+    outcome = outcomes[-1] if outcomes else None
+    if outcome is None or outcome.permitted:
+        return None
+    return KIND_BLOCKED_BY_POLICY if outcome.decision.decision == "deny" else KIND_APPROVAL_MISSING
+
+
 def setup_failure_reason(kind: str) -> str:
     """A short, path-free reason for the verification block."""
+    if kind == KIND_BLOCKED_BY_POLICY:
+        return "verification did not run: OpenShard's command gate blocked the check command"
+    if kind == KIND_APPROVAL_MISSING:
+        return "verification did not run: the check command needed an approval that was not given"
     if kind == KIND_MISSING_MODULE:
         return "verification could not run: a required Python module is missing in this environment"
     return "verification could not run: the check command was not found in this environment"
@@ -94,7 +115,7 @@ def setup_failure_metadata(
         status="unknown",
         exit_code=code,
         reason=setup_failure_reason(kind),
-        incomplete_reasons=["verifier_setup_failed"],
+        incomplete_reasons=["check_not_run_by_policy" if kind in _NOT_RUN_KINDS else "verifier_setup_failed"],
     )
     facts = ObservedFacts(
         verification_status="failed",

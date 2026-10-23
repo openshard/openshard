@@ -125,9 +125,11 @@ def _run_verify(verify_results, generate_results=None):
 
     def fake_verify(*args, **kwargs):
         try:
-            code, out = next(calls)
+            code, out, *outcome = next(calls)
         except StopIteration:
-            code, out = 0, ""
+            code, out, outcome = 0, "", []
+        if outcome and kwargs.get("outcome_sink") is not None:
+            kwargs["outcome_sink"].extend(outcome)  # what the command gate decided
         return (code, out) if kwargs.get("capture", False) else code
 
     with tempfile.TemporaryDirectory() as td:
@@ -189,6 +191,41 @@ class TestPipelineStopsOnSetupFailure:
             generate_results=[_gen(0.001), _gen(0.002)],
         )
         assert native.generate.call_count == 2 and "not escalating" not in result.output
+
+
+def _refused(decision: str):
+    """A ``CommandOutcome`` the command gate did not permit: ``deny``, or ``ask`` with no approval."""
+    from openshard.policy.command_execution import APPROVAL_DENIED, CommandOutcome
+
+    d = MagicMock(decision=decision, reason="compound command")
+    return CommandOutcome(argv=["python", "-c", "a; b"], decision=d,
+                          approval_status=APPROVAL_DENIED if decision == "ask" else "not_required")
+
+
+class TestPipelineDoesNotRetryAGateRefusedCheck:
+    @pytest.mark.parametrize(("decision", "reason"), [
+        ("deny", "command gate blocked the check command"),
+        ("ask", "needed an approval that was not given"),
+    ])
+    def test_a_check_that_never_ran_is_not_a_failure_and_costs_no_retry(self, decision, reason):
+        result, native, log_run = _run_verify([(1, "", _refused(decision))], generate_results=[_gen(0.001)])
+        assert native.generate.call_count == 1  # no paid escalation for a check that never ran
+        kwargs = _log_kwargs(log_run)
+        assert kwargs["retry_triggered"] is False and kwargs["retry_usage"] is None
+        assert kwargs["verification_passed"] is None  # unknown, never "failed"
+        block = kwargs["extra_metadata"]["verification"]
+        assert block["status"] == "unknown" and reason in block["reason"]
+        assert block["incomplete_reasons"] == ["check_not_run_by_policy"]
+
+    def test_a_permitted_check_that_fails_still_escalates(self):
+        from openshard.policy.command_execution import CommandOutcome
+
+        allowed = CommandOutcome(argv=["pytest"], decision=MagicMock(decision="allow"), executed=True, exit_code=1)
+        result, native, _ = _run_verify(
+            [(1, "", allowed), (1, "FAILED tests/test_calc.py::test_subtract - assert 1 == 2"), (0, "")],
+            generate_results=[_gen(0.001), _gen(0.002)],
+        )
+        assert native.generate.call_count == 2 and result.exit_code == 0
 
 
 class TestPipelineAccumulatesEscalations:
