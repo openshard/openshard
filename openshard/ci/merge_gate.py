@@ -22,6 +22,10 @@ Decision (docs/merge-gate.md):
 * Any error (unreachable, credentials refused, fork, timeout, malformed
   answer, not a commit) -> fail with its reason. Never a silent pass.
 
+PR findings (``verification/pr_findings.py``: size, junk files, edits to
+the change's own grader, removed code, new dependencies) are shown under
+"Change checks" for information. They do not change pass or fail.
+
 Wording rules: unknown is shown as unknown, never zero, and a Receipt is
 called tamper-evident only when the Platform says it witnessed it.
 """
@@ -252,6 +256,26 @@ def render_receipt(receipt: dict) -> list[str]:
     return out
 
 
+_NOT_GIVEN: Any = object()
+_MAX_FINDINGS = 10
+
+
+def render_findings(findings: list[dict] | None) -> list[str]:
+    """Markdown for the PR findings: what was seen, for information only."""
+    head = ["#### Change checks", "", "Information only: these do not change this result."]
+    if findings is None:
+        return head + ["", "Not checked: the base commit was unknown or could not be read."]
+    if not findings:
+        return head + ["", "Nothing found."]
+    out = head + ["", "| Check | What was seen | Where |", "| --- | --- | --- |"]
+    for f in findings[:_MAX_FINDINGS]:
+        paths, names = f.get("paths"), f.get("names")
+        listed: list = paths if isinstance(paths, list) and paths else names if isinstance(names, list) else []
+        where = ", ".join(str(p) for p in listed[:5]) or "-"
+        out.append(f"| {_cell(_words(f.get('kind')))} | {_cell(f.get('detail'))} | {_cell(where)} |")
+    return out
+
+
 def decide(
     sha: str,
     platform: dict[str, Any] | PlatformError,
@@ -259,11 +283,13 @@ def decide(
     local_verdict: str | None = None,
     agent_marks: list[str] | None = None,
     waited_minutes: float | None = None,
+    change_findings: list[dict] | None = _NOT_GIVEN,
 ) -> GateResult:
     """The gate outcome for *sha*. Never raises.
 
     *agent_marks* is None when the commits could not be read; *waited_minutes*
     is how long the caller waited for an agent change's Receipt.
+    *change_findings* are the PR findings (None: not checked); shown, never decisive.
     """
     receipts: list[dict] = []
     answer = platform.last if isinstance(platform, PlatformError) else platform
@@ -320,6 +346,8 @@ def decide(
             lines += [""] + render_receipt(receipt)
         if len(receipts) > _MAX_RECEIPTS:
             lines += ["", f"{len(receipts) - _MAX_RECEIPTS} more Receipt(s) not shown."]
+    if change_findings is not _NOT_GIVEN:
+        lines += [""] + render_findings(change_findings)
     lines += ["", "<sub>Unknown means the Platform does not record it, never zero.</sub>"]
     return GateResult(
         status=status,
@@ -331,4 +359,4 @@ def decide(
     )
 
 
-__all__ = ["HUMAN_CHANGE", "STATUS_FAIL", "STATUS_PASS", "GateResult", "decide", "render_receipt"]
+__all__ = ["HUMAN_CHANGE", "STATUS_FAIL", "STATUS_PASS", "GateResult", "decide", "render_findings", "render_receipt"]

@@ -5187,6 +5187,351 @@
               "type": "null"
             }
           ]
+        },
+        "change_findings": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "base_sha": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+                  "description": "The base the change was compared with (its merge-base was used)."
+                },
+                "head_sha": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                },
+                "findings": {
+                  "maxItems": 10,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "large_change",
+                          "junk_files",
+                          "grader_touched",
+                          "fix_by_deletion",
+                          "removed_public_code",
+                          "new_dependencies"
+                        ]
+                      },
+                      "detail": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 400,
+                        "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                      },
+                      "paths": {
+                        "default": [],
+                        "maxItems": 5,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                        }
+                      },
+                      "count": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "limit": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "lines_with_lockfiles": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "binary_files": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "categories": {
+                        "anyOf": [
+                          {
+                            "maxItems": 5,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "ci_config",
+                                "check_config",
+                                "tests_edited",
+                                "tests_removed",
+                                "tests_renamed"
+                              ]
+                            }
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "removed_functions": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "removed_endpoints": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "removed_tests": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "deleted_test_files": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "names": {
+                        "anyOf": [
+                          {
+                            "maxItems": 5,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                            }
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "reads_as_fix": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "fix_basis": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 256,
+                            "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "packages": {
+                        "anyOf": [
+                          {
+                            "maxItems": 10,
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "name": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256,
+                                  "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                                },
+                                "ecosystem": {
+                                  "type": "string",
+                                  "enum": [
+                                    "pypi",
+                                    "npm"
+                                  ]
+                                },
+                                "manifest": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256,
+                                  "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                                },
+                                "first_published": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "latest_published": {
+                                  "anyOf": [
+                                    {
+                                      "type": "string",
+                                      "format": "date-time",
+                                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ]
+                                },
+                                "recent": {
+                                  "type": [
+                                    "boolean",
+                                    "null"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "name",
+                                "ecosystem",
+                                "manifest"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "lockfiles": {
+                        "anyOf": [
+                          {
+                            "maxItems": 5,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                            }
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "recent_days": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "recent_dependencies": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "unknown_age": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "detail"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "base_sha",
+                "head_sha",
+                "findings"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

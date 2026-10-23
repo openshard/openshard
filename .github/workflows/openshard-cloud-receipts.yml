@@ -69,6 +69,20 @@ jobs:
             # trailers or in the associated PR body. Inspect every pushed commit
             # and fail closed later when neither source names an agent.
             shas=$(jq -c '[.commits[]?.id]' "$GITHUB_EVENT_PATH")
+            # Actions push payloads can omit the commits array. Recover the
+            # pushed range from the full checkout instead of silently skipping.
+            if [[ "$(jq 'length' <<<"$shas")" -eq 0 ]]; then
+              before=$(jq -r '.before // empty' "$GITHUB_EVENT_PATH")
+              if [[ "$before" == "0000000000000000000000000000000000000000" ]]; then
+                shas=$(jq -cn --arg sha "$GITHUB_SHA" '[$sha]')
+              elif [[ "$before" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$before^{commit}"; then
+                pushed=$(git rev-list --reverse "$before..$GITHUB_SHA") || exit 1
+                shas=$(printf '%s\n' "$pushed" | jq -Rsc 'split("\n") | map(select(length > 0))')
+              else
+                echo "Cannot recover pushed commits: missing or unavailable before SHA."
+                exit 1
+              fi
+            fi
           fi
 
           pr_body_for_sha() {
@@ -299,6 +313,13 @@ jobs:
 
             git checkout --force "$sha" >/dev/null 2>&1
 
+            # Fixed PR findings for this commit's own change (parent..sha), no registry lookup: observations
+            # recorded on the Receipt, never part of its verdict. Empty when not checked.
+            change_findings=""
+            if [[ -n "$parent" ]]; then
+              change_findings=$(BASE_SHA="$parent" HEAD_SHA="$sha" python -c 'import json, os; from pathlib import Path; from openshard.verification.pr_findings import pr_findings; b, h = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]; f = pr_findings(Path("."), b, h); print("" if f is None else json.dumps({"base_sha": b, "head_sha": h, "findings": [x.to_dict() for x in f][:10]}))' 2>/dev/null || true)
+            fi
+
             verify_started=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             start_epoch=$(date +%s)
 
@@ -310,14 +331,27 @@ jobs:
               local kind="$2"
               shift 2
               echo "Running $name..."
-              local rc=0
-              "$@" || rc=$?
+              # The output is shown in the log as before and hashed (sha256 and size),
+              # so the Receipt can show the check really ran without storing a byte of it.
+              local rc=0 out
+              out=$(mktemp)
+              # In a || list errexit is suspended, so a failing check is recorded, never fatal.
+              { "$@" 2>&1 | tee "$out"; rc=${PIPESTATUS[0]}; } || true
+              local output_sha256 output_bytes
+              # Portable (GNU and BSD/macOS): sha256sum or shasum, and wc for the size.
+              if command -v sha256sum >/dev/null; then
+                output_sha256=$(sha256sum "$out" | cut -d' ' -f1)
+              else
+                output_sha256=$(shasum -a 256 "$out" | cut -d' ' -f1)
+              fi
+              output_bytes=$(wc -c <"$out" | tr -d ' ')
+              rm -f "$out"
               local status="passed"
               if [[ $rc -ne 0 ]]; then
                 status="failed"
                 failed=1
               fi
-              checks=$(jq -c                 --arg name "$name"                 --arg kind "$kind"                 --arg status "$status"                 --argjson rc "$rc"                 '. + [{name:$name,kind:$kind,status:$status,exit_code:$rc}]' <<<"$checks")
+              checks=$(jq -c                 --arg name "$name"                 --arg kind "$kind"                 --arg status "$status"                 --argjson rc "$rc"                 --arg output_sha256 "$output_sha256"                 --argjson output_bytes "$output_bytes"                 '. + [{name:$name,kind:$kind,status:$status,exit_code:$rc,output_sha256:$output_sha256,output_bytes:$output_bytes}]' <<<"$checks")
             }
 
             run_check "Ruff" "lint" python -m ruff check .
@@ -339,7 +373,7 @@ jobs:
             files_truncated=false
             [[ "$file_count" -gt 50 ]] && files_truncated=true
 
-            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --argjson attach_only "$attach_only"               --arg claude_session "$claude_session"               '{
+            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --argjson attach_only "$attach_only"               --arg claude_session "$claude_session"               --argjson change_findings "${change_findings:-null}"               '{
                 head_sha: $head_sha,
                 before_sha: (if $before_sha == "" then null else $before_sha end),
                 created_at: $created_at,
@@ -370,7 +404,7 @@ jobs:
                 files_truncated: $files_truncated,
                 diff_added: $diff_added,
                 diff_removed: $diff_removed
-              } + (if $attach_only then {attach_only: true} else {} end) + (if $claude_session == "" then {} else {claude_session_id: $claude_session} end)')
+              } + (if $attach_only then {attach_only: true} else {} end) + (if $claude_session == "" then {} else {claude_session_id: $claude_session} end) + (if $change_findings == null then {} else {change_findings: $change_findings} end)')
 
             # A cloud session's Receipt is sealed when its turn ends, which can
             # be shortly after the push. Wait a bounded time, once per run.

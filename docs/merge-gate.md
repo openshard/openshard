@@ -126,6 +126,24 @@ is any. History committed to the repository is never used: if git tracks
 is a symlink, or if a file's real path is tracked, the local evidence is
 ignored. That holds for a committed `failed` result too.
 
+## Change checks (information only)
+
+The summary also lists fixed, model-free findings about the pull request
+itself, read from the checkout between the base's merge-base and the head
+(`openshard/verification/pr_findings.py`). They are shown for the reviewer
+and do not change pass or fail.
+
+| Finding | What it means |
+| --- | --- |
+| `large_change` | over 400 lines added plus removed, not counting lockfiles; consider a split |
+| `junk_files` | added backups, merge leftovers, logs, bytecode or OS metadata files |
+| `grader_touched` | existing tests edited, deleted or renamed, or CI, lint, type-check, test or coverage settings changed |
+| `fix_by_deletion`, `removed_public_code` | public functions or classes, endpoints or tests removed; `fix_by_deletion` when a commit subject or the title reads as a bug fix |
+| `new_dependencies` | packages added to `pyproject.toml`, `requirements*.txt` or `package.json`, and the lockfiles changed. The gate does not look up publish dates; `openshard ci findings --registry-lookup` does, sending the package names to PyPI or npm |
+
+Without a base commit (and `fetch-depth: 0`) they read "not checked". The
+same findings are in `--json` as `change_findings`.
+
 ## Getting Receipts to the Platform in time
 
 Receipts reach the Platform through the capture service's sync (on every
