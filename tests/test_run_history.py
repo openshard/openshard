@@ -811,3 +811,46 @@ class TestVerificationContractResultHistory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLogRunUsageAndOwner(TestLogRunHistory):
+    """`openshard run` Receipts carry the owner and say where tokens and cost came from."""
+
+    def _usage(self, total=150, cost=0.0123, source="provider_reported"):
+        from openshard.history.usage import UsageStats
+
+        return UsageStats(100, 50, total, cost, cost_source=source)
+
+    def _receipt(self) -> dict:
+        from openshard.sync.envelope import build_envelope
+
+        return build_envelope(self._read_entry(), 0, core_version="x")["receipt"]
+
+    def test_provider_tokens_and_cost_reach_the_receipt_with_their_source(self):
+        self._call(usage=self._usage())
+        entry, receipt = self._read_entry(), self._receipt()
+        self.assertEqual((entry["tokens_provenance"], entry["cost_provenance"]), ("provider_reported", "provider_reported"))
+        self.assertEqual((receipt["tokens_input"], receipt["tokens_output"]), (100, 50))
+        self.assertEqual((receipt["cost_usd"], receipt["cost_provenance"]), (0.0123, "provider_reported"))
+
+    def test_a_list_rate_cost_is_labelled_an_estimate(self):
+        self._call(usage=self._usage(source="list_rate_estimate"))
+        self.assertEqual(self._read_entry()["cost_provenance"], "official_rate_estimate")
+
+    def test_no_counts_or_no_cost_stays_unlabelled(self):
+        self._call(usage=self._usage(total=0, cost=None, source=None))
+        entry = self._read_entry()
+        self.assertNotIn("tokens_provenance", entry)
+        self.assertNotIn("cost_provenance", entry)
+        self.assertIsNone(self._receipt()["tokens_input"])  # unknown, never 0
+
+    def test_the_configured_owner_is_stamped(self):
+        from openshard.config.settings import user_config_path, write_identity_owner
+
+        write_identity_owner(user_config_path(), "Dev Person <dev@acme.example>")
+        self._call()
+        self.assertEqual(self._read_entry()["owner"], "Dev Person <dev@acme.example>")
+
+    def test_no_owner_configured_means_none_recorded(self):
+        self._call()
+        self.assertNotIn("owner", self._read_entry())

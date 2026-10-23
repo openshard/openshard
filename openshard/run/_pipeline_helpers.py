@@ -441,6 +441,35 @@ def _build_native_events(
         return []
 
 
+def _stamp_owner_and_usage(entry: dict, usage, source: Path) -> None:
+    """The configured owner (``identity.owner``; never inferred), the run's
+    tokens and cost, and where they came from, as the provider call said.
+
+    Tokens are the provider's own counts; a zero total may be a provider that
+    sent none, so it is left unlabelled (and so unprojected) rather than read
+    as zero. Cost: the provider's own figure, or OpenShard's list-rate
+    arithmetic when the provider sent none. Unlabelled otherwise.
+    """
+    from openshard.config.settings import stamp_owner
+    from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE
+    from openshard.providers.base import COST_SOURCE_LIST_RATE, COST_SOURCE_PROVIDER
+
+    stamp_owner(entry, source)  # never raises
+    if usage is None:
+        return
+    entry["prompt_tokens"] = usage.prompt_tokens
+    entry["completion_tokens"] = usage.completion_tokens
+    entry["total_tokens"] = usage.total_tokens
+    entry["estimated_cost"] = usage.estimated_cost
+    if isinstance(usage.total_tokens, int) and usage.total_tokens > 0:
+        entry["tokens_provenance"] = "provider_reported"
+    source = getattr(usage, "cost_source", None)
+    if usage.estimated_cost is not None and source == COST_SOURCE_PROVIDER:
+        entry["cost_provenance"] = COST_SOURCE_PROVIDER
+    elif usage.estimated_cost is not None and source == COST_SOURCE_LIST_RATE:
+        entry["cost_provenance"] = COST_PROVENANCE_OFFICIAL_RATE
+
+
 def _log_run(
     start: float,
     task: str,
@@ -567,11 +596,7 @@ def _log_run(
         # The model that produced the final attempt when the escalations are known;
         # older callers only know the configured fixer.
         entry["fixer_model"] = _retry_attempts[-1]["model"] if _retry_attempts else generator.fixer_model
-    if usage is not None:
-        entry["prompt_tokens"] = usage.prompt_tokens
-        entry["completion_tokens"] = usage.completion_tokens
-        entry["total_tokens"] = usage.total_tokens
-        entry["estimated_cost"] = usage.estimated_cost
+    _stamp_owner_and_usage(entry, usage, _git_source_path(workspace, extra_metadata))
     if retry_usage is not None:
         entry["retry_prompt_tokens"] = retry_usage.prompt_tokens
         entry["retry_completion_tokens"] = retry_usage.completion_tokens
