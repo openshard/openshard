@@ -16,7 +16,10 @@ SECRET_LINE = "this output line must never be stored"
 
 def _run(tmp_path: Path, body: str, *, stream: bool = False) -> ps.CheckRun:
     script = tmp_path / "check.py"
-    script.write_text(body, encoding="utf-8")
+    script.write_text(
+        "import sys\nsys.stdout.reconfigure(newline='\\n')\nsys.stderr.reconfigure(newline='\\n')\n" + body,
+        encoding="utf-8",
+    )
     check = ps.PlannedCheck(name="t", argv=[sys.executable, str(script)], kind="test", origin="change",
                             safety="safe", reason="")
     (run,) = ps.run_checks([check], tmp_path, stream=stream)
@@ -46,6 +49,13 @@ def test_a_failing_check_is_hashed_too_and_the_hash_follows_its_output(tmp_path)
     assert (a.status, a.exit_code) == ("failed", 1)
     assert a.output_sha256 == hashlib.sha256(b"1 failed\n").hexdigest()
     assert a.output_sha256 != b.output_sha256
+
+
+def test_the_hash_keeps_raw_windows_line_endings(tmp_path):
+    run = _run(tmp_path, "sys.stdout.buffer.write(b'check passed\\r\\n')\n")
+    raw = b"check passed\r\n"
+    assert run.output_sha256 == hashlib.sha256(raw).hexdigest()
+    assert run.output_bytes == len(raw)
 
 
 def test_the_receipt_block_carries_the_hash_beside_the_exit_code_and_never_the_text(tmp_path):
