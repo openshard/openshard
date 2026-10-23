@@ -15,12 +15,15 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import jsonschema
 import pytest
 
 from openshard.adapters import claude_hooks as ch
 from openshard.adapters import claude_subagents as cs
 from openshard.history import task_edges
-from openshard.sync.envelope import build_envelope
+from openshard.sync import client, config, outbox, transport
+from openshard.sync.envelope import build_envelope, rejected_for_subagents, subagents_block
+from openshard.sync.transport import SendResult
 from tests.capture_fixtures import _lines, _make_repo
 
 SID = "61616161-6161-4161-8161-616161616161"
@@ -164,10 +167,42 @@ def test_a_failed_background_subagent_reads_failed(repo):
     assert {r["agent_id"]: r["result"] for r in entry["capture"]["subagent_runs"]}[BG] == "failed"
 
 
-def test_subagent_runs_stay_local(repo):
+SCHEMA = json.loads((Path(__file__).parent / "fixtures" / "platform" / "receipt-sync-envelope.v1.json").read_text("utf-8"))
+OLD_PLATFORM = SendResult(transport.KIND_REJECTED, 400, "invalid_payload",
+                          [{"path": "receipt", "message": 'Unrecognized key: "subagents"'}])
+
+
+def test_the_envelope_carries_each_subagent_in_the_platform_contract(repo):
     entry = _capture(repo)
-    envelope = json.dumps(build_envelope(entry, 0, core_version="0.0.0"))
-    assert "subagent_runs" not in envelope and "subagent_cost" not in envelope and FG not in envelope
+    envelope = build_envelope(entry, 0, core_version="0.0.0")
+    jsonschema.validate(envelope, SCHEMA)
+    block = envelope["receipt"]["subagents"]
+    assert [a["agent_id"] for a in block["agents"]] == [FG, BG, LOST]
+    assert block["agents"][0] == entry["capture"]["subagent_runs"][0]
+    assert block["cost"]["status"] == "within_session_total"
+    assert "RAW SUBAGENT" not in json.dumps(envelope)
+
+
+def test_a_receipt_without_subagent_runs_sends_no_block():
+    assert subagents_block({"subagent_edges": [{"agent_id": "x"}]}) is None and subagents_block(None) is None
+
+
+def test_a_platform_that_predates_the_block_still_gets_the_receipt(repo, tmp_path):
+    env = {"OPENSHARD_HOME": str(tmp_path / "home"), "PATH": os.environ.get("PATH", "")}
+    config.save_link(endpoint="https://platform.example", organisation_id="0b6c1f7e-2a4d-4c8e-9f10-a1b2c3d4e5f6",
+                     api_key="osk_" + "a" * 40, env=env)
+    _capture(repo)
+    rt = transport.RecordingPlatformTransport([OLD_PLATFORM, SendResult(transport.KIND_CREATED, 201)])
+    report = client.flush(repo, env=env, transport=rt)
+    assert (report.created, report.rejected) == (1, 0)
+    first, second = rt.envelopes
+    assert "subagents" in first["receipt"] and "subagents" not in second["receipt"]
+    assert {r["state"] for r in outbox.load_outbox(repo).values()} == {"synced"}
+
+
+def test_any_other_rejection_is_not_resent_without_subagents():
+    other = SendResult(transport.KIND_REJECTED, 400, "invalid_payload", [{"path": "receipt.files", "message": "x"}])
+    assert rejected_for_subagents(OLD_PLATFORM) is True and rejected_for_subagents(other) is False
 
 
 def test_a_nested_subagent_names_the_subagent_that_launched_it(tmp_path):

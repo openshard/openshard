@@ -1390,6 +1390,31 @@
                             "type": "null"
                           }
                         ]
+                      },
+                      "output_sha256": {
+                        "description": "sha256 of everything the check printed (stdout and stderr). Never the output itself.",
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "output_bytes": {
+                        "description": "Size in bytes of the output output_sha256 covers.",
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
                     },
                     "required": [
@@ -4488,139 +4513,514 @@
           ]
         },
         "merge_check": {
-          "description": "How the Receipt's HEAD compared with the default branch when Core sealed it, computed with local git on the machine that ran the agent. Facts only (refs, shas, author names, commit subjects, paths, line numbers), never diff text or file contents. Absent: not checked. behind_by, base_commits, conflicts: null is unknown; conflicts [] is checked and clean.",
-          "type": "object",
-          "properties": {
-            "base_ref": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 255
-            },
-            "base_sha": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
-            },
-            "head_sha": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
-            },
-            "checked_at": {
-              "type": "string",
-              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
-            },
-            "behind_by": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 9007199254740991
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "base_ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
                 },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "base_commits": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "maxItems": 20,
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "sha": {
-                        "type": "string",
-                        "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
-                      },
-                      "author": {
-                        "anyOf": [
-                          {
+                "base_sha": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+                  "description": "Tip of the base at check time."
+                },
+                "head_sha": {
+                  "type": "string",
+                  "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                },
+                "checked_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "behind_by": {
+                  "description": "Commits on base not in head; null when unknown, never 0.",
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "base_commits": {
+                  "description": "Commits base gained since the merge-base, newest first.",
+                  "anyOf": [
+                    {
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "sha": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{7,64}$"
+                          },
+                          "author": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": 200
+                            "maxLength": 256,
+                            "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
                           },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "subject": {
-                        "anyOf": [
-                          {
+                          "subject": {
                             "type": "string",
-                            "minLength": 1,
-                            "maxLength": 200
+                            "maxLength": 200,
+                            "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$",
+                            "description": "The commit subject line only. Never the body or diff."
                           },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "committed_at": {
-                        "anyOf": [
-                          {
+                          "committed_at": {
                             "type": "string",
-                            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
-                          },
-                          {
-                            "type": "null"
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
                           }
-                        ]
+                        },
+                        "required": [
+                          "sha",
+                          "author",
+                          "subject",
+                          "committed_at"
+                        ],
+                        "additionalProperties": false
                       }
                     },
-                    "required": [
-                      "sha",
-                      "author",
-                      "subject",
-                      "committed_at"
-                    ],
-                    "additionalProperties": false
-                  }
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
-                {
-                  "type": "null"
+                "conflicts": {
+                  "description": "[] = checked and clean; null or absent = could not determine.",
+                  "anyOf": [
+                    {
+                      "maxItems": 50,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 512,
+                            "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$",
+                            "description": "Repository-relative path of a file changed on both sides."
+                          },
+                          "lines": {
+                            "maxItems": 20,
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 9007199254740991
+                            },
+                            "description": "1-based line numbers in the HEAD version where the conflicting hunks start. Numbers only, never the lines."
+                          },
+                          "base_author": {
+                            "description": "Git author name of the base-side commit that last touched those lines; null when blame could not tell.",
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 256,
+                                "pattern": "^[^\\u0000-\\u001f\\u007f\\u2028\\u2029]*$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "base_sha": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{7,64}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "lines"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
-              ]
+              },
+              "required": [
+                "base_ref",
+                "base_sha",
+                "head_sha",
+                "checked_at"
+              ],
+              "additionalProperties": false
             },
-            "conflicts": {
-              "anyOf": [
-                {
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subagents": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "agents": {
+                  "maxItems": 16,
                   "type": "array",
-                  "maxItems": 50,
                   "items": {
                     "type": "object",
                     "properties": {
-                      "path": {
+                      "agent_id": {
                         "type": "string",
-                        "minLength": 1,
-                        "maxLength": 1024
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$"
                       },
-                      "lines": {
+                      "agent_type": {
+                        "description": "The agent's own label, e.g. Explore.",
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_. :-]{0,63}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "agent_type_source": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "agent_reported",
+                              "provider_reported",
+                              "openshard_calculated"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "parent_agent": {
+                        "description": "`lead` (the session's main agent) or the agent_id of the subagent that launched it.",
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "parent_source": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "agent_reported",
+                              "provider_reported",
+                              "openshard_calculated"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "parent_not_recorded_reason": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-z_]{1,64}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "models": {
+                        "default": [],
+                        "maxItems": 5,
                         "type": "array",
-                        "maxItems": 20,
                         "items": {
-                          "type": "integer",
-                          "minimum": 1,
-                          "maximum": 9007199254740991
+                          "type": "string",
+                          "maxLength": 256
                         }
                       },
-                      "base_author": {
+                      "models_source": {
                         "anyOf": [
                           {
                             "type": "string",
-                            "minLength": 1,
-                            "maxLength": 200
+                            "enum": [
+                              "agent_reported",
+                              "provider_reported",
+                              "openshard_calculated"
+                            ]
                           },
                           {
                             "type": "null"
                           }
                         ]
                       },
-                      "base_sha": {
+                      "tokens": {
+                        "anyOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "input_tokens": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "output_tokens": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "cache_read_tokens": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "cache_write_tokens": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              },
+                              "total_tokens": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "input_tokens",
+                              "output_tokens",
+                              "cache_read_tokens",
+                              "cache_write_tokens",
+                              "total_tokens"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "tokens_source": {
                         "anyOf": [
                           {
                             "type": "string",
-                            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+                            "enum": [
+                              "agent_reported",
+                              "provider_reported",
+                              "openshard_calculated"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "tokens_not_recorded_reason": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-z_]{1,64}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "tokens_incomplete": {
+                        "description": "true: some of its usage was unreadable, so the counts are a lower bound.",
+                        "type": "boolean"
+                      },
+                      "cost_usd": {
+                        "anyOf": [
+                          {
+                            "type": "number",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cost_estimate": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "cost_provenance": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 64
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cost_source": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "agent_reported",
+                              "provider_reported",
+                              "openshard_calculated"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cost_not_recorded_reason": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-z_]{1,64}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "started_at": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "ended_at": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "times_source": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "agent_reported",
+                              "provider_reported",
+                              "openshard_calculated"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "times_not_recorded_reason": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-z_]{1,64}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "ended_not_recorded_reason": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-z_]{1,64}$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "tool_calls": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "tool_calls_source": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "agent_reported",
+                              "provider_reported",
+                              "openshard_calculated"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "result": {
+                        "type": "string",
+                        "enum": [
+                          "finished",
+                          "failed",
+                          "unknown"
+                        ]
+                      },
+                      "result_source": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": [
+                              "agent_reported",
+                              "provider_reported",
+                              "openshard_calculated"
+                            ]
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "result_reason": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^[a-z_]{1,64}$"
                           },
                           {
                             "type": "null"
@@ -4629,30 +5029,92 @@
                       }
                     },
                     "required": [
-                      "path",
-                      "lines",
-                      "base_author",
-                      "base_sha"
+                      "agent_id",
+                      "result"
                     ],
                     "additionalProperties": false
                   }
                 },
-                {
-                  "type": "null"
+                "cost": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "within_session_total",
+                            "exceeds_session_total",
+                            "unknown"
+                          ],
+                          "description": "Whether the subagents' costs fit inside the Receipt's own cost; exceeds_session_total means the figures do not reconcile."
+                        },
+                        "subagents_usd": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "minimum": 0
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "session_usd": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "minimum": 0
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "subagents_priced": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "subagents": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z_]{1,64}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "subagents_priced",
+                        "subagents"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 }
-              ]
+              },
+              "required": [
+                "agents"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
             }
-          },
-          "required": [
-            "base_ref",
-            "base_sha",
-            "head_sha",
-            "checked_at",
-            "behind_by",
-            "base_commits",
-            "conflicts"
-          ],
-          "additionalProperties": false
+          ]
         }
       },
       "required": [
