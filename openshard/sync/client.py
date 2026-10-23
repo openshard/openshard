@@ -48,6 +48,7 @@ from openshard.sync.envelope import (
     build_envelope,
     eligibility,
     payload_hash,
+    rejected_for_subagents,
 )
 from openshard.verification.settle import run_due_all
 
@@ -352,6 +353,11 @@ def flush(
                 # receipt itself is what must not be lost, so send it unsigned.
                 envelope.pop("seal")
                 report.sealed -= 1
+                result = sender.send(envelope)
+            if "subagents" in envelope["receipt"] and rejected_for_subagents(result):
+                # A Platform that predates the subagents block rejects the key; the
+                # receipt must not be lost, so it goes without it (kept locally).
+                envelope["receipt"].pop("subagents")
                 result = sender.send(envelope)
             report.sent += 1
             previous = records.get(candidate.receipt_id)

@@ -134,7 +134,51 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
             payload.pop("correlation")
     if not multi_agent:
         payload.pop("multi_agent", None)
+    subagents = subagents_block(capture)
+    if subagents is not None:
+        payload["subagents"] = subagents
     return payload
+
+
+# The Platform contract's ``subagents`` keys (Platform ``subagentRunSchema``); anything else stays local.
+_SUBAGENT_RUN_KEYS = frozenset({
+    "agent_id", "agent_type", "agent_type_source", "parent_agent", "parent_source", "parent_not_recorded_reason",
+    "models", "models_source", "tokens", "tokens_source", "tokens_not_recorded_reason", "tokens_incomplete",
+    "cost_usd", "cost_estimate", "cost_provenance", "cost_source", "cost_not_recorded_reason",
+    "started_at", "ended_at", "times_source", "times_not_recorded_reason", "ended_not_recorded_reason",
+    "tool_calls", "tool_calls_source", "result", "result_source", "result_reason",
+})
+_SUBAGENT_COST_KEYS = frozenset({"status", "subagents_usd", "session_usd", "subagents_priced", "subagents", "reason"})
+
+
+def subagents_block(capture: object) -> dict | None:
+    """``{agents, cost}``: what each subagent did, as capture recorded it
+    (``adapters/claude_subagents.py``); None when none was recorded."""
+    if not isinstance(capture, dict):
+        return None
+    runs = capture.get("subagent_runs")
+    agents = [{k: v for k, v in run.items() if k in _SUBAGENT_RUN_KEYS}
+              for run in runs if isinstance(run, dict)] if isinstance(runs, list) else []
+    if not agents:
+        return None
+    cost = capture.get("subagent_cost")
+    return {"agents": agents[:16],
+            "cost": {k: v for k, v in cost.items() if k in _SUBAGENT_COST_KEYS} if isinstance(cost, dict) else None}
+
+
+def rejected_for_subagents(result: object) -> bool:
+    """True when the Platform refused the envelope for ``receipt.subagents`` itself, as one
+    that predates the block does (``Unrecognized key: "subagents"`` on ``receipt``)."""
+    if getattr(result, "kind", None) != "rejected" or getattr(result, "code", None) != "invalid_payload":
+        return False
+    details = getattr(result, "details", None)
+    for d in details if isinstance(details, list) else []:
+        path, message = (d.get("path"), d.get("message")) if isinstance(d, dict) else (None, None)
+        if isinstance(path, str) and (path == "receipt.subagents" or path.startswith("receipt.subagents.")):
+            return True
+        if path == "receipt" and isinstance(message, str) and '"subagents"' in message:
+            return True
+    return False
 
 
 def build_envelope(entry: dict, index: int, *, core_version: str, multi_agent: bool = False) -> dict:
@@ -180,4 +224,6 @@ __all__ = [
     "eligibility",
     "payload_hash",
     "receipt_payload",
+    "rejected_for_subagents",
+    "subagents_block",
 ]
