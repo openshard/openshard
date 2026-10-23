@@ -2,39 +2,76 @@
 
 All notable changes to OpenShard are documented here.
 
-## Unreleased
+## 0.5.0 - 2026-10-23
+
+<!-- release-title: Openshard v0.5.0 - Verified Receipts Across Agents -->
+
+Receipts now connect a coding session to its commits, independent checks,
+sub-agents and cost. This release adds signed Receipts, per-turn Claude Code
+capture, a Platform-backed merge gate, and informational checks that help
+reviewers understand a change. Unknown facts stay unknown.
 
 ### Added
 
-- A merge gate for pull requests: a GitHub Action at the repository root
-  (`uses: openshard/openshard@<ref>`) and `openshard ci gate --commit <sha>`.
-  It reads the head commit's Receipt from the Openshard Platform with a
-  GitHub OIDC token (or an organisation API key) and only passes or fails:
-  verified passes; failed fails; pending waits up to `wait-minutes` (default
-  15, with a progress line a minute in the log) and then
-  fails; no Receipt, when the pull request's commits carry Openshard agent
-  trailers, waits up to `wait-minutes` for the Receipt to arrive and then
-  fails, and otherwise is decided at once and follows the team's `require_receipt` policy
-  (a human change passes under `agent_prs`). An unreachable Platform,
-  refused credentials or a fork pull request fails with the reason. The job
-  summary shows every Receipt field the Platform returns, with anything not
-  recorded shown as unknown. Committed or symlinked `.openshard/` history is
-  never used as evidence. Setup: `docs/merge-gate.md`.
-- The automatic per-commit verification sends its Receipt and commit
-  evidence to the Platform as soon as it is recorded, instead of waiting
-  for the next periodic sync, so the merge gate finds it sooner. Failures
-  there change nothing for the developer.
+- Locally signed Receipts with Ed25519 seals, field commitments and
+  `openshard verify --signature` for offline signature checks.
+- Per-turn Claude Code Receipts, with shared tasks and usage attributed to
+  the checkouts where the work happened. Sealed turns keep their own facts
+  while the next turn continues.
+- Verification bound to the exact commit and git tree. Codex and Cursor
+  sessions can reach a verified Receipt through Openshard's independent
+  re-run on an isolated copy of the commit.
+- A GitHub merge-gate Action and `openshard ci gate`. They read evidence from
+  the Platform, wait for an agent change's Receipt, and report passed,
+  failed or unavailable evidence according to the team's policy. Committed
+  `.openshard` history is never accepted as proof. See `docs/merge-gate.md`.
+- Per-sub-agent models, tokens, cost estimates, times and outcomes when
+  Claude Code records them, with sources and reasons for missing facts.
+  Receipts also record where the agent ran and its app when its environment
+  supplies those facts.
+- `openshard ci findings` and informational merge-gate summaries for large
+  changes, junk files, edits to tests or check configuration, removed public
+  code and new dependencies. Dependency publish-date lookups require
+  `--registry-lookup` and have a 15-second total budget; they are off by
+  default. Findings do not change the gate's verdict.
+- `openshard ci fail-without-fix` runs changed Python tests against both the
+  base and head, distinguishing tests that prove a fix from tests that pass
+  without it, fail on head or could not run.
+- Exact output hashes and byte counts beside completed check exit codes,
+  including cloud checks. Raw check output is not stored in the Receipt;
+  incomplete or timed-out output has no hash.
+- Browser-approved CLI login, an explicit Receipt-owner choice from the
+  approving account, and owner details or setup guidance in `sync status`.
+- Keyless Replicas sync using short-lived workspace identity tokens, plus
+  capture routing into the checkouts a workspace session actually touched.
+  The Platform must authorize the workspace's organisation.
+- Committable cloud-agent setup with `openshard setup --repo`. Background
+  installation recognizes documented cloud-sandbox markers and preserves
+  explicit opt-in and opt-out controls.
 
-- `openshard setup` marks agent commits by default: a `prepare-commit-msg`
-  hook adds `Openshard-Agent: Claude Code` when the commit is made inside a
-  Claude Code session Openshard observed in that repository, and nothing
-  otherwise (human commits, unknown sessions, rebases, cloud sessions that
-  already add `Claude-Session`). Never duplicated, never blocks a commit, and
-  existing hooks keep running; under husky, `core.hooksPath`, lefthook or
-  pre-commit setup prints the line to add instead. `openshard doctor` reports
-  a missing hook. Opt out with `openshard setup --no-commit-trailers`
-  (`git config openshard.commitTrailers false`). See
-  `docs/commit-trailers.md`.
+### Changed
+
+- Setup reports ready only after a Receipt reaches the Platform and names
+  the check Openshard will re-run, or explains how to configure one.
+- Commit trailers attribute usage to the committing agent when identifiable
+  and label a shared session window otherwise. Receipt costs record token,
+  rate and billing provenance instead of presenting estimates as charges.
+- Closed turns sync while a later turn is open. Per-commit verification
+  sends evidence promptly, and cloud capture recovers commits from push
+  ranges and records each commit's own change findings.
+
+### Fixed
+
+- A check refused by the command gate is recorded as not run and is not
+  retried as though it had failed.
+- Continued Claude Code work after an early session-end event is retained;
+  setup and doctor do not end a live session.
+- Multi-checkout usage, task routing and missed-hook accounting stay with
+  the relevant Receipt instead of being counted against unrelated work.
+- Unreadable check configuration stays unknown rather than being treated as
+  an empty file or a proven change to the grader.
+- Windows output-hash tests verify exact bytes, including CRLF output, and
+  commit-trailer type checks respect the Windows locking path.
 
 ## 0.4.18 - 2026-10-18
 
