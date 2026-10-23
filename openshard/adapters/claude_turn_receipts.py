@@ -54,7 +54,8 @@ _ON = frozenset({"1", "on", "true", "yes"})
 _OFF = frozenset({"0", "off", "false", "no"})
 _STOP = "Stop"
 _SESSION_END = "SessionEnd"
-_CLOUD_TURN_SURFACES = frozenset({("cursor", "cursor-cloud"), ("claude_code", "claude-code-web")})
+# Hosted runtimes that can reclaim or sleep the VM after Stop without a SessionEnd.
+_CLOUD_TURN_SURFACES = frozenset({("cursor", "cursor-cloud"), ("claude_code", "claude-code-web"), ("claude_code", "replicas")})
 
 
 def enabled(repo_root: Path, env: Mapping[str, str] | None = None) -> bool:
