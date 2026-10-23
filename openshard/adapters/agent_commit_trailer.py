@@ -407,10 +407,45 @@ def uninstall_commit_hook(repo: Path | None) -> CommitHookStatus:
         return CommitHookStatus("error", f"could not remove the commit trailer hook: {type(exc).__name__}")
 
 
+def add_cloud_usage_trailers(msg_file: Path, repo: Path | None = None, env: Mapping[str, str] | None = None) -> bool:
+    """In a Claude Code cloud session, add the committing agent's ``Openshard-Model`` /
+    ``Openshard-Tokens-*`` trailers (``adapters/commit_usage_trailers.py``); True when added.
+
+    A cloud commit's Receipt is built by the GitHub workflow from the commit
+    message alone, so without these it has no model and no cost. Only Claude
+    Code's own transcript counters are written, each message claimed by one
+    commit; when no true number exists nothing is added. Laptop sessions are
+    left alone: their hook-captured Receipt already holds the usage. Never raises.
+    """
+    env = os.environ if env is None else env
+    repo = repo if repo is not None else Path.cwd()
+    try:
+        if not _env_flag(env.get("CLAUDE_CODE_REMOTE")) or not env.get("CLAUDE_CODE_SESSION_ID"):
+            return False
+        if opted_out(repo, env) or _replaying(repo, env):
+            return False
+        from openshard.adapters.commit_usage_trailers import (
+            UsageUnavailable,
+            append_trailers,
+            usage_trailers,
+        )
+
+        try:
+            usage_trailers(repo, session_id=str(env["CLAUDE_CODE_SESSION_ID"]), hints=(str(msg_file),),
+                           deliver=lambda lines: append_trailers(msg_file, lines))
+        except UsageUnavailable:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def run_git_hook(argv: list[str], env: Mapping[str, str] | None = None) -> None:
-    """``openshard hooks git-commit-msg <file> [source] [sha]``: mark the message if the evidence holds. Never raises."""
+    """``openshard hooks git-commit-msg <file> [source] [sha]``: mark the message if the evidence holds,
+    and in a cloud session add its usage trailers. Never raises."""
     if argv and argv[0]:
         mark_commit_message(Path(argv[0]), None, env)
+        add_cloud_usage_trailers(Path(argv[0]), None, env)
 
 
 # ---------------------------------------------------------------------------
