@@ -755,6 +755,18 @@ class TestCli:
         out = self._run(["sync", "now"], repo, monkeypatch)
         assert "Not connected" in out.output
 
+    def test_status_names_the_owner_or_says_how_to_set_one(self, repo, env, monkeypatch, recording):
+        from openshard.config.settings import user_config_path, write_identity_owner
+
+        monkeypatch.setenv("OPENSHARD_HOME", env["OPENSHARD_HOME"])
+        self._run(["sync", "connect", "--endpoint", ENDPOINT, "--org", ORG, "--api-key", KEY], repo, monkeypatch)
+        out = self._run(["sync", "status"], repo, monkeypatch)
+        assert "owner:           not set" in out.output and "openshard login" in out.output
+        assert json.loads(self._run(["sync", "status", "--json"], repo, monkeypatch).output)["owner"] is None
+        write_identity_owner(user_config_path(), "Dev Person <dev@acme.example>")
+        out = self._run(["sync", "status"], repo, monkeypatch)
+        assert "owner:           Dev Person <dev@acme.example>" in out.output
+
     def test_connect_prompts_for_the_key_and_rejects_insecure_endpoints(self, repo, env, monkeypatch):
         monkeypatch.setenv("OPENSHARD_HOME", env["OPENSHARD_HOME"])
         out = self._run(["sync", "connect", "--endpoint", ENDPOINT, "--org", ORG], repo, monkeypatch, input=KEY + "\n")

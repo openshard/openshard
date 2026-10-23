@@ -7394,6 +7394,8 @@ def _render_sync_status(doc: dict) -> None:
     click.echo(f"  endpoint:        {link.get('endpoint')}")
     click.echo(f"  organisation:    {link.get('organisation_id')}")
     click.echo(f"  api key:         {link.get('api_key_prefix')}  (from {link.get('source')})")
+    click.echo(f"  owner:           {doc['owner']}" if doc.get("owner") else "  owner:           not set, so Receipts cannot show a verified owner. Run `openshard login`"
+               " again (it names who approves it) or `openshard config set-owner \"Name <email>\"`.")
     if "scanned" in doc:
         click.echo(f"  receipts:        {doc.get('scanned', 0)} in this repository")
         click.echo(f"  synced:          {doc.get('synced', 0)}")
@@ -7471,7 +7473,9 @@ def sync_status(as_json: bool) -> None:
     from openshard.sync.client import status
 
     loc = _locate_history()
-    doc = {**status(loc.root), "platform_link": platform_link(loc.root).to_dict()}
+    from openshard.config.settings import recorded_owner
+
+    doc = {**status(loc.root), "platform_link": platform_link(loc.root).to_dict(), "owner": recorded_owner(loc.root)}
     if as_json:
         click.echo(json.dumps(doc, indent=2))
     else:
