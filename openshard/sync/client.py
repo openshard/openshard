@@ -41,6 +41,7 @@ from openshard.sync import seal as _seal
 from openshard.sync import transport as _transport
 from openshard.sync.config import PlatformLink, resolve_link, sync_disabled
 from openshard.sync.envelope import (
+    OPTIONAL_RECEIPT_KEYS,
     QUIESCENT_SECONDS,
     REASON_SESSION_IN_PROGRESS,
     REASON_SESSION_QUIESCENT,
@@ -48,7 +49,7 @@ from openshard.sync.envelope import (
     build_envelope,
     eligibility,
     payload_hash,
-    rejected_for_subagents,
+    rejected_optional_key,
 )
 from openshard.verification.settle import run_due_all
 
@@ -66,6 +67,18 @@ def configure(*, transport: _transport.PlatformTransport | None = None, repo_con
     with _lock:
         _transport_override = transport
         _repo_config_override = repo_config
+
+
+def _resend_without_unknown_blocks(sender, envelope: dict, result):
+    """A Platform that predates an optional block (subagents, ran_on, agent_app) rejects the
+    key; the receipt must not be lost, so it goes again without it (kept locally)."""
+    for _ in OPTIONAL_RECEIPT_KEYS:
+        key = rejected_optional_key(result, envelope["receipt"])
+        if key is None:
+            break
+        envelope["receipt"].pop(key)
+        result = sender.send(envelope)
+    return result
 
 
 def _advanced_osn_enabled() -> bool:
@@ -354,11 +367,7 @@ def flush(
                 envelope.pop("seal")
                 report.sealed -= 1
                 result = sender.send(envelope)
-            if "subagents" in envelope["receipt"] and rejected_for_subagents(result):
-                # A Platform that predates the subagents block rejects the key; the
-                # receipt must not be lost, so it goes without it (kept locally).
-                envelope["receipt"].pop("subagents")
-                result = sender.send(envelope)
+            result = _resend_without_unknown_blocks(sender, envelope, result)
             report.sent += 1
             previous = records.get(candidate.receipt_id)
             if result.accepted:

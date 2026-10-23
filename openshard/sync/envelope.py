@@ -137,7 +137,37 @@ def receipt_payload(entry: dict, index: int, *, multi_agent: bool = False) -> di
     subagents = subagents_block(capture)
     if subagents is not None:
         payload["subagents"] = subagents
+    payload.update(host_blocks(entry))
     return payload
+
+
+_RAN_ON_KINDS = frozenset({"local", "cloud_agent", "ci", "cloud_dev"})
+
+
+def host_blocks(entry: dict) -> dict:
+    """``ran_on`` and ``agent_app`` when recorded: where the agent ran and in which app.
+
+    From hook capture's ``capture.agent_host`` (``adapters/agent_env.claude_host``,
+    the agent's own environment), or ``openshard`` for a run Openshard itself
+    executed. Absent means not recorded.
+    """
+    from openshard.adapters.agent_env import agent_host_or_none
+    from openshard.history.shard import ORIGIN_OPENSHARD_ROUTED
+
+    if entry.get("origin") == ORIGIN_OPENSHARD_ROUTED:
+        return {"ran_on": {"kind": "openshard", "name": None, "source": "openshard"}}
+    capture = entry.get("capture")
+    host = agent_host_or_none(capture.get("agent_host")) if isinstance(capture, dict) else None
+    if host is None:
+        return {}
+    ran_on, app = host.split("|", 1)
+    kind, _, name = ran_on.partition(":")
+    out: dict = {}
+    if kind in _RAN_ON_KINDS:
+        out["ran_on"] = {"kind": kind, "name": name or None, "source": "agent_env"}
+    if app:
+        out["agent_app"] = {"name": app, "source": "agent_env"}
+    return out
 
 
 # The Platform contract's ``subagents`` keys (Platform ``subagentRunSchema``); anything else stays local.
@@ -166,19 +196,31 @@ def subagents_block(capture: object) -> dict | None:
             "cost": {k: v for k, v in cost.items() if k in _SUBAGENT_COST_KEYS} if isinstance(cost, dict) else None}
 
 
-def rejected_for_subagents(result: object) -> bool:
-    """True when the Platform refused the envelope for ``receipt.subagents`` itself, as one
-    that predates the block does (``Unrecognized key: "subagents"`` on ``receipt``)."""
+# Receipt keys a Platform that predates them rejects; each is dropped and the receipt resent.
+OPTIONAL_RECEIPT_KEYS = ("subagents", "ran_on", "agent_app")
+
+
+def rejected_optional_key(result: object, receipt: dict) -> str | None:
+    """The optional receipt key the Platform refused the envelope for, as one that predates it
+    does (``Unrecognized key: "<key>"`` on ``receipt``, or a path under the key); else None."""
     if getattr(result, "kind", None) != "rejected" or getattr(result, "code", None) != "invalid_payload":
-        return False
+        return None
     details = getattr(result, "details", None)
     for d in details if isinstance(details, list) else []:
         path, message = (d.get("path"), d.get("message")) if isinstance(d, dict) else (None, None)
-        if isinstance(path, str) and (path == "receipt.subagents" or path.startswith("receipt.subagents.")):
-            return True
-        if path == "receipt" and isinstance(message, str) and '"subagents"' in message:
-            return True
-    return False
+        for key in OPTIONAL_RECEIPT_KEYS:
+            if key not in receipt:
+                continue
+            if isinstance(path, str) and (path == f"receipt.{key}" or path.startswith(f"receipt.{key}.")):
+                return key
+            if path == "receipt" and isinstance(message, str) and f'"{key}"' in message:
+                return key
+    return None
+
+
+def rejected_for_subagents(result: object) -> bool:
+    """True when the Platform refused the envelope for ``receipt.subagents`` itself."""
+    return rejected_optional_key(result, {"subagents": True}) == "subagents"
 
 
 def build_envelope(entry: dict, index: int, *, core_version: str, multi_agent: bool = False) -> dict:
@@ -224,6 +266,9 @@ __all__ = [
     "eligibility",
     "payload_hash",
     "receipt_payload",
+    "OPTIONAL_RECEIPT_KEYS",
+    "host_blocks",
     "rejected_for_subagents",
+    "rejected_optional_key",
     "subagents_block",
 ]

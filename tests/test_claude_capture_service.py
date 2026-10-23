@@ -414,7 +414,7 @@ def _stable_view(entry: dict) -> dict:
                                  "applied_event_ids",
                                  # Read from the hook process environment: the inline path
                                  # has it, a raw HTTP POST (no command client) carries none.
-                                 "provider", "provider_source", "surface")},
+                                 "provider", "provider_source", "surface", "agent_host")},
         "events": [{k: e.get(k) for k in _STABLE_EVENT_KEYS} for e in entry["events"]],
         "verification_attempted": entry["verification_attempted"],
         "verification_passed": entry["verification_passed"],

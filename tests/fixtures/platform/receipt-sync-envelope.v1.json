@@ -5115,6 +5115,78 @@
               "type": "null"
             }
           ]
+        },
+        "ran_on": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "local",
+                    "cloud_agent",
+                    "ci",
+                    "cloud_dev",
+                    "openshard"
+                  ]
+                },
+                "name": {
+                  "description": "e.g. claude_code, github_actions, codespaces; null when only the kind is known.",
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_]{0,40}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "agent_env",
+                    "openshard"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agent_app": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,40}$",
+                  "description": "e.g. vscode, jetbrains, iterm2, terminal, sdk, claude_desktop, claude_web."
+                },
+                "source": {
+                  "type": "string",
+                  "const": "agent_env"
+                }
+              },
+              "required": [
+                "name",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

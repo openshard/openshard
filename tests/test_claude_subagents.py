@@ -244,3 +244,16 @@ def test_usage_owned_by_another_checkout_is_not_counted_again(tmp_path):
     assert run["tokens"] is None and run["cost_usd"] is None
     assert run["tokens_not_recorded_reason"] == ch.USAGE_ELSEWHERE_REASON
     assert run["started_at"] == "2099-01-01T00:00:01Z"  # times and tool calls are still its own
+
+
+def test_an_old_platform_naming_several_new_keys_gets_the_receipt_without_each(repo, tmp_path):
+    from openshard.sync.envelope import rejected_optional_key
+
+    both = SendResult(transport.KIND_REJECTED, 400, "invalid_payload",
+                      [{"path": "receipt", "message": 'Unrecognized keys: "subagents", "ran_on"'}])
+    receipt = {"subagents": {}, "ran_on": {}, "agent_app": {}}
+    assert rejected_optional_key(both, receipt) == "subagents"
+    receipt.pop("subagents")
+    assert rejected_optional_key(both, receipt) == "ran_on"
+    receipt.pop("ran_on")
+    assert rejected_optional_key(both, receipt) is None  # agent_app was not named: kept
