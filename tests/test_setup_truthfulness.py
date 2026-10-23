@@ -121,3 +121,21 @@ def test_sync_status_without_a_link_points_to_login(root, env, monkeypatch):
     assert "Receipts stay on this machine" in out.output and "openshard login" in out.output
     as_json = CliRunner().invoke(cli, ["sync", "status", "--json"], env=env)
     assert '"platform_link"' in as_json.output and '"delivery": "none"' in as_json.output
+
+
+def test_setup_says_which_check_it_will_rerun_or_how_to_name_one(tmp_path: Path):
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    line = setup_output._checks_line(SimpleNamespace(repo_root=bare))
+    assert "No check command found" in line and "verification_commands" in line
+
+    py = tmp_path / "py"
+    (py / "tests").mkdir(parents=True)
+    (py / "pyproject.toml").write_text("[project]\nname = 'x'\n[tool.pytest.ini_options]\n", encoding="utf-8")
+    assert setup_output._checks_line(SimpleNamespace(repo_root=py)) == "After each commit, Openshard re-runs: python -m pytest."
+
+    (bare / ".openshard").mkdir()
+    (bare / ".openshard" / "config.yml").write_text('verification_commands: ["python -m pytest -q"]\n', encoding="utf-8")
+    assert "re-runs: python -m pytest -q" in setup_output._checks_line(SimpleNamespace(repo_root=bare))
+    assert setup_output._checks_line(SimpleNamespace(repo_root=None)) is None  # cannot tell: says nothing

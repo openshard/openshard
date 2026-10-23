@@ -104,6 +104,32 @@ def _platform_lines(link: PlatformLinkStatus) -> list[str]:
             "Your first finished task confirms it; check with `openshard sync status`."]
 
 
+def _checks_line(result) -> str | None:
+    """Which checks Openshard will re-run after a commit (``post_session.plan_checks``), or that it found none.
+
+    With none, a Receipt reads "not verified" after every session, so
+    setup says how to name one. Never raises; None when it cannot tell.
+    """
+    from pathlib import Path
+
+    root = getattr(result, "repo_root", None)
+    if not isinstance(root, Path):
+        return None
+    try:
+        from openshard.config.settings import load_config_safe
+        from openshard.verification.post_session import plan_checks
+
+        config, _valid, _path = load_config_safe(cwd=root)
+        planned = plan_checks(root, config, None)
+    except Exception:
+        return None
+    if not planned:
+        return ("No check command found, so Receipts will read \"not verified\". To have Openshard re-run one "
+                "after each commit, add `verification_commands: [\"<your test command>\"]` to .openshard/config.yml.")
+    names = [p.name + ("" if p.safety == "safe" else f" ({p.safety.replace('_', ' ')})") for p in planned]
+    return f"After each commit, Openshard re-runs: {', '.join(names)}."
+
+
 def _render_readiness(result, link: PlatformLinkStatus) -> None:
     """The readiness verdict and next steps of a claude_setup.SetupResult."""
     from openshard.adapters.claude_setup import display_next_steps
@@ -129,7 +155,7 @@ def _render_readiness(result, link: PlatformLinkStatus) -> None:
     else:
         click.echo("Openshard is capturing on this machine, with limitations (see below).")
         click.echo(f"{use_line} Shards and receipts are still recorded.")
-    for line in _platform_lines(link):
+    for line in [*_platform_lines(link), *filter(None, [_checks_line(result)])]:
         click.echo(line)
     click.echo("\nNext steps:")
     click.echo(f"  1. {open_line}")
