@@ -24,9 +24,11 @@ openshard mcp uninstall claude                     # Remove Openshard's Claude C
 Configuration. `set-owner` writes `identity.owner` to the user-global
 `~/.openshard/config.yml` (under `OPENSHARD_HOME` when set), or with `--repo` to
 `<repo root>/.openshard/config.yml`. A repository config's owner wins over the
-user-global one. The owner is only what you set here: it is never inferred from
-git, the OS account or organisation metadata, and Receipts already recorded keep
-their owner. `--repo` must run inside a project repository (never the home
+user-global one. The owner is only what you set here, or, when none is set,
+the person who approved `openshard login` (the Platform's `approved_by`,
+written user-globally as `Name <email>`; the same person the key syncs as, so the
+Platform can show a verified owner). It is never inferred from git, the OS
+account or organisation metadata, and Receipts already recorded keep their owner. `--repo` must run inside a project repository (never the home
 directory or a repository containing it), and refuses when the repository only
 has a root `config.yml`. The rewritten file keeps its other keys but not YAML
 comments:
