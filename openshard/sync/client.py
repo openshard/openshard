@@ -39,7 +39,10 @@ from openshard.history.store import load_history
 from openshard.sync import outbox as _outbox
 from openshard.sync import seal as _seal
 from openshard.sync import transport as _transport
-from openshard.sync.config import PlatformLink, resolve_link, sync_disabled
+from openshard.sync.config import PlatformLink, sync_disabled
+from openshard.sync.config import (
+    resolve_sync_link as resolve_link,  # sync alone may use the key-less Replicas link
+)
 from openshard.sync.envelope import (
     OPTIONAL_RECEIPT_KEYS,
     QUIESCENT_SECONDS,
