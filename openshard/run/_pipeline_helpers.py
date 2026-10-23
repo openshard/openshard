@@ -463,10 +463,10 @@ def _stamp_owner_and_usage(entry: dict, usage, source: Path) -> None:
     entry["estimated_cost"] = usage.estimated_cost
     if isinstance(usage.total_tokens, int) and usage.total_tokens > 0:
         entry["tokens_provenance"] = "provider_reported"
-    source = getattr(usage, "cost_source", None)
-    if usage.estimated_cost is not None and source == COST_SOURCE_PROVIDER:
+    cost_source = getattr(usage, "cost_source", None)
+    if usage.estimated_cost is not None and cost_source == COST_SOURCE_PROVIDER:
         entry["cost_provenance"] = COST_SOURCE_PROVIDER
-    elif usage.estimated_cost is not None and source == COST_SOURCE_LIST_RATE:
+    elif usage.estimated_cost is not None and cost_source == COST_SOURCE_LIST_RATE:
         entry["cost_provenance"] = COST_PROVENANCE_OFFICIAL_RATE
 
 
