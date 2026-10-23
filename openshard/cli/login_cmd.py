@@ -79,6 +79,33 @@ def _fail(kind: str, message: str, *, endpoint: str, as_json: bool, exit_code: i
     raise SystemExit(exit_code)
 
 
+def _offer_owner(token, repo_path: Path | None, say) -> dict:
+    """Name the person who approved this sign-in as the Receipt owner, unless one is set.
+
+    The owner is only ever what a person declared (``identity.owner``). Signing
+    in is that declaration for the approver, who is also the person the key
+    syncs as, so their email is what lets the Platform show a verified owner.
+    An owner already configured is kept. Written user-globally; never raises.
+    """
+    from openshard.config.settings import recorded_owner, user_config_path, write_identity_owner
+
+    current = recorded_owner(repo_path)
+    if current:
+        return {"value": current, "source": "configured"}
+    if token.approver_email:
+        value = f"{token.approver_name} <{token.approver_email}>" if token.approver_name else token.approver_email
+        try:
+            write_identity_owner(user_config_path(), value)
+        except (OSError, ValueError):
+            return {"value": None, "source": None}
+        say(f"Receipts from this computer name {value} as owner (who approved this sign-in). "
+            "Change it with `openshard config set-owner`.")
+        return {"value": value, "source": "login_approver"}
+    say("Receipts carry no owner yet. Set one with `openshard config set-owner \"Name <email>\"`, "
+        "using the email you sign in with, so they can show a verified owner.")
+    return {"value": None, "source": None}
+
+
 @click.command("login")
 @click.option("--endpoint", default=None,
               help=f"Platform API base URL (default: the linked one, else {DEFAULT_ENDPOINT}).")
@@ -137,5 +164,6 @@ def login_cmd(endpoint: str | None, no_browser: bool, repo_path: Path | None, as
     if link_from_env() is not None:
         say(f"Note: OPENSHARD_PLATFORM_* variables ({ENDPOINT_ENV}, ...) are set and take precedence "
             "over the stored link until they are unset.")
+    owner = _offer_owner(token, repo_path, say)
     _finish_connect(link, True, repo_path=repo_path, as_json=as_json, command="login",
-                    extra={"organisation_name": token.org_name, "device": code.to_public_dict()})
+                    extra={"organisation_name": token.org_name, "device": code.to_public_dict(), "owner": owner})

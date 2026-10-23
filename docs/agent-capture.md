@@ -505,7 +505,8 @@ never invented evidence.
   (or `$CLAUDE_CONFIG_DIR/projects`).
 * **Owner**: `owner` is stamped only from an explicit `identity.owner`
   (`openshard config set-owner "<name>"`, user-global; `--repo` writes this
-  repository's `.openshard/config.yml`, which wins). Never inferred from git or organisation data.
+  repository's `.openshard/config.yml`, which wins), or, when none is set, from
+  the person who approved `openshard login`. Never inferred from git or organisation data.
 * **Checks re-run**: a check command that failed and then passed on a
   re-run reads `passed`. The status follows each command's latest reported
   outcome (commands keyed by a hash of their scrubbed text);

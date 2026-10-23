@@ -275,6 +275,49 @@ class TestLoginPacingAndFailures:
         assert out.exit_code == 1 and "no usable key" in out.output and config.load_link() is None
 
 
+class TestOwner:
+    """The person who approved the sign-in becomes the Receipt owner, unless one is set."""
+
+    def _approved_by(self, email="dev@acme.example", name="Dev Person") -> tuple[int, dict]:
+        return 200, {**_approved()[1], "approved_by": {"email": email, "name": name}}
+
+    def test_the_approver_is_named_owner_and_new_receipts_carry_it(self, platform, clock, home, repo, monkeypatch):
+        from openshard.config.settings import recorded_owner
+
+        _Platform.token_script = [self._approved_by()]
+        out = _login(["--endpoint", platform, "--no-browser"], repo, monkeypatch)
+        assert out.exit_code == 0, out.output
+        assert "name Dev Person <dev@acme.example> as owner" in out.output
+        assert recorded_owner(repo) == "Dev Person <dev@acme.example>"
+        assert (home / "config.yml").exists() and not (repo / ".openshard" / "config.yml").exists()
+
+    def test_an_owner_already_set_is_kept(self, platform, clock, home, repo, monkeypatch):
+        from openshard.config.settings import recorded_owner, user_config_path, write_identity_owner
+
+        write_identity_owner(user_config_path(), "Me <me@acme.example>")
+        _Platform.token_script = [self._approved_by()]
+        out = _login(["--endpoint", platform, "--no-browser", "--json"], repo, monkeypatch)
+        assert json.loads(out.stdout)["owner"] == {"value": "Me <me@acme.example>", "source": "configured"}
+        assert recorded_owner(repo) == "Me <me@acme.example>"
+
+    def test_without_a_name_the_email_alone_is_the_owner(self, platform, clock, home, repo, monkeypatch):
+        _Platform.token_script = [self._approved_by(name=None)]
+        out = _login(["--endpoint", platform, "--no-browser", "--json"], repo, monkeypatch)
+        assert json.loads(out.stdout)["owner"] == {"value": "dev@acme.example", "source": "login_approver"}
+
+    @pytest.mark.parametrize("approver", [None, {"email": "not an email", "name": "X"}, {"name": "No Email"}])
+    def test_an_older_or_unclear_platform_sets_no_owner_and_says_how(self, platform, clock, home, repo, monkeypatch,
+                                                                     approver):
+        from openshard.config.settings import recorded_owner
+
+        body = {**_approved()[1], **({"approved_by": approver} if approver is not None else {})}
+        _Platform.token_script = [(200, body)]
+        out = _login(["--endpoint", platform, "--no-browser"], repo, monkeypatch)
+        assert out.exit_code == 0, out.output
+        assert recorded_owner(repo) is None
+        assert "openshard config set-owner" in out.output
+
+
 def test_default_endpoint_is_the_linked_one_then_the_hosted_platform(home):
     from openshard.cli import login_cmd
 

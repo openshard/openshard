@@ -22,6 +22,7 @@ the person did not choose.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -78,6 +79,10 @@ class DeviceToken:
     api_key: str  # secret
     org_id: str
     org_name: str
+    # Who approved the sign-in (Platform ``approved_by``): the person this key
+    # syncs as. None from a Platform that does not say.
+    approver_email: str | None = None
+    approver_name: str | None = None
 
 
 def _version() -> str:
@@ -170,15 +175,24 @@ def request_code(
     )
 
 
+_EMAIL_RE = re.compile(r"^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$")
+
+
 def _token(endpoint: str, body: dict | None) -> DeviceToken:
     api_key = body.get("api_key") if body else None
     org_id = body.get("org_id") if body else None
     org_name = body.get("org_name") if body else None
     if not is_api_key(api_key) or not is_organisation_id(org_id):
         raise DeviceAuthError(REJECTED, f"The Platform at {endpoint} approved the request but sent no usable key.")
+    approver = body.get("approved_by") if body else None
+    email = approver.get("email") if isinstance(approver, dict) else None
+    name = approver.get("name") if isinstance(approver, dict) else None
+    email_ok = isinstance(email, str) and len(email) <= 254 and _EMAIL_RE.fullmatch(email) is not None
     return DeviceToken(
         api_key=str(api_key), org_id=str(org_id).lower(),
         org_name=org_name.strip()[:200] if isinstance(org_name, str) else "",
+        approver_email=email if email_ok else None,
+        approver_name=" ".join(name.split())[:80] or None if email_ok and isinstance(name, str) else None,
     )
 
 
