@@ -48,6 +48,7 @@ This is evidence, not policy: nothing here gates, blocks or fails anything.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -163,6 +164,26 @@ class CheckRun:
     # With ``setup_failed``: what the runner's own summary reported before setup failed (all passing).
     reported: ReportedTests | None = None
     started_at: str | None = None  # wall-clock UTC stamp when OpenShard started the process
+    # sha256 and size of everything the check printed (stdout and stderr, as read). Proof the
+    # check ran and what it said, without keeping a byte of it. None when not read in full.
+    output_sha256: str | None = None
+    output_bytes: int | None = None
+
+
+class OutputDigest:
+    """A running sha256 over a check's whole output; ``complete`` only once the pipe was read to its end."""
+
+    def __init__(self) -> None:
+        self._hash = hashlib.sha256()
+        self.size = 0
+        self.complete = False
+
+    def update(self, chunk: bytes) -> None:
+        self._hash.update(chunk)
+        self.size += len(chunk)
+
+    def hexdigest(self) -> str | None:
+        return self._hash.hexdigest() if self.complete else None
 
 
 @dataclass
@@ -457,13 +478,15 @@ OUTPUT_TAIL_BYTES = 48_000
 
 
 def run_check_process(argv: list[str], *, cwd: Path, timeout: float, echo: bool,
-                      env: dict[str, str] | None = None) -> tuple[Any, str]:
+                      env: dict[str, str] | None = None,
+                      digest: OutputDigest | None = None) -> tuple[Any, str]:
     """``run_process_tree`` with output read through a pipe: ``(process, bounded output)``.
 
     Output is echoed to the terminal as it arrives when *echo*, and the first
     ``OUTPUT_HEAD_BYTES`` and last ``OUTPUT_TAIL_BYTES`` are kept only so the
     caller can tell "could not run" from "failed"; it is never stored.
-    Raises ``TimeoutExpired`` like ``run``.
+    *digest*, when given, hashes every byte read and is marked complete only
+    when the pipe reached its end. Raises ``TimeoutExpired`` like ``run``.
     """
     import os
     import sys
@@ -489,7 +512,11 @@ def run_check_process(argv: list[str], *, cwd: Path, timeout: float, echo: bool,
             while True:
                 chunk = os.read(fd, 65536)
                 if not chunk:
+                    if digest is not None:
+                        digest.complete = True
                     return
+                if digest is not None:
+                    digest.update(chunk)
                 if echo:
                     try:
                         if out is not None:
@@ -584,13 +611,18 @@ def run_checks(
         started_at = _now()
         started = time.monotonic()
         output: str | None = None
+        digest = OutputDigest()
         try:
             if runner is None:
-                proc, output = run_check_process(argv, cwd=cwd, timeout=timeout, echo=stream, env=io["env"])
+                proc, output = run_check_process(argv, cwd=cwd, timeout=timeout, echo=stream, env=io["env"],
+                                                 digest=digest)
             else:
                 proc = runner(argv, cwd=cwd, timeout=timeout, check=False, **io)
                 raw_out = getattr(proc, "stdout", None)
                 output = raw_out if isinstance(raw_out, str) else None
+                if output is not None:
+                    digest.update(output.encode("utf-8"))
+                    digest.complete = True
         except subprocess.TimeoutExpired:
             results.append(CheckRun(
                 check, CHECK_UNKNOWN, duration_seconds=round(time.monotonic() - started, 2),
@@ -614,7 +646,8 @@ def run_checks(
             continue
         results.append(CheckRun(
             check, CHECK_PASSED if code == 0 else CHECK_FAILED, exit_code=code, duration_seconds=duration,
-            started_at=started_at,
+            started_at=started_at, output_sha256=digest.hexdigest(),
+            output_bytes=digest.size if digest.complete else None,
         ))
     return results
 
@@ -710,7 +743,8 @@ def build_attestation(
 def _attested_check(r: CheckRun) -> VerificationCheck:
     """The verification-block check for *r*: outcome, timing, and setup failure with any reported counts."""
     check = VerificationCheck(name=r.check.name, status=r.status, kind=r.check.kind, exit_code=r.exit_code,
-                              duration_seconds=r.duration_seconds, started_at=r.started_at)
+                              duration_seconds=r.duration_seconds, started_at=r.started_at,
+                              output_sha256=r.output_sha256, output_bytes=r.output_bytes)
     if r.setup_failed:
         # Unknown, never failed: the exit code belongs to the setup (VerificationCheck.to_dict keeps the rule).
         check.setup_failed = True

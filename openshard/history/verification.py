@@ -167,6 +167,9 @@ class VerificationCheck:
     reported_skipped: int | None = None
     duration_seconds: float | None = None
     started_at: str | None = None
+    # Recorded only for a check Openshard ran itself: sha256 and size of its whole output.
+    output_sha256: str | None = None
+    output_bytes: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "kind": self.kind, "status": self.status, "exit_code": self.exit_code}
@@ -183,6 +186,11 @@ class VerificationCheck:
             out["duration_seconds"] = self.duration_seconds
         if _stamp(self.started_at) is not None:
             out["started_at"] = self.started_at
+        # Only as a pair, and only beside the exit code it was read with.
+        if (self.exit_code is not None and _sha256(self.output_sha256) is not None
+                and _count_or_none(self.output_bytes) is not None):
+            out["output_sha256"] = self.output_sha256
+            out["output_bytes"] = self.output_bytes
         return out
 
 
@@ -284,6 +292,10 @@ def _duration(value: object) -> float | None:
     return float(value)
 
 
+def _sha256(value: object) -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+
 def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
@@ -335,7 +347,9 @@ def _parse_check(raw: object) -> VerificationCheck | None:
     kind = raw.get("kind") if raw.get("kind") in CHECK_KINDS else "other"
     check = VerificationCheck(name=name, status=str(status), kind=str(kind), exit_code=_int_or_none(raw.get("exit_code")),
                               duration_seconds=_duration(raw.get("duration_seconds")),
-                              started_at=_stamp(raw.get("started_at")))
+                              started_at=_stamp(raw.get("started_at")),
+                              output_sha256=_sha256(raw.get("output_sha256")),
+                              output_bytes=_count_or_none(raw.get("output_bytes")))
     if raw.get("setup_failed") is True and check.status == CHECK_UNKNOWN:
         check.setup_failed = True
         check.reported_runner = _reported_runner(raw.get("reported_runner"))

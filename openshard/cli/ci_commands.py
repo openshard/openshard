@@ -7,9 +7,10 @@ import click
 
 def register_ci_commands(group: click.Group) -> None:
     from openshard.cli.fail_without_fix_cmd import ci_fail_without_fix
+    from openshard.cli.findings_cmd import ci_findings
     from openshard.cli.gate_cmd import ci_gate
 
-    for command in (ci_gate, ci_fail_without_fix):
+    for command in (ci_gate, ci_fail_without_fix, ci_findings):
         group.add_command(command)
 
 

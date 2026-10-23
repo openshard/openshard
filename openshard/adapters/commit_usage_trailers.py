@@ -43,6 +43,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -282,6 +283,9 @@ def _locked(path: Path) -> Iterator[None]:
     """Serialise parallel agents of one session on its state file (no lock where ``fcntl`` is missing)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_suffix(".lock"), "a+") as fh:
+        if sys.platform == "win32":
+            yield
+            return
         try:
             import fcntl
         except ImportError:  # Windows: cloud sessions run on Linux
