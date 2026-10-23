@@ -24,6 +24,8 @@ from typing import Any
 EVIDENCE_AGENT_REPORTED = "agent_reported"
 MAX_SUBAGENT_EDGES = 16
 SUBAGENT_EDGES_FIELD = "subagent_edges"
+SUBAGENT_RUNS_FIELD = "subagent_runs"
+SUBAGENT_COST_FIELD = "subagent_cost"
 
 # Hook-attribute keys the shared subagent fold already reads (``claude_hooks._SUBAGENT_ATTR_KEYS``).
 ATTR_CHILD_ID = "child_subagent_id"
@@ -129,11 +131,19 @@ def task_edges_block(entry: object) -> dict[str, Any] | None:
     children = _clean_edges(capture.get(SUBAGENT_EDGES_FIELD)) if isinstance(capture, dict) else []
     if parent is None and not children:
         return None
-    return {
+    block: dict[str, Any] = {
         "parent_task_id": parent,
         "parent_evidence": "declared" if parent else None,
         "children": children,
     }
+    # What each subagent did, when capture read it (adapters/claude_subagents.py).
+    runs = capture.get(SUBAGENT_RUNS_FIELD) if isinstance(capture, dict) else None
+    by_id = {r["agent_id"]: r for r in runs if isinstance(r, dict) and isinstance(r.get("agent_id"), str)} if isinstance(runs, list) else {}
+    if by_id:
+        block["children"] = [{**child, "run": by_id.get(child["agent_id"])} for child in children]
+        cost = capture.get(SUBAGENT_COST_FIELD) if isinstance(capture, dict) else None
+        block["subagent_cost"] = cost if isinstance(cost, dict) else None
+    return block
 
 
 def task_edge_lines(block: object) -> list[tuple[str, str]]:
@@ -145,9 +155,51 @@ def task_edge_lines(block: object) -> list[tuple[str, str]]:
         rows.append(("Parent task", f"{block['parent_task_id']} (declared)"))
     for child in block.get("children") or []:
         kind = f" {child['agent_type']}" if child.get("agent_type") else ""
+        run = child.get("run")
+        if isinstance(run, dict):
+            rows.append(("Subagent", f"{child['agent_id']}{kind} · {_run_text(run)}"))
+            continue
         state = "stopped" if child.get("stopped") else "started"
         rows.append(("Subagent", f"{child['agent_id']}{kind} · {state} (agent-reported)"))
+    cost = block.get("subagent_cost")
+    if isinstance(cost, dict) and cost.get("status") == "exceeds_session_total":
+        rows.append(("Subagent cost", f"${cost['subagents_usd']:.4f} est. is more than this Receipt's "
+                                      f"${cost['session_usd']:.4f}: the figures do not reconcile"))
     return rows
+
+
+def _seconds(start: object, end: object) -> float | None:
+    from datetime import datetime
+
+    try:
+        first = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        last = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (last - first).total_seconds() if start and end and last >= first else None
+
+
+def _run_text(run: dict) -> str:
+    """One subagent's recorded facts; anything not recorded says so, never 0."""
+    parts = []
+    parent = run.get("parent_agent")
+    parts.append("from lead" if parent == "lead" else f"from {parent}" if isinstance(parent, str) else "parent not recorded")
+    models = run.get("models") or []
+    parts.append(", ".join(models) if models else "model not recorded")
+    tokens = run.get("tokens")
+    if isinstance(tokens, dict):
+        parts.append(f"{tokens['total_tokens']:,} tokens" + (" (incomplete)" if run.get("tokens_incomplete") else ""))
+    else:
+        parts.append("tokens not recorded")
+    cost = run.get("cost_usd")
+    parts.append(f"${cost:.4f} est." if isinstance(cost, (int, float)) else "cost not recorded")
+    seconds = _seconds(run.get("started_at"), run.get("ended_at"))
+    if seconds is not None:
+        parts.append(f"{seconds:.0f}s")
+    calls = run.get("tool_calls")
+    parts.append(f"{calls} tool call{'' if calls == 1 else 's'}" if isinstance(calls, int) else "tool calls not recorded")
+    parts.append(f"{run.get('result') or 'unknown'} (agent-reported)")
+    return " · ".join(parts)
 
 
 __all__ = [
