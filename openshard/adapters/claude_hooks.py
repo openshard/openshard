@@ -174,8 +174,8 @@ from typing import Any
 
 from openshard.adapters import claude_session_fidelity as fidelity
 from openshard.adapters import claude_stop_failure as stop_failure
+from openshard.adapters import claude_subagents, merge_check
 from openshard.adapters import claude_turn_receipts as turns
-from openshard.adapters import merge_check
 from openshard.adapters.agent_env import PROVIDER_SOURCE_AGENT_ENV, claude_agent_env
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
 from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
@@ -341,10 +341,6 @@ _ATTR_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 # Which ``HookPayload.attrs`` reach an Event's metadata, per event family
 # (``sanitize_metadata`` keeps at most ten keys, so each list is short).
 _TOOL_ATTR_KEYS: tuple[str, ...] = ("duration_ms", "tool_status", "tool_call_id", "turn_id")
-_SUBAGENT_ATTR_KEYS: tuple[str, ...] = (
-    "child_role", "child_status", "duration_ms", "tool_calls", "child_subagent_id",
-    "child_session_id", "parent_subagent_id",
-)
 _APPROVAL_ATTR_KEYS: tuple[str, ...] = (
     "choice", "surface", "pattern_key", "decided_by", "tool_call_id", "turn_id",
 )
@@ -3399,6 +3395,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             # absent for agents whose hooks expose none.
             entry["capture"][count_key] = {n: int(raw_counts.get(n) or 0) for n in count_names}
     task_edges.stamp_subagent_edges(entry, buf)
+    claude_subagents.stamp_subagent_runs(entry, buf, agent=profile.key, session_cost=estimated_cost)
     if isinstance(buf.get("resumed_from_receipt_id"), str):
         # This receipt continues an agent session whose earlier receipt had
         # already ended (see _resumed_segment); that receipt is left as it was.
@@ -3811,36 +3808,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         return f"tool {tool} buffered", False, False
 
     if event in (EVENT_SUBAGENT_START, EVENT_SUBAGENT_STOP):
-        # A subagent the agent delegated work to (Hermes ``subagent_start`` /
-        # ``subagent_stop``). Counted and staged as agent-reported; the
-        # delegated goal and the child's summary are free text and are never
-        # stored. The child's own session, if it emits hooks, is its own Shard.
-        started = event == EVENT_SUBAGENT_START
-        counts = buf.get("subagents")
-        if not isinstance(counts, dict):
-            counts = buf["subagents"] = {}
-        child_status = payload.attrs.get("child_status")
-        failed_child = (not started) and child_status in ("failed", "error")
-        counts["started" if started else "stopped"] = int(counts.get("started" if started else "stopped") or 0) + 1
-        if failed_child:
-            counts["failed"] = int(counts.get("failed") or 0) + 1
-        task_edges.note_subagent(counts, payload.attrs, started=started)
-        meta: dict[str, Any] = {"hook": event}
-        for attr_key in _SUBAGENT_ATTR_KEYS:
-            if attr_key in payload.attrs:
-                meta[attr_key] = payload.attrs[attr_key]
-        role = payload.attrs.get("child_role")
-        if started:
-            action = f"subagent started (role={role})" if isinstance(role, str) else "subagent started"
-            status = "started"
-        else:
-            action = f"subagent stopped ({child_status})" if isinstance(child_status, str) else "subagent stopped"
-            status = "failed" if failed_child else "unknown"
-        _append_event(
-            buf, event_type="session.activity", action=action, status=status,
-            evidence="agent_reported", metadata=meta, occurred_at=now,
-        )
-        return ("subagent started" if started else "subagent stopped"), False, False
+        return claude_subagents.apply_subagent_event(buf, event, payload.attrs, now)
 
     if event in (EVENT_APPROVAL_REQUEST, EVENT_APPROVAL_DECISION):
         # The agent's human-approval gate (Hermes ``pre_approval_request`` /

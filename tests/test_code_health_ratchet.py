@@ -49,7 +49,7 @@ MODULE_LINE_BUDGETS = {
     # +7: `setup --no-commit-trailers` and the setup/doctor lines for agent commit trailers;
     # the logic lives in adapters/agent_commit_trailer.py.
     "openshard/cli/main.py": 8461,
-    "openshard/adapters/claude_hooks.py": 4556,
+    "openshard/adapters/claude_hooks.py": 4524,
     "openshard/native/context.py": 3742,
     # +3: the compact Receipt says agent-reported files are also in git's diff (ShardReceipt.agent_reported_in_git).
     "openshard/history/shard_contract.py": 1810,
@@ -69,7 +69,7 @@ FUNCTION_LINE_BUDGETS = {
     ("openshard/history/receipt_render.py", "render_full_shard_receipt"): 496,
     ("openshard/cli/main.py", "_render_log_entry"): 433,
     ("openshard/adapters/claude_hooks.py", "build_hook_entry"): 398,
-    ("openshard/adapters/claude_hooks.py", "_apply"): 367,
+    ("openshard/adapters/claude_hooks.py", "_apply"): 325,
     ("openshard/run/_pipeline_helpers.py", "_log_run"): 343,
     ("openshard/osn/agent_loop.py", "run_attempt_turns"): 334,
     ("openshard/native/context.py", "build_native_model_candidate_scoring"): 259,
@@ -99,7 +99,7 @@ COMPLEXITY_BUDGETS = {
     ("openshard/history/shard_contract.py", "build_shard_receipt"): 136,
     ("openshard/cli/osn_cmd.py", "osn_run"): 121,
     ("openshard/cli/main.py", "_render_log_entry"): 110,
-    ("openshard/adapters/claude_hooks.py", "_apply"): 93,
+    ("openshard/adapters/claude_hooks.py", "_apply"): 81,
     ("openshard/native/context.py", "build_native_model_candidate_scoring"): 93,
     ("openshard/adapters/claude_hooks.py", "build_hook_entry"): 84,
     ("openshard/osn/loop.py", "run_bounded_loop"): 82,
