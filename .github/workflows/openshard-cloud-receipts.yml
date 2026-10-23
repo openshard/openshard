@@ -310,14 +310,27 @@ jobs:
               local kind="$2"
               shift 2
               echo "Running $name..."
-              local rc=0
-              "$@" || rc=$?
+              # The output is shown in the log as before and hashed (sha256 and size),
+              # so the Receipt can show the check really ran without storing a byte of it.
+              local rc=0 out
+              out=$(mktemp)
+              # In a || list errexit is suspended, so a failing check is recorded, never fatal.
+              { "$@" 2>&1 | tee "$out"; rc=${PIPESTATUS[0]}; } || true
+              local output_sha256 output_bytes
+              # Portable (GNU and BSD/macOS): sha256sum or shasum, and wc for the size.
+              if command -v sha256sum >/dev/null; then
+                output_sha256=$(sha256sum "$out" | cut -d' ' -f1)
+              else
+                output_sha256=$(shasum -a 256 "$out" | cut -d' ' -f1)
+              fi
+              output_bytes=$(wc -c <"$out" | tr -d ' ')
+              rm -f "$out"
               local status="passed"
               if [[ $rc -ne 0 ]]; then
                 status="failed"
                 failed=1
               fi
-              checks=$(jq -c                 --arg name "$name"                 --arg kind "$kind"                 --arg status "$status"                 --argjson rc "$rc"                 '. + [{name:$name,kind:$kind,status:$status,exit_code:$rc}]' <<<"$checks")
+              checks=$(jq -c                 --arg name "$name"                 --arg kind "$kind"                 --arg status "$status"                 --argjson rc "$rc"                 --arg output_sha256 "$output_sha256"                 --argjson output_bytes "$output_bytes"                 '. + [{name:$name,kind:$kind,status:$status,exit_code:$rc,output_sha256:$output_sha256,output_bytes:$output_bytes}]' <<<"$checks")
             }
 
             run_check "Ruff" "lint" python -m ruff check .
