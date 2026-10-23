@@ -255,7 +255,9 @@ def test_written_file_that_git_ignores_is_warned(repo: Path) -> None:
 
 
 def _run(command: str, env: dict[str, str], stdin: str = "{}") -> subprocess.CompletedProcess:
-    return subprocess.run([SH, "-c", command], input=stdin, capture_output=True, text=True, env=env, timeout=20)
+    # Run from HOME, not the developer's checkout: hooks read ${CLAUDE_PROJECT_DIR:-.}/.claude/settings.local.json.
+    return subprocess.run([SH, "-c", command], input=stdin, capture_output=True, text=True, env=env, timeout=20,
+                          cwd=env["HOME"])
 
 
 def _env(tmp_path: Path, path: str, **extra: str) -> dict[str, str]:
