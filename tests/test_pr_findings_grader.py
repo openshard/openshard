@@ -143,3 +143,13 @@ def test_findings_name_paths_never_contents(tmp_path):
     head = _commit(root, {"tests/test_app.py": "SECRET_TOKEN = 1\n"})
     finding = _grader(root, base, head)
     assert finding is not None and "SECRET_TOKEN" not in repr(finding.to_dict())
+
+
+def test_an_unreadable_config_is_unknown_not_an_added_or_removed_check():
+    changed = pf.ChangedFile(path="setup.cfg", status="M")
+    config = "[flake8]\nmax-line-length = 100\n"
+    for missing in ("base", "head"):
+        def show(rev, _path):
+            return None if rev == missing else config
+
+        assert pf.grader_touched([changed], show, "base", "head") is None

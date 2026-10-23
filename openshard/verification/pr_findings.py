@@ -287,8 +287,11 @@ def _grader_category(f: ChangedFile, show: GitShow | None, base_rev: str | None,
     if reader is not None:
         if show is None or base_rev is None or head_rev is None:
             return None
-        before = reader(show(base_rev, f.old_path or f.path)) if f.status != "A" else reader(None)
-        after = reader(show(head_rev, f.path)) if f.status != "D" else reader(None)
+        before_text = show(base_rev, f.old_path or f.path) if f.status != "A" else ""
+        after_text = show(head_rev, f.path) if f.status != "D" else ""
+        if before_text is None or after_text is None:
+            return None
+        before, after = reader(before_text), reader(after_text)
         # A file that cannot be parsed on either side is not proof of anything; the diff is still visible.
         return "check_config" if before is not None and after is not None and before != after else None
     if is_test_path(f.old_path or f.path):
