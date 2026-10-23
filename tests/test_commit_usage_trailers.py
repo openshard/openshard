@@ -257,7 +257,12 @@ def test_append_to_replaces_the_declared_model_and_keeps_other_trailers(repo, tm
     assert "claude-opus-5.5" not in text and text.count("Openshard-Model:") == 1
     assert "Openshard-Usage-Scope: session-window\n" in text
     assert "Co-Authored-By: Claude" in text and "Openshard-Tokens-Cache-Creation-1h: 30\n" in text
+    # git matches trailer keys by prefix; the total cache write must survive its -1h part.
+    assert "Openshard-Tokens-Cache-Creation: 40\n" in text
     assert "\n\n" not in text.split("\n\n", 1)[1]  # one trailer block
+    result = _run("--append-to", str(msg), "--since", "2026-01-01T00:00:00Z", "--no-record")  # an amend: replaced, not doubled
+    again = msg.read_text(encoding="utf-8")
+    assert again.count("Openshard-Tokens-Cache-Creation: 40\n") == 1 and again.count("Openshard-Model:") == 1
 
 
 BASH = shutil.which("bash")
@@ -289,3 +294,36 @@ def test_workflow_prices_the_printed_trailers(repo, tmp_path, caller_known, prov
     assert expected is not None
     assert (model, creation, provenance) == ("claude-opus-5-5", "4000", provenance_expected)
     assert float(cost) == pytest.approx(expected.usd)
+
+
+def _hook_commit(repo: Path, env: dict) -> str:
+    """A real `git commit` through Openshard's prepare-commit-msg hook logic; the message it landed with."""
+    from openshard.adapters.agent_commit_trailer import run_git_hook
+
+    msg = repo / ".git" / "COMMIT_EDITMSG_TEST"
+    msg.write_text("Do the work\n", encoding="utf-8")
+    run_git_hook([str(msg)], env={**os.environ, **env})
+    return msg.read_text(encoding="utf-8")
+
+
+def test_a_cloud_commit_gets_its_usage_trailers_from_the_hook(repo, tmp_path):
+    _write(_transcript(tmp_path), [_msg("m1", "2026-02-01T00:00:00Z", o=42)])
+    text = _hook_commit(repo, {"CLAUDE_CODE_REMOTE": "true"})
+    assert "Openshard-Model: claude-opus-5-5" in text and "Openshard-Tokens-Output: 42" in text
+    _commit(repo)
+    again = _hook_commit(repo, {"CLAUDE_CODE_REMOTE": "true"})
+    assert "Openshard-Tokens" not in again  # claimed by the first commit: never counted twice
+
+
+@pytest.mark.parametrize("env", [
+    {},  # a laptop session: its hook-captured Receipt already holds the usage
+    {"CLAUDE_CODE_REMOTE": "true", "OPENSHARD_COMMIT_TRAILERS": "off"},
+    {"CLAUDE_CODE_REMOTE": "true", "GIT_REFLOG_ACTION": "rebase (pick)"},
+])
+def test_the_hook_adds_no_usage_outside_a_cloud_commit_of_ones_own(repo, tmp_path, env):
+    _write(_transcript(tmp_path), [_msg("m1", "2026-02-01T00:00:00Z", o=42)])
+    assert "Openshard-" not in _hook_commit(repo, env)
+
+
+def test_no_true_number_adds_nothing_and_never_blocks(repo, tmp_path):
+    assert _hook_commit(repo, {"CLAUDE_CODE_REMOTE": "true"}) == "Do the work\n"  # no transcript at all

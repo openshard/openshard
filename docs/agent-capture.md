@@ -1408,8 +1408,13 @@ Openshard-Cost-USD: 0.1234
 `Openshard-Tokens-Cache-Creation` is the total cache write; the optional
 `Openshard-Tokens-Cache-Creation-1h` names the part billed at the 1-hour rate.
 
-Claude Code cloud sessions do not add these themselves. Before committing, the
-agent runs `openshard usage trailers --append-to <message-file>` (or prints the
+Claude Code cloud sessions do not add these themselves. In a repository where
+`openshard setup` installed its `prepare-commit-msg` hook, the hook adds them to
+every commit made in a Claude Code cloud session (`CLAUDE_CODE_REMOTE`), unless
+commit trailers are opted out or a rebase is replaying commits; laptop sessions
+are left alone, since their hook-captured Receipt already holds the usage.
+Otherwise, before committing, the agent runs
+`openshard usage trailers --append-to <message-file>` (or prints the
 lines with `openshard usage trailers`). It writes `Openshard-Model`,
 `Openshard-Usage-Scope` and the token trailers for the usage no earlier commit
 has claimed, replacing any declared `Openshard-Model`, and prints a one-line

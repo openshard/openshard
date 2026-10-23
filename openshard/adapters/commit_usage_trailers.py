@@ -375,9 +375,30 @@ def usage_trailers(
     return lines
 
 
+def _drop_own_trailers(msg_file: Path, keys: set[str]) -> None:
+    """Remove trailer lines whose key is exactly one of *keys* from the message's last paragraph.
+
+    ``git interpret-trailers --if-exists replace`` matches keys by prefix, so
+    writing ``Openshard-Tokens-Cache-Creation-1h`` would also drop
+    ``Openshard-Tokens-Cache-Creation``. Exact keys are removed here and the
+    new lines are then added.
+    """
+    text = msg_file.read_text(encoding="utf-8")
+    body, sep, block = text.rstrip("\n").rpartition("\n\n")
+    if not sep:
+        return
+    kept = [ln for ln in block.split("\n") if ln.split(":", 1)[0].strip().lower() not in keys]
+    msg_file.write_text(body + ("\n\n" + "\n".join(kept) if kept else "") + "\n", encoding="utf-8")
+
+
 def append_trailers(msg_file: Path, lines: list[str]) -> None:
-    """Add *lines* to a commit message file's trailer block (``git interpret-trailers``)."""
-    args = ["git", "interpret-trailers", "--in-place", "--if-exists", "replace"]
+    """Add *lines* to a commit message file's trailer block (``git interpret-trailers``),
+    replacing any trailer with exactly the same key."""
+    try:
+        _drop_own_trailers(msg_file, {line.split(":", 1)[0].strip().lower() for line in lines})
+    except OSError as exc:
+        raise UsageUnavailable(f"Could not add trailers to {msg_file}: {exc}") from exc
+    args = ["git", "interpret-trailers", "--in-place", "--if-exists", "add"]
     for line in lines:
         args += ["--trailer", line]
     try:
