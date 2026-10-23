@@ -284,6 +284,31 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "output_sha256": {
+                      "description": "sha256 of everything the check printed (stdout and stderr). Never the output itself.",
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "output_bytes": {
+                      "description": "Size in bytes of the output output_sha256 covers.",
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
                     }
                   },
                   "required": [
