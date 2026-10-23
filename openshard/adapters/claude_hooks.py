@@ -176,9 +176,11 @@ from openshard.adapters import claude_session_fidelity as fidelity
 from openshard.adapters import claude_stop_failure as stop_failure
 from openshard.adapters import claude_subagents, merge_check
 from openshard.adapters import claude_turn_receipts as turns
-from openshard.adapters.agent_env import PROVIDER_SOURCE_AGENT_ENV, claude_agent_env
+from openshard.adapters.agent_env import agent_host_or_none as _agent_host_or_none
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
 from openshard.adapters.agent_env import agent_surface_or_none as _agent_surface_or_none
+from openshard.adapters.agent_env import apply_agent_env as apply_agent_env
+from openshard.adapters.agent_env import claude_agent_env, note_agent_env
 from openshard.adapters.agent_env import cloud_session_or_none as _cloud_session_or_none
 from openshard.adapters.billing_basis import billing_basis_or_none
 from openshard.adapters.capture_agents import (
@@ -515,6 +517,7 @@ class HookPayload:
     # environment's CLAUDE_CODE_REMOTE_SESSION_ID; see ``claude_agent_env``.
     agent_cloud_session: str | None = None
     agent_billing_basis: str | None = None  # Claude Code / Codex; see adapters/billing_basis.py
+    agent_host: str | None = None  # "<ran_on>|<app>"; see agent_env.claude_host
 
 
 OUTCOME_PASSED = "passed"
@@ -760,17 +763,6 @@ def _claude_command_outcome(
 # ---------------------------------------------------------------------------
 # Agent environment (provider / surface; see adapters/agent_env.py)
 # ---------------------------------------------------------------------------
-
-
-def apply_agent_env(payload: HookPayload, agent_env: Mapping[str, str] | None) -> None:
-    """Attach a validated agent environment: Claude Code takes all of it, Codex its billing basis, others nothing."""
-    if not agent_env or payload.agent not in (AGENT_CLAUDE_CODE, AGENT_CODEX):
-        return
-    payload.agent_billing_basis = billing_basis_or_none(agent_env.get("billing_basis"))
-    if payload.agent == AGENT_CLAUDE_CODE:
-        payload.agent_provider = _agent_provider_or_none(agent_env.get("provider"))
-        payload.agent_surface = _agent_surface_or_none(agent_env.get("surface"))
-        payload.agent_cloud_session = _cloud_session_or_none(agent_env.get("cloud_session"))
 
 
 # ---------------------------------------------------------------------------
@@ -1265,7 +1257,7 @@ def _summarize_command(command: str | None, label: str) -> tuple[str, str | None
 # Optional scalar fields ``ReducedHookPayload.to_dict`` writes last, only when set,
 # so queue lines of every other event keep their shape.
 _OPTIONAL_TAIL_KEYS = ("task_id", "transcript_path", "agent_provider", "effort_level", "permission_mode",
-                       "agent_surface", "agent_cloud_session", "agent_billing_basis")
+                       "agent_surface", "agent_cloud_session", "agent_billing_basis", "agent_host")
 
 
 @dataclass
@@ -1324,6 +1316,7 @@ class ReducedHookPayload:
     agent_surface: str | None = None
     agent_cloud_session: str | None = None  # see HookPayload.agent_cloud_session
     agent_billing_basis: str | None = None  # see HookPayload.agent_billing_basis
+    agent_host: str | None = None  # see HookPayload.agent_host
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {
@@ -1447,6 +1440,7 @@ class ReducedHookPayload:
             agent_surface=_agent_surface_or_none(data.get("agent_surface")),
             agent_cloud_session=_cloud_session_or_none(data.get("agent_cloud_session")),
             agent_billing_basis=billing_basis_or_none(data.get("agent_billing_basis")),
+            agent_host=_agent_host_or_none(data.get("agent_host")),
         )
 
 
@@ -1533,6 +1527,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         agent_surface=_agent_surface_or_none(payload.agent_surface),
         agent_cloud_session=_cloud_session_or_none(payload.agent_cloud_session),
         agent_billing_basis=billing_basis_or_none(payload.agent_billing_basis),
+        agent_host=_agent_host_or_none(payload.agent_host),
     )
     if payload.event == EVENT_USER_PROMPT_SUBMIT and fidelity.prompt_source(payload.prompt):
         reduced.attrs = {**reduced.attrs, "prompt_source": fidelity.PROMPT_SOURCE_AGENT_NOTIFICATION}
@@ -1940,7 +1935,7 @@ def _buffer_from_entry(entry: dict, session_id: str) -> dict | None:
         ),
         "provider_current": capture.get("provider") if isinstance(capture.get("provider"), str) else None,
         "provider_source": capture.get("provider_source") if isinstance(capture.get("provider_source"), str) else None,
-        "surface": _agent_surface_or_none(capture.get("surface")), "billing_basis": billing_basis_or_none(capture.get("billing_basis")),
+        "surface": _agent_surface_or_none(capture.get("surface")), "billing_basis": billing_basis_or_none(capture.get("billing_basis")), "agent_host": _agent_host_or_none(capture.get("agent_host")),
         "effort_level": _effort_level(capture.get("effort_level")),
         "effort_levels_seen": [v for v in capture.get("effort_levels_seen", []) if _effort_level(v)]
         if isinstance(capture.get("effort_levels_seen"), list) else [],
@@ -3406,6 +3401,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     if surface:
         # How the agent was launched (Claude Code: CLAUDE_CODE_ENTRYPOINT, raw).
         entry["capture"]["surface"] = surface
+    if _agent_host_or_none(buf.get("agent_host")):
+        entry["capture"]["agent_host"] = buf["agent_host"]  # where it ran and in which app (agent_env.claude_host)
     if billing_basis_or_none(buf.get("billing_basis")):
         entry["capture"]["billing_basis"] = buf["billing_basis"]
     if _effort_level(buf.get("effort_level")):
@@ -3580,17 +3577,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
             baseline = read_codex_transcript_usage(Path(payload.transcript_path), payload.session_id)
             if baseline is not None and baseline.get("complete") is True:
                 buf["codex_usage_baseline"] = baseline.get("totals")
-    if payload.agent_provider and not buf.get("provider_current"):
-        # First observation wins: a session's environment does not change.
-        buf["provider_current"] = payload.agent_provider
-        buf["provider_source"] = PROVIDER_SOURCE_AGENT_ENV
-    if payload.agent_surface and not buf.get("surface"):
-        buf["surface"] = payload.agent_surface
-    if payload.agent_cloud_session and not buf.get("cloud_session_id"):
-        # First observation wins: one cloud session per hosted VM.
-        buf["cloud_session_id"] = payload.agent_cloud_session
-    if payload.agent_billing_basis:  # a fresh environment observation replaces a carried one
-        buf["billing_basis"] = payload.agent_billing_basis
+    note_agent_env(buf, payload)
     for key in ("herdr_delegated", "herdr_terminals"):
         if getattr(payload, key):
             seen = herdr_delegated_or_none(buf.get(key)) or []

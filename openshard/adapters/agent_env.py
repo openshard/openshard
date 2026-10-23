@@ -84,12 +84,66 @@ def claude_agent_env(env: Mapping[str, str] | None) -> dict[str, str]:
         match = _CLOUD_SESSION_ENV_RE.match(str(env.get("CLAUDE_CODE_REMOTE_SESSION_ID") or "").strip())
         if match and _env_flag(env.get("CLAUDE_CODE_REMOTE")):
             out["cloud_session"] = f"session_{match.group(1)}"
+        host = claude_host(env)
+        if host:
+            out["host"] = host
     except Exception:
         return {}
     billing = claude_billing_basis(env)
     if billing != UNKNOWN:
         out["billing_basis"] = billing
     return out
+
+
+# Where the agent ran, from its own environment: (variable, value or "" for any, ran_on token).
+_CI_VARS: tuple[tuple[str, str], ...] = (
+    ("GITHUB_ACTIONS", "ci:github_actions"), ("GITLAB_CI", "ci:gitlab"), ("BUILDKITE", "ci:buildkite"),
+    ("CIRCLECI", "ci:circleci"), ("JENKINS_URL", "ci:jenkins"), ("CI", "ci:other"),
+)
+_CLOUD_DEV_VARS: tuple[tuple[str, str], ...] = (("CODESPACES", "cloud_dev:codespaces"), ("GITPOD_WORKSPACE_ID", "cloud_dev:gitpod"))
+# The app Claude Code ran in: its entrypoint first, then the terminal that launched it.
+_ENTRYPOINT_APPS = {"claude-vscode": "vscode", "claude-desktop": "claude_desktop", "remote_desktop": "claude_desktop",
+                    "remote_mobile": "claude_mobile", "remote": "claude_web", "remote_web": "claude_web"}
+_TERM_APPS = {"vscode": "vscode", "iTerm.app": "iterm2", "Apple_Terminal": "macos_terminal", "WezTerm": "wezterm",
+              "ghostty": "ghostty", "WarpTerminal": "warp", "tmux": "tmux", "Hyper": "hyper", "kitty": "kitty"}
+_HOST_RE = re.compile(r"^[a-z][a-z0-9_:]{0,40}\|(?:[a-z][a-z0-9_]{0,30})?$")
+
+
+def agent_host_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and _HOST_RE.match(value) else None
+
+
+def claude_host(env: Mapping[str, str] | None) -> str | None:
+    """``"<ran_on>|<app>"`` for a Claude Code session, from its hook environment; None when not known.
+
+    ran_on: ``cloud_agent:claude_code`` (``CLAUDE_CODE_REMOTE``), ``ci:<name>``
+    (a CI runner's own variable), ``cloud_dev:<name>`` (Codespaces, Gitpod),
+    else ``local`` (this machine: a laptop or a server the person runs, not a
+    known cloud agent or CI). app (may be empty): from ``CLAUDE_CODE_ENTRYPOINT``
+    (``claude-vscode`` is VS Code), else ``TERMINAL_EMULATOR`` (JetBrains) or
+    ``TERM_PROGRAM`` (iTerm2, VS Code's terminal...), else ``terminal`` for the
+    plain ``cli`` entrypoint and ``sdk`` for headless ``sdk-*``. Only these
+    tokens are recorded, never an environment value. Never raises.
+    """
+    if not isinstance(env, Mapping):
+        return None
+    try:
+        entry = str(env.get("CLAUDE_CODE_ENTRYPOINT") or "").strip()
+        if _env_flag(env.get("CLAUDE_CODE_REMOTE")):
+            ran_on = "cloud_agent:claude_code"
+        else:
+            ran_on = next((token for var, token in (*_CI_VARS, *_CLOUD_DEV_VARS) if _env_flag(env.get(var))), "local")
+        app = _ENTRYPOINT_APPS.get(entry)
+        if app is None and not ran_on.startswith("cloud_agent"):
+            if str(env.get("TERMINAL_EMULATOR") or "").startswith("JetBrains"):
+                app = "jetbrains"
+            else:
+                app = _TERM_APPS.get(str(env.get("TERM_PROGRAM") or "").strip())
+        if app is None:
+            app = "terminal" if entry == "cli" else "sdk" if entry.startswith("sdk-") else ""
+        return agent_host_or_none(f"{ran_on}|{app}")
+    except Exception:
+        return None
 
 
 def codex_agent_env(env: Mapping[str, str] | None) -> dict[str, str]:
@@ -105,6 +159,36 @@ def agent_environment(agent: str, env: Mapping[str, str] | None) -> dict[str, st
     if agent == "codex":
         return codex_agent_env(env)
     return None
+
+
+def apply_agent_env(payload, agent_env: Mapping[str, str] | None) -> None:
+    """Attach a validated agent environment to a hook payload (moved from ``claude_hooks``):
+    Claude Code takes all of it, Codex its billing basis, others nothing."""
+    if not agent_env or payload.agent not in ("claude_code", "codex"):
+        return
+    payload.agent_billing_basis = billing_basis_or_none(agent_env.get("billing_basis"))
+    if payload.agent == "claude_code":
+        payload.agent_provider = agent_provider_or_none(agent_env.get("provider"))
+        payload.agent_surface = agent_surface_or_none(agent_env.get("surface"))
+        payload.agent_cloud_session = cloud_session_or_none(agent_env.get("cloud_session"))
+        payload.agent_host = agent_host_or_none(agent_env.get("host"))
+
+
+def note_agent_env(buf: dict, payload) -> None:
+    """Fold a hook payload's agent environment into the session buffer (moved from ``claude_hooks._apply``)."""
+    if payload.agent_provider and not buf.get("provider_current"):
+        # First observation wins: a session's environment does not change.
+        buf["provider_current"] = payload.agent_provider
+        buf["provider_source"] = PROVIDER_SOURCE_AGENT_ENV
+    if payload.agent_surface and not buf.get("surface"):
+        buf["surface"] = payload.agent_surface
+    if payload.agent_host and not buf.get("agent_host"):
+        buf["agent_host"] = payload.agent_host  # first observation wins, like the surface
+    if payload.agent_cloud_session and not buf.get("cloud_session_id"):
+        # First observation wins: one cloud session per hosted VM.
+        buf["cloud_session_id"] = payload.agent_cloud_session
+    if payload.agent_billing_basis:  # a fresh environment observation replaces a carried one
+        buf["billing_basis"] = payload.agent_billing_basis
 
 
 def format_agent_env(agent_env: Mapping[str, str] | None) -> str | None:
@@ -124,6 +208,9 @@ def format_agent_env(agent_env: Mapping[str, str] | None) -> str | None:
     billing = billing_basis_or_none(agent_env.get("billing_basis"))
     if billing and billing != UNKNOWN:
         parts.append(f"billing={billing}")
+    host = agent_host_or_none(agent_env.get("host"))
+    if host:
+        parts.append(f"host={host}")
     return ";".join(parts) or None
 
 
@@ -151,4 +238,6 @@ def parse_agent_env(value: object) -> dict[str, str]:
             billing = billing_basis_or_none(raw.strip())
             if billing and billing != UNKNOWN:
                 out["billing_basis"] = billing
+        elif key == "host" and (host := agent_host_or_none(raw.strip())):
+            out["host"] = host
     return out

@@ -41,6 +41,45 @@ def _docs(repo: Path, sid: str = SID) -> list[dict]:
     ]
 
 
+class TestHost:
+    """Where Claude Code ran and in which app, from its own environment only."""
+
+    @pytest.mark.parametrize(("env", "host"), [
+        ({"CLAUDE_CODE_REMOTE": "true", "CLAUDE_CODE_ENTRYPOINT": "remote_desktop"}, "cloud_agent:claude_code|claude_desktop"),
+        ({"CLAUDE_CODE_REMOTE": "true", "CLAUDE_CODE_ENTRYPOINT": "something_new"}, "cloud_agent:claude_code|"),
+        ({"CLAUDE_CODE_ENTRYPOINT": "claude-vscode"}, "local|vscode"),
+        ({"CLAUDE_CODE_ENTRYPOINT": "cli", "TERM_PROGRAM": "iTerm.app"}, "local|iterm2"),
+        ({"CLAUDE_CODE_ENTRYPOINT": "cli", "TERMINAL_EMULATOR": "JetBrains-JediTerm"}, "local|jetbrains"),
+        ({"CLAUDE_CODE_ENTRYPOINT": "cli", "TERM_PROGRAM": "SomethingElse"}, "local|terminal"),
+        ({"CLAUDE_CODE_ENTRYPOINT": "sdk-cli", "GITHUB_ACTIONS": "true", "CI": "true"}, "ci:github_actions|sdk"),
+        ({"CLAUDE_CODE_ENTRYPOINT": "sdk-ts", "CI": "1"}, "ci:other|sdk"),
+        ({"CLAUDE_CODE_ENTRYPOINT": "cli", "CODESPACES": "true"}, "cloud_dev:codespaces|terminal"),
+        ({"CLAUDE_CODE_ENTRYPOINT": "cli", "CI": "false"}, "local|terminal"),
+    ])
+    def test_ran_on_and_app(self, env, host):
+        from openshard.adapters.agent_env import claude_host
+
+        assert claude_host(env) == host
+
+    def test_it_reaches_the_receipt_as_ran_on_and_agent_app(self, repo: Path):
+        from openshard.sync.envelope import build_envelope
+
+        env = {"CLAUDE_PROJECT_DIR": str(repo), "CLAUDE_CODE_ENTRYPOINT": "claude-vscode"}
+        for doc in _docs(repo):
+            handle_claude_hook(doc, env=env)
+        (entry,) = _lines(repo)
+        assert entry["capture"]["agent_host"] == "local|vscode"
+        receipt = build_envelope(entry, 0, core_version="x")["receipt"]
+        assert receipt["ran_on"] == {"kind": "local", "name": None, "source": "agent_env"}
+        assert receipt["agent_app"] == {"name": "vscode", "source": "agent_env"}
+
+    def test_openshard_runs_read_openshard_and_unrecorded_stays_absent(self):
+        from openshard.sync.envelope import host_blocks
+
+        assert host_blocks({"origin": "openshard_routed"}) == {"ran_on": {"kind": "openshard", "name": None, "source": "openshard"}}
+        assert host_blocks({"capture": {}}) == {} and host_blocks({"capture": {"agent_host": "bad value"}}) == {}
+
+
 class TestDerivation:
     @pytest.mark.parametrize(("env", "expected"), [
         ({}, {"provider": "anthropic"}),
@@ -56,7 +95,9 @@ class TestDerivation:
         ({"CLAUDE_CODE_ENTRYPOINT": "has spaces/and slashes"}, {"provider": "anthropic"}),
     ])
     def test_provider_and_surface(self, env, expected):
-        assert claude_agent_env(env) == expected
+        derived = claude_agent_env(env)
+        assert derived.pop("host").startswith("local|")  # where it ran: tested in TestHost
+        assert derived == expected
 
     def test_header_round_trip_and_malformed_values_are_dropped(self):
         value = format_agent_env({"provider": "amazon_bedrock", "surface": "sdk-cli"})
@@ -168,7 +209,7 @@ class TestCaptureServicePath:
                "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
         assert client._run_hook_raw(raw, env, event_override=None, agent="claude_code", spawn=False) == "forwarded"
         (call,) = sent
-        assert call["headers"][client.AGENT_ENV_HEADER] == "provider=google_vertex;surface=sdk-cli"
+        assert call["headers"][client.AGENT_ENV_HEADER] == "provider=google_vertex;surface=sdk-cli;host=local|sdk"
         assert call["body"] == raw
 
     def test_other_agents_send_no_agent_env(self, sent, tmp_path: Path):

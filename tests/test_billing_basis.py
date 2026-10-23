@@ -459,7 +459,7 @@ class TestTransport:
         agent_env = claude_agent_env(env)
         header = format_agent_env(agent_env)
         assert agent_env["billing_basis"] == "api_billed"
-        assert header == "provider=anthropic;surface=sdk-cli;billing=api_billed"
+        assert header == "provider=anthropic;surface=sdk-cli;billing=api_billed;host=local|sdk"
         assert parse_agent_env(header)["billing_basis"] == "api_billed"
         assert SECRET not in json.dumps(agent_env) and SECRET not in header
 
