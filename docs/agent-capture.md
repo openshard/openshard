@@ -1420,6 +1420,16 @@ lines with `openshard usage trailers`). It writes `Openshard-Model`,
 has claimed, replacing any declared `Openshard-Model`, and prints a one-line
 summary (scope, tokens, list-rate estimate) to stderr.
 
+Codex gives the commands it runs its thread id (`CODEX_THREAD_ID`). In a Codex
+thread Openshard did not capture, the same hook adds `Openshard-Model`,
+`Openshard-Usage-Scope: agent` and the input, output and cache-read token
+trailers from that thread's own cumulative `token_count`
+(`$CODEX_HOME/sessions/.../rollout-*-<thread>.jsonl`), each token claimed by one
+commit (`~/.openshard/usage-trailers/codex-<thread>.json`). Codex reports no
+cache writes, so no `Cache-Creation` trailer is written. A thread served by
+several models, or with a malformed counter, gets no usage trailers. A thread
+Openshard captured is left alone: its Receipt already holds the usage.
+
 - `Openshard-Usage-Scope: agent`: only the committing agent's own transcript.
   Claude Code gives commands no agent id, but each transcript (main thread
   `<session>.jsonl`, subagents `<session>/subagents/agent-<id>.jsonl`) records
