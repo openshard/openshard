@@ -138,6 +138,7 @@ classified:
 | `git_observed` | the repository changed; no agent signal; actor not established (a human, another tool, or an agent without a success signal such as Codex) | yes, labelled as git-observed |
 | `pre_existing` | already dirty/untracked at session start and content unchanged since | **no** -- listed as excluded |
 | `other_session` | reported by another live agent session in the same repository | **no** -- listed as excluded |
+| `other_commit` | changed only in commits since the session's base whose `Openshard-Agent` (or `Claude-Session`) trailer names a different agent, not reported by this session, and unchanged in the working tree since; an unmarked commit stays `git_observed` | **no** -- listed as excluded |
 
 A pre-existing file that changed again during the session is
 `git_observed` with `pre_existing: true` (never hidden); a pre-existing

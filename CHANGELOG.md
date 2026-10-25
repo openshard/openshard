@@ -2,6 +2,14 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Files another agent changed and committed during a Claude Code turn (for
+  example a Codex commit) are no longer counted as that turn's work when the
+  commit carries the other agent's `Openshard-Agent` trailer.
+
 ## 0.5.0 - 2026-10-25
 
 <!-- release-title: Openshard v0.5.0 - Verified Receipts Across Agents -->

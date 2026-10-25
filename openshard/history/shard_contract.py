@@ -851,12 +851,12 @@ def _workspace_folder_name(raw: object) -> str | None:
     return Path(value).name or None
 
 
-_EXCLUDED_ATTRIBUTIONS = frozenset({"pre_existing", "other_session"})
+_EXCLUDED_ATTRIBUTIONS = frozenset({"pre_existing", "other_session", "other_commit"})
 _ATTRIBUTION_TAGS: dict[str, str] = {
     "agent_reported": "agent-reported",
     "git_observed": "git-observed",
     "pre_existing": "pre-existing",
-    "other_session": "other session",
+    "other_session": "other session", "other_commit": "another agent's commit",
 }
 
 
@@ -967,6 +967,8 @@ def excluded_changes_rows(receipt: ShardReceipt) -> list[str]:
         rows.append(_row("Excluded", f"{pre} pre-existing (changed before the {'turn' if ((receipt.recorded_evidence or {}).get('session') or {}).get('receipt_scope') == 'turn' else 'session'})"))
     if other:
         rows.append(_row("Excluded", f"{other} other-session (reported by another agent session)"))
+    if commits := sum(1 for f in receipt.files_excluded if f.get("attribution") == "other_commit"):
+        rows.append(_row("Excluded", f"{commits} other-agent commit (changed only in another agent's commit)"))
     return rows
 
 
