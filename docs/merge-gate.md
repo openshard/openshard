@@ -168,6 +168,27 @@ not each commit in the branch. Verification evidence is bound to one exact
 commit; the head is the content being merged. A new push changes the head
 and the gate runs again. For a `push` event, the pushed commit is gated.
 
+### After "Update branch"
+
+Updating an agent's pull request from its base branch (GitHub's "Update
+branch", or `git merge main`) adds a merge commit with no agent marks. Nobody
+makes a Receipt for it, so the head has none. When the Platform has no
+Receipt for the head, the gate walks back along first parents and judges the
+agent's change on the agent's own last commit instead, but only when every
+commit above it:
+
+- has two parents and no agent marks;
+- brings in only commits already on the base branch;
+- has exactly the tree git's own merge of its parents gives, so it adds no
+  edits of its own (no conflict resolution, no extra change).
+
+The summary says so: "the agent's last commit `<sha>` is verified, and the
+later commit only merges the base branch in". That commit's Receipt decides:
+verified passes, failed or unfinished fails, none fails as an agent change
+without a Receipt. Anything else above the agent's commit (a plain commit, a
+merge that resolves conflicts or edits, a merge of another branch) is judged
+on the head as before. Merge queues are unaffected.
+
 ### Merge queues
 
 In a merge queue (`merge_group`) GitHub tests a temporary commit that
