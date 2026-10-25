@@ -276,6 +276,47 @@ def render_findings(findings: list[dict] | None) -> list[str]:
     return out
 
 
+def _carried_outcome(carried: dict[str, Any] | None) -> tuple[dict[str, Any], str, str, str] | None:
+    """(answer, verdict, status, headline) from the agent's last commit when the head only merges the
+    base branch in (``ci/base_merges.py``), or None when that commit has no Receipt either."""
+    answer = carried.get("platform") if isinstance(carried, dict) else None
+    status = answer.get("status") if isinstance(answer, dict) else None
+    if not isinstance(answer, dict) or status not in ("verified", "failed", "pending"):
+        return None
+    agent = _short((carried or {}).get("agent_commit"))
+    later = len((carried or {}).get("merges") or [])
+    merged = f"{later} later commit{'' if later == 1 else 's'} only merge{'s' if later == 1 else ''} the base branch in"
+    if status == "verified":
+        return answer, status, STATUS_PASS, (f"Verified: the agent's last commit {agent} is verified, "
+                                             f"and the {merged}, cleanly and with no agent marks.")
+    if status == "failed":
+        return answer, status, STATUS_FAIL, f"Failed: verification failed for the agent's last commit {agent}."
+    return answer, status, STATUS_FAIL, (f"Failed: verification of the agent's last commit {agent} "
+                                         "had not finished when the gate stopped waiting.")
+
+
+def _no_receipt_outcome(agent_marks: list[str] | None, waited_minutes: float | None, policy: object) -> tuple[str, str]:
+    """(status, headline) when nothing has a Receipt: decided by the agent marks and the team policy."""
+    if agent_marks is None:
+        return STATUS_FAIL, ("Failed: no Receipt for this commit, and the pull request's commits "
+                             "could not be read to tell whether an agent made them "
+                             "(check out with `fetch-depth: 0`).")
+    if agent_marks:
+        names = ", ".join(agent_marks[:_MAX_MARKS])
+        waited = f" The gate waited {waited_minutes:g} min for one." if waited_minutes else ""
+        return STATUS_FAIL, f"Failed: an agent changed code but there is no Receipt (found {names}).{waited}"
+    if policy == "agent_prs":
+        return STATUS_PASS, HUMAN_CHANGE
+    return STATUS_FAIL, "Failed: no Receipt for this commit, and the team requires one for every pull request."
+
+
+def _carried_meta(carried: dict[str, Any] | None, outcome: tuple | None, answer: object) -> list[str]:
+    """The summary note when the answer shown is the agent's last commit's, not the head's."""
+    if outcome is None or answer is not outcome[0]:
+        return []
+    return ["merges the base branch in", f"evidence for the agent's last commit `{_short((carried or {}).get('agent_commit'))}`"]
+
+
 def decide(
     sha: str,
     platform: dict[str, Any] | PlatformError,
@@ -298,10 +339,7 @@ def decide(
     """
     receipts: list[dict] = []
     answer = platform.last if isinstance(platform, PlatformError) else platform
-    carried_answer = carried.get("platform") if isinstance(carried, dict) else None
-    carried_status = carried_answer.get("status") if isinstance(carried_answer, dict) else None
-    agent_sha = carried.get("agent_commit") if isinstance(carried, dict) else None
-    later = len(carried.get("merges") or []) if isinstance(carried, dict) else 0
+    carried_outcome = _carried_outcome(carried)
     if isinstance(platform, PlatformError):
         verdict, status = platform.kind, STATUS_FAIL
         headline = f"Failed: {platform.message}"
@@ -320,42 +358,17 @@ def decide(
                                              "for this commit).")
         elif local_verdict == "failed":
             status, headline = STATUS_FAIL, "Failed: evidence on this runner says verification failed."
-        elif carried_status in ("verified", "failed", "pending"):
-            # The head only merges the base branch in, cleanly and with no agent marks: the agent's
-            # change is judged on its own last commit, whose Receipt the Platform holds.
-            answer, verdict = carried_answer, str(carried_status)
-            merged = f"{later} later commit{'' if later == 1 else 's'} only merge{'s' if later == 1 else ''} the base branch in"
-            if carried_status == "verified":
-                status, headline = STATUS_PASS, (f"Verified: the agent's last commit {_short(agent_sha)} is verified, "
-                                                 f"and the {merged}, cleanly and with no agent marks.")
-            elif carried_status == "failed":
-                status, headline = STATUS_FAIL, f"Failed: verification failed for the agent's last commit {_short(agent_sha)}."
-            else:
-                status, headline = STATUS_FAIL, (f"Failed: verification of the agent's last commit {_short(agent_sha)} "
-                                                 "had not finished when the gate stopped waiting.")
-        elif agent_marks is None:
-            status, headline = STATUS_FAIL, ("Failed: no Receipt for this commit, and the pull request's commits "
-                                             "could not be read to tell whether an agent made them "
-                                             "(check out with `fetch-depth: 0`).")
-        elif agent_marks:
-            names = ", ".join(agent_marks[:_MAX_MARKS])
-            waited = f" The gate waited {waited_minutes:g} min for one." if waited_minutes else ""
-            status, headline = STATUS_FAIL, (f"Failed: an agent changed code but there is no Receipt "
-                                             f"(found {names}).{waited}")
-        elif policy == "agent_prs":
-            status, headline = STATUS_PASS, HUMAN_CHANGE
+        elif carried_outcome is not None:
+            # The head only merges the base branch in (ci/base_merges.py): judged on the agent's own last commit.
+            answer, verdict, status, headline = carried_outcome
         else:
-            status, headline = STATUS_FAIL, ("Failed: no Receipt for this commit, and the team requires one for "
-                                             "every pull request.")
+            status, headline = _no_receipt_outcome(agent_marks, waited_minutes, policy)
 
     title = "Passed" if status == STATUS_PASS else "Failed"
     # The heading already says Failed; the reason is not prefixed with it again.
     reason = headline[len("Failed: "):] if headline.startswith("Failed: ") else headline
     lines = [f"### Openshard gate · {title}", "", _cell(reason[:1].upper() + reason[1:])]
-    meta = [f"Commit `{_short(sha)}`"]
-    if answer is carried_answer and carried_answer is not None:
-        meta = [f"Commit `{_short(sha)}` merges the base branch in",
-                f"evidence for the agent's last commit `{_short(agent_sha)}`"]
+    meta = [f"Commit `{_short(sha)}`", *_carried_meta(carried, carried_outcome, answer)]
     if isinstance(answer, dict):
         meta += [f"Platform answer {_cell(answer.get('status'))}", f"checked {_cell(answer.get('checked_at'))}"]
     lines += ["", " · ".join(meta)]
