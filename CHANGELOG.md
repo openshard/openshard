@@ -53,7 +53,9 @@ reviewers understand a change. Unknown facts stay unknown.
 
 - Setup reports ready only after a Receipt reaches the Platform and names
   the check Openshard will re-run, or explains how to configure one.
-- Codex commits now record the model and per-commit input, output and cache-read token counts when a supported local Codex thread exposes them (#675).
+- Codex commits now record the model and per-commit input, output and
+  cache-read token counts when a supported local Codex thread exposes them
+  (#675).
 - Commit trailers attribute usage to the committing agent when identifiable
   and label a shared session window otherwise. Receipt costs record token,
   rate and billing provenance instead of presenting estimates as charges.
