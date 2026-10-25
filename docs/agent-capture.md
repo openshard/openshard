@@ -689,6 +689,23 @@ external agent completes
   found, timed out) or nothing was planned, `0` otherwise. The attestation is
   recorded in every case. A future release may make strict the default
   behind a deprecation notice; until then the default stays evidence-only.
+* **`--commit <sha>`** picks checks from what the commit changed
+  (`verification/change_checks.py`); a configured `verification_commands`
+  contract always wins. When every changed path is documentation, nothing
+  runs and the attestation is `not_run` with `no_checks_applicable`, shown
+  as `No checks needed: documentation-only change (nothing run; not
+  verified)`. It is never verified, passed or failed, has no
+  `artifact_sha`, and is sent to the Platform as `not_run`. Documentation
+  means: `*.md`, `*.rst`, `*.txt`, `*.adoc` and `.gitignore` at the
+  repository root; text and images under `docs/` or `doc/`; and README,
+  LICENSE, CHANGELOG and similar files anywhere. Paths under test, fixture,
+  `.github/` or dependency folders, `requirements*.txt`, config files and any
+  other nested Markdown (it may be package data) are code, so the normal
+  selection, and its whole-suite fallback, still applies.
+* **Timeouts.** A check stopped by `--timeout` (default 600 seconds) is
+  `unknown`, and the CLI says so plainly: `<check> timed out after 600s and
+  was stopped, so the outcome is unknown (not passed, not failed). To allow
+  longer, re-run with --timeout SECONDS`.
 * **Observed commands** are re-run only on request, only when the stored
   summary is complete (not redacted, not at the 100-character cap where it
   may be truncated), and only when classified safe. Shell chaining is

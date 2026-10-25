@@ -485,3 +485,193 @@ class TestSyncAfterAutoVerify:
         calls = self._flushes(monkeypatch)
         assert _verify("--receipt", entry["receipt_id"], "--commit", head)["status"] == "ok"
         assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Documentation-only commits: no check applies, nothing is verified
+# ---------------------------------------------------------------------------
+
+
+class TestDocsOnlyClassification:
+    @pytest.mark.parametrize("path", [
+        "README.md", "CHANGELOG.md", "notes.txt", "LICENSE", "NOTICE", ".gitignore", "guide.rst",
+        "docs/verify.md", "docs/img/flow.png", "packages/web/README.md", "packages/web/LICENSE",
+    ])
+    def test_documentation_paths(self, path):
+        assert cc.docs_only([PurePosixPath(path)]) is True
+
+    @pytest.mark.parametrize("path", [
+        "pyproject.toml", "setup.cfg", "package.json", "src/a.py", "requirements.txt", "requirements-dev.txt",
+        "CMakeLists.txt", "docs/conf.py", "docs/requirements.txt", "docs/Makefile", ".github/workflows/ci.yml",
+        ".github/README.md", "tests/fixtures/expected.txt", "tests/README.md", "pkg/prompts/system.md",
+        ".gitattributes", ".pre-commit-config.yaml", "config.yml", "Makefile",
+    ])
+    def test_code_config_test_and_ci_paths_are_never_documentation(self, path):
+        assert cc.docs_only([PurePosixPath(path)]) is False
+
+    def test_unknown_or_mixed_changes_are_not_docs_only(self):
+        assert cc.docs_only(None) is False
+        assert cc.docs_only([]) is False
+        assert cc.docs_only([PurePosixPath("README.md"), PurePosixPath("pkg/a.py")]) is False
+
+
+PY_PROJECT = {
+    "pyproject.toml": "[project]\nname='p'\n",
+    "pkg/__init__.py": "",
+    "pkg/widget.py": "def f():\n    return 1\n",
+    "tests/test_widget.py": "def test_f():\n    assert True\n",
+    "README.md": "x\n",
+}
+
+
+class TestDocsOnlyPlanning:
+    def test_a_docs_only_commit_plans_nothing_not_the_whole_suite(self, tmp_path):
+        root, base = _repo(tmp_path, PY_PROJECT)
+        _write(root, "README.md", "a one-line note\n")
+        head = _commit(root)
+        assert ps.plan_commit(root, {}, None, head, base) == ([], False)
+        assert ps.docs_only_commit(root, {}, head, base) is True
+
+    def test_a_commit_touching_code_still_uses_change_selection(self, tmp_path):
+        root, base = _repo(tmp_path, PY_PROJECT)
+        _write(root, "README.md", "y\n")
+        _write(root, "pkg/widget.py", "def f():\n    return 2\n")
+        head = _commit(root)
+        planned, _ = ps.plan_commit(root, {}, None, head, base)
+        assert [(p.origin, p.argv[-1]) for p in planned] == [(ps.ORIGIN_CHANGE, "tests/test_widget.py")]
+        assert ps.docs_only_commit(root, {}, head, base) is False
+
+    def test_a_config_change_is_not_docs_only_and_falls_back(self, tmp_path):
+        root, base = _repo(tmp_path, PY_PROJECT)
+        _write(root, "pyproject.toml", "[project]\nname='p2'\n")
+        head = _commit(root)
+        planned, _ = ps.plan_commit(root, {}, None, head, base)
+        assert planned and planned[0].origin == ps.ORIGIN_DETECTED
+
+    def test_the_configured_contract_still_runs_on_a_docs_only_commit(self, tmp_path):
+        root, base = _repo(tmp_path, PY_PROJECT)
+        _write(root, "README.md", "y\n")
+        head = _commit(root)
+        config = {"verification_commands": ["python -m pytest -q"]}
+        planned, _ = ps.plan_commit(root, config, None, head, base)
+        assert [(p.origin, p.argv) for p in planned] == [(ps.ORIGIN_CONTRACT, ["python", "-m", "pytest", "-q"])]
+        assert ps.docs_only_commit(root, config, head, base) is False
+
+
+@pytest.fixture
+def captured_docs(tmp_path, monkeypatch):
+    """A captured session in a Python project whose whole change is a one-line README note."""
+    root, _base = _repo(tmp_path, {**PY_PROJECT, ".gitignore": ".openshard/\n__pycache__/\n.pytest_cache/\n"})
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(cc, "python_executable", lambda _root: sys.executable)
+    _claude(root, "UserPromptSubmit", prompt="add a note to the README")
+    _write(root, "README.md", "a one-line note\n")
+    _claude(root, "PostToolUse", tool_name="Edit", tool_input={"file_path": str(root / "README.md")})
+    _claude(root, "Stop")
+    _claude(root, "SessionEnd", reason="exit")
+    head = _commit(root, "note")
+    entry = [json.loads(ln) for ln in (root / ".openshard" / "runs.jsonl").read_text(encoding="utf-8").splitlines()][-1]
+    return root, head, entry
+
+
+class TestDocsOnlyRecorded:
+    def _docs_commit(self, captured_docs) -> tuple[Path, str, dict]:
+        return captured_docs
+
+    def test_recorded_not_run_with_its_own_reason_and_never_verified(self, captured_docs):
+        from openshard.history.verification_truth import OBSERVED_STATES, interpret_evidence
+        from openshard.verification.verdict import commit_verdict
+
+        root, sha, entry = self._docs_commit(captured_docs)
+        out = _verify("--receipt", entry["receipt_id"], "--commit", sha)
+        v = out["verification"]
+        assert out["no_checks_applicable"] is True and out["checks"] == []
+        assert (v["status"], v["artifact_sha"], v["checks_passed"]) == ("not_run", None, None)
+        assert ps.REASON_NO_CHECKS_APPLICABLE in v["incomplete_reasons"]
+        assert v["reason"] == "No checks needed: documentation-only change; OpenShard ran nothing."
+        assert "checkout" not in out or out["checkout"] is None  # nothing was checked out or run
+
+        attestations = ps.load_attestations(root / ".openshard")
+        summary = ps.summarize_attestation(attestations[-1])
+        assert ps.display_line(summary) == "No checks needed: documentation-only change (nothing run; not verified)"
+        assert ps.display_heading(summary) == "Re-check"
+        truth = interpret_evidence(None, post_session_verification={"evidence": [summary]})
+        assert truth.state not in OBSERVED_STATES and truth.effective_status != "passed"
+        assert commit_verdict(sha, attestations)["verdict"] == "unknown"
+
+    def test_the_platform_projection_never_reads_it_as_verified(self, captured_docs):
+        from openshard.history.verification_truth import OBSERVED_STATES
+        from openshard.sync.evidence import build_evidence_envelope
+
+        root, sha, entry = self._docs_commit(captured_docs)
+        _verify("--receipt", entry["receipt_id"], "--commit", sha)
+        envelope = build_evidence_envelope(entry, 0, ps.load_attestations(root / ".openshard"), core_version="t")
+        assert envelope is not None
+        [item] = envelope["evidence"]
+        assert item["verification"]["status"] == "not_run"
+        assert ps.REASON_NO_CHECKS_APPLICABLE in item["verification"]["incomplete_reasons"]
+        assert envelope["state"]["state"] not in OBSERVED_STATES
+        assert envelope["state"]["effective_status"] != "passed"
+
+    def test_text_output_says_nothing_ran_and_strict_is_not_a_pass(self, captured_docs):
+        root, sha, entry = self._docs_commit(captured_docs)
+        result = CliRunner().invoke(cli, ["verify", "--receipt", entry["receipt_id"], "--commit", sha, "--strict"])
+        assert result.exit_code == 2, result.output
+        assert "No checks needed: documentation-only change. Nothing was run, so this commit is not verified." \
+            in result.output
+        assert "Re-verified" not in result.output
+
+
+class TestTimeoutMessage:
+    def test_a_timed_out_check_names_the_limit_and_the_flag_and_stays_unknown(self, tmp_path):
+        check = ps.PlannedCheck(name="pytest (whole suite)", argv=["pytest"], kind="test",
+                                origin=ps.ORIGIN_DETECTED, safety="safe", reason="")
+
+        def runner(argv, **_kw):
+            raise subprocess.TimeoutExpired(argv, 600)
+
+        [result] = ps.run_checks([check], tmp_path, timeout=600, stream=False, runner=runner)
+        assert result.status == "unknown" and result.note == "timed out after 600s; no exit code"
+        assert ps.timeout_hint([result], 600) == (
+            "pytest (whole suite) timed out after 600s and was stopped, so the outcome is unknown "
+            "(not passed, not failed). To allow longer, re-run with --timeout SECONDS (for example --timeout 1800).")
+        tree = ps.TreeState(head="a" * 40, dirty=False, tracked_dirty=False)
+        att = ps.build_attestation(None, [result], before=tree, after=tree, started_at="2026-10-25T00:00:00Z",
+                                   completed_at="2026-10-25T00:10:00Z", commit="a" * 40)
+        assert att["verification"]["status"] == "unknown"
+        assert ps.display_heading(ps.summarize_attestation(att)) == "Re-verified"
+
+    def test_no_hint_without_a_timeout(self):
+        check = ps.PlannedCheck(name="t", argv=["t"], kind="test", origin=ps.ORIGIN_CHANGE, safety="safe", reason="")
+        assert ps.timeout_hint([ps.CheckRun(check, "failed", exit_code=1)], 600) is None
+
+
+class TestDocsOnlyCli:
+    def _contract(self, root: Path, *, sleep: bool = False) -> None:
+        if sleep:
+            _write(root, "tests/test_slow.py", "import time\n\ndef test_slow():\n    time.sleep(30)\n")
+            _git(root, "add", "-A")
+            _git(root, "commit", "-q", "--amend", "--no-edit")
+        cfg = {"verification_commands": [[sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]]}
+        _write(root, ".openshard/config.yml", json.dumps(cfg))
+
+    def test_a_configured_contract_still_runs_on_a_docs_only_commit(self, captured_docs):
+        root, sha, entry = captured_docs
+        self._contract(root)
+        out = _verify("--receipt", entry["receipt_id"], "--commit", sha)
+        assert out["no_checks_applicable"] is False
+        assert [c["origin"] for c in out["checks"]] == ["contract"]
+        assert ps.REASON_NO_CHECKS_APPLICABLE not in out["verification"]["incomplete_reasons"]
+
+    def test_a_timeout_is_said_plainly_with_the_flag_and_recorded_unknown(self, captured_docs):
+        root, _sha, entry = captured_docs
+        self._contract(root, sleep=True)
+        sha = _git(root, "rev-parse", "HEAD")
+        result = CliRunner().invoke(cli, ["verify", "--receipt", entry["receipt_id"], "--commit", sha,
+                                          "--timeout", "2"])
+        assert result.exit_code == 0, result.output
+        assert "timed out after 2s and was stopped, so the outcome is unknown" in result.output
+        assert "re-run with --timeout SECONDS" in result.output
+        assert "Re-verified: Outcome unknown" in result.output
+        [att] = ps.load_attestations(root / ".openshard")
+        assert att["verification"]["status"] == "unknown"

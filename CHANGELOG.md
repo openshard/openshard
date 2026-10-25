@@ -2,6 +2,17 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Fixed
+
+- `openshard verify --commit` no longer runs the whole test suite for a
+  documentation-only commit. It runs nothing and records "No checks needed:
+  documentation-only change" (`not_run`, `no_checks_applicable`), which never
+  counts as verified or passed. A configured `verification_commands` contract
+  still runs. A check that hits the time limit now says "timed out after Ns"
+  and points to `--timeout`; its outcome stays unknown.
+
 ## 0.5.0 - 2026-10-25
 
 <!-- release-title: Openshard v0.5.0 - Verified Receipts Across Agents -->
