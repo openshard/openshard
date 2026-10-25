@@ -193,6 +193,7 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
     $OPENSHARD_GATE_API_KEY with $OPENSHARD_GATE_ORG.
     """
     from openshard.ci import gate_platform as gp
+    from openshard.ci.base_merges import base_merges_after_agent
     from openshard.ci.merge_gate import decide
     from openshard.cli.main import (
         _machine_envelope,
@@ -219,6 +220,7 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
     marks: list[str] | None = None
     local: str | None = None
     wait_on_none = False
+    carried: dict | None = None
     progress: GateWait | None = None
     platform: dict | gp.PlatformError
     if sha is None:
@@ -235,15 +237,26 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
         pr = event.get("pull_request")
         findings = _change_findings(root, base, sha, pr)
         marks_now, agent = _commit_marks(root, sha, base, pr.get("body") if isinstance(pr, dict) else None)
-        wait_on_none = bool(marks_now) and local_now not in ("verified", "failed")
+        # A head that only merges the base branch into an agent's work ("Update branch") never gets a
+        # Receipt of its own: the agent's change is then judged on the agent's own last commit.
+        chain = base_merges_after_agent(root, sha, base) if marks_now and "merge_group" not in event else None
+        decided_here = local_now in ("verified", "failed")
+        wait_on_none = bool(marks_now) and not decided_here and chain is None
         progress = GateWait(agent=agent, wait_minutes=wait_minutes, env=env)
         platform = _platform_verdict(api_base, sha, env, wait_minutes=wait_minutes, poll_seconds=poll_seconds,
                                      wait_on_none=wait_on_none, progress=progress)
         if isinstance(platform, dict) and platform.get("status") == "none":
             local, marks = local_now, marks_now
+            if chain is not None and not decided_here:
+                wait_on_none = True
+                agent_answer = _platform_verdict(api_base, chain.agent_commit, env, wait_minutes=wait_minutes,
+                                                 poll_seconds=poll_seconds, wait_on_none=True, progress=progress)
+                carried = {"agent_commit": chain.agent_commit, "merges": list(chain.merges),
+                           "platform": agent_answer if isinstance(agent_answer, dict) else None}
 
     result = decide(sha or commit_ref, platform, local_verdict=local, agent_marks=marks,
-                    waited_minutes=wait_minutes if wait_on_none else None, change_findings=findings)
+                    waited_minutes=wait_minutes if wait_on_none else None, change_findings=findings,
+                    carried=carried)
     if progress is not None:
         progress.close("passed" if result.exit_code == 0 else "failed", result.verdict)
 
@@ -260,6 +273,7 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
             headline=result.headline, reasons=result.reasons, agent_marks=marks, local_verdict=local,
             platform=platform if isinstance(platform, dict) else None,
             change_findings=findings,
+            base_merges=({"agent_commit": carried["agent_commit"], "merges": carried["merges"]} if carried else None),
         ), indent=2))
     else:
         click.echo(f"Openshard gate: {result.status}")
