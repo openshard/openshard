@@ -14,9 +14,10 @@ Truth rules
   capture service holds that same session, still open, for this repository
   (its staging buffer or queue under ``.openshard/claude_sessions/``).
   Either one alone adds nothing: a human commit carries no session id, and a
-  session id Openshard never observed is only a claim.
+  session id Openshard never observed is only a claim. Codex exports
+  ``CODEX_THREAD_ID`` the same way.
 * Unknown adds nothing: no session state, unreadable state, an agent whose
-  commands get no session id (every agent but Claude Code today), a rebase
+  commands get no session id (every agent but Claude Code and Codex today), a rebase
   or cherry-pick replaying someone else's commits, or any error.
 * Cloud sessions are left to Claude: Claude Code on the web
   (``CLAUDE_CODE_REMOTE``) already adds its own ``Claude-Session`` trailer,
@@ -69,7 +70,7 @@ OPT_OUT_COMMAND = "openshard setup --no-commit-trailers"
 # (capture agent key, environment variable naming its session in the commands it runs).
 # Only agents that export their session id to commands can be matched to an
 # observed session; others get no trailer (unknown, not human).
-AGENT_SESSION_ENV: tuple[tuple[str, str], ...] = (("claude_code", "CLAUDE_CODE_SESSION_ID"),)
+AGENT_SESSION_ENV: tuple[tuple[str, str], ...] = (("claude_code", "CLAUDE_CODE_SESSION_ID"), ("codex", "CODEX_THREAD_ID"))
 
 _SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 _FALSE = ("0", "false", "no", "off")
@@ -440,12 +441,41 @@ def add_cloud_usage_trailers(msg_file: Path, repo: Path | None = None, env: Mapp
         return False
 
 
+def add_codex_usage_trailers(msg_file: Path, repo: Path | None = None, env: Mapping[str, str] | None = None) -> bool:
+    """In a Codex thread Openshard did not capture, add its ``Openshard-Model`` /
+    ``Openshard-Tokens-*`` trailers (``adapters/codex_commit_usage.py``); True when added.
+
+    Such a commit's Receipt is built by the GitHub workflow from the message
+    alone. A thread Openshard captured is left alone: its hook-captured
+    Receipt already holds the usage. Never raises.
+    """
+    env = os.environ if env is None else env
+    repo = repo if repo is not None else Path.cwd()
+    try:
+        thread = str(env.get("CODEX_THREAD_ID") or "").strip()
+        if not thread or env.get("CLAUDE_CODE_SESSION_ID") or opted_out(repo, env) or _replaying(repo, env):
+            return False
+        if any(_session_open(root, thread, "codex") for root in _candidate_roots(repo)):
+            return False
+        from openshard.adapters.codex_commit_usage import codex_usage_trailers
+        from openshard.adapters.commit_usage_trailers import UsageUnavailable, append_trailers
+
+        try:
+            codex_usage_trailers(repo, thread, env=env, deliver=lambda lines: append_trailers(msg_file, lines))
+        except UsageUnavailable:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def run_git_hook(argv: list[str], env: Mapping[str, str] | None = None) -> None:
     """``openshard hooks git-commit-msg <file> [source] [sha]``: mark the message if the evidence holds,
-    and in a cloud session add its usage trailers. Never raises."""
+    and in a cloud session or an uncaptured Codex thread add its usage trailers. Never raises."""
     if argv and argv[0]:
         mark_commit_message(Path(argv[0]), None, env)
         add_cloud_usage_trailers(Path(argv[0]), None, env)
+        add_codex_usage_trailers(Path(argv[0]), None, env)
 
 
 # ---------------------------------------------------------------------------
