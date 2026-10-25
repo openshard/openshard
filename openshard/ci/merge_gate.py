@@ -284,15 +284,24 @@ def decide(
     agent_marks: list[str] | None = None,
     waited_minutes: float | None = None,
     change_findings: list[dict] | None = _NOT_GIVEN,
+    carried: dict[str, Any] | None = None,
 ) -> GateResult:
     """The gate outcome for *sha*. Never raises.
 
     *agent_marks* is None when the commits could not be read; *waited_minutes*
     is how long the caller waited for an agent change's Receipt.
     *change_findings* are the PR findings (None: not checked); shown, never decisive.
+    *carried* is set when *sha* only merges the base branch into an agent's work
+    (``ci/base_merges.py``): ``agent_commit``, ``merges`` and the Platform's
+    ``platform`` answer for the agent's last commit. It is used only when the
+    Platform has no Receipt for *sha* itself.
     """
     receipts: list[dict] = []
     answer = platform.last if isinstance(platform, PlatformError) else platform
+    carried_answer = carried.get("platform") if isinstance(carried, dict) else None
+    carried_status = carried_answer.get("status") if isinstance(carried_answer, dict) else None
+    agent_sha = carried.get("agent_commit") if isinstance(carried, dict) else None
+    later = len(carried.get("merges") or []) if isinstance(carried, dict) else 0
     if isinstance(platform, PlatformError):
         verdict, status = platform.kind, STATUS_FAIL
         headline = f"Failed: {platform.message}"
@@ -311,6 +320,19 @@ def decide(
                                              "for this commit).")
         elif local_verdict == "failed":
             status, headline = STATUS_FAIL, "Failed: evidence on this runner says verification failed."
+        elif carried_status in ("verified", "failed", "pending"):
+            # The head only merges the base branch in, cleanly and with no agent marks: the agent's
+            # change is judged on its own last commit, whose Receipt the Platform holds.
+            answer, verdict = carried_answer, str(carried_status)
+            merged = f"{later} later commit{'' if later == 1 else 's'} only merge{'s' if later == 1 else ''} the base branch in"
+            if carried_status == "verified":
+                status, headline = STATUS_PASS, (f"Verified: the agent's last commit {_short(agent_sha)} is verified, "
+                                                 f"and the {merged}, cleanly and with no agent marks.")
+            elif carried_status == "failed":
+                status, headline = STATUS_FAIL, f"Failed: verification failed for the agent's last commit {_short(agent_sha)}."
+            else:
+                status, headline = STATUS_FAIL, (f"Failed: verification of the agent's last commit {_short(agent_sha)} "
+                                                 "had not finished when the gate stopped waiting.")
         elif agent_marks is None:
             status, headline = STATUS_FAIL, ("Failed: no Receipt for this commit, and the pull request's commits "
                                              "could not be read to tell whether an agent made them "
@@ -331,6 +353,9 @@ def decide(
     reason = headline[len("Failed: "):] if headline.startswith("Failed: ") else headline
     lines = [f"### Openshard gate · {title}", "", _cell(reason[:1].upper() + reason[1:])]
     meta = [f"Commit `{_short(sha)}`"]
+    if answer is carried_answer and carried_answer is not None:
+        meta = [f"Commit `{_short(sha)}` merges the base branch in",
+                f"evidence for the agent's last commit `{_short(agent_sha)}`"]
     if isinstance(answer, dict):
         meta += [f"Platform answer {_cell(answer.get('status'))}", f"checked {_cell(answer.get('checked_at'))}"]
     lines += ["", " · ".join(meta)]

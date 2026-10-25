@@ -65,6 +65,9 @@ reviewers understand a change. Unknown facts stay unknown.
 
 ### Fixed
 
+- The merge gate no longer fails an agent's pull request after "Update
+  branch": a head that only merges the base branch in, cleanly and with no
+  agent marks, is judged on the agent's own last commit and its Receipt.
 - A check refused by the command gate is recorded as not run and is not
   retried as though it had failed.
 - Continued Claude Code work after an early session-end event is retained;
