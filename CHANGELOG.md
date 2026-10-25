@@ -2,6 +2,15 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Fixed
+
+- `openshard doctor` no longer says Codex capture is verified because of an
+  old or imported Codex record; it needs a Codex hook capture made after the
+  hooks last changed, and it tells you to approve the hooks under `/hooks`
+  in Codex when they have not been reviewed.
+
 ## 0.5.0 - 2026-10-25
 
 <!-- release-title: Openshard v0.5.0 - Verified Receipts Across Agents -->

@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
 
 from openshard.adapters.antigravity_hooks_install import (
@@ -307,6 +308,81 @@ def grok_build_capture_observed(repo_root: Path | None) -> bool | None:
     return _capture_observed(repo_root, _GROK_BUILD_RECORD_MARKERS)
 
 
+def _record_time(value: object) -> float | None:
+    """A runs.jsonl ISO timestamp as epoch seconds (naive means UTC), or ``None``."""
+    if not isinstance(value, str) or not value:
+        return None
+    from datetime import datetime
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def _codex_records(path: Path) -> tuple[list[float | None], bool]:
+    """``(hook capture times, any imported Codex history)`` from one runs.jsonl."""
+    import json as _json
+
+    hook_times: list[float | None] = []
+    imported = False
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                entry = _json.loads(line) if line.strip() else None
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("executor") == "codex_hooks" and entry.get("origin") != "historical_import":
+                hook_times.append(_record_time(entry.get("timestamp")))
+            elif entry.get("import_source") == "codex" or entry.get("executor") == "codex_history_import":
+                imported = True
+    return hook_times, imported
+
+
+def codex_capture_evidence(repo_root: Path | None) -> tuple[bool | None, str | None]:
+    """``(observed, reason)``: is there a Codex hook capture newer than the hooks file?
+
+    Codex pins each project hook by hash and may stop running a hook whose
+    file changed until it is reviewed again, so a capture recorded before
+    ``.codex/hooks.json`` last changed proves nothing about the hooks in place
+    now. Imported Codex history (``openshard ingest``) never proves the hooks
+    ran. ``observed`` keeps ``opencode_capture_observed``'s tri-state;
+    ``reason`` says in plain words why an existing Codex record does not count.
+    Never raises.
+    """
+    if repo_root is None:
+        return None, None
+    path = Path(repo_root) / _RUNS_RELPATH
+    try:
+        if not path.is_file() or path.stat().st_size > _MAX_RUNS_SCAN_BYTES:
+            return None, None
+        hooks_mtime = (Path(repo_root) / CODEX_HOOKS_RELPATH).stat().st_mtime
+        hook_times, imported = _codex_records(path)
+    except (OSError, ValueError):  # ValueError: undecodable bytes in the history file
+        return None, None
+    known = [t for t in hook_times if t is not None]
+    if any(t >= hooks_mtime for t in known):
+        return True, None
+    if known:
+        from datetime import datetime
+
+        last = datetime.fromtimestamp(max(known), tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+        return False, (
+            f"last captured {last}, before the Codex hooks were last changed; "
+            "run one Codex task to re-verify"
+        )
+    if hook_times:
+        return False, "a Codex capture is recorded but its time is unreadable; run one Codex task to verify"
+    if imported:
+        return False, "only imported Codex history found; run one Codex task to verify"
+    return False, None
+
+
 def detect_agent_cli(agent: str) -> tuple[bool, str | None]:
     """``(available, path)`` for the agent's CLI on PATH. Never raises."""
     if agent == AGENT_CLAUDE_CODE:
@@ -349,6 +425,8 @@ class AgentIntegrationStatus:
     # agent whose integration is fully configured: a plugin can fail to load
     # and a hook command can fail to run, and neither leaves a trace.
     capture_observed: bool | None = None
+    # Codex only: why existing records do not prove capture (stale or imported only).
+    capture_unverified_reason: str | None = None
     # Codex only: whether Codex trusts the project (or every hook): "trusted","untrusted",
     # "partial" or "unknown" (None for other agents).
     hooks_trust: str | None = None
@@ -381,6 +459,7 @@ class AgentIntegrationStatus:
             "configured": self.configured,
             "capture_observed": self.capture_observed,
             "capture_verified": self.capture_verified,
+            "capture_unverified_reason": self.capture_unverified_reason,
             "state": self.state,
             "detail": self.detail,
             "config_path": self.config_relpath,
@@ -417,10 +496,11 @@ def detect_codex_integration(repo_root: Path | None) -> AgentIntegrationStatus:
         state, detail = "partial", f"hooks missing for {', '.join(missing)}; run `openshard setup`"
     else:
         state, detail = "openshard", f"configured ({rel})"
+    observed, unverified_reason = codex_capture_evidence(repo_root) if state == "openshard" else (None, None)
     return AgentIntegrationStatus(
         AGENT_CODEX, available, path, repo_root, state, detail, rel,
         events_installed=installed, events_missing=missing,
-        capture_observed=agent_capture_observed(AGENT_CODEX, repo_root) if state == "openshard" else None,
+        capture_observed=observed, capture_unverified_reason=unverified_reason,
         hooks_trust=codex_hook_trust(repo_root) if installed else None,
         hooks_review=codex_hooks_reviewed(repo_root) if installed else None,
     )
