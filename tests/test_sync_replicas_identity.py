@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -54,6 +55,7 @@ def test_an_explicit_key_still_wins(tmp_path):
     assert link is not None and link.source == cfg.SOURCE_ENV
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell stub; Windows executable integration is covered separately")
 def test_the_token_comes_from_the_workspace_cli_for_the_openshard_audience(tmp_path):
     env = _env(tmp_path, PATH=_replicas_cli(tmp_path))
     assert tr.replicas_identity_token(env) == TOKEN
@@ -92,6 +94,7 @@ def server():
     httpd.shutdown()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell stub; HTTP transport is exercised by other Windows tests")
 def test_receipts_and_evidence_go_to_the_replicas_routes_with_a_fresh_token(tmp_path, monkeypatch, server):
     env = _env(tmp_path, OPENSHARD_PLATFORM_AUTH="replicas", OPENSHARD_PLATFORM_ENDPOINT=server, **WORKSPACE,
                PATH=_replicas_cli(tmp_path))
