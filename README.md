@@ -46,15 +46,16 @@ Now use Claude Code, Codex, Cursor or any [supported agent](#works-with) exactly
 
 ```bash
 openshard last             # the receipt for that run
-openshard verify           # re-run your checks yourself, so it's proven, not just claimed
 ```
+
+When the agent commits, Openshard re-runs your checks on that exact commit by itself, in the background, so "tests pass" is proven rather than just claimed. For work you commit yourself, run `openshard verify`.
 
 No account, no API key, nothing to configure. Receipts stay in your repo.
 Stuck? `openshard doctor` shows what's working, agent by agent.
 
 ## What you get
 
-Here is a real receipt for a Claude Code change, before and after `openshard verify` (trimmed to the key rows):
+Here is a real receipt for a Claude Code change (trimmed to the key rows). First, what the agent claimed:
 
 ```text
   Task        Round prorated seat charges down so nobody is overcharged
@@ -65,9 +66,11 @@ Here is a real receipt for a Claude Code change, before and after `openshard ver
   Verified    Not verified by OpenShard (agent reported 1/1 passed)
 ```
 
+Then the same receipt seconds later, after Openshard re-ran the checks on the agent's commit, with nobody typing a command:
+
 ```text
-  Verified    Passed (OpenShard re-ran the check(s): 1/1 passed @ a6f1dfbb1950)
-  Signature   Signed · key 8257ca3e
+  Verified    Passed (OpenShard re-ran the check(s): 1/1 passed @ 654b65e898ea)
+  Signature   Signed · key d30b2a87
 ```
 
 Every receipt answers the questions you'd ask before merging:
@@ -75,7 +78,7 @@ Every receipt answers the questions you'd ask before merging:
 | Question | What the receipt shows |
 | --- | --- |
 | **What changed?** | Every file the agent touched, checked against git. |
-| **Did it really work?** | The agent's own claim is marked as a claim. It only becomes **verified** when Openshard re-runs your checks or CI passes on that exact commit. |
+| **Did it really work?** | The agent's own claim is marked as a claim. It only becomes **verified** when Openshard re-runs your checks (automatic when the agent commits) or CI passes on that exact commit. |
 | **What did it cost?** | The agent, model, tokens and cost, marked as an estimate when it is one. |
 | **What's missing?** | If something couldn't be recorded, it says so. It never guesses or fills a gap with zero. |
 | **Was it edited later?** | Every receipt is signed. Any later change shows up. |
@@ -105,7 +108,7 @@ Openshard watches these agents. It doesn't run them, slow them down or change ho
 | | Free | Pro | Team |
 | --- | --- | --- | --- |
 | Full receipts on your machine | ✓ | ✓ | ✓ |
-| Re-run checks with `openshard verify` | ✓ | ✓ | ✓ |
+| Checks re-run automatically when an agent commits | ✓ | ✓ | ✓ |
 | Dashboard across all your machines |  | ✓ | ✓ |
 | Merge gate |  | Your repos | Your whole org |
 | Shared team dashboard, rules and roles |  |  | ✓ |
