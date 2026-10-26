@@ -9,8 +9,13 @@
 <h3 align="center">Receipts for AI coding agents.</h3>
 
 <p align="center">
-  Your agent says it's done and the tests pass.<br>
-  Openshard records what it actually changed, re-runs the checks to prove it, and shows what it cost.
+  <strong>Openshard is an open-source tool that keeps a record of everything your AI coding agents do.</strong>
+</p>
+
+<p align="center">
+  Each time Claude Code, Codex, Cursor or another agent works in your repo, Openshard writes a receipt:<br>
+  which files it changed, whether the tests really passed, and what it cost.<br>
+  Teams can also block agent work from merging until its receipt proves it.
 </p>
 
 <p align="center">
