@@ -64,19 +64,138 @@ never an approval, and Core installs no permission hook (it would decide).
 Hermes "smart" approvals are a model's decision, not a person's, and are left
 out.
 
-**Cloud.** The same hooks fire inside a hosted agent VM (Claude Code on the
-web, Cursor cloud agents) when Core is installed there, so the live-hook
-signals are the same. The log signals need the agent's log inside that VM;
-this has not been verified for hosted runtimes. A manual edit in a cloud VM
-is only seen if a person changes that VM's working tree between turns.
+## Every environment
+
+The same agent exposes different signals depending on where it runs. Each
+row is an (agent, environment) pair OpenShard has a capture path for; a pair
+that is not listed is not claimed. "from GitHub": derived from the pull
+request (below). A test keeps this table equal to
+`adapters/steering.py: ENVIRONMENT_ROWS` / `environment_capability`.
+
+| Agent | Environment | Initial prompt | Follow-up | Mid-turn interjection | Interrupt | Permission decision | Manual edit |
+|---|---|---|---|---|---|---|---|
+| Claude Code | `local_terminal` | live hook | live hook | from log | from log | from log | from git |
+| Claude Code | `local_ide` | live hook | live hook | from log | from log | from log | from git |
+| Claude Code | `cloud_workspace` | live hook | live hook | from log | from log | from log | from git |
+| Claude Code | `cloud_agent` | live hook | live hook | from log (A) | from log (A) | from log (A) | from git (B) |
+| Claude Code | `ci` | live hook | not available (C) | not available (C) | not available (C) | not available (C) | not available (C) |
+| Codex | `local_terminal` | live hook | live hook | from log | live hook | not available (1) | from git |
+| Codex | `cloud_workspace` | live hook | live hook | from log | live hook | not available (1) | from git |
+| Codex | `cloud_agent` (D) | live hook | live hook | from log (A) | live hook | not available (1) | from git (B) |
+| Codex | `ci` | live hook | not available (C) | not available (C) | not available (C) | not available (C) | not available (C) |
+| Cursor | `local_ide` | live hook | live hook | not available (2) | live hook | not available (3) | from git |
+| Cursor | `cloud_agent` | live hook | live hook | not available (2) | live hook | not available (3) | from git (B) |
+| OpenCode | `local_terminal` | live hook | live hook | not available (4) | not available (5) | not available (6) | from git |
+| OpenCode | `cloud_workspace` | live hook | live hook | not available (4) | not available (5) | not available (6) | from git |
+| Google Antigravity | `local_ide` | not available (7) | not available (7) | not available (8) | not available (9) | not available (10) | from git |
+| Grok Build | `local_terminal` | live hook | live hook | not available (11) | not available (12) | not available (13) | from git |
+| Grok Build | `cloud_workspace` | live hook | live hook | not available (11) | not available (12) | not available (13) | from git |
+| Hermes Agent | `local_terminal` | live hook | live hook | not available (14) | live hook | live hook | from git |
+| Hermes Agent | `cloud_workspace` | live hook | live hook | not available (14) | live hook | live hook | from git |
+| Grok Bot | `cloud_agent` | not available (E) | not available (E) | not available (E) | not available (E) | not available (E) | not available (E) |
+| Any PR-driven agent | `web` | not available (F) | from GitHub | not available (G) | not available (H) | not available (I) | not available (J) |
+
+Why, beyond the numbered reasons above:
+
+* (A) Read inside the hosted VM, where the agent writes its log, by the same
+  code as locally; tested with fixture transcripts, not yet on a live hosted run.
+* (B) The hosted VM's working tree between turns. A person seldom has a shell
+  there, so a change is usually another process's; it is still "not the agent".
+* (C) A CI run is headless: no person is there to type, stop, answer or edit
+  while it runs. The run's prompt is the only human input.
+* (D) Only where the Codex cloud environment runs trusted command hooks.
+  Cloud-orchestrated ChatGPT Work runs none, so nothing is captured there
+  in-run; only the `web` row applies once it opens a pull request.
+* (E) Grok Bot runs no hooks; Action Recording exports actions, not the
+  conversation, and its self-report carries no steering.
+* (F) The task reaches a PR-driven agent through its own app, or an issue or
+  chat OpenShard does not read; GitHub shows only what follows on the PR.
+* (G) GitHub does not show whether the agent was still working when a comment
+  was posted. (H) A person stops a cloud agent in the agent's own app; nothing
+  reaches GitHub. (I) Permission prompts are answered in the agent's own app.
+* (J) GitHub names the account behind a commit, and cloud agents often push as
+  the person who started them, so a person's commit cannot be told from the
+  agent's.
+
+Not covered by a row: Codex inside an IDE extension and Cursor's CLI (the
+hooks are the same configuration, but neither has been verified), Copilot,
+Devin, OpenHands and other agents without a Core adapter (only `web`
+applies), and a local devcontainer (it reads as the machine it runs on).
+
+### Environment on every block
+
+Each block carries `environment`, from the Receipt's own where-it-ran
+evidence (`capture.agent_host`, `adapters/agent_env.py`: the hook process's
+environment, never guessed from the agent's name):
+
+| `environment` | From |
+|---|---|
+| `cloud_agent` | the agent's hosted-VM marker: `CLAUDE_CODE_REMOTE` (Claude Code on the web), `CURSOR_CODE_REMOTE` (Cursor cloud agents) |
+| `cloud_workspace` | the workspace's own variable: `CODESPACES`, `GITPOD_WORKSPACE_ID`, `REPLICAS_WORKSPACE_ID` |
+| `ci` | a CI runner's own variable (`GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI`, `JENKINS_URL`, `CI`) |
+| `local_ide` | local, and the app is VS Code (`claude-vscode` entrypoint or `TERM_PROGRAM=vscode`) or JetBrains |
+| `local_terminal` | local, and the app is a terminal (Claude Code's `cli` entrypoint, iTerm2, Terminal, WezTerm, Ghostty, Warp, tmux, Hyper, kitty) |
+| `web` | only the GitHub-derived block: the person steered on GitHub, where OpenShard had no runtime presence |
+
+When the evidence does not say, there is no `environment`, and
+`environment_not_recorded_reason` says why: `where_it_ran_not_recorded`
+(no hook environment reached Core, e.g. only HTTP hooks, which carry none),
+`local_app_not_recorded` (local, app unknown: Codex or Cursor launched
+from an IDE or an app that sets no terminal variable), or
+`local_app_not_terminal_or_ide` (headless SDK, the Claude desktop app).
+Where it ran is now recorded for every hook-captured agent, not only Claude
+Code (`ran_on` / `agent_app` in sync).
+
+### Remote and cloud runtimes
+
+Inside a cloud agent VM or cloud workspace, Core runs the same hooks and reads
+the same session log, so the steering facts are the same facts, classified
+inside that runtime: only `prompt_facts` (intent, confidence, rule, length)
+are queued, and log messages are classified at fold time and dropped. Every
+steering fact has a timeline Event (`session.activity`, or the hook's own
+Event) with `steering_kind`, `intent` / `decision` where it has one, and
+nothing else; those Events stream out through the remote capture journal
+(`docs/remote-capture.md`) as they are folded, including the facts read from
+the log during the fold that seals a turn or ends the session. So if the VM
+is destroyed before its Receipt is delivered, the journal still holds what
+was steered. The delivered Receipt carries the block as everywhere else.
+The spool's own privacy rules (`remote/spool.py: wire_event`) apply on top.
+
+### Pull requests (`source: github`)
+
+Where OpenShard has no runtime presence, the cloud-receipts workflow
+(`.github/workflows/openshard-cloud-receipts.yml`) derives steering from the
+pull request each pushed commit belongs to (`github/steering.py`, read-only
+`gh api` GETs):
+
+| On GitHub | Event |
+|---|---|
+| a review requesting changes | `follow_up`, `via: review_changes_requested`, intent `correction` (rule `github.review_changes_requested`) |
+| an approving review | `follow_up`, `via: review_approved`, intent `approval` |
+| a review that comments | `follow_up`, `via: review_commented`, intent from `rules-v1` on its text (or its first inline comment's) |
+| a PR comment addressed to the agent (`@codex`, `@claude`, `@copilot`, `@cursor`, `@devin`, `@jules`, `@grok`, `@openhands`, `@gemini`, `@amp`) | `follow_up`, `via: agent_mention`, intent from `rules-v1` on the text without the mention |
+
+plus `github` counts: `review_comments` (inline, by people), `review_rerequests`
+(a review requested again from someone who had reviewed), `bot_comments_ignored`
+(a bot is not a person), and `commit_after_review` (this commit followed a
+review: the follow-up push). Each commit's Receipt carries the input after the
+previous commit of the PR and up to this one, by committer date (GitHub does
+not record when a commit was pushed); input after the last commit is on no
+Receipt until a commit follows. Pending and dismissed reviews, PR comments not
+addressed to an agent, and comments by bots are not steering. The text is
+classified inside the CI job and dropped; no comment text and no login is in
+the block. It goes to the Platform as an optional `steering` key on the
+GitHub receipt; a Platform that rejects the key gets the Receipt without it
+(the workflow resends), never a failed delivery.
 
 ## The steering event
 
 Each fact is one entry in `capture.steering.events` (bounded to 100; the
 overflow is counted in `events_dropped`). For the timeline, a hook-observed
 prompt's existing `session.activity` Event gains `steering_kind` and `intent`;
-log-observed interjections and git-observed manual edits add a
-`session.activity` Event of their own.
+a hook-observed interrupt's Event and a person's Hermes approval Event gain
+`steering_kind`; log-observed interjections, interrupts and rejections and
+git-observed manual edits add a `session.activity` Event of their own.
 
 | Field | Values |
 |---|---|
@@ -86,7 +205,8 @@ log-observed interjections and git-observed manual edits add a
 | `intent` | follow-ups and interjections: `correction`, `redirect`, `clarification`, `approval`, `continue`, `new_task`, `unknown` |
 | `intent_confidence`, `intent_rule` | `high` / `medium` / `low`, and the id of the rule that decided |
 | `after` | `turn_end`, `failed_check` (the turn ended on a failed check), `tool_call`, `permission_prompt`, `none`, `unknown` |
-| `source` | `hook`, `transcript` (the agent's own log), `git` |
+| `source` | `hook`, `transcript` (the agent's own log), `git`, `github` (a pull request) |
+| `via` | GitHub only: `review_changes_requested`, `review_approved`, `review_commented`, `agent_mention` |
 | `prompt_chars` | the prompt's length in characters, never its text. A lower bound past 4,000 (the hook reader keeps at most 4,000 characters) and, for OpenCode, past 400 (its plugin truncates) |
 | `think_seconds` | follow-ups: the pause since the turn ended, capped at 15 minutes (`think_capped`) |
 | `from_queue` | a follow-up the agent took from its queue; already counted where it was typed |
@@ -149,8 +269,9 @@ Pasted content and code blocks are ignored. Anything else is `unknown`.
 
 ## Privacy
 
-The prompt text is read only on the user's machine, to classify it, and is
-dropped at once. Hook prompts are classified where the capture service reduces
+The prompt text is read only where the agent runs (the user's machine, the
+cloud VM or workspace, or the CI job that reads a pull request), to classify
+it, and is dropped at once. Hook prompts are classified where the capture service reduces
 the hook (`reduce_hook_payload`); the queue line carries only `prompt_facts`
 (`intent`, `confidence`, `rule`, `chars`). Log messages (Claude Code queued
 messages, Codex mid-turn messages) are classified at fold time and never
@@ -169,7 +290,11 @@ their words appear nowhere.
 `tests/test_steering_capture.py::TestPrivacy` feeds prompts holding a
 secret-shaped key and distinctive phrases through Claude Code and Codex and
 checks every file under `.openshard/`, the sync payload, the rendered Receipt
-and the telemetry queue.
+and the telemetry queue. `tests/test_steering_environments.py` does the same for a
+cloud session (every file under `.openshard/` and the OpenShard home,
+including the remote capture journal) and for the GitHub path (the block, the
+payload the workflow sends, and what `python -m openshard.github.steering`
+prints).
 
 ## Autonomy (derived)
 
@@ -185,9 +310,9 @@ is computed from text.
 | `longest_unsupervised_seconds` | the longest time the agent worked with no human input, over turns whose end was observed; `null` when none was |
 | `steering_seconds` | sum of think time between a turn end and the next prompt, each pause capped at 15 minutes |
 
-Local vs cloud and the permission mode are not repeated in the block: they are
-the Receipt's existing `ran_on` (sync) / `capture.agent_host` and
-`runtime_configuration.permission_mode`.
+Where it ran is the block's `environment` (derived from the Receipt's existing
+`capture.agent_host`, which sync sends as `ran_on` / `agent_app`); the
+permission mode is not repeated: it is `runtime_configuration.permission_mode`.
 
 The block is part of the sealed `history --json` projection, which
 `openshard verify --signature` recomputes, so the version 1 derivation is

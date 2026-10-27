@@ -23,6 +23,24 @@ All notable changes to OpenShard are documented here.
   `history --json` and Platform sync carry an optional `steering` block (no
   paths). A Platform that does not accept the block yet gets the Receipt
   without it.
+- Steering in every environment: each block says where the session ran
+  (`local_terminal`, `local_ide`, `cloud_agent`, `cloud_workspace`, `ci`, or
+  `web`), from the Receipt's own where-it-ran evidence, which is now recorded
+  for every hook-captured agent (Replicas workspaces and Cursor cloud agents
+  included), not only Claude Code; when it does not say, the block says why.
+  Inside cloud agents and cloud workspaces, every steering fact streams through
+  the remote capture journal, so it survives a VM that is destroyed before its
+  Receipt is delivered. For PR-driven agents the cloud-receipts workflow
+  derives steering from each commit's pull request (reviews requesting
+  changes, approvals, review comments, `@agent` comments, re-requests and the
+  follow-up push), classified in the CI job; no comment text or login is kept.
+  `docs/steering-capture.md` has the agent x environment x signal matrix.
+
+### Fixed
+
+- Remote capture: Events staged while a fold read the agent's session log
+  (for example a Claude Code mid-turn message or Esc) were not spooled when
+  that fold sealed the turn or ended the session, so the journal lost them.
 
 ## 0.5.0 - 2026-10-25
 

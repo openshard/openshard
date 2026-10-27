@@ -48,6 +48,12 @@ Platform's own privacy rules before an Event is written
 (`remote/spool.py: wire_event`), so an Event the Platform would refuse is
 never sent; anything unsafe is withheld field by field.
 
+Steering facts (`docs/steering-capture.md`) travel the same way: each one
+has an Event whose metadata says `steering_kind` and, where it has one, the
+`intent` or `decision`, classified inside the environment. Facts read from
+the agent's session log during a fold, including the fold that seals a turn
+or ends the session, go out with that hook's batch.
+
 Batches leave a few seconds after each burst of hooks: inside the capture
 service a flusher thread wakes on every Event; without a service, the hook
 starts one detached flusher at a time, at most one per five seconds.
