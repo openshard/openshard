@@ -60,6 +60,7 @@ from openshard.history.shard_contract import (
     render_compact_shard_receipt,
     render_full_shard_receipt,
 )
+from tests.capture_fixtures import untimed_steering
 
 SID = "20260923_101500_a1b2c3"
 SID2 = "20260923_111500_ffffff"
@@ -682,7 +683,8 @@ def _stable(entry: dict) -> dict:
         "task": entry["task"], "executor": entry["executor"], "execution_model": entry["execution_model"],
         "files_detail": entry["files_detail"], "summary": entry["summary"],
         "tokens": [entry.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens")],
-        "capture": {k: v for k, v in entry["capture"].items() if k not in volatile},
+        "capture": {k: v for k, v in entry["capture"].items() if k not in volatile | {"steering"}},
+        "steering": untimed_steering(entry["capture"].get("steering")),
         "events": [{k: e.get(k) for k in keys} for e in entry["events"]],
     }
 

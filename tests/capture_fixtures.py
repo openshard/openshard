@@ -32,6 +32,20 @@ def _git(repo: Path, *args: str) -> None:
     )
 
 
+def untimed_steering(block: object) -> object:
+    """A Receipt's ``capture.steering`` without its wall-clock times.
+
+    The service and inline paths record the same steering facts; only the
+    hook-observed times (whole seconds) can differ between two runs.
+    """
+    if not isinstance(block, dict):
+        return block
+    timed = {"at", "since", "think_seconds", "think_capped"}
+    return {**{k: v for k, v in block.items() if k not in ("turn_ends", "last_turn_end_at")},
+            "events": [{k: v for k, v in e.items() if k not in timed} for e in block.get("events") or []],
+            "turn_ends": [t.get("how") for t in block.get("turn_ends") or []]}
+
+
 def _make_repo(root: Path) -> Path:
     root.mkdir(parents=True)
     _git(root, "init", "-q")

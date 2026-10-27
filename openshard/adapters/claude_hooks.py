@@ -174,7 +174,7 @@ from typing import Any
 
 from openshard.adapters import claude_session_fidelity as fidelity
 from openshard.adapters import claude_stop_failure as stop_failure
-from openshard.adapters import claude_subagents, merge_check
+from openshard.adapters import claude_subagents, merge_check, steering
 from openshard.adapters import claude_turn_receipts as turns
 from openshard.adapters.agent_env import agent_host_or_none as _agent_host_or_none
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
@@ -1257,7 +1257,7 @@ def _summarize_command(command: str | None, label: str) -> tuple[str, str | None
 # Optional scalar fields ``ReducedHookPayload.to_dict`` writes last, only when set,
 # so queue lines of every other event keep their shape.
 _OPTIONAL_TAIL_KEYS = ("task_id", "transcript_path", "agent_provider", "effort_level", "permission_mode",
-                       "agent_surface", "agent_cloud_session", "agent_billing_basis", "agent_host")
+                       "agent_surface", "agent_cloud_session", "agent_billing_basis", "agent_host", "prompt_facts")
 
 
 @dataclass
@@ -1317,6 +1317,7 @@ class ReducedHookPayload:
     agent_cloud_session: str | None = None  # see HookPayload.agent_cloud_session
     agent_billing_basis: str | None = None  # see HookPayload.agent_billing_basis
     agent_host: str | None = None  # see HookPayload.agent_host
+    prompt_facts: dict | None = None  # UserPromptSubmit: steering.prompt_facts (intent, never the text)
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {
@@ -1441,6 +1442,7 @@ class ReducedHookPayload:
             agent_cloud_session=_cloud_session_or_none(data.get("agent_cloud_session")),
             agent_billing_basis=billing_basis_or_none(data.get("agent_billing_basis")),
             agent_host=_agent_host_or_none(data.get("agent_host")),
+            prompt_facts=steering.valid_prompt_facts(data.get("prompt_facts")),
         )
 
 
@@ -1533,6 +1535,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         reduced.attrs = {**reduced.attrs, "prompt_source": fidelity.PROMPT_SOURCE_AGENT_NOTIFICATION}
     elif payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
+        reduced.prompt_facts = steering.prompt_facts(payload.prompt)  # classified here; the text is not queued
     elif payload.event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         tool = payload.tool_name or "unknown"
         reduced.tool_name = tool
@@ -1782,6 +1785,7 @@ def _apply_prompt(buf: dict, payload: ReducedHookPayload, repo_root: Path, now: 
                   evidence="directly_observed", occurred_at=now,
                   metadata={"hook": payload.event, "prompt_index": buf["prompt_count"]})
     turns.mark_opened(buf, repo_root)  # a turn's opening prompt names its Receipt (the open-turn signal)
+    steering.note_prompt(buf, payload.prompt_facts, repo_root, now)
     return ("first prompt: record created" if created else "prompt buffered"), created, False
 
 
@@ -2187,6 +2191,7 @@ def _resumed_segment(
         buf["herdr_terminals"] = terminals
     buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
     turns.inherit(buf, persisted, same_receipt=False, repo_root=repo_root)
+    steering.inherit(buf, persisted)
     return buf
 
 
@@ -2233,6 +2238,7 @@ def _load_or_create_buffer(
             )
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
+            steering.restore(rebuilt, persisted)
             turns.inherit(rebuilt, persisted, same_receipt=True)
             return rebuilt
     return _new_buffer(
@@ -3463,6 +3469,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     learning = captured_learning(repo_root, profile.key, str(buf.get("session_id") or ""), str(buf.get("started_at") or ""))
     if learning is not None:
         entry["learning"] = learning
+    steering.stamp(entry, buf)  # reads the session log's new lines first, so it may stage Events
     entry["events"] = [dict(e) for e in buf["events"] if isinstance(e, dict)] + file_events
     stamp_gaming_signals(entry, buf, repo_root)  # observations only; never changes the verdict
     return coerce_shard_entry(entry)
@@ -3603,6 +3610,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         # this Receipt's run instead of every run on the same cloud agent.
         buf["cursor_generation_id"] = generation_id
 
+    steering.observe(buf, payload, repo_root, now)  # turn ends, interrupts, approvals (adapters/steering.py)
     if event == EVENT_MODEL_SWITCH:
         return "session model changed", bool(buf.get("record")), False
 
