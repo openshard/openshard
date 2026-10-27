@@ -131,12 +131,15 @@ class CheckCommand:
     # a final ``exit 0``, ``set +e`` before it): one of EXIT_MASKS. An
     # observation about the command text, never a verdict.
     exit_masked: str | None = None
-    # True for a pytest run whose exit status is hidden only by a pipe or a
-    # later statement, on a line where every other command is a setup step
-    # or a line filter that cannot write a summary line of its own (see
-    # ``_summary_readable``): pytest's own summary line in the output is then
-    # its outcome (``pytest_summary_outcome``).
+    # True for a pytest or vitest run whose exit status is hidden only by a
+    # pipe or a later statement, on a line where every other command is a
+    # setup step or a line filter that cannot write a summary line of its own
+    # (see ``_summary_readable``): the runner's own summary in the output is
+    # then its outcome (``runner_summary_outcome``).
     summary_readable: bool = False
+    # ``"pytest"`` / ``"vitest"`` for a ``summary_readable`` check: which
+    # runner's summary format stands for its outcome.
+    summary_runner: str | None = None
 
     @property
     def is_check(self) -> bool:
@@ -223,9 +226,10 @@ def _classify(command: str | None, *, depth: int, shell: str = SHELL_POSIX) -> l
             kind = _kind_of(simple.words)
             if kind != KIND_OTHER:
                 suite = _suite(simple.words) if kind == KIND_TEST and not moves_dir else None
+                readable = not blocked and _summary_readable(statements, si, ci, outer, depth)
                 out.append(CheckCommand(kind, _display(simple.words), outer, outer_failure, suite,
-                                        _exit_mask(statements, si, ci, shell),
-                                        not blocked and _summary_readable(statements, si, ci, outer, depth)))
+                                        _exit_mask(statements, si, ci, shell), readable,
+                                        _summary_runner(simple.words) if readable else None))
     return out
 
 
@@ -244,9 +248,9 @@ _SILENT_AFTER = frozenset({"cd", "pushd", "popd", "set-location", "sl", "true", 
 def _summary_readable(
     statements: list[list[_Simple]], si: int, ci: int, outer: str | None, depth: int,
 ) -> bool:
-    """Whether pytest's own summary line in the output may stand for its hidden exit status.
+    """Whether the test runner's own summary in the output may stand for its hidden exit status.
 
-    Only for a pytest run hidden by a pipe or a later statement (never
+    Only for a pytest or vitest run (``_summary_runner``) hidden by a pipe or a later statement (never
     ``||``, a background ``&`` or a block), on a line where every command
     before pytest is a setup step, every command after it in its pipeline is
     a line filter of its output (``_filter_ok``), and every later statement
@@ -255,7 +259,7 @@ def _summary_readable(
     if depth or outer not in (UNATTRIBUTED_PIPED, UNATTRIBUTED_NOT_LAST):
         return False
     statement = statements[si]
-    if not _is_pytest(statement[ci].words) or any(s.op_after in ("||", "&") for s in statement):
+    if _summary_runner(statement[ci].words) is None or any(s.op_after in ("||", "&") for s in statement):
         return False
     for sj, other in enumerate(statements):
         for cj, simple in enumerate(other):
@@ -304,6 +308,37 @@ def _is_pytest(words: list[str]) -> bool:
     return head in _PYTHONS and len(rest) >= 2 and rest[0] == "-m" and rest[1].lower() == "pytest"
 
 
+def _is_vitest(words: list[str]) -> bool:
+    """A direct vitest run: ``vitest``, ``npx vitest``, ``pnpm vitest``, ``pnpm exec vitest``.
+
+    Only these exact shapes: a package-manager flag before ``vitest``
+    (``pnpm -r``, ``--filter``) may run it in several packages, each printing
+    its own summary, so the last one in the output would not speak for all.
+    ``pnpm test`` is excluded for the same reason: the script may run anything.
+    """
+    if not words:
+        return False
+    head, rest = _program(words[0]), words[1:]
+    if head == "vitest":
+        return True
+    if head in _NODE_EXEC:
+        rest = rest[1:] if rest and rest[0] in ("-y", "--yes") else rest
+        return bool(rest) and _program(rest[0]) == "vitest"
+    if head in _PACKAGE_MANAGERS:
+        if rest and rest[0] in _PM_SUBCOMMANDS_EXEC:
+            rest = rest[1:]
+        return bool(rest) and rest[0] == "vitest"
+    return False
+
+
+def _summary_runner(words: list[str]) -> str | None:
+    if _is_pytest(words):
+        return "pytest"
+    if _is_vitest(words):
+        return "vitest"
+    return None
+
+
 # pytest's final summary line: ``==== 3 failed, 507 passed in 12.31s ====``
 # (or, with ``-q``, the same without the ``=`` padding). Only the counts are
 # read; nothing else of the output is kept.
@@ -342,6 +377,71 @@ def pytest_summary_outcome(output: object) -> str | None:
             return "failed"
         ran = sum(counts.get(k, 0) for k in ("passed", "skipped", "xfailed", "xpassed"))
         return "passed" if ran else "failed"  # only deselected: pytest exits 5
+    return None
+
+
+# vitest's closing summary block, e.g.
+#    Test Files  1 failed | 12 passed (13)
+#         Tests  2 failed | 140 passed | 3 skipped (145)
+#        Errors  1 error
+#      Start at  14:24:35
+#      Duration  3.21s (transform 42%, ...)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_VITEST_ROW_RE = re.compile(r"^(Test Files|Tests|Errors|Type Errors|Snapshots|Start at|Duration)\s+(.*)$")
+_VITEST_COUNT_RE = re.compile(r"(\d+) ([a-z][a-z ]*?)(?= \||\s*\(|$)")
+_VITEST_FAILING_ROWS = ("Errors", "Type Errors")
+
+
+def vitest_summary_outcome(output: object) -> str | None:
+    """``passed`` / ``failed`` from vitest's closing summary block in *output*, else None.
+
+    ``failed`` when the block reports a failed test file, test or snapshot,
+    or any (type) error: vitest exits non-zero for each. ``passed`` only when
+    the block reports passed test files and tests, nothing failed, and the
+    block is the very end of the output (``Duration`` last), so nothing printed
+    after it -- a coverage threshold, a reporter error -- can have failed the
+    run unseen. Anything else, a cancelled run, or no block -> None: unknown,
+    never a guessed pass. Only the last ``_SUMMARY_TAIL_CHARS`` are scanned.
+    """
+    if not isinstance(output, str) or not output:
+        return None
+    lines = [_ANSI_RE.sub("", line).strip() for line in output[-_SUMMARY_TAIL_CHARS:].splitlines()]
+    lines = lines[-_SUMMARY_TAIL_LINES:]
+    while lines and not lines[-1]:
+        lines.pop()
+    starts = [i for i, line in enumerate(lines) if line.startswith("Test Files ")]
+    if not starts or any("cancel" in line.lower() for line in lines):
+        return None
+    rows: dict[str, dict[str, int]] = {}
+    clean = True
+    for line in lines[starts[-1]:]:
+        match = _VITEST_ROW_RE.match(line)
+        if not match:
+            clean = False
+            break
+        rows[match.group(1)] = {word: int(n) for n, word in _VITEST_COUNT_RE.findall(match.group(2))}
+    failing = any(rows.get(row, {}).get("failed") for row in ("Test Files", "Tests", "Snapshots"))
+    if failing or any(sum(rows[row].values()) for row in _VITEST_FAILING_ROWS if row in rows):
+        return "failed"
+    if (clean and lines[-1].startswith("Duration") and rows.get("Test Files", {}).get("passed")
+            and rows.get("Tests", {}).get("passed")):
+        return "passed"
+    return None
+
+
+def runner_summary_outcome(command: str | None, output: object, *, shell: str = SHELL_POSIX) -> str | None:
+    """The outcome of *command*'s summary-readable test run, read off its runner's summary in *output*.
+
+    None unless exactly one check on the line is ``summary_readable``.
+    """
+    runners = {c.summary_runner for c in classify_check_commands(command, shell=shell) if c.summary_readable}
+    if len(runners) != 1:
+        return None
+    runner = runners.pop()
+    if runner == "pytest":
+        return pytest_summary_outcome(output)
+    if runner == "vitest":
+        return vitest_summary_outcome(output)
     return None
 
 
@@ -1113,7 +1213,7 @@ def check_command_items(
     (the caller's scrubber); the raw command never leaves this call. With a
     *context* (the reported working directory) a test-runner check also
     carries ``suite`` (``suite_key``: a hash of the directory, never its text).
-    *test_summary* is ``pytest_summary_outcome`` of the command's reported
+    *test_summary* is ``runner_summary_outcome`` of the command's reported
     output; a ``summary_readable`` check carries it as ``summary_outcome``.
     """
     items: list[dict] = []
@@ -1159,8 +1259,8 @@ def queued_check_commands(value: object) -> list[dict] | None:
 def item_outcome(item: dict, command_outcome: str) -> tuple[str, str | None]:
     """``(status, reason)`` for one queued check item given the command's outcome.
 
-    A pytest run whose exit status a pipe or a later statement hid takes its
-    outcome from its own summary line (``summary_outcome``) once the command
+    A pytest or vitest run whose exit status a pipe or a later statement hid
+    takes its outcome from its own summary (``summary_outcome``) once the command
     completed: a failed summary always, a passed one only when the whole
     command also succeeded. Otherwise it stays unknown.
     """

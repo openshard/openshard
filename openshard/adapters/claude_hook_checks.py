@@ -15,7 +15,8 @@ from typing import Any
 
 from openshard.verification.check_command import (
     item_outcome,
-    pytest_summary_outcome,
+    runner_summary_outcome,
+    shell_for_tool,
     suite_supersedes,
 )
 from openshard.verification.gaming_signals import note_masked_check
@@ -31,14 +32,15 @@ MAX_CHECK_KEYS = 100  # distinct check commands whose latest outcome is tracked
 
 
 def claude_test_summary(event: str, data: Mapping[str, Any], tool_input: Mapping[str, Any]) -> str | None:
-    """pytest's summary-line outcome from a Claude shell call's reported output, else None.
+    """The test runner's summary outcome from a Claude shell call's reported output, else None.
 
-    Only for a command that names pytest; only the tail of ``stdout``
+    Only for a command that names pytest or vitest, read in that runner's
+    format (``runner_summary_outcome``); only the tail of ``stdout``
     (``PostToolUse``) or ``error`` (``PostToolUseFailure``, which carries the
     output after its exit line) is scanned, and only the outcome word is kept.
     """
     command = tool_input.get("command")
-    if not isinstance(command, str) or "pytest" not in command:
+    if not isinstance(command, str) or ("pytest" not in command and "vitest" not in command):
         return None
     if event == "PostToolUse":
         response = data.get("tool_response")
@@ -47,7 +49,8 @@ def claude_test_summary(event: str, data: Mapping[str, Any], tool_input: Mapping
         output = data.get("error")
     else:
         return None
-    return pytest_summary_outcome(output)
+    tool_name = data.get("tool_name")
+    return runner_summary_outcome(command, output, shell=shell_for_tool(tool_name if isinstance(tool_name, str) else None))
 
 
 def record_checks(buf: dict, payload: Any, action: str, outcome: str, at: str) -> None:

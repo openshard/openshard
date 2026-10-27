@@ -2,6 +2,18 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Fixed
+
+- A vitest run whose output is piped (`npx vitest run 2>&1 | tail -8`) now
+  takes its outcome from vitest's own summary, as a piped pytest run already
+  did, instead of reading "outcome not observed". It reads "passed" only
+  when the summary is the last thing printed, so a later coverage or
+  reporter error is never hidden. An unhandled error reads "failed". Script
+  runs such as `pnpm test | tail` stay unknown, because they may print
+  several summaries. The outcome is still the agent's own report.
+
 ## 0.5.0 - 2026-10-25
 
 <!-- release-title: Openshard v0.5.0 - Verified Receipts Across Agents -->

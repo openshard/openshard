@@ -83,7 +83,6 @@ def test_piped_pytest_runs_may_take_their_summary_line(command):
     ("if pytest | tail; then :; fi", cc.SHELL_POSIX),
     ("pytest; ruff check . | tail", cc.SHELL_POSIX),
     ("bash -lc 'pytest | tail -3'", cc.SHELL_POSIX),
-    ("npx vitest run | tail -5", cc.SHELL_POSIX),  # only pytest's summary line is read
     ("python -m unittest | tail -5", cc.SHELL_POSIX),
 ])
 def test_lines_where_the_summary_may_not_be_pytests_own_are_not_readable(command, shell):
