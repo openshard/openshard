@@ -2,6 +2,28 @@
 
 All notable changes to OpenShard are documented here.
 
+## Unreleased
+
+### Added
+
+- Steering capture: each Receipt records when a person steered the agent:
+  the first prompt, follow-ups after a turn, messages sent while the agent was
+  working, interrupts (Esc), answers to permission prompts and files changed
+  between turns while the agent was not running. Follow-ups and mid-turn
+  messages get an intent (correction, redirect, clarification, approval,
+  continue, new task or unknown) from a local, rule-based classifier
+  (`rules-v1`). Prompt text is read only on your machine to classify it and is
+  never stored, synced or sent; only the kind, intent, confidence, rule and
+  length are kept. Each agent records what its hooks and local session log
+  expose; a signal an agent does not expose is listed as not available with
+  the reason, never as zero. See `docs/steering-capture.md`.
+- Autonomy facts derived from those records: how often a person stepped in,
+  the longest stretch the agent worked alone, interrupts, permission prompts
+  and think time between turns. `openshard last` prints one Steering line;
+  `history --json` and Platform sync carry an optional `steering` block (no
+  paths). A Platform that does not accept the block yet gets the Receipt
+  without it.
+
 ## 0.5.0 - 2026-10-25
 
 <!-- release-title: Openshard v0.5.0 - Verified Receipts Across Agents -->

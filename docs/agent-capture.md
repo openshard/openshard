@@ -521,7 +521,15 @@ never invented evidence.
   environment variables. Prompts are reduced to a secret-scrubbed, 300-char
   excerpt of the *first* prompt (the Shard task); commands to a scrubbed,
   100-char summary. The OpenCode plugin already truncates what it sends
-  (400 chars) and never reads tool output.
+  (400 chars, so an OpenCode prompt's recorded length is at most 400) and
+  never reads tool output.
+* **Steering** (`docs/steering-capture.md`): every human prompt, and each
+  message Claude Code / Codex logs as sent mid-turn, is classified locally
+  into an intent; only the intent, confidence, rule id and length in
+  characters are kept, never the text. The Claude Code transcript is read
+  for `queue-operation`, interrupt markers and tool rejections; the Codex
+  rollout for `task_started` / `user_message` / `turn_aborted`. Files changed
+  between turns come from git (paths and counts only).
 * **Session boundary**: one agent session = one Shard, attempt 1 — exactly
   the Claude rule. Sessions are never grouped by prompt text or timing, and
   two agents' sessions never merge: staging buffers and capture-service

@@ -91,6 +91,12 @@ So the following are never sent:
 `openshard telemetry sample` prints the queued events exactly as they will
 be sent, so you can check this yourself at any time.
 
+Steering capture (`docs/steering-capture.md`) adds nothing to telemetry: the
+intent of a follow-up, interrupts, permission answers and files changed
+between turns stay in the local Receipt (and the Platform, if you link it).
+No telemetry event or property carries them, and the prompt text they are
+classified from is never kept anywhere.
+
 ## Installation id
 
 `installation_id` is a random uuid4 minted the first time telemetry state is
