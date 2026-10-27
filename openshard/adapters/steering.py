@@ -75,7 +75,8 @@ AFTER_VALUES: frozenset[str] = frozenset(
 SOURCE_HOOK = "hook"
 SOURCE_TRANSCRIPT = "transcript"
 SOURCE_GIT = "git"
-SOURCES: frozenset[str] = frozenset({SOURCE_HOOK, SOURCE_TRANSCRIPT, SOURCE_GIT})
+SOURCE_GITHUB = "github"  # derived from a pull request's reviews and comments (github/steering.py)
+SOURCES: frozenset[str] = frozenset({SOURCE_HOOK, SOURCE_TRANSCRIPT, SOURCE_GIT, SOURCE_GITHUB})
 DECISIONS: frozenset[str] = frozenset({"allow", "deny", "always_allow"})
 
 LIVE_HOOK = "live_hook"
@@ -160,6 +161,62 @@ CAPABILITIES: dict[str, dict[str, tuple[str, str]]] = {
         KIND_MANUAL_EDIT: _GIT,
     },
 }
+
+FROM_GITHUB = "from_github"
+AGENT_GROK_BOT = "grok_bot"  # adapters/grok_bot.py (not imported here: the hook path stays light)
+AGENT_PR = "pull_request_agent"  # any agent driven from a pull request, with or without a Core adapter
+
+# The environment dimension (docs/steering-capture.md, "Every environment"): the (agent,
+# environment) pairs OpenShard has a capture path for. A pair that is absent is not claimed.
+ENVIRONMENT_ROWS: tuple[tuple[str, str], ...] = (
+    (AGENT_CLAUDE_CODE, "local_terminal"), (AGENT_CLAUDE_CODE, "local_ide"),
+    (AGENT_CLAUDE_CODE, "cloud_workspace"), (AGENT_CLAUDE_CODE, "cloud_agent"), (AGENT_CLAUDE_CODE, "ci"),
+    (AGENT_CODEX, "local_terminal"), (AGENT_CODEX, "cloud_workspace"), (AGENT_CODEX, "cloud_agent"),
+    (AGENT_CODEX, "ci"),
+    (AGENT_CURSOR, "local_ide"), (AGENT_CURSOR, "cloud_agent"),
+    (AGENT_OPENCODE, "local_terminal"), (AGENT_OPENCODE, "cloud_workspace"),
+    (AGENT_ANTIGRAVITY, "local_ide"),
+    (AGENT_GROK_BUILD, "local_terminal"), (AGENT_GROK_BUILD, "cloud_workspace"),
+    (AGENT_HERMES, "local_terminal"), (AGENT_HERMES, "cloud_workspace"),
+    (AGENT_GROK_BOT, "cloud_agent"),
+    (AGENT_PR, "web"),
+)
+_CI_HEADLESS = "a CI run is headless: no person is there to type, stop, answer or edit while it runs"
+_GROK_BOT_WHY = ("Grok Bot runs no hooks; Action Recording exports actions, not the conversation, and its "
+                 "self-report carries no steering")
+_CLOUD_LOG = "; read inside the hosted VM, where the log is written (fixture-tested, not yet on a live hosted run)"
+_CLOUD_EDIT = (FROM_GIT, "the hosted VM's working tree between turns; a person seldom has a shell there, "
+                         "so this is usually another process")
+
+
+def environment_capability(agent: str, environment: str, signal: str) -> tuple[str, str]:
+    """How *signal* of *agent* is captured in *environment*: ``(how, what / why not)``. Pure.
+
+    A local terminal, a local IDE and a cloud workspace run the same agent
+    with Core beside it: the agent's own row (``CAPABILITIES``). A hosted
+    agent VM runs the same hooks once Core is installed there
+    (``openshard setup --repo``); its log is read inside the VM. CI is
+    headless. ``web`` is what reached GitHub (``github/steering.py``).
+    """
+    if environment == "web":
+        from openshard.github.steering import NOT_AVAILABLE as GITHUB_NOT_AVAILABLE
+
+        if signal == KIND_FOLLOW_UP:
+            return FROM_GITHUB, ("reviews (changes requested -> correction, approved -> approval, commented) and "
+                                 "PR comments addressed to the agent, before each commit")
+        return NOT_AVAILABLE, GITHUB_NOT_AVAILABLE[signal]
+    if agent == AGENT_GROK_BOT:
+        return NOT_AVAILABLE, _GROK_BOT_WHY
+    how, why = CAPABILITIES[agent][signal]
+    if environment == "ci" and signal != KIND_INITIAL:
+        return NOT_AVAILABLE, _CI_HEADLESS
+    if environment == "cloud_agent":
+        if signal == KIND_MANUAL_EDIT:
+            return _CLOUD_EDIT
+        if how == FROM_LOG:
+            return how, why + _CLOUD_LOG
+    return how, why
+
 
 # Permission prompt counts each agent can report: asked / allowed / denied.
 _PERMISSION_COUNTS: dict[str, tuple[bool, bool, bool]] = {
@@ -441,7 +498,17 @@ def note_interrupt(buf: dict, now: str, *, source: str = SOURCE_HOOK, after: str
                 return False  # one Esc, seen by the hook and again in the log
     index = _turn_index_at(buf, now) if source == SOURCE_TRANSCRIPT else _turn_index(buf)
     event = {"at": now, "turn_index": index, "kind": KIND_INTERRUPT, "after": after, "source": source}
-    return _add(buf, event)
+    added = _add(buf, event)
+    if added and source == SOURCE_TRANSCRIPT:
+        # The hook's own Interrupt Event is this fact's timeline entry; an Esc only the log saw gets one here.
+        _activity_event(buf, "assistant turn interrupted by user", {"steering_kind": KIND_INTERRUPT}, now,
+                        "agent_reported")
+    return added
+
+
+def person_decision(choice: object) -> bool:
+    """True for a Hermes approval choice a person made (smart-mode choices are a model's)."""
+    return isinstance(choice, str) and choice in _HERMES_DECISIONS
 
 
 def note_permission(buf: dict, choice: object, now: str) -> None:
@@ -821,9 +888,11 @@ def _claude_user_item(buf: dict, item: Mapping[str, Any], at: str) -> None:
         body = item.get("content")
         body_text = body if isinstance(body, str) else " ".join(
             c.get("text", "") for c in body if isinstance(c, dict)) if isinstance(body, list) else ""
-        if isinstance(body_text, str) and body_text.startswith(_CLAUDE_REJECTION):
-            _add(buf, {"at": at, "turn_index": _turn_index_at(buf, at), "kind": KIND_PERMISSION,
-                       "decision": "deny", "after": "permission_prompt", "source": SOURCE_TRANSCRIPT})
+        if isinstance(body_text, str) and body_text.startswith(_CLAUDE_REJECTION) and _add(
+            buf, {"at": at, "turn_index": _turn_index_at(buf, at), "kind": KIND_PERMISSION,
+                  "decision": "deny", "after": "permission_prompt", "source": SOURCE_TRANSCRIPT}):
+            _activity_event(buf, "permission prompt answered: deny",
+                            {"steering_kind": KIND_PERMISSION, "decision": "deny"}, at, "agent_reported")
         return
     text = item.get("text") if item.get("type") == "text" else None
     stripped = text.strip() if isinstance(text, str) else None
@@ -965,6 +1034,17 @@ def permission_counts_available(agent: str) -> tuple[bool, bool, bool]:
     return _PERMISSION_COUNTS.get(agent, (False, False, False))
 
 
+def environment_facts(agent_host: object) -> dict[str, str]:
+    """``environment`` (+ ``environment_source``) from where the agent ran, or why it is not known."""
+    from openshard.adapters.agent_env import agent_host_or_none
+    from openshard.history.steering import environment_from_host
+
+    environment, reason = environment_from_host(agent_host_or_none(agent_host))
+    if environment is None:
+        return {"environment_not_recorded_reason": str(reason)}
+    return {"environment": environment, "environment_source": "agent_env"}
+
+
 def stamp(entry: dict, buf: dict) -> None:
     """``capture.steering`` on the Receipt being built: the staged facts, nothing derived from text."""
     try:
@@ -983,6 +1063,7 @@ def stamp(entry: dict, buf: dict) -> None:
         }
         if agent == AGENT_HERMES:
             block["permission_prompts_asked"] = int(approvals.get("requested") or 0)
+        block.update(environment_facts(buf.get("agent_host")))
         for key in ("last_turn_end_at",):
             if isinstance(state.get(key), str):
                 block[key] = state[key]
@@ -1001,12 +1082,17 @@ def stamp(entry: dict, buf: dict) -> None:
 
 __all__ = [
     "CAPABILITIES",
+    "ENVIRONMENT_ROWS",
     "FROM_GIT",
+    "FROM_GITHUB",
     "FROM_LOG",
     "LIVE_HOOK",
     "NOT_AVAILABLE",
     "SIGNALS",
+    "SOURCE_GITHUB",
     "THINK_CAP_SECONDS",
+    "environment_capability",
+    "environment_facts",
     "inherit",
     "note_interrupt",
     "note_model_invocation",
@@ -1017,6 +1103,7 @@ __all__ = [
     "note_work_resumed",
     "not_available",
     "permission_counts_available",
+    "person_decision",
     "prompt_facts",
     "restore",
     "forget",

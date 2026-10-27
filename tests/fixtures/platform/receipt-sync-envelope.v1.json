@@ -5252,7 +5252,8 @@
                         "enum": [
                           "hook",
                           "transcript",
-                          "git"
+                          "git",
+                          "github"
                         ]
                       },
                       "intent": {
@@ -5344,6 +5345,15 @@
                         "type": "string",
                         "maxLength": 40,
                         "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+                      },
+                      "via": {
+                        "type": "string",
+                        "enum": [
+                          "review_changes_requested",
+                          "review_approved",
+                          "review_commented",
+                          "agent_mention"
+                        ]
                       }
                     },
                     "required": [
@@ -5385,6 +5395,61 @@
                 "log_not_read_reason": {
                   "type": "string",
                   "pattern": "^[a-z_]{1,40}$"
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "local_terminal",
+                    "local_ide",
+                    "cloud_agent",
+                    "cloud_workspace",
+                    "web",
+                    "ci"
+                  ],
+                  "description": "Where the steered session ran, from the Receipt's own where-it-ran evidence; web: derived from a pull request (no runtime presence)."
+                },
+                "environment_source": {
+                  "type": "string",
+                  "pattern": "^[a-z_]{1,40}$"
+                },
+                "environment_not_recorded_reason": {
+                  "type": "string",
+                  "pattern": "^[a-z_]{1,40}$"
+                },
+                "github": {
+                  "type": "object",
+                  "description": "Counts derived from a pull request (source github). Never comment text or logins.",
+                  "properties": {
+                    "review_comments": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "review_rerequests": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "bot_comments_ignored": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "commit_after_review": {
+                      "type": "boolean"
+                    },
+                    "window_from": {
+                      "type": "string",
+                      "maxLength": 40,
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+                    },
+                    "window_to": {
+                      "type": "string",
+                      "maxLength": 40,
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+                    }
+                  },
+                  "additionalProperties": false
                 },
                 "autonomy": {
                   "type": "object",

@@ -36,11 +36,29 @@ KINDS: tuple[str, ...] = (
 )
 _INTENTS = frozenset({"correction", "redirect", "clarification", "approval", "continue", "new_task", "unknown"})
 _AFTER = frozenset({"turn_end", "failed_check", "tool_call", "permission_prompt", "none", "unknown"})
-_SOURCES = frozenset({"hook", "transcript", "git"})
+_SOURCES = frozenset({"hook", "transcript", "git", "github"})
 _DECISIONS = frozenset({"allow", "deny", "always_allow"})
 _CONFIDENCES = frozenset({"high", "medium", "low"})
 _MAX_EVENTS = 100
 _MAX_SYNC_EVENTS = 50
+
+# Where the steered session ran (docs/steering-capture.md, "Environment on every block").
+ENV_LOCAL_TERMINAL = "local_terminal"
+ENV_LOCAL_IDE = "local_ide"
+ENV_CLOUD_AGENT = "cloud_agent"
+ENV_CLOUD_WORKSPACE = "cloud_workspace"
+ENV_WEB = "web"
+ENV_CI = "ci"
+ENVIRONMENTS: tuple[str, ...] = (
+    ENV_LOCAL_TERMINAL, ENV_LOCAL_IDE, ENV_CLOUD_AGENT, ENV_CLOUD_WORKSPACE, ENV_WEB, ENV_CI,
+)
+# ``capture.agent_host`` apps (adapters/agent_env.py) that settle local terminal vs local IDE.
+_IDE_APPS = frozenset({"vscode", "jetbrains"})
+_TERMINAL_APPS = frozenset({
+    "terminal", "iterm2", "macos_terminal", "wezterm", "ghostty", "warp", "tmux", "hyper", "kitty",
+})
+_RAN_ON_ENVIRONMENTS = {"cloud_agent": ENV_CLOUD_AGENT, "cloud_dev": ENV_CLOUD_WORKSPACE, "ci": ENV_CI}
+_GITHUB_VIA = frozenset({"review_changes_requested", "review_approved", "review_commented", "agent_mention"})
 
 # Keys an event may carry, by type; anything else is dropped on read.
 _INT_KEYS = ("turn_index", "prompt_chars", "files", "lines_added", "lines_removed", "lines_unknown_files")
@@ -49,6 +67,33 @@ _BOOL_KEYS = ("from_queue", "think_capped", "incomplete")
 _STR_KEYS = ("at", "since", "intent_rule")
 # Local only: a manual edit's paths stay in runs.jsonl and are never synced.
 _LOCAL_ONLY_KEYS = frozenset({"paths"})
+# The GitHub-derived block's counts (``github/steering.py``).
+_GITHUB_COUNT_KEYS = ("review_comments", "review_rerequests", "bot_comments_ignored")
+
+
+def environment_from_host(host: object) -> tuple[str | None, str | None]:
+    """``(environment, None)`` from a recorded ``capture.agent_host``, or ``(None, reason)`` when it does not say.
+
+    ``cloud_agent:*`` is a hosted agent VM, ``cloud_dev:*`` a cloud workspace
+    (Codespaces, Gitpod, Replicas), ``ci:*`` a CI runner. ``local`` needs the
+    app to tell a terminal from an IDE; a headless SDK run, a desktop app or an
+    unrecorded app leaves it unknown. ``web`` is never derived from a host: it
+    is the GitHub-derived block's (the person steered on GitHub, where
+    OpenShard had no runtime presence).
+    """
+    if not isinstance(host, str) or "|" not in host:
+        return None, "where_it_ran_not_recorded"
+    ran_on, app = host.split("|", 1)
+    kind = ran_on.partition(":")[0]
+    if kind in _RAN_ON_ENVIRONMENTS:
+        return _RAN_ON_ENVIRONMENTS[kind], None
+    if kind != "local":
+        return None, "where_it_ran_not_recorded"
+    if app in _IDE_APPS:
+        return ENV_LOCAL_IDE, None
+    if app in _TERMINAL_APPS:
+        return ENV_LOCAL_TERMINAL, None
+    return None, "local_app_not_recorded" if not app else "local_app_not_terminal_or_ide"
 
 
 def _parse(stamp: object) -> datetime | None:
@@ -95,6 +140,8 @@ def _event(raw: object) -> dict[str, Any] | None:
     out["source"] = raw.get("source") if raw.get("source") in _SOURCES else "hook"
     if raw.get("decision") in _DECISIONS:
         out["decision"] = raw["decision"]
+    if raw.get("via") in _GITHUB_VIA:
+        out["via"] = raw["via"]
     paths = raw.get("paths")
     if isinstance(paths, list):
         out["paths"] = [p for p in paths if isinstance(p, str)][:20]
@@ -125,6 +172,22 @@ def stored_block(capture: object) -> dict[str, Any] | None:
             block[key] = raw[key]
     if isinstance(raw.get("log_not_read_reason"), str):
         block["log_not_read_reason"] = raw["log_not_read_reason"][:40]
+    # Present only on blocks that recorded them: an older block reads back exactly as before.
+    if raw.get("environment") in ENVIRONMENTS:
+        block["environment"] = raw["environment"]
+        if isinstance(raw.get("environment_source"), str):
+            block["environment_source"] = raw["environment_source"][:40]
+    elif isinstance(raw.get("environment_not_recorded_reason"), str):
+        block["environment_not_recorded_reason"] = raw["environment_not_recorded_reason"][:40]
+    github = raw.get("github")
+    if isinstance(github, Mapping):
+        facts: dict[str, Any] = {k: github[k] for k in _GITHUB_COUNT_KEYS if _count(github.get(k)) is not None}
+        if isinstance(github.get("commit_after_review"), bool):
+            facts["commit_after_review"] = github["commit_after_review"]
+        for key in ("window_from", "window_to"):
+            if _parse(github.get(key)) is not None:
+                facts[key] = github[key]
+        block["github"] = facts
     return block
 
 
@@ -251,4 +314,8 @@ def summary_line(evidence: object) -> str | None:
     return " · ".join(parts)
 
 
-__all__ = ["KINDS", "autonomy", "steering_evidence", "stored_block", "summary_line", "sync_block"]
+__all__ = [
+    "ENVIRONMENTS", "ENV_CI", "ENV_CLOUD_AGENT", "ENV_CLOUD_WORKSPACE", "ENV_LOCAL_IDE", "ENV_LOCAL_TERMINAL",
+    "ENV_WEB", "KINDS", "autonomy", "environment_from_host", "steering_evidence", "stored_block", "summary_line",
+    "sync_block",
+]

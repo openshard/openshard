@@ -219,7 +219,9 @@ from openshard.adapters.claude_hook_checks import (
 )
 from openshard.adapters.claude_lead_models import model_roles as _model_roles
 from openshard.adapters.claude_lead_models import transcript_models as _transcript_models
-from openshard.adapters.claude_session_fidelity import sweep_stale_buffers  # noqa: F401  (re-exported)
+from openshard.adapters.claude_session_fidelity import (
+    sweep_stale_buffers,  # noqa: F401  (re-exported)
+)
 from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-exported for callers and tests)
     _count,
     _new_transcript_state,
@@ -3659,7 +3661,8 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     if event == EVENT_INTERRUPT:
         _append_event(
             buf, event_type="session.activity", action="assistant turn interrupted by user",
-            status="unknown", evidence="directly_observed", metadata={"hook": event}, occurred_at=now,
+            status="unknown", evidence="directly_observed",
+            metadata={"hook": event, "steering_kind": steering.KIND_INTERRUPT}, occurred_at=now,
         )
         if buf.get("record") and _has_activity(buf):
             return "turn interrupted", True, False
@@ -3838,6 +3841,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
             counts["unanswered"] = int(counts.get("unanswered") or 0) + 1
             event_type, status = "session.activity", "unknown"
             verb = f"approval not decided ({choice})" if isinstance(choice, str) else "approval not decided"
+        meta.update({"steering_kind": steering.KIND_PERMISSION} if steering.person_decision(choice) else {})
         _append_event(
             buf, event_type=event_type, action=f"{verb}: {command_text}", target=payload.command_target,
             status=status, evidence="agent_reported", metadata=meta, occurred_at=now,
@@ -4053,13 +4057,6 @@ def apply_reduced_hook(
             if cloud_turn_closed or turn_sealed:
                 should_fold, should_delete = True, True
             _mark_applied(buf, dedup_id)
-            remote_events = _remote_capture_new_events(buf)
-            if remote_events is not None:
-                # Remote/connected capture names the repository from the first
-                # hook, not the first fold: cache the identity on the buffer now
-                # so the SessionStart batch already carries it (see
-                # connected.config.session_from_entry).
-                _cached_repo_identity(buf, repo_root)
             if buf.get("ended") and _has_activity(buf):
                 # An ended buffer (this SessionEnd, or a buffer an older
                 # version left behind): snapshot and drop it rather than
@@ -4074,6 +4071,14 @@ def apply_reduced_hook(
                 entry, outcome = _fold(buf, repo_root, finalize=finalize)
                 if turn_sealed:
                     turns.after_seal()
+            # After the fold: its steering Events (read from the session log) leave with this batch.
+            remote_events = _remote_capture_new_events(buf)
+            if remote_events is not None:
+                # Remote/connected capture names the repository from the first
+                # hook, not the first fold: cache the identity on the buffer now
+                # so the SessionStart batch already carries it (see
+                # connected.config.session_from_entry).
+                _cached_repo_identity(buf, repo_root)
             if should_delete:
                 try:
                     if path.exists():

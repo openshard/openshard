@@ -396,14 +396,20 @@ class TestBlockingPath:
 _STABLE_EVENT_KEYS = ("event_type", "action", "status", "evidence", "target", "actor", "source")
 
 
+_ENV_STEERING_KEYS = ("environment", "environment_source", "environment_not_recorded_reason")  # from agent_host
+
+
 def _stable_view(entry: dict) -> dict:
+    capture = dict(entry["capture"])
+    if isinstance(capture.get("steering"), dict):
+        capture["steering"] = {k: v for k, v in capture["steering"].items() if k not in _ENV_STEERING_KEYS}
     return {
         "task": entry["task"],
         "executor": entry["executor"],
         "files_source": entry["files_source"],
         "files_detail": entry["files_detail"],
         "summary": entry["summary"],
-        "capture": {k: v for k, v in entry["capture"].items()
+        "capture": {k: v for k, v in capture.items()
                     if k not in ("started_at", "last_activity_at", "first_prompt_at",
                                  "last_turn_completed_at", "last_status_ping_at", "turn_sealed_at",
                                  # Legitimately differs by capture path: the HTTP/service
