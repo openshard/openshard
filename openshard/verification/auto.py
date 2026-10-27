@@ -1,32 +1,32 @@
 """Automatic verification of captured sessions.
 
-Two triggers live here: commit verification (on by default, see
-``schedule_commit_verify`` below) and the older opt-in post-session
-verification of whatever the working tree holds, described first.
+Two triggers live here, both on by default:
 
-Opt-in post-session verification: run ``openshard verify`` when a captured session closes.
+* **commit verification** -- a Receipt that names its resulting commit gets
+  that exact commit re-run (``schedule_commit_verify`` below);
+* **post-session verification** -- a Receipt that changed files but made no
+  commit gets the checks its change calls for re-run on a *private copy* of
+  the uncommitted changes (``openshard verify --snapshot --auto``,
+  ``verification/snapshot_run.py``), at session end, or for per-turn
+  Receipts once their Task settles (``settle.py``).
 
-An external agent's Receipt ends with, at best, the agent's own account of
-its checks. ``openshard verify`` replaces that with an outcome OpenShard
-observed, but only if somebody runs it. With
+``post_session_verify`` in ``.openshard/config.yml`` chooses the second:
 
-    post_session_verify: safe
+    # unset (default) or "snapshot": a private copy, never the checkout
+    post_session_verify: safe   # the older run in the checkout itself
+    post_session_verify: off    # no automatic re-run at all (commits included)
 
-in ``.openshard/config.yml`` the capture path starts it when a session's
-Receipt is finalised (a session-end event, or the stale sweep closing a
-session that never sent one), and for per-turn Receipts once their Task
-settles (``settle.py``).
+``OPENSHARD_NO_AUTO_VERIFY`` turns both off for a process.
 
 What it will and will not do
 ----------------------------
-* Off unless the repository's config turns it on; ``OPENSHARD_NO_AUTO_VERIFY``
-  turns it off for a process regardless.
-* It starts exactly ``openshard verify --receipt <id> --json``: never
-  ``--approve``, never ``--from-observed``. So only checks the shared safety
-  rules class as ``safe`` run; ``needs_approval`` and ``blocked`` checks are
-  recorded as skipped, as they are for a person who runs the command.
+* Only checks the shared safety rules class as ``safe`` run; nothing is
+  approved and ``--from-observed`` is never passed.
+* A session that changed no files starts nothing.
 * The child is detached and gets no stdio: a session-end hook never waits
   for a test suite. Its result is the attestation it appends, nothing else.
+* A snapshot result is never bound to a commit, so it never counts as
+  commit verification for the merge gate.
 * Nothing is recorded here. If the child cannot start, the Receipt simply
   keeps the evidence it had.
 
@@ -43,33 +43,53 @@ from pathlib import Path
 
 CONFIG_KEY = "post_session_verify"
 MODE_SAFE = "safe"
+MODE_OFF = "off"
+# The default (key unset): uncommitted changes are re-run on a private copy
+# (``snapshot_run``), never in the live checkout. ``safe`` keeps the older
+# in-place run; ``off`` (or false) turns every automatic run off.
+MODE_SNAPSHOT = "snapshot"
 ENV_DISABLE = "OPENSHARD_NO_AUTO_VERIFY"
 
 Spawner = Callable[[list[str], Path], bool]
 
 
-def auto_verify_enabled(repo_root: Path, env: dict | os._Environ | None = None) -> bool:
-    """True only when this repository's config asks for post-session verification."""
+def post_session_mode(repo_root: Path, env: dict | os._Environ | None = None) -> str | None:
+    """How a Receipt without a commit is re-run: ``snapshot`` (default), ``safe``, or None (off)."""
     env = os.environ if env is None else env
     if env.get(ENV_DISABLE):
-        return False
+        return None
     try:
         path = repo_root / ".openshard" / "config.yml"
         # Cheap pre-check: session-end hooks run on a latency budget, so the
         # YAML parser is only loaded for a config that mentions the key.
         if not path.is_file() or CONFIG_KEY.encode() not in path.read_bytes():
-            return False
+            return MODE_SNAPSHOT
         from openshard.config.settings import load_config_safe
 
         config, valid, _ = load_config_safe(cwd=repo_root)
-        return bool(valid) and config.get(CONFIG_KEY) == MODE_SAFE
+        if not valid:
+            return None  # an unreadable config never starts anything new
+        value = config.get(CONFIG_KEY)
+        if value is False or value == MODE_OFF:
+            return None
+        return MODE_SAFE if value == MODE_SAFE else MODE_SNAPSHOT
     except Exception:
-        return False
+        return None
+
+
+def auto_verify_enabled(repo_root: Path, env: dict | os._Environ | None = None) -> bool:
+    """True unless this repository's config or the environment turns post-session verification off."""
+    return post_session_mode(repo_root, env) is not None
 
 
 def verify_argv(receipt_ref: str) -> list[str]:
     # -P: the child runs in the repository; its working tree must never shadow OpenShard's own modules.
     return [sys.executable, "-P", "-m", "openshard.cli.entrypoint", "verify", "--receipt", receipt_ref, "--json"]
+
+
+def snapshot_verify_argv(receipt_ref: str) -> list[str]:
+    return [sys.executable, "-P", "-m", "openshard.cli.entrypoint", "verify", "--receipt", receipt_ref,
+            "--snapshot", "--auto", "--json"]
 
 
 def _spawn_detached(argv: list[str], cwd: Path) -> bool:
@@ -98,14 +118,22 @@ def schedule_post_session_verify(
     spawner: Spawner | None = None,
     env: dict | os._Environ | None = None,
 ) -> bool:
-    """Start a detached safe-only ``openshard verify`` for *entry* when enabled. Returns whether it started."""
+    """Start a detached safe-only ``openshard verify`` for *entry* when enabled. Returns whether it started.
+
+    The default mode runs on a private copy of the uncommitted changes
+    (``--snapshot``); ``post_session_verify: safe`` runs in the checkout.
+    """
     try:
-        if not isinstance(entry, dict) or not auto_verify_enabled(repo_root, env):
+        if not isinstance(entry, dict):
+            return False
+        mode = post_session_mode(repo_root, env)
+        if mode is None:
             return False
         ref = entry.get("receipt_id") or entry.get("run_id")
         if not isinstance(ref, str) or not ref:
             return False
-        return bool((spawner or _spawn_detached)(verify_argv(ref), repo_root))
+        argv = verify_argv(ref) if mode == MODE_SAFE else snapshot_verify_argv(ref)
+        return bool((spawner or _spawn_detached)(argv, repo_root))
     except Exception:
         return False
 
@@ -128,7 +156,6 @@ def schedule_post_session_verify(
 # is set. Each (Receipt, commit) pair is requested once per process; the
 # child itself skips a commit already verified, under a per-repository lock.
 
-MODE_OFF = "off"
 _requested: set[tuple[str, str]] = set()
 
 
@@ -242,7 +269,11 @@ def schedule_for_receipt(repo_root: Path, entry: dict | None, *, finalized: bool
             return schedule_commit_verify(repo_root, entry) or settled_now
         if _is_sealed_turn(entry):  # a turn is re-run when its Task settles, not at its Stop
             return settled_now
-        return finalized and schedule_post_session_verify(repo_root, entry)
+        if not finalized:
+            return False
+        if post_session_mode(repo_root) == MODE_SNAPSHOT and not changed_files(entry):
+            return False  # nothing changed, nothing to verify (the explicit ``safe`` mode keeps its old behaviour)
+        return schedule_post_session_verify(repo_root, entry)
     except Exception:
         return False
 
@@ -256,10 +287,8 @@ def _is_sealed_turn(entry: dict) -> bool:
         capture.get("turn_sealed_at"), str)
 
 
-def sealed_turn_changed_files(entry: dict) -> bool:
-    """A sealed per-turn Receipt (docs/per-turn-receipts.md) with at least one file the turn changed."""
-    if not _is_sealed_turn(entry):
-        return False
+def changed_files(entry: dict) -> bool:
+    """*entry* records at least one file its own work changed (not pre-existing, not another session's)."""
     files = entry.get("files_detail")
     return any(
         isinstance(f, dict) and f.get("path") and f.get("attribution") not in _NOT_THIS_TURNS
@@ -267,8 +296,14 @@ def sealed_turn_changed_files(entry: dict) -> bool:
     )
 
 
+def sealed_turn_changed_files(entry: dict) -> bool:
+    """A sealed per-turn Receipt (docs/per-turn-receipts.md) with at least one file the turn changed."""
+    return _is_sealed_turn(entry) and changed_files(entry)
+
+
 __all__ = [
-    "CONFIG_KEY", "ENV_DISABLE", "MODE_OFF", "MODE_SAFE", "auto_verify_enabled", "commit_verify_argv",
-    "commit_verify_enabled", "schedule_commit_verify", "schedule_for_receipt", "schedule_post_session_verify",
-    "sealed_turn_changed_files", "verify_argv",
+    "CONFIG_KEY", "ENV_DISABLE", "MODE_OFF", "MODE_SAFE", "MODE_SNAPSHOT", "auto_verify_enabled", "changed_files",
+    "commit_verify_argv", "commit_verify_enabled", "post_session_mode", "schedule_commit_verify",
+    "schedule_for_receipt", "schedule_post_session_verify", "sealed_turn_changed_files", "snapshot_verify_argv",
+    "verify_argv",
 ]

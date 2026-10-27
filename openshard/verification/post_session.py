@@ -672,11 +672,15 @@ def build_attestation(
     commit: str | None = None,
     checkout: dict | None = None,
     truncated: bool = False,
+    snapshot: dict | None = None,
 ) -> dict:
     """One ``verifications.jsonl`` line: what OpenShard ran, saw, and against which tree.
 
     With *commit* (``openshard verify --commit``) the result binds only when
     the tree that ran was exactly that commit; *checkout* says where it ran.
+    With *snapshot* (``snapshot_run``: a copy of uncommitted changes) the
+    result is never bound to a commit, however clean the copy was: nobody
+    merges a snapshot. Its ``tree`` and ``base`` are recorded as they are.
     """
     checks = [_attested_check(r) for r in results]
     incomplete: list[str] = []
@@ -691,6 +695,7 @@ def build_attestation(
         and after_tracked is False
         and after.head == before.head
         and (commit is None or before.head.startswith(commit.lower()))
+        and snapshot is None
     )
     if not bound:
         incomplete.append(REASON_ARTIFACT_NOT_BOUND)
@@ -702,7 +707,7 @@ def build_attestation(
                              commit=commit, truncated=truncated, incomplete=incomplete)
     durations = [r.duration_seconds for r in results if r.duration_seconds is not None]
     ran = [r for r in results if r.status != CHECK_SKIPPED]
-    reason = _reason(results, bound, before)
+    reason = _reason(results, bound, before, snapshot=snapshot is not None)
     block = build_verification(
         source=SOURCE_DIRECTLY_OBSERVED,
         observation_mode=MODE_OPENSHARD_EXECUTED,
@@ -735,6 +740,8 @@ def build_attestation(
         # The tree of the bound commit, so the result still names the content after a squash or rewrite.
         **({"tree_oid": before.tree} if bound and before.tree else {}),
         **({"checkout": checkout} if checkout else {}),
+        **({"snapshot": {k: snapshot[k] for k in ("tree", "base") if isinstance(snapshot.get(k), str)}}
+           if snapshot else {}),
         "raw_output_stored": False,
         "verification": block,
     }
@@ -800,7 +807,7 @@ def _commit_verdict(status: str, results: list[CheckRun], *, commit: str | None,
     return STATUS_PARTIAL if status == STATUS_PASSED and (truncated or skipped) else status
 
 
-def _reason(results: list[CheckRun], bound: bool, before: TreeState) -> str:
+def _reason(results: list[CheckRun], bound: bool, before: TreeState, *, snapshot: bool = False) -> str:
     if not results:
         return "OpenShard found no approved check to run."
     ran = sum(1 for r in results if r.status in (CHECK_PASSED, CHECK_FAILED))
@@ -814,6 +821,8 @@ def _reason(results: list[CheckRun], bound: bool, before: TreeState) -> str:
     parts = [f"OpenShard ran {ran} of {len(results)} check(s) and read their exit codes"]
     if bound:
         parts.append(f"on clean commit {before.head[:12] if before.head else ''}")
+    elif snapshot:
+        parts.append("on a private copy of the uncommitted changes (not bound to a commit)")
     elif before.dirty:
         parts.append("on a working tree with uncommitted changes (not bound to a commit)")
     else:
