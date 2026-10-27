@@ -238,6 +238,7 @@ from openshard.history.capture_completeness import (
     REASON_SESSION_END_NOT_OBSERVED,
     build_completeness,
     make_reason,
+    may_hide_tool_events,
 )
 from openshard.history.correlation import (
     correlation_block,
@@ -3272,7 +3273,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # Structured evidence (history/verification.py): what was seen, who
         # reported it and what is known missing. The two booleans above stay
         # for older readers.
-        "verification": hook_verification(buf, lost=bool(_all_losses(buf))),
+        "verification": hook_verification(buf, lost=may_hide_tool_events(_all_losses(buf))),
         # Counts cover this session's changes only: agent-reported and
         # git-observed. Pre-existing / other-session changes are excluded
         # from the counts and listed after them in files_detail with their

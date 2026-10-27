@@ -779,7 +779,13 @@ def _from_hook_record(entry: dict, capture: dict, attempted: bool) -> Verificati
     """A hook-captured session with no stored block (written before v1)."""
     raw_completeness = capture.get("completeness")
     completeness: dict = raw_completeness if isinstance(raw_completeness, dict) else {}
-    lost = int(capture.get("hook_events_dropped") or 0) > 0 or completeness.get("status") == "incomplete"
+    from openshard.history.capture_completeness import may_hide_tool_events
+
+    raw_reasons = completeness.get("reasons")
+    reasons = raw_reasons if isinstance(raw_reasons, list) else []
+    lost = int(capture.get("hook_events_dropped") or 0) > 0 or (
+        completeness.get("status") == "incomplete" and (not reasons or may_hide_tool_events(reasons))
+    )
     check_events = _hook_check_events(entry)
     # The hook events themselves are directly observed (see hook_verification_source).
     ev = VerificationEvidence(source=SOURCE_DIRECTLY_OBSERVED, observation_mode=MODE_HOOK_TOOL_EVENT)
