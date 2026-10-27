@@ -23,6 +23,7 @@ import re
 from typing import Any
 
 from openshard.history.run_cost import run_total_cost, stored_retry_attempts
+from openshard.history.runtime_configuration import runtime_configuration_block
 from openshard.models.pricing import priced_models
 
 MAX_TEXT = 300
@@ -1390,41 +1391,12 @@ def stage_metrics(entry: dict) -> list[dict[str, float | int | None]]:
     ]
 
 
-_CLAUDE_PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "dontAsk")
-
-
-def runtime_configuration_block(entry: dict) -> dict | None:
-    """Effective settings explicitly reported by Claude hooks, never requested env settings.
-
-    ``effort`` is the effective effort level; ``permission_mode`` is the
-    permission regime Claude Code reported running under (last seen) with
-    every distinct mode in ``permission_modes_seen``, first-seen order. Both
-    are the agent's own report (``agent_reported``): OpenShard observed them
-    and enforced neither.
-    """
-    capture = _dict(entry.get("capture"))
-    block: dict[str, Any] = {}
-    level = capture.get("effort_level")
-    if capture.get("effort_source") == "claude_hook" and level in ("low", "medium", "high", "xhigh", "max"):
-        block["effort"] = level
-    mode = capture.get("permission_mode")
-    if capture.get("permission_mode_source") == "claude_hook" and mode in _CLAUDE_PERMISSION_MODES:
-        block["permission_mode"] = mode
-        seen = capture.get("permission_modes_seen")
-        block["permission_modes_seen"] = [
-            m for m in (seen if isinstance(seen, list) else []) if m in _CLAUDE_PERMISSION_MODES
-        ][:len(_CLAUDE_PERMISSION_MODES)] or [mode]
-    if not block:
-        return None
-    block.update({"source": "claude_hook", "evidence": "agent_reported"})
-    return block
-
-
 def project_entry_evidence(entry: Any) -> dict[str, Any]:
     """Every entry-derived block in one dict (``ShardReceipt.recorded_evidence``). Never raises."""
     if not isinstance(entry, dict):
         return {}
     from openshard.history.correlation import correlation_block
+    from openshard.history.steering import steering_evidence
 
     projectors = {
         "runtime_configuration": runtime_configuration_block,
@@ -1454,6 +1426,7 @@ def project_entry_evidence(entry: Any) -> dict[str, Any]:
         "routing": routing_block,
         "retry": retry_block,
         "rated_models": priced_models,  # local; views.py turns it into ``rates``
+        "steering": steering_evidence,  # capture.steering + derived autonomy (history/steering.py)
     }
     out: dict[str, Any] = {}
     for key, fn in projectors.items():

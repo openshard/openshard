@@ -197,7 +197,7 @@ def subagents_block(capture: object) -> dict | None:
 
 
 # Receipt keys a Platform that predates them rejects; each is dropped and the receipt resent.
-OPTIONAL_RECEIPT_KEYS = ("subagents", "ran_on", "agent_app")
+OPTIONAL_RECEIPT_KEYS = ("subagents", "ran_on", "agent_app", "steering")
 
 
 def rejected_optional_key(result: object, receipt: dict) -> str | None:

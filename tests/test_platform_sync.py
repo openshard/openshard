@@ -60,7 +60,7 @@ CONTRACT_RECEIPT_KEYS = frozenset({
     "agent_budgets", "adaptive_routing", "supervisor_routing", "capability_snapshot", "organisation_policy",
 })
 # Optional keys Core sends only when it recorded them (Platform #230); absent means unknown.
-OPTIONAL_RECEIPT_KEYS = frozenset({"lines_not_recorded_reason", "rates", "subagents", "ran_on", "agent_app"})
+OPTIONAL_RECEIPT_KEYS = frozenset({"lines_not_recorded_reason", "rates", "subagents", "ran_on", "agent_app", "steering"})
 FORBIDDEN_KEYS = {"prompt", "transcript", "stdout", "stderr", "diff", "patch", "agent_notes", "run_timeline",
                   "timeline", "env", "environment", "api_key", "password"}
 
