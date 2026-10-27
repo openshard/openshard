@@ -8,7 +8,13 @@ from openshard.adapters import claude_turn_receipts as turns
 from openshard.adapters import claude_workspace as ws
 from openshard.connected import config as cconfig
 from tests.capture_fixtures import _Service, _wait_for
-from tests.test_claude_workspace_capture import _Claude, _edit, _receipts, _sealed, workspace  # noqa: F401
+from tests.test_claude_workspace_capture import (  # noqa: F401
+    _Claude,
+    _edit,
+    _receipts,
+    _sealed,
+    workspace,
+)
 
 
 def test_replicas_is_a_workspace_surface_that_seals_turns_at_stop():
