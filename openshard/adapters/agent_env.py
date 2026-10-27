@@ -100,7 +100,15 @@ _CI_VARS: tuple[tuple[str, str], ...] = (
     ("GITHUB_ACTIONS", "ci:github_actions"), ("GITLAB_CI", "ci:gitlab"), ("BUILDKITE", "ci:buildkite"),
     ("CIRCLECI", "ci:circleci"), ("JENKINS_URL", "ci:jenkins"), ("CI", "ci:other"),
 )
-_CLOUD_DEV_VARS: tuple[tuple[str, str], ...] = (("CODESPACES", "cloud_dev:codespaces"), ("GITPOD_WORKSPACE_ID", "cloud_dev:gitpod"))
+_CLOUD_DEV_VARS: tuple[tuple[str, str], ...] = (
+    ("CODESPACES", "cloud_dev:codespaces"), ("GITPOD_WORKSPACE_ID", "cloud_dev:gitpod"),
+    ("REPLICAS_WORKSPACE_ID", "cloud_dev:replicas"),  # the marker repo_setup.CLOUD_SANDBOX_MARKERS reads
+)
+# A hosted agent VM's own marker, per agent (the markers connected.config reads for its surface).
+_CLOUD_AGENT_VARS: dict[str, tuple[str, str]] = {
+    "claude_code": ("CLAUDE_CODE_REMOTE", "cloud_agent:claude_code"),
+    "cursor": ("CURSOR_CODE_REMOTE", "cloud_agent:cursor"),
+}
 # The app Claude Code ran in: its entrypoint first, then the terminal that launched it.
 _ENTRYPOINT_APPS = {"claude-vscode": "vscode", "claude-desktop": "claude_desktop", "remote_desktop": "claude_desktop",
                     "remote_mobile": "claude_mobile", "remote": "claude_web", "remote_web": "claude_web"}
@@ -117,20 +125,35 @@ def claude_host(env: Mapping[str, str] | None) -> str | None:
     """``"<ran_on>|<app>"`` for a Claude Code session, from its hook environment; None when not known.
 
     ran_on: ``cloud_agent:claude_code`` (``CLAUDE_CODE_REMOTE``), ``ci:<name>``
-    (a CI runner's own variable), ``cloud_dev:<name>`` (Codespaces, Gitpod),
-    else ``local`` (this machine: a laptop or a server the person runs, not a
-    known cloud agent or CI). app (may be empty): from ``CLAUDE_CODE_ENTRYPOINT``
-    (``claude-vscode`` is VS Code), else ``TERMINAL_EMULATOR`` (JetBrains) or
-    ``TERM_PROGRAM`` (iTerm2, VS Code's terminal...), else ``terminal`` for the
-    plain ``cli`` entrypoint and ``sdk`` for headless ``sdk-*``. Only these
-    tokens are recorded, never an environment value. Never raises.
+    (a CI runner's own variable), ``cloud_dev:<name>`` (Codespaces, Gitpod,
+    Replicas), else ``local`` (this machine: a laptop or a server the person
+    runs, not a known cloud agent or CI). app (may be empty): from
+    ``CLAUDE_CODE_ENTRYPOINT`` (``claude-vscode`` is VS Code), else
+    ``TERMINAL_EMULATOR`` (JetBrains) or ``TERM_PROGRAM`` (iTerm2, VS Code's
+    terminal...), else ``terminal`` for the plain ``cli`` entrypoint and ``sdk``
+    for headless ``sdk-*``. Only these tokens are recorded, never an
+    environment value. Never raises.
+    """
+    return agent_host("claude_code", env)
+
+
+def agent_host(agent: str, env: Mapping[str, str] | None) -> str | None:
+    """``"<ran_on>|<app>"`` for any hook-captured agent (see :func:`claude_host`); None when not known.
+
+    A command hook runs in the agent's own environment, so the same markers
+    hold for every agent: its hosted-VM marker where it has one
+    (``_CLOUD_AGENT_VARS``), a CI runner's or cloud workspace's own variable,
+    else ``local``. The app comes from Claude Code's entrypoint, else the
+    terminal / JetBrains variables the hook inherited; when none says, it is
+    empty (unknown), never inferred from the agent's name. Never raises.
     """
     if not isinstance(env, Mapping):
         return None
     try:
-        entry = str(env.get("CLAUDE_CODE_ENTRYPOINT") or "").strip()
-        if _env_flag(env.get("CLAUDE_CODE_REMOTE")):
-            ran_on = "cloud_agent:claude_code"
+        entry = str(env.get("CLAUDE_CODE_ENTRYPOINT") or "").strip() if agent == "claude_code" else ""
+        marker = _CLOUD_AGENT_VARS.get(agent)
+        if marker is not None and _env_flag(env.get(marker[0])):
+            ran_on = marker[1]
         else:
             ran_on = next((token for var, token in (*_CI_VARS, *_CLOUD_DEV_VARS) if _env_flag(env.get(var))), "local")
         app = _ENTRYPOINT_APPS.get(entry)
@@ -153,25 +176,30 @@ def codex_agent_env(env: Mapping[str, str] | None) -> dict[str, str]:
 
 
 def agent_environment(agent: str, env: Mapping[str, str] | None) -> dict[str, str] | None:
-    """The hook-environment facts recorded for *agent*; None for agents with none."""
+    """The hook-environment facts recorded for *agent*: all of them for Claude Code; for the
+    others where it ran (``host``), and Codex's billing basis. None when there are none."""
     if agent == "claude_code":
         return claude_agent_env(env)
-    if agent == "codex":
-        return codex_agent_env(env)
-    return None
+    out = codex_agent_env(env) if agent == "codex" else {}
+    host = agent_host(agent, env)
+    if host and host != "local|":  # "local" with no app is the default, not an observation
+        out["host"] = host
+    return out or None
 
 
 def apply_agent_env(payload, agent_env: Mapping[str, str] | None) -> None:
     """Attach a validated agent environment to a hook payload (moved from ``claude_hooks``):
-    Claude Code takes all of it, Codex its billing basis, others nothing."""
-    if not agent_env or payload.agent not in ("claude_code", "codex"):
+    Claude Code takes all of it, Codex its billing basis, every agent where it ran."""
+    if not agent_env:
+        return
+    payload.agent_host = agent_host_or_none(agent_env.get("host"))
+    if payload.agent not in ("claude_code", "codex"):
         return
     payload.agent_billing_basis = billing_basis_or_none(agent_env.get("billing_basis"))
     if payload.agent == "claude_code":
         payload.agent_provider = agent_provider_or_none(agent_env.get("provider"))
         payload.agent_surface = agent_surface_or_none(agent_env.get("surface"))
         payload.agent_cloud_session = cloud_session_or_none(agent_env.get("cloud_session"))
-        payload.agent_host = agent_host_or_none(agent_env.get("host"))
 
 
 def note_agent_env(buf: dict, payload) -> None:
