@@ -58,11 +58,22 @@ Read here, all confirmed in real payloads:
   ``toolResultTruncated`` is true. It is Grok's report of the command's exit
   status -> the check outcome is ``agent_reported`` (see ``_terminal_exit_code``).
 
+* ``StopCancelled``: ``reason`` and ``cancelledBy`` (bundled hooks reference:
+  ``user_interrupt`` / ``permission_rejected`` / ``permission_cancelled`` /
+  ``max_turns`` / ``no_progress`` / ``unknown``; ``user`` or ``runtime``).
+  ``user_interrupt`` by ``user`` -> ``Interrupt``; a declined or dismissed
+  permission prompt by ``user`` is carried as attributes so steering records
+  the person's denial; anything else stays the neutral ``SessionIdle``.
+* ``transcriptPath`` (``transcript_path``): a locator only, validated as this
+  session's own directory under ``~/.grok/sessions``; its ``updates.jsonl`` is
+  read at fold time on this machine for steering facts alone
+  (``adapters/steering_logs.py``), never stored.
+
 **Never read:** the rest of ``toolResult`` / ``tool_response`` (command
 output, ``output_for_prompt``), ``toolInput`` content other than the one path or the command line
-(``old_string`` / ``new_string``, ``description``, queries), ``transcriptPath``
-and Grok's session files, ``lastAssistantMessage``, ``workspaceRoot``, and
-every unknown key. An agent label in the payload is never read: the agent is
+(``old_string`` / ``new_string``, ``description``, queries), the session files
+other than ``updates.jsonl``, ``reasonDetails``, ``cancelTrigger``,
+``lastAssistantMessage``, ``workspaceRoot``, and every unknown key. An agent label in the payload is never read: the agent is
 fixed by the receiver path the hook process posts to.
 
 Real-payload behaviours the mapping depends on
@@ -79,8 +90,8 @@ Real-payload behaviours the mapping depends on
   ``SessionEnd`` with ``reason: "shutdown"``. Only ``end_turn`` is a completed
   turn; a ``Stop`` with any other reason is ignored.
 * ``StopCancelled`` (``reason: max_turns`` observed; also a user interrupt or
-  a declined permission) fires **instead of** ``Stop`` -> a neutral
-  ``SessionIdle`` boundary, never a completed turn. ``StopFailure`` likewise.
+  a declined permission) fires **instead of** ``Stop``: never a completed
+  turn (see above for the user interrupt). ``StopFailure`` -> ``SessionIdle``.
 * A subagent runs as a session of its own: a new ``sessionId``, and every one
   of its events (including its ``UserPromptSubmit`` and ``SessionEnd``) carries
   ``subagentType``. Such an event is ignored, so a subagent never becomes a
@@ -116,6 +127,7 @@ from typing import Any
 from openshard.adapters.capture_agents import AGENT_GROK_BUILD
 from openshard.adapters.claude_hooks import (
     _SESSION_ID_RE,
+    EVENT_INTERRUPT,
     EVENT_PERMISSION_DENIED,
     EVENT_POST_TOOL_USE,
     EVENT_POST_TOOL_USE_FAILURE,
@@ -251,6 +263,13 @@ def extract_grok_build_payload(
         if isinstance(reason, str) and reason != _TURN_END_REASON:
             return None  # the extra Stop Grok fires at session end ("shutdown") is not a turn
     event = GROK_BUILD_EVENT_MAP[name]
+    cancel: dict[str, Any] = {}
+    if name == "StopCancelled":
+        reason, by = _str_or_none(data.get("reason"), 40), _str_or_none(data.get("cancelledBy"), 20)
+        if reason == "user_interrupt" and by == "user":
+            event = EVENT_INTERRUPT
+        elif reason and by:
+            cancel = {"cancel_reason": reason, "cancelled_by": by}
 
     session_id = data.get("sessionId")
     if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
@@ -262,6 +281,8 @@ def extract_grok_build_payload(
         cwd=_str_or_none(data.get("cwd"), 1_000),
         agent=AGENT_GROK_BUILD,
         tool_success=None,
+        transcript_path=_str_or_none(data.get("transcriptPath") or data.get("transcript_path"), 2_000),
+        attrs=cancel,
     )
     if name == "SessionStart":
         payload.source = _str_or_none(data.get("source"), 40)

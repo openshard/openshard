@@ -47,7 +47,6 @@ FOLLOW_UP_PHRASE = "tangerine-nebula"  # only ever in a follow-up prompt
 INTERJECTION_PHRASE = "obsidian-kumquat"  # only ever in a message sent mid-turn
 COMMENT_PHRASE = "velvet-crankshaft"  # only ever in pull request comments
 REVIEWER = "alice-reviewer-login"  # a login: never kept either
-TASK_EXCERPT_KEYS = ("task", "task_title", "task_full", "task_short")
 SCHEMA = json.loads(
     (Path(__file__).parent / "fixtures" / "platform" / "receipt-sync-envelope.v1.json").read_text(encoding="utf-8")
 )
@@ -522,14 +521,11 @@ class TestPrivacy:
             surfaces[f"sync/{i}"] = json.dumps(receipt)
             surfaces[f"receipt/{i}"] = render_compact_shard_receipt(build_shard_receipt(entry, index=i))
             surfaces[f"steering/{i}"] = json.dumps(entry["capture"]["steering"])
-            surfaces[f"sync-without-task/{i}"] = json.dumps(
-                {k: v for k, v in receipt.items() if k not in TASK_EXCERPT_KEYS})
         for name, text in surfaces.items():
             assert SECRET not in text and SECRET[:24] not in text, name
             assert INTERJECTION_PHRASE not in text, name  # a mid-turn message is never stored or sent
-            if name in ("journal", "telemetry") or name.startswith(("steering/", "sync-without-task/")):
-                # Only the pre-existing task excerpt of the prompt that opens a Receipt may hold its words.
-                assert FOLLOW_UP_PHRASE not in text, name
+            # Only the task's first prompt names a Receipt: a follow-up's words are nowhere, in the VM or out of it.
+            assert FOLLOW_UP_PHRASE not in text, name
 
     def test_pull_request_text_and_logins_never_reach_the_block_payload_or_output(self, tmp_path, monkeypatch, capsys):
         pr = _pr_fixture()

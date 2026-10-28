@@ -28,10 +28,13 @@ parse live Antigravity payloads (atuin, AgentNotch, emdash):
   name/identifier of the model handling the invocation", e.g.
   ``gemini-3.6-flash-medium`` -- kept verbatim, never split into a
   provider), ``transcriptPath`` and ``artifactDirectoryPath``. OpenShard
-  reads ``conversationId``, ``workspacePaths[0]`` and ``modelName``.
-  **``transcriptPath`` and ``artifactDirectoryPath`` are never read**:
-  the transcript is the full conversation (``transcript.jsonl``) with no
-  published schema, so it is neither stored nor mined for outcomes.
+  reads ``conversationId``, ``workspacePaths[0]``, ``modelName`` and
+  ``transcriptPath`` -- a locator only, validated as this conversation's own
+  ``transcript.jsonl`` and read at fold time on this machine for steering
+  facts alone (``adapters/steering_logs.py``: the person's prompts, follow-ups
+  and messages sent mid-turn, classified and dropped). The transcript has no
+  published schema, so it is never stored and never mined for outcomes.
+  **``artifactDirectoryPath`` is never read.**
 * The event name is **not reliably in the payload** (some builds send
   ``hookEventName``, others nothing), so the installer puts it on the
   command line (``--event PreInvocation``). The command-line name wins;
@@ -85,7 +88,9 @@ parse live Antigravity payloads (atuin, AgentNotch, emdash):
   ``fullyIdle`` not ``false`` -> ``Stop`` (a completed turn); an error, or
   ``fullyIdle: false`` (background work still running) -> ``SessionIdle``,
   a neutral boundary that snapshots the record and is never a completed
-  turn. ``terminationReason`` is not read.
+  turn. ``terminationReason`` is read for one value only: ``USER_CANCELED``
+  (observed in real payloads; Google's docs list the reasons as open-ended)
+  -> ``Interrupt``, a person's stop. Every other value is not read.
 * Not subscribed: ``PreToolUse`` is a permission gate (an unrecognised
   reply denies the tool) and recording never needs to gate anything;
   ``PostInvocation`` repeats ``PreInvocation``'s model and would double the
@@ -105,6 +110,7 @@ from typing import Any
 from openshard.adapters.capture_agents import AGENT_ANTIGRAVITY
 from openshard.adapters.claude_hooks import (
     _SESSION_ID_RE,
+    EVENT_INTERRUPT,
     EVENT_MODEL_INVOCATION,
     EVENT_POST_TOOL_USE,
     EVENT_POST_TOOL_USE_FAILURE,
@@ -128,6 +134,8 @@ ANTIGRAVITY_EVENT_MAP: dict[str, str] = {
 ANTIGRAVITY_HOOK_EVENTS: tuple[str, ...] = tuple(ANTIGRAVITY_EVENT_MAP)
 
 COMMAND_TOOL_NAMES: frozenset[str] = frozenset({"run_command"})
+# ``Stop.terminationReason`` spellings of a person cancelling the turn.
+_USER_CANCELLED: frozenset[str] = frozenset({"USER_CANCELED", "USER_CANCELLED"})
 # tool name -> default change type
 WRITE_TOOL_NAMES: dict[str, str] = {
     "write_to_file": "create",
@@ -211,7 +219,10 @@ def extract_antigravity_payload(
 
     if name == "Stop":
         fully_idle = data.get("fullyIdle")
-        if has_error or fully_idle is False:
+        reason = data.get("terminationReason")
+        if isinstance(reason, str) and reason.upper().replace("-", "_") in _USER_CANCELLED:
+            event = EVENT_INTERRUPT  # the person stopped the turn: activity, never a completed turn
+        elif has_error or fully_idle is False:
             event = EVENT_SESSION_IDLE
     elif name == "PostToolUse" and has_error:
         event = EVENT_POST_TOOL_USE_FAILURE
@@ -223,6 +234,7 @@ def extract_antigravity_payload(
         agent=AGENT_ANTIGRAVITY,
         model_id=_str_or_none(data.get("modelName"), 200),
         tool_success=None,
+        transcript_path=_str_or_none(data.get("transcriptPath"), 2_000),
     )
     if name != "PostToolUse":
         return payload

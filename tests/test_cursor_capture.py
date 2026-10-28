@@ -224,7 +224,9 @@ class TestTranslator:
             ("sessionEnd", {"reason": "error", "error_message": f"boom {SECRET}"}),
         ):
             p = cu.extract_cursor_payload(_doc(ev, repo, **extra))
-            assert not hasattr(p, "user_email") and getattr(p, "transcript_path", None) is None
+            assert not hasattr(p, "user_email")
+            # transcript_path is a locator only, kept when it is this conversation's own agent transcript
+            # (steering, adapters/steering_logs.py); this one is not, so it is dropped at reduction.
             blob = json.dumps(reduce_hook_payload(p, repo).to_dict())
             assert EMAIL not in blob and TRANSCRIPT not in blob and SECRET not in blob, ev
 

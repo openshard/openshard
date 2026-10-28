@@ -19,9 +19,12 @@ Confirmed against Cursor's hooks reference (``cursor.com/docs/agent/hooks``):
   ``model`` (``model_id`` optionally), ``hook_event_name``,
   ``cursor_version``, ``workspace_roots``, ``user_email`` and
   ``transcript_path``. OpenShard reads ``conversation_id`` (the session),
-  ``hook_event_name``, ``model``/``model_id`` and ``workspace_roots[0]``
-  (as the fallback working directory). **``user_email`` and
-  ``transcript_path`` are never read** -- not even to discard them.
+  ``hook_event_name``, ``model``/``model_id``, ``workspace_roots[0]``
+  (as the fallback working directory) and ``transcript_path``: a locator
+  only, validated as this conversation's own agent transcript and read at
+  fold time on this machine for steering facts alone
+  (``adapters/steering_logs.py``); its content is never stored and the path
+  never reaches ``runs.jsonl``. **``user_email`` is never read.**
 * ``sessionStart`` (``session_id``, ``is_background_agent``,
   ``composer_mode``) -> ``SessionStart``. ``is_background_agent`` becomes
   the start source (``background`` / ``startup``); ``composer_mode`` is
@@ -245,6 +248,7 @@ def extract_cursor_payload(data: Mapping[str, Any], *, event_override: str | Non
         agent=AGENT_CURSOR,
         model_id=_model(data),
         tool_success=None,
+        transcript_path=_str_or_none(data.get("transcript_path"), 2_000),
     )
     generation_id = _str_or_none(data.get("generation_id"), 80)
     if generation_id:

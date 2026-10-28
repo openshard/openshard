@@ -35,6 +35,31 @@ All notable changes to OpenShard are documented here.
   changes, approvals, review comments, `@agent` comments, re-requests and the
   follow-up push), classified in the CI job; no comment text or login is kept.
   `docs/steering-capture.md` has the agent x environment x signal matrix.
+- Steering from every agent's own local log: OpenShard now reads Cursor's
+  agent transcript and local store, Antigravity's `transcript.jsonl`, Grok
+  Build's `updates.jsonl` and Hermes' `state.db` on the machine where the
+  agent runs, to count and classify messages sent mid-turn, Antigravity's
+  prompts and follow-ups, and Cursor's permission answers; the text never
+  leaves the machine, and each Receipt names the log format it read
+  (`log_formats`). Grok Build interrupts and declined permission prompts come
+  from `StopCancelled`'s `reason` / `cancelledBy`; an Antigravity
+  `USER_CANCELED` stop is an interrupt; Codex denials come from its rollout.
+  The OpenCode plugin (v6) forwards aborts, permission replies and messages
+  sent while a turn runs; re-run `openshard setup` to update it. Claude Code
+  gets a non-blocking `Notification` hook (`permission_prompt`): a prompt
+  followed by that tool running is recorded as an approval (inferred), never
+  answered or blocked by OpenShard. Only Antigravity permission decisions stay
+  not available: Antigravity records none.
+
+### Changed
+
+- Only the task's first prompt names a Receipt. A Receipt that continues a
+  task (the next turn's, or a resumed session's) carries no prompt text: its
+  title is the task's title and the turn number (`Revamp website hero ·
+  turn 3`, `capture.task_source: task_title_and_turn`), and what the person
+  said is only in its steering facts. Follow-up messages no longer leave the
+  machine as a Receipt's task. Receipts sealed before this change are left as
+  they are.
 
 ### Fixed
 

@@ -5396,6 +5396,15 @@
                   "type": "string",
                   "pattern": "^[a-z_]{1,40}$"
                 },
+                "log_formats": {
+                  "description": "The agent log formats the block's transcript facts were read from (Core-detected name and version, e.g. hermes-state-db/v32; 'unversioned' when the agent marks none). Never content.",
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9./-]{1,60}$"
+                  }
+                },
                 "environment": {
                   "type": "string",
                   "enum": [

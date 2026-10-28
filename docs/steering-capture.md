@@ -14,55 +14,69 @@ sync projection, the `openshard last` line).
 ## Capability matrix
 
 What each agent exposes, and where OpenShard reads it. "live hook": the agent's
-own hook event, as it happens. "from log": the agent's own local session log,
-read at each fold. "from git": the working tree. "not available": the agent
-does not expose it; every Receipt of that agent lists the signal under
-`not_available` with the reason, and it is never reported as zero.
+own hook event (or OpenShard's own plugin), as it happens. "from log": the
+agent's own local session log, read on the machine where the agent runs, at
+each fold (`adapters/steering.py`, `adapters/steering_logs.py`). "from git":
+the working tree. "not available": the agent itself does not record it; every
+Receipt of that agent lists the signal under `not_available` with the reason,
+and it is never reported as zero.
 
 | Agent | Initial prompt | Follow-up | Mid-turn interjection | Interrupt | Permission decision | Manual edit |
 |---|---|---|---|---|---|---|
-| Claude Code | live hook (`UserPromptSubmit`) | live hook (`UserPromptSubmit`) | from log (transcript `queue-operation` enqueue) | from log (transcript `[Request interrupted by user]`) | from log (transcript rejections; denials only) | from git |
-| Codex | live hook (`UserPromptSubmit`) | live hook (`UserPromptSubmit`) | from log (rollout `user_message` inside an open task) | live hook (`Interrupt`; also rollout `turn_aborted`) | not available (1) | from git |
-| Cursor | live hook (`beforeSubmitPrompt`) | live hook (`beforeSubmitPrompt`) | not available (2) | live hook (`stop` with `status: aborted`) | not available (3) | from git |
-| OpenCode | live hook (`chat.message`) | live hook (`chat.message`) | not available (4) | not available (5) | not available (6) | from git |
-| Google Antigravity | not available (7) | not available (7) | not available (8) | not available (9) | not available (10) | from git (between a `Stop` and the next model invocation) |
-| Grok Build | live hook (`UserPromptSubmit`) | live hook (`UserPromptSubmit`) | not available (11) | not available (12) | not available (13) | from git |
-| Hermes Agent | live hook (`pre_llm_call`) | live hook (`pre_llm_call`) | not available (14) | live hook (`on_session_end` with `interrupted`) | live hook (`post_approval_response`) | from git |
+| Claude Code | live hook (`UserPromptSubmit`) | live hook (`UserPromptSubmit`) | from log (transcript `queue-operation` enqueue) | from log (transcript `[Request interrupted by user]`) | live hook (`Notification` `permission_prompt`, then that tool ran: allow, inferred) + from log (transcript rejections: deny) | from git |
+| Codex | live hook (`UserPromptSubmit`) | live hook (`UserPromptSubmit`) | from log (rollout `user_message` inside an open task) | live hook (`Interrupt`; also rollout `turn_aborted`) | from log (rollout `exec command / patch rejected by user`: deny only) | from git |
+| Cursor | live hook (`beforeSubmitPrompt`) | live hook (`beforeSubmitPrompt`) | from log (agent transcript: no `turn_ended` and no `stop` since the previous prompt) | live hook (`stop` with `status: aborted`) | from log (`state.vscdb` `toolFormerData.userDecision`: allow / deny) | from git |
+| OpenCode | live hook (`chat.message`) | live hook (`chat.message`) | live hook (`chat.message` while `session.status` is busy; plugin v6) | live hook (`session.error` `MessageAbortedError`; plugin v6) | live hook (`permission.asked` / `permission.replied`; plugin v6) | from git |
+| Google Antigravity | from log (transcript `USER_INPUT` step) | from log (`USER_INPUT` after a `Stop`) | from log (`USER_INPUT` with no turn end since the previous prompt) | live hook (`Stop` with `terminationReason: USER_CANCELED`) | not available (1) | from git (between a `Stop` and the next model invocation) |
+| Grok Build | live hook (`UserPromptSubmit`) | live hook (`UserPromptSubmit`) | from log (`updates.jsonl`: user message after agent output, before `turn_completed`) | live hook (`StopCancelled` `reason: user_interrupt`, `cancelledBy: user`) | live hook (`StopCancelled` `permission_rejected` / `permission_cancelled` by `user`: deny) + from log (`updates.jsonl` ACP option kind, where recorded) | from git |
+| Hermes Agent | live hook (`pre_llm_call`) | live hook (`pre_llm_call`) | from log (`state.db` `display_kind: steer`, or `_queued_prompt`) | live hook (`on_session_end` with `interrupted`) | live hook (`post_approval_response`) | from git |
 
 Why not:
 
-1. Codex's documented hook events include no approval event, and approval
-   requests are not read from the rollout log.
-2. Cursor's hooks do not say whether a prompt was sent while a generation was
-   running, and its transcript is deliberately not read.
-3. Cursor shows permission decisions only to blocking `preToolUse` /
-   `beforeShellExecution` hooks; OpenShard does not subscribe to them, because
-   answering one is a decision.
-4. The OpenShard OpenCode plugin forwards no signal that a message was sent
-   while a turn was running.
-5. An aborted OpenCode turn reaches the plugin only as `session.idle`, which
-   also follows a normal turn end.
-6. The OpenShard OpenCode plugin does not forward permission replies.
-7. Antigravity delivers no user prompt to command hooks (`PreInvocation`
-   fires per model call).
-8. No prompt hook, and Antigravity's transcript has no published schema and
-   is never read.
-9. `Stop`'s `terminationReason` values are not documented, so a user stop
-   cannot be told from other ends.
-10. `PreToolUse` is a permission gate OpenShard does not subscribe to.
-11. Grok Build's hooks do not mark messages sent mid-turn, and its session
-    files are never read.
-12. `StopCancelled` fires alike for a user interrupt, a declined permission
-    and `--max-turns`.
-13. `PermissionDenied` does not say whether a person, a rule or a policy denied.
-14. Hermes' conversation history is never read, and no hook marks a message
-    sent mid-turn.
+1. Antigravity records no approval decision: its transcript writes a step
+   waiting for approval only once it is answered, with no decision field, and
+   its only permission hook (`PreToolUse`) is a gate that must answer the
+   prompt, which OpenShard never does.
 
-Claude Code approvals are not available either: the transcript records a
-person's rejection ("The user doesn't want to proceed with this tool use"),
-never an approval, and Core installs no permission hook (it would decide).
+What each count can say (`autonomy.permission_prompts`, `null` = the agent
+does not record it): Claude Code asked / allowed / denied; Codex denied only
+(Codex persists neither an approval nor an approval request: approvals are
+`Op`s, never rollout lines); Cursor allowed / denied (no record of a prompt
+shown); OpenCode and Hermes all three; Grok Build denied (its hooks name no
+approval, and its log's permission lines are read only where present).
 Hermes "smart" approvals are a model's decision, not a person's, and are left
 out.
+
+How the new sources are read, and their limits:
+
+* **Claude Code approvals** are inferred, never observed: Claude Code fires no
+  hook with a person's answer. Core installs a `Notification` hook (matcher
+  `permission_prompt`), which by Claude Code's design cannot answer or block
+  the prompt; the tool it names (`"... permission to use Bash"`) running next
+  (`PostToolUse`) is recorded as `allow`. A failed call, another tool, or the
+  turn ending first clears the prompt with no claim. The VS Code extension
+  fires no such notification, and a notification Claude Code sends late or
+  for no visible dialog (known Claude Code issues) can misattribute one.
+  Core never installs `PermissionRequest` (it sits in the decision path).
+* **Cursor**: the transcript lines carry no time, so a transcript row never
+  stands alone: the newest rows are paired with this Receipt's prompt hooks
+  (newest first), and only a prompt the hook saw with no turn end observed,
+  whose row also has no `turn_ended` before it, becomes an interjection.
+  Decisions come from Cursor's local store, opened read-only; a row without
+  a time is skipped; the conversation id is assumed to be the store's
+  composer id (observed by third-party readers, not documented).
+* **Antigravity**: a `Stop` within one second of a prompt step (hooks carry
+  whole seconds) leaves the prompt's `after` unknown. `USER_CANCELED` is
+  reported in real payloads; some CLI builds fire no `Stop` on a cancel at
+  all, so an interrupt can still go unseen.
+* **Grok Build**: Esc never cancels a turn (Grok's own docs); the interrupt
+  is Ctrl+C, the stop button or the dashboard. A runtime cancel (`max_turns`,
+  `no_progress`) is never a person's. The log's line format is not
+  documented beyond "one ACP session update per line"; only the shapes named
+  above are read.
+* **Hermes**: Hermes' default busy mode (`interrupt`) ends the running turn
+  and makes the message the next prompt: an interrupt plus a follow-up, as
+  observed. Only `steer` and `queue` modes leave an interjection.
 
 ## Every environment
 
@@ -74,24 +88,24 @@ request (below). A test keeps this table equal to
 
 | Agent | Environment | Initial prompt | Follow-up | Mid-turn interjection | Interrupt | Permission decision | Manual edit |
 |---|---|---|---|---|---|---|---|
-| Claude Code | `local_terminal` | live hook | live hook | from log | from log | from log | from git |
-| Claude Code | `local_ide` | live hook | live hook | from log | from log | from log | from git |
-| Claude Code | `cloud_workspace` | live hook | live hook | from log | from log | from log | from git |
-| Claude Code | `cloud_agent` | live hook | live hook | from log (A) | from log (A) | from log (A) | from git (B) |
+| Claude Code | `local_terminal` | live hook | live hook | from log | from log | live hook + from log | from git |
+| Claude Code | `local_ide` | live hook | live hook | from log | from log | live hook + from log (K) | from git |
+| Claude Code | `cloud_workspace` | live hook | live hook | from log | from log | live hook + from log | from git |
+| Claude Code | `cloud_agent` | live hook | live hook | from log (A) | from log (A) | live hook + from log (A) | from git (B) |
 | Claude Code | `ci` | live hook | not available (C) | not available (C) | not available (C) | not available (C) | not available (C) |
-| Codex | `local_terminal` | live hook | live hook | from log | live hook | not available (1) | from git |
-| Codex | `cloud_workspace` | live hook | live hook | from log | live hook | not available (1) | from git |
-| Codex | `cloud_agent` (D) | live hook | live hook | from log (A) | live hook | not available (1) | from git (B) |
+| Codex | `local_terminal` | live hook | live hook | from log | live hook | from log | from git |
+| Codex | `cloud_workspace` | live hook | live hook | from log | live hook | from log | from git |
+| Codex | `cloud_agent` (D) | live hook | live hook | from log (A) | live hook | from log (A) | from git (B) |
 | Codex | `ci` | live hook | not available (C) | not available (C) | not available (C) | not available (C) | not available (C) |
-| Cursor | `local_ide` | live hook | live hook | not available (2) | live hook | not available (3) | from git |
-| Cursor | `cloud_agent` | live hook | live hook | not available (2) | live hook | not available (3) | from git (B) |
-| OpenCode | `local_terminal` | live hook | live hook | not available (4) | not available (5) | not available (6) | from git |
-| OpenCode | `cloud_workspace` | live hook | live hook | not available (4) | not available (5) | not available (6) | from git |
-| Google Antigravity | `local_ide` | not available (7) | not available (7) | not available (8) | not available (9) | not available (10) | from git |
-| Grok Build | `local_terminal` | live hook | live hook | not available (11) | not available (12) | not available (13) | from git |
-| Grok Build | `cloud_workspace` | live hook | live hook | not available (11) | not available (12) | not available (13) | from git |
-| Hermes Agent | `local_terminal` | live hook | live hook | not available (14) | live hook | live hook | from git |
-| Hermes Agent | `cloud_workspace` | live hook | live hook | not available (14) | live hook | live hook | from git |
+| Cursor | `local_ide` | live hook | live hook | from log | live hook | from log | from git |
+| Cursor | `cloud_agent` | live hook | live hook | from log (A) | live hook | from log (A) | from git (B) |
+| OpenCode | `local_terminal` | live hook | live hook | live hook | live hook | live hook | from git |
+| OpenCode | `cloud_workspace` | live hook | live hook | live hook | live hook | live hook | from git |
+| Google Antigravity | `local_ide` | from log | from log | from log | live hook | not available (1) | from git |
+| Grok Build | `local_terminal` | live hook | live hook | from log | live hook | live hook + from log | from git |
+| Grok Build | `cloud_workspace` | live hook | live hook | from log | live hook | live hook + from log | from git |
+| Hermes Agent | `local_terminal` | live hook | live hook | from log | live hook | live hook | from git |
+| Hermes Agent | `cloud_workspace` | live hook | live hook | from log | live hook | live hook | from git |
 | Grok Bot | `cloud_agent` | not available (E) | not available (E) | not available (E) | not available (E) | not available (E) | not available (E) |
 | Any PR-driven agent | `web` | not available (F) | from GitHub | not available (G) | not available (H) | not available (I) | not available (J) |
 
@@ -116,6 +130,8 @@ Why, beyond the numbered reasons above:
 * (J) GitHub names the account behind a commit, and cloud agents often push as
   the person who started them, so a person's commit cannot be told from the
   agent's.
+* (K) Claude Code's VS Code extension sends no `permission_prompt`
+  notification, so there only the transcript's denials are seen.
 
 Not covered by a row: Codex inside an IDE extension and Cursor's CLI (the
 hooks are the same configuration, but neither has been verified), Copilot,
@@ -269,32 +285,59 @@ Pasted content and code blocks are ignored. Anything else is `unknown`.
 
 ## Privacy
 
+**OpenShard reads these agents' own local logs on the machine where the agent
+runs, to count and classify steering; the text never leaves that machine.**
+The logs read: the Claude Code transcript, the Codex rollout, Cursor's agent
+transcript and its local `state.vscdb` (read-only), Antigravity's
+`transcript.jsonl`, Grok Build's `updates.jsonl` and Hermes' `state.db`
+(read-only). Each is validated as this session's own log before it is opened
+(a path under the agent's own directory, naming the session), read in bounded
+chunks, and never copied: its locator stays on the transient staging buffer,
+exactly like `transcript_path` before. Only the facts reach the Receipt:
+kind, intent, confidence, rule id, length in characters, times, a decision,
+and the log format read (`log_formats`, e.g. `hermes-state-db/v32`;
+`unversioned` where the agent marks no version).
+
 The prompt text is read only where the agent runs (the user's machine, the
 cloud VM or workspace, or the CI job that reads a pull request), to classify
 it, and is dropped at once. Hook prompts are classified where the capture service reduces
 the hook (`reduce_hook_payload`); the queue line carries only `prompt_facts`
-(`intent`, `confidence`, `rule`, `chars`). Log messages (Claude Code queued
-messages, Codex mid-turn messages) are classified at fold time and never
-written anywhere. Nothing steering adds holds prompt text: not `runs.jsonl`,
-not the Receipt, not the sync payload, not telemetry (steering adds no
-telemetry property).
+(`intent`, `confidence`, `rule`, `chars`). Log messages are classified at
+fold time and never written anywhere. Nothing steering adds holds prompt
+text: not `runs.jsonl`, not the Receipt, not the sync payload, not telemetry
+(steering adds no telemetry property).
 
-What was already true is unchanged: the prompt that opens a Receipt (the
-session's first prompt, or each turn's with per-turn Receipts) is kept as the
-Receipt's task, a secret-scrubbed excerpt of at most 300 characters
-(`task`, `task_title`; `session.task_source: first_user_prompt_excerpt`).
-That excerpt is the only place a follow-up's words can appear, and it
-predates steering capture. Messages sent mid-turn never open a Receipt, so
-their words appear nowhere.
+**Only the task's first prompt names a Receipt.** The prompt that starts a
+task (the first prompt of an agent session) is kept as the task, a
+secret-scrubbed excerpt of at most 300 characters (`task`, `task_title`;
+`session.task_source: first_user_prompt_excerpt`), stored and synced as
+before. A Receipt that continues the task (the next turn's Receipt, or the
+segment a resumed session opens) holds no prompt text at all: its task and
+title are the task's first title plus the turn number (`Revamp website hero
+· turn 3`; `· continued` when the turn number is not known), with
+`capture.task_source: task_title_and_turn`, `capture.task_base_title` and
+`capture.task_turn` (`adapters/task_continuation.py`). Sync sends no
+`session.task_source` for it (the value is not in the Platform contract yet:
+unknown, never mislabelled). A later prompt in the same Receipt never
+becomes its task either, even when the first had no text. A task that ended
+(a branch change, its pull request merged or closed) is not continued: the
+next prompt starts a new task and names it. Receipts sealed before this rule
+keep the excerpt they were sealed with; nothing is rewritten. GitHub-derived
+Receipts were already free of prompt text (their title is the commit
+subject; review comments are classified and dropped).
 
 `tests/test_steering_capture.py::TestPrivacy` feeds prompts holding a
 secret-shaped key and distinctive phrases through Claude Code and Codex and
-checks every file under `.openshard/`, the sync payload, the rendered Receipt
-and the telemetry queue. `tests/test_steering_environments.py` does the same for a
-cloud session (every file under `.openshard/` and the OpenShard home,
-including the remote capture journal) and for the GitHub path (the block, the
-payload the workflow sends, and what `python -m openshard.github.steering`
-prints).
+checks every file under `.openshard/`, `runs.jsonl`, the sync payload, the
+rendered Receipt and the telemetry queue: a follow-up's phrase appears
+nowhere, while the first prompt's scrubbed title does.
+`tests/test_steering_agent_logs.py::TestPrivacy` does the same for every newly
+read log (Cursor's transcript and store, Antigravity, Grok Build, Hermes, and
+the OpenCode plugin's mid-turn message). `tests/test_steering_environments.py`
+does the same for a cloud session (every file under `.openshard/` and the
+OpenShard home, including the remote capture journal) and for the GitHub path
+(the block, the payload the workflow sends, and what `python -m
+openshard.github.steering` prints).
 
 ## Autonomy (derived)
 
@@ -306,7 +349,7 @@ is computed from text.
 | `human_inputs`, `human_inputs_by_kind` | times a person stepped in; a kind the agent does not expose is `null` |
 | `intents` | follow-ups and interjections by intent |
 | `interrupts` | Esc / stop |
-| `permission_prompts` | `asked` / `allowed` / `denied`; `null` where the agent does not expose it (Claude Code: denials only; Hermes: all three) |
+| `permission_prompts` | `asked` / `allowed` / `denied`; `null` where the agent does not record it (see "What each count can say" above). Which counts a capture could make is stored with the block (`permission_counts`, local only), so a block recorded before them reads back exactly as it was sealed |
 | `longest_unsupervised_seconds` | the longest time the agent worked with no human input, over turns whose end was observed; `null` when none was |
 | `steering_seconds` | sum of think time between a turn end and the next prompt, each pause capped at 15 minutes |
 
@@ -330,7 +373,8 @@ captured before this feature have no block and print no line.
   it like every other capture fact; Receipts sealed before it have no block
   and verify unchanged (no field is back-filled).
 * `history --json` and the sync envelope carry `steering`: the block without
-  `paths` and `turn_ends`, at most 50 events, plus `autonomy`. It is optional
+  `paths`, `turn_ends` and `permission_counts`, at most 50 events, plus
+  `autonomy` and, where an agent's log was read, `log_formats`. It is optional
   in the receipt-sync contract (`tests/fixtures/platform/receipt-sync-envelope.v1.json`),
   proposed by Core; a Platform that does not know it rejects the key and Core
   resends the Receipt without it (`OPTIONAL_RECEIPT_KEYS`), keeping it locally.
@@ -339,10 +383,12 @@ captured before this feature have no block and print no line.
 
 * Hook times are whole seconds; two facts within one second may be ordered
   by arrival rather than by the instant they happened.
-* The Claude Code transcript and Codex rollout formats are not stable APIs.
-  The shapes read here (`queue-operation`, `[Request interrupted by user]`,
-  the rejection text, `event_msg` `task_started` / `user_message` /
-  `turn_aborted`) match what Core already parses for usage and history
-  import; an unknown shape under-reports, never invents.
+* No agent's log format is a stable API. The shapes read here (Claude Code
+  `queue-operation`, `[Request interrupted by user]`, the rejection text;
+  Codex `event_msg` `task_started` / `user_message` / `turn_aborted` and the
+  `rejected by user` tool output; the Cursor, Antigravity, Grok Build and
+  Hermes shapes in `adapters/steering_logs.py`) are each agent's documented
+  or widely observed ones; an unknown shape, an unreadable database or a
+  broken line under-reports, never invents and never breaks capture.
 * A Claude Code Esc fires no hook, so no turn-end snapshot is taken: manual
   edits right after an Esc are not seen.

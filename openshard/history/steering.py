@@ -27,6 +27,7 @@ changed after sealing.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -69,6 +70,11 @@ _STR_KEYS = ("at", "since", "intent_rule")
 _LOCAL_ONLY_KEYS = frozenset({"paths"})
 # The GitHub-derived block's counts (``github/steering.py``).
 _GITHUB_COUNT_KEYS = ("review_comments", "review_rerequests", "bot_comments_ignored")
+_PERMISSION_COUNT_KEYS = ("asked", "allowed", "denied")
+# The agent log format a block's ``transcript`` facts were read from (adapters/steering_logs.py).
+_LOG_FORMAT_RE = re.compile(r"^[a-z0-9./-]{1,60}$")
+# Local only: what this capture could count is already in ``autonomy.permission_prompts`` (null = not counted).
+_LOCAL_ONLY_BLOCK_KEYS = frozenset({"events", "turn_ends", "permission_counts"})
 
 
 def environment_from_host(host: object) -> tuple[str | None, str | None]:
@@ -170,6 +176,15 @@ def stored_block(capture: object) -> dict[str, Any] | None:
     for key in ("permission_prompts_asked",):
         if _count(raw.get(key)) is not None:
             block[key] = raw[key]
+    # Present only on blocks that recorded them (see ``autonomy``): older blocks read back exactly as before.
+    counts = raw.get("permission_counts")
+    if isinstance(counts, Mapping) and all(isinstance(counts.get(k), bool) for k in _PERMISSION_COUNT_KEYS):
+        block["permission_counts"] = {k: counts[k] for k in _PERMISSION_COUNT_KEYS}
+    formats = raw.get("log_formats")
+    if isinstance(formats, list):
+        valid = [f for f in formats if isinstance(f, str) and _LOG_FORMAT_RE.match(f)][:4]
+        if valid:
+            block["log_formats"] = valid
     if isinstance(raw.get("log_not_read_reason"), str):
         block["log_not_read_reason"] = raw["log_not_read_reason"][:40]
     # Present only on blocks that recorded them: an older block reads back exactly as before.
@@ -224,15 +239,25 @@ def autonomy(block: Mapping[str, Any], capture: Mapping[str, Any] | None = None)
         by_kind[kind] = None  # this agent does not expose it: unknown, not zero
     decisions = [e.get("decision") for e in events if e["kind"] == "permission_decision"]
     unavailable = block.get("not_available") or {}
-    agent = (capture or {}).get("agent")
-    hermes = agent == "hermes"
-    claude = agent == "claude_code"
+    counted_raw = block.get("permission_counts")
+    if isinstance(counted_raw, Mapping):
+        # What this capture could count, recorded with the block; a count it could not make is null.
+        can_count = {k: counted_raw.get(k) is True and "permission_decision" not in unavailable
+                     for k in _PERMISSION_COUNT_KEYS}
+    else:
+        # Blocks recorded before ``permission_counts``: the version 1 derivation, frozen.
+        agent = (capture or {}).get("agent")
+        hermes = agent == "hermes"
+        claude = agent == "claude_code"
+        can_count = {"asked": hermes, "allowed": hermes,
+                     "denied": (hermes or claude) and "permission_decision" not in unavailable}
     permission = {
-        "asked": block.get("permission_prompts_asked") if hermes else None,
-        "allowed": sum(1 for d in decisions if d in ("allow", "always_allow")) if hermes else None,
-        "denied": sum(1 for d in decisions if d == "deny")
-        if (hermes or claude) and "permission_decision" not in unavailable else None,
+        "asked": (_count(block.get("permission_prompts_asked")) or 0) if can_count["asked"] else None,
+        "allowed": sum(1 for d in decisions if d in ("allow", "always_allow")) if can_count["allowed"] else None,
+        "denied": sum(1 for d in decisions if d == "deny") if can_count["denied"] else None,
     }
+    if not isinstance(counted_raw, Mapping) and can_count["asked"]:
+        permission["asked"] = block.get("permission_prompts_asked")  # exactly as version 1 read it
     think = [e["think_seconds"] for e in events if e["kind"] == "follow_up" and "think_seconds" in e]
     out: dict[str, Any] = {
         "human_inputs": sum(v for v in by_kind.values() if isinstance(v, int)),
@@ -271,7 +296,7 @@ def sync_block(evidence: object) -> dict[str, Any] | None:
         return None
     events = [{k: v for k, v in e.items() if k not in _LOCAL_ONLY_KEYS}
               for e in evidence.get("events") or [] if isinstance(e, Mapping)]
-    out = {k: v for k, v in evidence.items() if k not in ("events", "turn_ends")}
+    out = {k: v for k, v in evidence.items() if k not in _LOCAL_ONLY_BLOCK_KEYS}
     out["events"] = events[:_MAX_SYNC_EVENTS]
     if len(events) > _MAX_SYNC_EVENTS:
         out["events_dropped"] = int(out.get("events_dropped") or 0) + len(events) - _MAX_SYNC_EVENTS

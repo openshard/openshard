@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -95,8 +96,8 @@ CAPABILITIES: dict[str, dict[str, tuple[str, str]]] = {
         KIND_FOLLOW_UP: (LIVE_HOOK, "UserPromptSubmit"),
         KIND_INTERJECTION: (FROM_LOG, "transcript queue-operation enqueue (a message queued while Claude worked)"),
         KIND_INTERRUPT: (FROM_LOG, "transcript [Request interrupted by user] marker (Esc fires no hook)"),
-        KIND_PERMISSION: (FROM_LOG, "transcript tool rejections only; approvals are not recorded anywhere "
-                                    "OpenShard reads, and Core installs no permission hook (it would decide)"),
+        KIND_PERMISSION: (LIVE_HOOK, "Notification (permission_prompt; non-blocking) then that tool's PostToolUse "
+                                     "-> allow (inferred); transcript rejection -> deny"),
         KIND_MANUAL_EDIT: _GIT,
     },
     AGENT_CODEX: {
@@ -104,57 +105,52 @@ CAPABILITIES: dict[str, dict[str, tuple[str, str]]] = {
         KIND_FOLLOW_UP: (LIVE_HOOK, "UserPromptSubmit"),
         KIND_INTERJECTION: (FROM_LOG, "rollout user_message inside an open task"),
         KIND_INTERRUPT: (LIVE_HOOK, "Interrupt hook, and rollout turn_aborted (interrupted)"),
-        KIND_PERMISSION: (NOT_AVAILABLE, "Codex's documented hook events include no approval event, and "
-                                         "approval requests are not read from the rollout log"),
+        KIND_PERMISSION: (FROM_LOG, "rollout tool output 'exec command / patch rejected by user' (denials only; "
+                                    "Codex persists no approval or approval request)"),
         KIND_MANUAL_EDIT: _GIT,
     },
     AGENT_CURSOR: {
         KIND_INITIAL: (LIVE_HOOK, "beforeSubmitPrompt"),
         KIND_FOLLOW_UP: (LIVE_HOOK, "beforeSubmitPrompt"),
-        KIND_INTERJECTION: (NOT_AVAILABLE, "Cursor's hooks do not say whether a prompt was sent while a "
-                                           "generation was running, and its transcript is deliberately not read"),
+        KIND_INTERJECTION: (FROM_LOG, "agent transcript: a prompt with no turn_ended row (and no stop hook) since "
+                                      "the previous one"),
         KIND_INTERRUPT: (LIVE_HOOK, "stop with status aborted"),
-        KIND_PERMISSION: (NOT_AVAILABLE, "permission decisions are only visible to blocking preToolUse / "
-                                         "beforeShellExecution hooks, which OpenShard does not subscribe to"),
+        KIND_PERMISSION: (FROM_LOG, "state.vscdb toolFormerData.userDecision (accepted / rejected)"),
         KIND_MANUAL_EDIT: _GIT,
     },
     AGENT_OPENCODE: {
         KIND_INITIAL: (LIVE_HOOK, "chat.message"),
         KIND_FOLLOW_UP: (LIVE_HOOK, "chat.message"),
-        KIND_INTERJECTION: (NOT_AVAILABLE, "the OpenShard plugin forwards no signal that a message was sent "
-                                           "while a turn was running"),
-        KIND_INTERRUPT: (NOT_AVAILABLE, "an aborted turn reaches the plugin only as session.idle, which also "
-                                        "follows a normal turn end"),
-        KIND_PERMISSION: (NOT_AVAILABLE, "the OpenShard plugin does not forward permission replies"),
+        KIND_INTERJECTION: (LIVE_HOOK, "chat.message while session.status is busy (OpenShard plugin v6)"),
+        KIND_INTERRUPT: (LIVE_HOOK, "session.error MessageAbortedError (OpenShard plugin v6)"),
+        KIND_PERMISSION: (LIVE_HOOK, "permission.asked / permission.replied once, always, reject (OpenShard "
+                                     "plugin v6)"),
         KIND_MANUAL_EDIT: _GIT,
     },
     AGENT_ANTIGRAVITY: {
-        KIND_INITIAL: (NOT_AVAILABLE, "Antigravity delivers no user prompt to command hooks "
-                                      "(PreInvocation fires per model call)"),
-        KIND_FOLLOW_UP: (NOT_AVAILABLE, "Antigravity delivers no user prompt to command hooks"),
-        KIND_INTERJECTION: (NOT_AVAILABLE, "no prompt hook, and the transcript has no published schema and is "
-                                           "never read"),
-        KIND_INTERRUPT: (NOT_AVAILABLE, "Stop's terminationReason values are not documented, so a user stop "
-                                        "cannot be told from other ends"),
-        KIND_PERMISSION: (NOT_AVAILABLE, "PreToolUse is a permission gate OpenShard does not subscribe to"),
+        KIND_INITIAL: (FROM_LOG, "transcript USER_INPUT step (no hook delivers the prompt)"),
+        KIND_FOLLOW_UP: (FROM_LOG, "transcript USER_INPUT step after a Stop"),
+        KIND_INTERJECTION: (FROM_LOG, "transcript USER_INPUT step with no turn end since the previous prompt"),
+        KIND_INTERRUPT: (LIVE_HOOK, "Stop with terminationReason USER_CANCELED (when Antigravity fires Stop on a "
+                                    "cancel; some CLI builds fire none)"),
+        KIND_PERMISSION: (NOT_AVAILABLE, "Antigravity records no approval decision: the transcript has no decision "
+                                         "field, and its only permission hook (PreToolUse) must answer the prompt"),
         KIND_MANUAL_EDIT: (FROM_GIT, "working-tree changes between a Stop and the next model invocation"),
     },
     AGENT_GROK_BUILD: {
         KIND_INITIAL: (LIVE_HOOK, "UserPromptSubmit"),
         KIND_FOLLOW_UP: (LIVE_HOOK, "UserPromptSubmit"),
-        KIND_INTERJECTION: (NOT_AVAILABLE, "Grok Build's hooks do not mark messages sent mid-turn, and its "
-                                           "session files are never read"),
-        KIND_INTERRUPT: (NOT_AVAILABLE, "StopCancelled fires alike for a user interrupt, a declined permission "
-                                        "and --max-turns"),
-        KIND_PERMISSION: (NOT_AVAILABLE, "PermissionDenied does not say whether a person, a rule or a policy "
-                                         "denied"),
+        KIND_INTERJECTION: (FROM_LOG, "updates.jsonl: a user message after agent output and before "
+                                      "turn_completed (follow_up_behavior steer)"),
+        KIND_INTERRUPT: (LIVE_HOOK, "StopCancelled reason user_interrupt, cancelledBy user"),
+        KIND_PERMISSION: (LIVE_HOOK, "StopCancelled reason permission_rejected / permission_cancelled, cancelledBy "
+                                     "user (denials); updates.jsonl permission lines where recorded"),
         KIND_MANUAL_EDIT: _GIT,
     },
     AGENT_HERMES: {
         KIND_INITIAL: (LIVE_HOOK, "pre_llm_call"),
         KIND_FOLLOW_UP: (LIVE_HOOK, "pre_llm_call"),
-        KIND_INTERJECTION: (NOT_AVAILABLE, "Hermes' conversation history is never read, and no hook marks a "
-                                           "message sent mid-turn"),
+        KIND_INTERJECTION: (FROM_LOG, "state.db messages: display_kind steer, or display_metadata _queued_prompt"),
         KIND_INTERRUPT: (LIVE_HOOK, "on_session_end with interrupted"),
         KIND_PERMISSION: (LIVE_HOOK, "post_approval_response (once / session / always / deny); smart-mode "
                                      "decisions are not a person's and are left out"),
@@ -218,11 +214,21 @@ def environment_capability(agent: str, environment: str, signal: str) -> tuple[s
     return how, why
 
 
-# Permission prompt counts each agent can report: asked / allowed / denied.
+# Permission prompt counts each agent can report: asked / allowed / denied. Stamped on each new
+# block (``permission_counts``) so the frozen version 1 derivation of older blocks never changes.
 _PERMISSION_COUNTS: dict[str, tuple[bool, bool, bool]] = {
-    AGENT_CLAUDE_CODE: (False, False, True),
+    AGENT_CLAUDE_CODE: (True, True, True),
+    AGENT_CODEX: (False, False, True),
+    AGENT_CURSOR: (False, True, True),
+    AGENT_OPENCODE: (True, True, True),
+    AGENT_GROK_BUILD: (False, False, True),
     AGENT_HERMES: (True, True, True),
 }
+# Agents whose approval-gate hook counts (``buf["approvals"]``) are the prompts asked.
+_ASKED_FROM_APPROVALS = frozenset({AGENT_HERMES, AGENT_OPENCODE})
+# Grok Build ``StopCancelled`` reasons that are a person declining a permission prompt.
+_GROK_DECLINED = frozenset({"permission_rejected", "permission_cancelled"})
+_CLAUDE_PERMISSION_TOOL_RE = re.compile(r"permission to use ([A-Za-z0-9_.:-]{1,80})")
 
 THINK_CAP_SECONDS = 15 * 60  # a longer pause between turns is time away, not steering
 _MAX_EVENTS = 100
@@ -240,7 +246,10 @@ _PROMPT_KEYS = ("intent", "confidence", "rule", "chars")
 # Hermes ``post_approval_response.choice`` a person made (smart-mode choices are a model's).
 _HERMES_DECISIONS = {"once": "allow", "session": "allow", "always": "always_allow", "deny": "deny"}
 
-_CODEX_MARKERS = (b'"task_started"', b'"task_complete"', b'"turn_aborted"', b'"user_message"')
+_CODEX_MARKERS = (b'"task_started"', b'"task_complete"', b'"turn_aborted"', b'"user_message"', b"rejected by user")
+# Codex's own text for a person's rejection of an approval prompt (core/src/tools/events.rs), as the tool
+# output it gives the model; the only trace an approval decision leaves in the rollout.
+_CODEX_REJECTIONS = ("exec command rejected by user", "patch rejected by user")
 
 _CLAUDE_INTERRUPT = "[Request interrupted by user]"
 _CLAUDE_INTERRUPT_TOOL = "[Request interrupted by user for tool use]"
@@ -386,8 +395,15 @@ def observe(buf: dict, payload: Any, repo_root: Path, now: str) -> None:
             note_model_invocation(buf, repo_root, now)  # the first call after a Stop: work resumed
         elif event == "ApprovalDecision":
             note_permission(buf, (payload.attrs or {}).get("choice"), now)
+        elif event == "PermissionPrompt":
+            note_permission_prompt(buf, (payload.attrs or {}).get("tool"), now)
+        elif event in ("PostToolUse", "PostToolUseFailure"):
+            note_tool_ran(buf, payload.tool_name, now, failed=event == "PostToolUseFailure")
         elif event == "SessionEnd":
             forget(buf, repo_root)
+        attrs = payload.attrs or {}
+        if attrs.get("cancel_reason") in _GROK_DECLINED and attrs.get("cancelled_by") == "user":
+            note_permission(buf, "deny", now)  # Grok Build: the person declined the prompt that ended the turn
     except Exception:
         pass
 
@@ -395,21 +411,26 @@ def observe(buf: dict, payload: Any, repo_root: Path, now: str) -> None:
 _TURN_ENDS = {"Stop": "stop", "Interrupt": "interrupt", "SessionIdle": "idle"}
 
 
-def note_prompt(buf: dict, facts: dict | None, repo_root: Path, now: str) -> None:
-    """A human prompt was submitted: an initial prompt, or a follow-up after a turn. Never raises."""
+def note_prompt(buf: dict, facts: dict | None, repo_root: Path, now: str, *, while_busy: bool = False) -> None:
+    """A human prompt was submitted: an initial prompt, a follow-up after a turn, or (*while_busy*: the agent
+    said a turn was running) a message sent mid-turn. Never raises."""
     try:
         events = buf.get("events") or []
         last = events[-1] if events and isinstance(events[-1], dict) else None
         prompt_event = last if last is not None and (last.get("metadata") or {}).get("hook") == "UserPromptSubmit" else None
-        _note_prompt(buf, valid_prompt_facts(facts), repo_root, now, prompt_event)
+        _note_prompt(buf, valid_prompt_facts(facts), repo_root, now, prompt_event, while_busy=while_busy)
     except Exception:
         pass
 
 
-def _note_prompt(buf: dict, facts: dict | None, repo_root: Path, now: str, prompt_event: dict | None) -> None:
+def _note_prompt(buf: dict, facts: dict | None, repo_root: Path, now: str, prompt_event: dict | None,
+                 *, while_busy: bool = False) -> None:
     state = _state(buf)
     earlier = state.get("prompts_before") or any(
         e.get("kind") in (KIND_INITIAL, KIND_FOLLOW_UP) for e in state["events"])
+    if while_busy and earlier and state.get("turn_open") is not False:
+        _busy_message(buf, facts, now, prompt_event)
+        return
     event: dict[str, Any] = {"at": now, "turn_index": _turn_index(buf, opening=True), "source": SOURCE_HOOK}
     if not earlier and buf.get("start_source") not in ("turn", "resume"):
         event.update(kind=KIND_INITIAL, after="none")
@@ -462,6 +483,48 @@ def note_work_resumed(buf: dict, repo_root: Path, now: str) -> None:
                         now, "git_observed")
 
 
+def _busy_message(buf: dict, facts: dict | None, now: str, prompt_event: dict | None) -> None:
+    """A message the agent's own hook says arrived while a turn ran (OpenCode ``session.status`` busy)."""
+    event: dict[str, Any] = {"at": now, "turn_index": _turn_index(buf), "kind": KIND_INTERJECTION,
+                             "after": _after_activity(buf, now), "source": SOURCE_HOOK}
+    if facts is not None:
+        event.update(intent=facts["intent"], intent_confidence=facts["confidence"], intent_rule=facts["rule"],
+                     prompt_chars=facts["chars"])
+    else:
+        event.update(intent="unknown", intent_confidence="low", intent_rule="no_prompt_text")
+    _add(buf, event)
+    if prompt_event is not None and isinstance(prompt_event.get("metadata"), dict) and len(prompt_event["metadata"]) < 9:
+        prompt_event["metadata"].update(steering_kind=KIND_INTERJECTION, intent=event["intent"])
+
+
+def note_permission_prompt(buf: dict, tool: object, now: str) -> None:
+    """The agent showed a person a permission prompt (Claude Code ``Notification``); its answer comes later."""
+    state = _state(buf)
+    state["permission_prompts"] = int(state.get("permission_prompts") or 0) + 1
+    state["pending_permission"] = {"at": now, "tool": tool if isinstance(tool, str) else None}
+
+
+def note_tool_ran(buf: dict, tool: object, now: str, *, failed: bool) -> None:
+    """The tool a pending prompt named ran: the person allowed it. A failed call proves no answer."""
+    state = _state(buf)
+    pending = state.get("pending_permission")
+    if not isinstance(pending, dict) or (pending.get("tool") and pending.get("tool") != tool):
+        return
+    state.pop("pending_permission", None)
+    if failed:
+        return  # a rejected call may surface as a failure too: no claim either way
+    if _add(buf, {"at": now, "turn_index": _turn_index(buf), "kind": KIND_PERMISSION, "decision": "allow",
+                  "after": "permission_prompt", "source": SOURCE_HOOK}):
+        _activity_event(buf, "permission prompt answered: allow (the tool then ran)",
+                        {"steering_kind": KIND_PERMISSION, "decision": "allow"}, now, "agent_reported")
+
+
+def claude_permission_tool(message: object) -> str | None:
+    """The tool a Claude Code permission notification names ("... permission to use Bash"), or None."""
+    match = _CLAUDE_PERMISSION_TOOL_RE.search(message) if isinstance(message, str) else None
+    return match.group(1) if match else None
+
+
 def note_model_invocation(buf: dict, repo_root: Path, now: str) -> None:
     """A model call (Antigravity): the first after a turn end means the session works again."""
     state = _state(buf)
@@ -476,6 +539,7 @@ def note_turn_end(buf: dict, repo_root: Path, now: str, *, how: str) -> None:
     state = _state(buf)
     state["turn_open"] = False
     state["last_turn_end_at"] = now
+    state.pop("pending_permission", None)  # a prompt still open at the turn's end was never answered by a run
     state["last_turn_failed_check"] = _last_check_failed(buf)
     state["turn_ends"] = (state["turn_ends"] + [{"at": now, "how": how}])[-_MAX_TURN_ENDS:]
     if buf.get("record"):
@@ -547,6 +611,7 @@ def inherit(buf: dict, persisted: Mapping[str, Any]) -> None:
         end = previous.get("last_turn_end_at")
         if isinstance(end, str) and capture.get("session_end_observed") is not True:
             state["last_turn_end_at"] = end
+            state["inherited_end"] = end  # a log line before it is an earlier Receipt's
             state["turn_open"] = False
             state["last_turn_failed_check"] = previous.get("last_turn_failed_check") is True
 
@@ -775,22 +840,36 @@ def _line_counts(repo_root: Path, head: str | None, paths: list[str], dirty_befo
 
 
 def scan_logs(buf: dict) -> None:
-    """Read new lines of the session's own log (Claude Code / Codex) for log-only signals. Never raises."""
+    """Read new lines of the session's own log for log-only signals (every agent that keeps one). Never raises."""
     try:
         agent = _agent(buf)
-        if agent not in (AGENT_CLAUDE_CODE, AGENT_CODEX):
+        from openshard.adapters import steering_logs
+
+        if agent == AGENT_HERMES:
+            steering_logs.scan_hermes(buf)  # Hermes keeps its history in SQLite, not a file of lines
             return
+        if agent == AGENT_OPENCODE:
+            return  # OpenCode exposes no session log to plugins; its plugin forwards the signals live
         from openshard.adapters.claude_transcript_usage import _valid_transcript_path
 
         raw = _valid_transcript_path(buf.get("transcript_path"), buf.get("session_id"), agent=agent)
-        if raw is None:
-            return
-        _scan(buf, Path(raw), agent)
+        if raw is not None:
+            path = steering_logs.log_file(agent, raw) if agent in steering_logs.LINE_AGENTS else Path(raw)
+            _scan(buf, path, agent)
+        if agent in steering_logs.LINE_AGENTS:
+            raw_log = _state(buf).get("log")
+            steering_logs.settle(agent, buf, raw_log if isinstance(raw_log, dict) else {})
     except Exception:
         pass
 
 
+# Per-agent reading state kept with the log's offset (counts and flags only, never text).
+_LOG_STATE_KEYS = ("task", "cursor", "antigravity", "grok")
+
+
 def _scan(buf: dict, path: Path, agent: str) -> None:
+    from openshard.adapters import steering_logs
+
     state = _state(buf)
     raw_log = state.get("log")
     log: dict = raw_log if isinstance(raw_log, dict) else {}
@@ -807,7 +886,7 @@ def _scan(buf: dict, path: Path, agent: str) -> None:
     offset = log["offset"] if same and log["offset"] <= size else 0
     if offset == 0:
         log = {}  # a new or rewritten file: its task state starts again too
-    log = {"path": str(path), "offset": offset, **{k: v for k, v in log.items() if k in ("task",)}}
+    log = {"path": str(path), "offset": offset, **{k: v for k, v in log.items() if k in _LOG_STATE_KEYS}}
     window = _parse(buf.get("started_at"))
     with path.open("rb") as stream:
         stream.seek(offset)
@@ -824,6 +903,8 @@ def _scan(buf: dict, path: Path, agent: str) -> None:
                     continue
                 if agent == AGENT_CLAUDE_CODE:
                     _claude_line(buf, raw, window)
+                elif agent != AGENT_CODEX:
+                    steering_logs.line(agent, buf, raw, window, log)
                 elif not _codex_line(buf, raw, window, log):
                     state["log"] = {"path": str(path), "offset": 0, "foreign": True}
                     return
@@ -929,6 +1010,9 @@ def _codex_line(buf: dict, raw: bytes, window: datetime | None, log: dict) -> bo
         if "task" not in log:
             log["task"] = {"open": False, "messages": 0}
         return not isinstance(sid, str) or sid == buf.get("session_id")
+    if record.get("type") == "response_item":
+        _codex_rejection(buf, payload, record.get("timestamp"), window)
+        return True
     if record.get("type") != "event_msg":
         return True
     task = log.setdefault("task", {"open": False, "messages": 0})
@@ -949,6 +1033,25 @@ def _codex_line(buf: dict, raw: bytes, window: datetime | None, log: dict) -> bo
             if at is not None:
                 _interjection(buf, at, message if isinstance(message, str) else None)
     return True
+
+
+def _codex_rejection(buf: dict, payload: Mapping[str, Any], stamp: object, window: datetime | None) -> None:
+    """A tool output saying the person rejected the approval prompt: a denial. Approvals leave no trace."""
+    if payload.get("type") not in ("function_call_output", "custom_tool_call_output"):
+        return
+    output = payload.get("output")
+    if isinstance(output, Mapping):
+        output = output.get("content")
+    if isinstance(output, list):
+        output = " ".join(str(c.get("text") or "") for c in output if isinstance(c, Mapping))
+    if not isinstance(output, str) or not output.strip().startswith(_CODEX_REJECTIONS):
+        return
+    at = _in_window(stamp, window)
+    if at is not None and _add(buf, {"at": at, "turn_index": _turn_index_at(buf, at), "kind": KIND_PERMISSION,
+                                     "decision": "deny", "after": "permission_prompt",
+                                     "source": SOURCE_TRANSCRIPT}):
+        _activity_event(buf, "permission prompt answered: deny",
+                        {"steering_kind": KIND_PERMISSION, "decision": "deny"}, at, "agent_reported")
 
 
 def _interjection(buf: dict, at: str, text: str | None) -> None:
@@ -1061,8 +1164,15 @@ def stamp(entry: dict, buf: dict) -> None:
             "turn_ends": [dict(t) for t in state["turn_ends"]][-_MAX_TURN_ENDS:],
             "not_available": not_available(agent),
         }
-        if agent == AGENT_HERMES:
+        asked, allowed, denied = permission_counts_available(agent)
+        block["permission_counts"] = {"asked": asked, "allowed": allowed, "denied": denied}
+        if agent in _ASKED_FROM_APPROVALS:
             block["permission_prompts_asked"] = int(approvals.get("requested") or 0)
+        elif agent == AGENT_CLAUDE_CODE:
+            block["permission_prompts_asked"] = int(state.get("permission_prompts") or 0)
+        formats = state.get("log_formats")
+        if isinstance(formats, list) and formats:
+            block["log_formats"] = [f for f in formats if isinstance(f, str)][:4]
         block.update(environment_facts(buf.get("agent_host")))
         for key in ("last_turn_end_at",):
             if isinstance(state.get(key), str):

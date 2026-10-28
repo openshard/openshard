@@ -23,6 +23,7 @@ from openshard.history import steering as steering_view
 from openshard.history.receipt_render import render_compact_shard_receipt
 from openshard.history.shard_contract import build_shard_receipt
 from openshard.history.store import load_history
+from openshard.history.task_title import normalize_title_candidate
 from openshard.sync import envelope
 from tests.capture_fixtures import _git, _make_repo
 
@@ -33,8 +34,6 @@ SCHEMA = json.loads(
 SECRET = "sk-ant-api03-" + "Zq9" * 20  # secret-shaped: must never leave the prompt
 FOLLOW_UP_PHRASE = "periwinkle-zeppelin"  # distinctive: only ever in a follow-up prompt
 INTERJECTION_PHRASE = "marmalade-quasar"  # distinctive: only ever in a message sent mid-turn
-# The pre-existing scrubbed excerpt of the prompt that opens a Receipt (its task); steering adds none.
-TASK_EXCERPT_KEYS = ("task", "task_title", "task_full")
 
 
 @pytest.fixture
@@ -185,7 +184,8 @@ class TestClaudeCode:
         facts = _block(second)["autonomy"]
         assert facts["human_inputs"] == 6
         assert facts["interrupts"] == 1
-        assert facts["permission_prompts"] == {"asked": None, "allowed": None, "denied": 1}
+        # No Notification hook fired in this fixture: none asked, none allowed; the transcript's denial counts.
+        assert facts["permission_prompts"] == {"asked": 0, "allowed": 0, "denied": 1}
         assert facts["intents"] == {"correction": 1, "redirect": 1, "new_task": 1}
         assert facts["steering_seconds"] > 1  # two pauses: after the Stop, and after the Esc
         assert "permission_mode" not in facts and "ran_on" not in facts  # existing fields, not repeated
@@ -323,21 +323,26 @@ class TestCodex:
         _wait_next_second()
         _codex(repo, rollout, "UserPromptSubmit", prompt="looks good, now add the docs")
         _codex_log(rollout, {"type": "task_started", "turn_id": "turn_2"},
-                   {"type": "user_message", "message": "looks good, now add the docs"},
-                   {"type": "task_complete", "turn_id": "turn_2"})
+                   {"type": "user_message", "message": "looks good, now add the docs"})
+        with rollout.open("a", encoding="utf-8") as fh:  # the person rejects an approval prompt
+            fh.write(json.dumps({"timestamp": _now_ms(), "type": "response_item", "payload": {
+                "type": "function_call_output", "call_id": "c1", "output": "exec command rejected by user"}}) + "\n")
+        _codex_log(rollout, {"type": "task_complete", "turn_id": "turn_2"})
         _codex(repo, rollout, "Stop")
         _codex(repo, rollout, "SessionEnd", reason="other")
         (entry,) = _entries(repo)
-        assert _kinds(entry) == ["initial_prompt", "interjection", "interrupt", "follow_up"]
+        assert _kinds(entry) == ["initial_prompt", "interjection", "interrupt", "follow_up", "permission_decision"]
         interjection = _one(entry, "interjection")
         assert (interjection["intent"], interjection["source"]) == ("redirect", "transcript")
         follow_up = _one(entry, "follow_up")
         assert (follow_up["intent"], follow_up["after"]) == ("new_task", "turn_end")
         assert follow_up["think_seconds"] >= 1
         block = _block(entry)
-        assert "permission_decision" in block["not_available"]
-        assert block["autonomy"]["permission_prompts"] == {"asked": None, "allowed": None, "denied": None}
-        assert block["autonomy"]["human_inputs_by_kind"]["permission_decision"] is None  # unknown, never 0
+        denial = _one(entry, "permission_decision")
+        assert (denial["decision"], denial["source"]) == ("deny", "transcript")
+        assert block["not_available"] == {}
+        # Codex persists no approval and no approval request: those stay unknown, never 0.
+        assert block["autonomy"]["permission_prompts"] == {"asked": None, "allowed": None, "denied": 1}
 
     def test_a_rollout_of_another_session_is_never_read(self, repo, tmp_path, monkeypatch):
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
@@ -374,7 +379,7 @@ class TestOtherAgents:
         assert _kinds(entry) == ["initial_prompt", "interrupt", "follow_up"]
         assert _one(entry, "interrupt")["source"] == "hook"
         assert (_one(entry, "follow_up")["intent"], _one(entry, "follow_up")["after"]) == ("correction", "turn_end")
-        assert set(_block(entry)["not_available"]) == {"interjection", "permission_decision"}
+        assert _block(entry)["not_available"] == {}  # no transcript here: nothing claimed from it
 
     def test_opencode_prompts_after_idle(self, repo):
         def run(event: str, **fields):
@@ -391,7 +396,7 @@ class TestOtherAgents:
         (entry,) = _entries(repo)
         assert _kinds(entry) == ["initial_prompt", "follow_up"]
         assert _one(entry, "follow_up")["intent"] == "continue"
-        assert set(_block(entry)["not_available"]) == {"interjection", "interrupt", "permission_decision"}
+        assert _block(entry)["not_available"] == {}
 
     def test_grok_build_permission_denied_is_not_claimed_as_a_person(self, repo):
         def doc(event: str, **fields) -> dict:
@@ -409,7 +414,8 @@ class TestOtherAgents:
         (entry,) = _entries(repo)
         assert _kinds(entry) == ["initial_prompt", "follow_up"]
         assert _one(entry, "follow_up")["intent"] == "continue"
-        assert "permission_decision" in _block(entry)["not_available"]
+        # PermissionDenied alone does not say a person denied: no permission decision is claimed.
+        assert _block(entry)["autonomy"]["permission_prompts"]["denied"] == 0
 
     def test_hermes_person_approvals_and_interrupt(self, repo):
         (repo / ".openshard").mkdir(exist_ok=True)  # Hermes hooks are user-global: a repository opts in
@@ -442,7 +448,9 @@ class TestOtherAgents:
         assert _kinds(entry) == ["manual_edit"]
         assert (_one(entry, "manual_edit")["lines_added"], _one(entry, "manual_edit")["lines_removed"]) == (1, 0)
         by_kind = _block(entry)["autonomy"]["human_inputs_by_kind"]
-        assert by_kind["initial_prompt"] is None and by_kind["follow_up"] is None and by_kind["manual_edit"] == 1
+        # No transcript here, so no prompt was read; the permission decision is what Antigravity never records.
+        assert by_kind["initial_prompt"] == 0 and by_kind["manual_edit"] == 1
+        assert by_kind["permission_decision"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -623,19 +631,27 @@ class TestPrivacy:
                 surfaces[f"{root.name}/sync/{i}"] = json.dumps(receipt)
                 surfaces[f"{root.name}/receipt/{i}"] = render_compact_shard_receipt(build_shard_receipt(entry, index=i))
                 surfaces[f"{root.name}/steering/{i}"] = json.dumps(entry["capture"].get("steering"))
-                untasked = {k: v for k, v in entry.items() if k not in TASK_EXCERPT_KEYS}
-                surfaces[f"{root.name}/runs-without-task/{i}"] = json.dumps(untasked)
-                synced = {k: v for k, v in receipt.items() if k not in TASK_EXCERPT_KEYS}
-                surfaces[f"{root.name}/sync-without-task/{i}"] = json.dumps(synced)
+                surfaces[f"{root.name}/runs/{i}"] = json.dumps(entry)
         surfaces["telemetry"] = json.dumps(telemetry_queue.peek(limit=500))
         assert telemetry_queue.peek(limit=500), "telemetry was on, so receipt events were queued"
 
         for name, text in surfaces.items():
             assert SECRET not in text and SECRET[:24] not in text, name  # scrubbed or never kept, everywhere
             assert INTERJECTION_PHRASE not in text, name  # a mid-turn message is never stored anywhere
-            if "/steering/" in name or "without-task" in name or name == "telemetry":
-                # Only the existing first-prompt-of-a-turn task excerpt may hold a follow-up's words.
-                assert FOLLOW_UP_PHRASE not in text, name
+            # Only the task's first prompt may name a Receipt: a follow-up's words are nowhere, not even as
+            # the next turn's task (runs.jsonl, every .openshard file, the Receipt, sync, telemetry).
+            assert FOLLOW_UP_PHRASE not in text, name
+
+        # The first prompt's scrubbed title is still the task's, and names each later turn with its number.
+        first, second = _entries(repo)
+        title = first["task_title"]
+        assert title.startswith("Build settings page") and first["capture"]["task_source"] == "first_user_prompt_excerpt"
+        assert second["task"] == second["task_title"] == f"{normalize_title_candidate(title)} · turn 2"
+        assert second["task_title"].startswith("Build settings page")
+        assert title in surfaces["widget/.openshard"] and title in surfaces["widget/sync/0"]
+        synced = envelope.build_envelope(second, 1, core_version="9.9.9")["receipt"]
+        assert synced["task_title"] == synced["task_full"] == second["task_title"]
+        assert "task_source" not in synced.get("session", {})  # not a contract value yet: unknown, never mislabelled
 
 
 # ---------------------------------------------------------------------------

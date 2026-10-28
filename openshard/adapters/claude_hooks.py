@@ -311,6 +311,11 @@ EVENT_SUBAGENT_START = "SubagentStart"
 EVENT_SUBAGENT_STOP = "SubagentStop"
 EVENT_APPROVAL_REQUEST = "ApprovalRequest"
 EVENT_APPROVAL_DECISION = "ApprovalDecision"
+# The agent showed a person a permission prompt (Claude Code ``Notification`` with
+# ``notification_type: permission_prompt``). Observation only: a notification hook
+# cannot answer or block the prompt, and OpenShard never does.
+EVENT_PERMISSION_PROMPT = "PermissionPrompt"
+CLAUDE_NOTIFICATION = "Notification"
 SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_SESSION_START,
     EVENT_MODEL_SWITCH,
@@ -328,6 +333,7 @@ SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_SUBAGENT_STOP,
     EVENT_APPROVAL_REQUEST,
     EVENT_APPROVAL_DECISION,
+    EVENT_PERMISSION_PROMPT,
 )
 
 # Tools whose tool_input.file_path names a file Claude Code says it changed.
@@ -659,12 +665,20 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     event = data.get("hook_event_name")
     if not isinstance(event, str) or not event:
         event = event_override
-    if not isinstance(event, str) or event not in SUPPORTED_HOOK_EVENTS:
-        return None
-
     session_id = data.get("session_id")
     if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
         session_id = None
+    if event == CLAUDE_NOTIFICATION:
+        if data.get("notification_type") != "permission_prompt":
+            return None  # idle and auth notifications carry no steering fact
+        # Only the tool name is taken from Claude Code's own notification text.
+        tool = steering.claude_permission_tool(data.get("message"))
+        return HookPayload(event=EVENT_PERMISSION_PROMPT, session_id=session_id,
+                           cwd=_str_or_none(data.get("cwd"), 1_000), tool_name=tool,
+                           attrs={"tool": tool} if tool else {},
+                           transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id))
+    if not isinstance(event, str) or event not in SUPPORTED_HOOK_EVENTS:
+        return None
 
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -910,6 +924,8 @@ def _transcript_usage(buf: dict) -> dict | None:
     cached = buf.get("transcript_usage") if isinstance(buf.get("transcript_usage"), dict) else None
     agent_raw = buf.get("agent")
     agent = agent_raw if isinstance(agent_raw, str) else AGENT_CLAUDE_CODE
+    if agent not in (AGENT_CLAUDE_CODE, AGENT_CODEX):
+        return cached  # another agent's log holds no token usage OpenShard reads (steering only)
     raw = _valid_transcript_path(buf.get("transcript_path"), buf.get("session_id"), agent=agent)
     if agent == AGENT_CODEX:
         if raw is None:
@@ -1789,7 +1805,7 @@ def _apply_prompt(buf: dict, payload: ReducedHookPayload, repo_root: Path, now: 
                   evidence="directly_observed", occurred_at=now,
                   metadata={"hook": payload.event, "prompt_index": buf["prompt_count"]})
     turns.mark_opened(buf, repo_root)  # a turn's opening prompt names its Receipt (the open-turn signal)
-    steering.note_prompt(buf, payload.prompt_facts, repo_root, now)
+    steering.note_prompt(buf, payload.prompt_facts, repo_root, now, while_busy=payload.attrs.get("while_busy") is True)
     return ("first prompt: record created" if created else "prompt buffered"), created, False
 
 
@@ -3712,6 +3728,16 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
 
     if event == EVENT_USER_PROMPT_SUBMIT:
         return _apply_prompt(buf, payload, repo_root, now)
+
+    if event == EVENT_PERMISSION_PROMPT:
+        # The agent asked a person (steering.note_permission_prompt staged it); not work done.
+        named = payload.attrs.get("tool")
+        _append_event(
+            buf, event_type="session.activity",
+            action=f"permission prompt shown: {named if isinstance(named, str) else 'a tool'}", status="unknown",
+            evidence="agent_reported", metadata={"hook": event}, occurred_at=now,
+        )
+        return "permission prompt noted", False, False
 
     if event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         failed = event == EVENT_POST_TOOL_USE_FAILURE
