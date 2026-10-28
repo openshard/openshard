@@ -174,7 +174,13 @@ from typing import Any
 
 from openshard.adapters import claude_session_fidelity as fidelity
 from openshard.adapters import claude_stop_failure as stop_failure
-from openshard.adapters import claude_subagents, merge_check, steering, task_continuation
+from openshard.adapters import (
+    claude_subagents,
+    hook_approvals,
+    merge_check,
+    steering,
+    task_continuation,
+)
 from openshard.adapters import claude_turn_receipts as turns
 from openshard.adapters.agent_env import agent_host_or_none as _agent_host_or_none
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
@@ -311,9 +317,7 @@ EVENT_SUBAGENT_START = "SubagentStart"
 EVENT_SUBAGENT_STOP = "SubagentStop"
 EVENT_APPROVAL_REQUEST = "ApprovalRequest"
 EVENT_APPROVAL_DECISION = "ApprovalDecision"
-# The agent showed a person a permission prompt (Claude Code ``Notification`` with
-# ``notification_type: permission_prompt``). Observation only: a notification hook
-# cannot answer or block the prompt, and OpenShard never does.
+# Claude Code ``Notification`` ``permission_prompt`` (hook_approvals.py): observed, never answered.
 EVENT_PERMISSION_PROMPT = "PermissionPrompt"
 CLAUDE_NOTIFICATION = "Notification"
 SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
@@ -351,15 +355,6 @@ _ATTR_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 # Which ``HookPayload.attrs`` reach an Event's metadata, per event family
 # (``sanitize_metadata`` keeps at most ten keys, so each list is short).
 _TOOL_ATTR_KEYS: tuple[str, ...] = ("duration_ms", "tool_status", "tool_call_id", "turn_id")
-_APPROVAL_ATTR_KEYS: tuple[str, ...] = (
-    "choice", "surface", "pattern_key", "decided_by", "tool_call_id", "turn_id",
-)
-# Hermes' ``post_approval_response.choice`` values. A grant lets the command
-# run; ``deny`` / ``smart_deny`` is a refusal; the rest mean nobody answered
-# (or the prompt could not be delivered), so the command did not run and no
-# one refused it either.
-_APPROVAL_GRANTED = frozenset({"once", "session", "always", "smart_approve"})
-_APPROVAL_DENIED = frozenset({"deny", "smart_deny"})
 # v0.4.4 change attribution (see _snapshot_baseline / _classify_changed_files).
 _BASELINE_MAX_PATHS = 500  # dirty/untracked paths remembered at session start
 _GIT_DIFF_MAX_FILES = 200  # git diff rows examined at fold (pre-existing ones are then excluded)
@@ -669,14 +664,7 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
         session_id = None
     if event == CLAUDE_NOTIFICATION:
-        if data.get("notification_type") != "permission_prompt":
-            return None  # idle and auth notifications carry no steering fact
-        # Only the tool name is taken from Claude Code's own notification text.
-        tool = steering.claude_permission_tool(data.get("message"))
-        return HookPayload(event=EVENT_PERMISSION_PROMPT, session_id=session_id,
-                           cwd=_str_or_none(data.get("cwd"), 1_000), tool_name=tool,
-                           attrs={"tool": tool} if tool else {},
-                           transcript_path=_valid_transcript_path(data.get("transcript_path"), session_id))
+        return hook_approvals.claude_permission_payload(data, session_id)
     if not isinstance(event, str) or event not in SUPPORTED_HOOK_EVENTS:
         return None
 
@@ -3730,14 +3718,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         return _apply_prompt(buf, payload, repo_root, now)
 
     if event == EVENT_PERMISSION_PROMPT:
-        # The agent asked a person (steering.note_permission_prompt staged it); not work done.
-        named = payload.attrs.get("tool")
-        _append_event(
-            buf, event_type="session.activity",
-            action=f"permission prompt shown: {named if isinstance(named, str) else 'a tool'}", status="unknown",
-            evidence="agent_reported", metadata={"hook": event}, occurred_at=now,
-        )
-        return "permission prompt noted", False, False
+        return hook_approvals.apply_permission_prompt(buf, payload, now)
 
     if event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         failed = event == EVENT_POST_TOOL_USE_FAILURE
@@ -3840,44 +3821,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         return claude_subagents.apply_subagent_event(buf, event, payload.attrs, now)
 
     if event in (EVENT_APPROVAL_REQUEST, EVENT_APPROVAL_DECISION):
-        # The agent's human-approval gate (Hermes ``pre_approval_request`` /
-        # ``post_approval_response``). Observed only -- OpenShard neither
-        # raises nor answers it. Only a documented grant/deny choice becomes a
-        # granted/denied Event; a timeout, withdrawal or undeliverable prompt
-        # means nobody decided, and is recorded as exactly that.
-        counts = buf.get("approvals")
-        if not isinstance(counts, dict):
-            counts = buf["approvals"] = {}
-        meta = {"hook": event}
-        for attr_key in _APPROVAL_ATTR_KEYS:
-            if attr_key in payload.attrs:
-                meta[attr_key] = payload.attrs[attr_key]
-        command_text = payload.command_action or "command"
-        if event == EVENT_APPROVAL_REQUEST:
-            counts["requested"] = int(counts.get("requested") or 0) + 1
-            _append_event(
-                buf, event_type="approval.requested", action=f"approval requested: {command_text}",
-                target=payload.command_target, status="started", evidence="agent_reported",
-                metadata=meta, occurred_at=now,
-            )
-            return "approval requested", False, False
-        choice = payload.attrs.get("choice")
-        if choice in _APPROVAL_GRANTED:
-            counts["granted"] = int(counts.get("granted") or 0) + 1
-            event_type, status, verb = "approval.granted", "passed", f"approval granted ({choice})"
-        elif choice in _APPROVAL_DENIED:
-            counts["denied"] = int(counts.get("denied") or 0) + 1
-            event_type, status, verb = "approval.denied", "failed", f"approval denied ({choice})"
-        else:
-            counts["unanswered"] = int(counts.get("unanswered") or 0) + 1
-            event_type, status = "session.activity", "unknown"
-            verb = f"approval not decided ({choice})" if isinstance(choice, str) else "approval not decided"
-        meta.update({"steering_kind": steering.KIND_PERMISSION} if steering.person_decision(choice) else {})
-        _append_event(
-            buf, event_type=event_type, action=f"{verb}: {command_text}", target=payload.command_target,
-            status=status, evidence="agent_reported", metadata=meta, occurred_at=now,
-        )
-        return "approval decision", False, False
+        return hook_approvals.apply_approval_event(buf, event, payload, now)  # observed, never answered
 
     if event == EVENT_STOP:
         buf["turn_count"] = int(buf.get("turn_count") or 0) + 1

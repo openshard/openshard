@@ -217,7 +217,10 @@ def test_multi_repository_cloud_session_produces_receipts_in_the_touched_checkou
 
     # The task and the touched files land in the right checkout.
     assert core_turn["task"] == platform_turn["task"] == "Change both repositories"
-    assert platform_followup["task"] == "Follow up in platform"
+    # A later turn of the task carries the task's title and its turn number, never its own prompt's words.
+    turn = platform_followup["capture"]["turn_index"]
+    assert platform_followup["task"] == f"Change both repositories · turn {turn}"
+    assert "Follow up in platform" not in json.dumps(platform_followup)
     def changed(receipt: dict) -> set[str]:
         return {f["path"] for f in receipt["files_detail"] if f.get("attribution") != "pre_existing"}
 

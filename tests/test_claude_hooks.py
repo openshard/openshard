@@ -612,8 +612,10 @@ class TestLifecycle:
             assert second["capture"]["turn_index"] == 2
             assert second["task_id"] == ended["task_id"]
         assert second["capture"]["prompt_count"] == 1
-        assert second["task"] == "Now add subtraction"
-        acts = [e["action"] for e in _events(second, EVENT_SESSION_ACTIVITY)]
+        # The resumed session continues the task: its title and turn, never the resuming prompt's words.
+        assert second["task"] == f"{ended['task_title']} · turn 2"
+        assert second["capture"]["task_source"] == "task_title_and_turn"
+        acts =[e["action"] for e in _events(second, EVENT_SESSION_ACTIVITY)]
         assert "Claude Code session resumed" in acts
 
     def test_resumed_segment_baseline_excludes_the_ended_segments_changes(self, repo: Path):

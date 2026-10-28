@@ -176,15 +176,7 @@ def stored_block(capture: object) -> dict[str, Any] | None:
     for key in ("permission_prompts_asked",):
         if _count(raw.get(key)) is not None:
             block[key] = raw[key]
-    # Present only on blocks that recorded them (see ``autonomy``): older blocks read back exactly as before.
-    counts = raw.get("permission_counts")
-    if isinstance(counts, Mapping) and all(isinstance(counts.get(k), bool) for k in _PERMISSION_COUNT_KEYS):
-        block["permission_counts"] = {k: counts[k] for k in _PERMISSION_COUNT_KEYS}
-    formats = raw.get("log_formats")
-    if isinstance(formats, list):
-        valid = [f for f in formats if isinstance(f, str) and _LOG_FORMAT_RE.match(f)][:4]
-        if valid:
-            block["log_formats"] = valid
+    block.update(_log_facts(raw))
     if isinstance(raw.get("log_not_read_reason"), str):
         block["log_not_read_reason"] = raw["log_not_read_reason"][:40]
     # Present only on blocks that recorded them: an older block reads back exactly as before.
@@ -204,6 +196,20 @@ def stored_block(capture: object) -> dict[str, Any] | None:
                 facts[key] = github[key]
         block["github"] = facts
     return block
+
+
+def _log_facts(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """``permission_counts`` and ``log_formats``, present only on blocks that recorded them (see ``autonomy``),
+    so older blocks read back exactly as before."""
+    out: dict[str, Any] = {}
+    counts = raw.get("permission_counts")
+    if isinstance(counts, Mapping) and all(isinstance(counts.get(k), bool) for k in _PERMISSION_COUNT_KEYS):
+        out["permission_counts"] = {k: counts[k] for k in _PERMISSION_COUNT_KEYS}
+    formats = raw.get("log_formats")
+    valid = [f for f in formats if isinstance(f, str) and _LOG_FORMAT_RE.match(f)][:4] if isinstance(formats, list) else []
+    if valid:
+        out["log_formats"] = valid
+    return out
 
 
 def _counted(event: Mapping[str, Any]) -> bool:
