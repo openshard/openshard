@@ -129,7 +129,11 @@ class TestTwoPromptsOneSession:
             assert capture["prompt_count"] == 1 and capture["turn_count"] == 1
         assert second["capture"]["start_source"] == "turn"
         assert second["capture"]["resumed_from_receipt_id"] == first["receipt_id"]
-        assert (first["task"], second["task"]) == ("add a", "add b")
+        # Only the task's first prompt names it; turn 2 carries the task's title and its number, no prompt text.
+        assert (first["task"], first["capture"]["task_source"]) == ("add a", "first_user_prompt_excerpt")
+        assert (second["task"], second["task_title"]) == ("Add · turn 2", "Add · turn 2")
+        assert second["capture"]["task_source"] == "task_title_and_turn"
+        assert (second["capture"]["task_base_title"], second["capture"]["task_turn"]) == ("Add", 2)
         # Files: the diff between each turn's start and end.
         assert _paths(first) == {"a.py"} and _paths(second) == {"b.py"}
         # Commits: only the ones made during the turn.

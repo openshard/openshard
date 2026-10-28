@@ -174,7 +174,7 @@ from typing import Any
 
 from openshard.adapters import claude_session_fidelity as fidelity
 from openshard.adapters import claude_stop_failure as stop_failure
-from openshard.adapters import claude_subagents, merge_check, steering
+from openshard.adapters import claude_subagents, merge_check, steering, task_continuation
 from openshard.adapters import claude_turn_receipts as turns
 from openshard.adapters.agent_env import agent_host_or_none as _agent_host_or_none
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
@@ -1779,7 +1779,9 @@ def _apply_prompt(buf: dict, payload: ReducedHookPayload, repo_root: Path, now: 
         return "agent notification buffered", False, False
     buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
     buf["first_prompt_at"] = buf.get("first_prompt_at") or now
-    buf["task"] = buf.get("task") or payload.task_excerpt
+    if buf["prompt_count"] == 1 and not task_continuation.continued(buf):
+        # Only the prompt that starts a task names it; a later prompt's words never become a task.
+        buf["task"] = buf.get("task") or payload.task_excerpt
     created = buf.get("record") is None  # first prompt = real work: record it now, so an interrupted one leaves a trace
     if created:
         _ensure_record(buf, repo_root)
@@ -2193,6 +2195,7 @@ def _resumed_segment(
         buf["herdr_terminals"] = terminals
     buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
     turns.inherit(buf, persisted, same_receipt=False, repo_root=repo_root)
+    task_continuation.inherit(buf, persisted)  # the same task goes on: no prompt text names this Receipt
     steering.inherit(buf, persisted)
     return buf
 
@@ -2242,6 +2245,7 @@ def _load_or_create_buffer(
         if rebuilt is not None:
             steering.restore(rebuilt, persisted)
             turns.inherit(rebuilt, persisted, same_receipt=True)
+            task_continuation.restore(rebuilt, persisted.get("capture") or {})
             return rebuilt
     return _new_buffer(
         session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline, start_head=start_head,
@@ -3364,6 +3368,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
     _stamp_task_context(entry, buf)
+    task_continuation.stamp(entry, buf)  # a continuing Receipt: the task's title and the turn, no prompt text
     turns.stamp(entry, buf, repo_root)  # per-turn Receipts (flag): turn facts and session grouping
     stamp_record_correlation(entry, buf.get("correlation"), buf.get("herdr_delegated"), buf.get("herdr_terminals"))
     _stamp_cloud_session(entry, buf)
