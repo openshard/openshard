@@ -934,13 +934,16 @@ def _claude_line(buf: dict, raw: bytes, window: datetime | None) -> None:
     if not isinstance(record, dict) or record.get("isSidechain") is True:
         return
     # A dequeue may be stamped a moment before the prompt hook that opened this
-    # Receipt (whole seconds); nothing else from before its start is this Receipt's.
-    dequeue = record.get("type") == "queue-operation" and record.get("operation") == "dequeue"
-    at = _in_window(record.get("timestamp"), window, slack=1.0 if dequeue else 0.0)
+    # Receipt (whole seconds), and the enqueue of a prompt passed through the queue
+    # a moment before that; nothing else from before its start is this Receipt's.
+    operation = record.get("operation") if record.get("type") == "queue-operation" else None
+    slack = {"dequeue": 1.0, "enqueue": 1.0 + _QUEUE_MATCH_SECONDS}.get(str(operation), 0.0)
+    at = _in_window(record.get("timestamp"), window, slack=slack)
     if at is None:
         return
-    if record.get("type") == "queue-operation":
-        _claude_queue_operation(buf, record, at)
+    if operation is not None:
+        before = window is not None and (_parse(at) or window) < window
+        _claude_queue_operation(buf, record, at, before_start=before)
     elif record.get("type") == "user":
         message = record.get("message")
         content = message.get("content") if isinstance(message, dict) else None
@@ -949,18 +952,52 @@ def _claude_line(buf: dict, raw: bytes, window: datetime | None) -> None:
                 _claude_user_item(buf, item, at)
 
 
-def _claude_queue_operation(buf: dict, record: Mapping[str, Any], at: str) -> None:
+def _claude_queue_operation(buf: dict, record: Mapping[str, Any], at: str, *, before_start: bool = False) -> None:
     """A message queued while Claude worked (an interjection), or one taken off the queue."""
     operation = record.get("operation")
+    state = _state(buf)
     if operation == "enqueue":
         content = record.get("content")
         text = content if isinstance(content, str) else None
         if text is not None and text.lstrip().startswith(("<", "/")):
             return  # a slash command or harness plumbing, not a message to the agent
-        _interjection(buf, at, text)
+        if not _turn_running(buf, at):
+            # The prompt that opens the next turn, passed through the queue (``claude -p``, ``--continue``):
+            # it is that turn's initial prompt or follow-up, already recorded from the hook.
+            idle = state.get("idle_enqueues")
+            state["idle_enqueues"] = ((idle if isinstance(idle, list) else []) + [at])[-_MAX_DEQUEUES:]
+            return
+        if not before_start:  # typed during an earlier Receipt's turn: counted there
+            _interjection(buf, at, text)
     elif operation == "dequeue":
-        state = _state(buf)
+        raw_idle = state.get("idle_enqueues")
+        waiting: list = raw_idle if isinstance(raw_idle, list) else []
+        for queued in waiting:
+            gap = _seconds(queued, at)
+            if gap is not None and 0 <= gap <= _QUEUE_MATCH_SECONDS:
+                waiting.remove(queued)  # that prompt taken off the queue: not a message typed mid-turn
+                return
         state["dequeues"] = (state["dequeues"] + [at])[-_MAX_DEQUEUES:]
+
+
+def _turn_running(buf: dict, at: str) -> bool:
+    """Whether a turn of this Receipt was running at *at* (a log time): a prompt opened one at or before it,
+    and no turn end or interrupt closed it since. Hook times are whole seconds, so an end in the same
+    second as *at* is not taken to have come first."""
+    state = _state(buf)
+    moment = _parse(at)
+    if moment is None:
+        return True
+    opened = [_order(e) for e in state["events"]
+              if e.get("kind") in (KIND_INITIAL, KIND_FOLLOW_UP) and _order(e) <= moment]
+    if not opened:
+        # Before this Receipt's first prompt: running only if still inside the previous Receipt's turn.
+        end = _parse(state.get("inherited_end"))
+        return end is not None and (moment - end).total_seconds() < 1.0
+    start = max(opened)
+    ends = [_parse(t.get("at")) for t in state["turn_ends"] if isinstance(t, dict)]
+    ends += [_order(e) for e in state["events"] if e.get("kind") == KIND_INTERRUPT]
+    return not any(end is not None and end >= start and (moment - end).total_seconds() >= 1.0 for end in ends)
 
 
 def _claude_user_item(buf: dict, item: Mapping[str, Any], at: str) -> None:

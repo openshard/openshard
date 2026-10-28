@@ -218,6 +218,29 @@ class TestClaudeCode:
         assert delivered["from_queue"] is True
         assert _block(second)["autonomy"]["human_inputs"] == 0  # typed (and counted) in turn 1
 
+    def test_prompts_passed_through_the_queue_while_idle_are_not_interjections(self, repo):
+        # ``claude -p`` and ``claude --continue -p`` (live session, 2026-10-28): each turn's own prompt is
+        # enqueued and dequeued a moment before its UserPromptSubmit hook, while no turn is running.
+        def queued_prompt(text: str) -> None:
+            _claude_log({**_enqueue(text), "timestamp": _now_ms(-1.5)},
+                        {"type": "queue-operation", "operation": "dequeue", "timestamp": _now_ms(-1.3)})
+
+        _claude_transcript().write_text("", encoding="utf-8")
+        _claude(repo, "SessionStart", source="startup")
+        queued_prompt("Read calc.py, fix the bug, run pytest and commit")
+        _claude(repo, "UserPromptSubmit", prompt="Read calc.py, fix the bug, run pytest and commit")
+        _claude(repo, "Stop")
+        time.sleep(3.2)  # the person reads the answer; the queue lines below are stamped 1.5s back
+        queued_prompt("No, that's not quite what I wanted. Also add a docstring")
+        _claude(repo, "UserPromptSubmit", prompt="No, that's not quite what I wanted. Also add a docstring")
+        _claude(repo, "Stop")
+        first, second = _entries(repo)
+        assert _kinds(first) == ["initial_prompt"]
+        assert steering_view.summary_line(_block(first)) == "no steering observed"
+        assert _kinds(second) == ["follow_up"]
+        assert "from_queue" not in _one(second, "follow_up")
+        assert steering_view.summary_line(_block(second)) == "1 correction · you stepped in 1 time"
+
     def test_slash_commands_in_the_queue_are_not_interjections(self, repo):
         _claude_transcript().write_text("", encoding="utf-8")
         _claude(repo, "SessionStart", source="startup")

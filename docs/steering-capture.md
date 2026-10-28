@@ -241,6 +241,10 @@ Rules that keep it honest:
   prompt is the rejection, not a second input.
 * **A queued message delivered as the next prompt** is counted once: as the
   interjection where it was typed. The prompt it became is `from_queue`.
+* **A prompt passed through the queue while no turn runs** (Claude Code
+  enqueues and dequeues each `claude -p` / `--continue -p` prompt a moment
+  before its `UserPromptSubmit` hook) is that turn's initial prompt or
+  follow-up, not an interjection, and not `from_queue`.
 * **A log that proves to be another session's** (a Codex rollout whose
   `session_meta` id differs) is never read again: `log_not_read_reason:
   log_session_mismatch`. A log over 256 MB is not read:

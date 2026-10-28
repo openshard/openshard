@@ -66,6 +66,11 @@ All notable changes to OpenShard are documented here.
 - Remote capture: Events staged while a fold read the agent's session log
   (for example a Claude Code mid-turn message or Esc) were not spooled when
   that fold sealed the turn or ended the session, so the journal lost them.
+- Steering: a prompt Claude Code passes through its queue while no turn is
+  running (`claude -p`, `claude --continue -p`) was recorded as a message sent
+  mid-turn, so a turn opened by a single prompt said "you stepped in 1 time".
+  It is now that turn's own prompt only. Receipts sealed before this fix are
+  left as they are.
 
 ## 0.5.0 - 2026-10-25
 
