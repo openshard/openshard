@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
   id-token: write  # OIDC token for the Platform's gate verdict (read-only audience)
+  pull-requests: write  # the gate summary as one PR comment (action input `comment`)
 
 jobs:
   gate:

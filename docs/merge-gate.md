@@ -16,6 +16,7 @@ on:
 permissions:
   contents: read
   id-token: write                 # a read-only OIDC token for the Platform
+  pull-requests: write            # to post the gate summary as a PR comment
 jobs:
   gate:
     name: Openshard gate          # the check name you mark as required
@@ -221,6 +222,21 @@ Each field appears once. Anything the Platform does not record reads
 `unknown`, never zero. Only a witnessed Receipt is described as having a
 detectable rewrite, and being witnessed is not being verified. All text is
 escaped before it is written.
+
+## The pull request comment
+
+The same summary is posted on the pull request as one comment, so reviewers
+see it without opening the run. Each run edits that comment rather than
+adding another. It opens with what the Receipts' checks prove for this
+commit and what they do not: a check counts as proof only when its outcome
+is passed or failed and it was seen directly by Openshard, confirmed against
+git, or reported by CI. A check the agent reported itself, or one with no
+recorded result, is listed under "Not proven".
+
+The comment needs `pull-requests: write` in the job's permissions. Without
+it, or on a pull request from a fork (whose token is read-only), the gate
+runs as before and a note in the log says why there is no comment. Posting
+the comment never changes pass or fail. Turn it off with `comment: false`.
 
 ## Make it required, and keep it required
 

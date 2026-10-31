@@ -43,6 +43,16 @@ All notable changes to OpenShard are documented here.
   several summaries. The outcome is still the agent's own report.
 ### Added
 
+- The merge gate now posts its summary as one pull request comment, edited
+  in place on every run, so reviewers see it without opening the Actions
+  run. It needs `pull-requests: write`; without it, or on a fork, the gate
+  runs as before and the log says why there is no comment. The comment never
+  changes pass or fail. Turn it off with `comment: false`.
+- The gate summary now opens with what the Receipts' checks prove for the
+  commit and what they do not. A check counts as proof only when its outcome
+  was seen directly by Openshard, confirmed against git, or reported by CI.
+  Checks the agent reported itself, or with no recorded result, are listed
+  under "Not proven".
 - Steering capture: each Receipt records when a person steered the agent:
   the first prompt, follow-ups after a turn, messages sent while the agent was
   working, interrupts (Esc), answers to permission prompts and files changed

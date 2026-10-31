@@ -33,6 +33,14 @@ inputs:
     description: "Deprecated, no effect: the gate only passes or fails."
     required: false
     default: ""
+  comment:
+    description: "Also post the gate summary as one pull request comment, updated in place on every run. Needs `pull-requests: write` in the job's permissions; without it the gate still runs and a note says why there is no comment. Set to false to turn it off. Never changes pass or fail."
+    required: false
+    default: "true"
+  github-token:
+    description: "Token used only to post the pull request comment."
+    required: false
+    default: ${{ github.token }}
   python-version:
     description: "Python used to run Openshard (3.11 or later)."
     required: false
@@ -72,6 +80,8 @@ runs:
       shell: bash
       env:
         INPUT_COMMIT: ${{ inputs.commit }}
+        INPUT_COMMENT: ${{ inputs.comment }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_STRICT: ${{ inputs.strict }}
         INPUT_WAIT: ${{ inputs.wait-minutes }}
         OPENSHARD_GATE_API: ${{ inputs.api }}
@@ -87,8 +97,10 @@ runs:
           echo "::warning title=Openshard gate::The strict input is deprecated and has no effect: the gate only passes or fails."
         fi
         commit="${INPUT_COMMIT:-${PR_HEAD_SHA:-$GITHUB_SHA}}"
+        comment=()
+        [[ "$INPUT_COMMENT" == true ]] && comment=(--github-pr-comment)
         rc=0
-        out=$("$bin" ci gate --commit "$commit" --wait-minutes "$INPUT_WAIT" --github-step-summary --github-output) || rc=$?
+        out=$("$bin" ci gate --commit "$commit" --wait-minutes "$INPUT_WAIT" --github-step-summary --github-output ${comment[@]+"${comment[@]}"}) || rc=$?
         printf '%s\n' "$out"
         status=$(printf '%s\n' "$out" | sed -n 's/^Openshard gate: //p' | head -1)
         headline=$(printf '%s\n' "$out" | sed -n '2p')
