@@ -6,6 +6,12 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- `openshard verify --commit` no longer runs the whole test suite for a
+  documentation-only commit. It runs nothing and records "No checks needed:
+  documentation-only change" (`not_run`, `no_checks_applicable`), which never
+  counts as verified or passed. A configured `verification_commands` contract
+  still runs. A check that hits the time limit now says "timed out after Ns"
+  and points to `--timeout`; its outcome stays unknown.
 - Files another agent changed and committed during a Claude Code turn (for
   example a Codex commit) are no longer counted as that turn's work when the
   commit carries the other agent's `Openshard-Agent` trailer.
