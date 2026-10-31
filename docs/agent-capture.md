@@ -138,6 +138,7 @@ classified:
 | `git_observed` | the repository changed; no agent signal; actor not established (a human, another tool, or an agent without a success signal such as Codex) | yes, labelled as git-observed |
 | `pre_existing` | already dirty/untracked at session start and content unchanged since | **no** -- listed as excluded |
 | `other_session` | reported by another live agent session in the same repository | **no** -- listed as excluded |
+| `other_commit` | changed only in commits since the session's base whose `Openshard-Agent` (or `Claude-Session`) trailer names a different agent, not reported by this session, and unchanged in the working tree since; an unmarked commit stays `git_observed` | **no** -- listed as excluded |
 
 A pre-existing file that changed again during the session is
 `git_observed` with `pre_existing: true` (never hidden); a pre-existing
@@ -689,6 +690,23 @@ external agent completes
   found, timed out) or nothing was planned, `0` otherwise. The attestation is
   recorded in every case. A future release may make strict the default
   behind a deprecation notice; until then the default stays evidence-only.
+* **`--commit <sha>`** picks checks from what the commit changed
+  (`verification/change_checks.py`); a configured `verification_commands`
+  contract always wins. When every changed path is documentation, nothing
+  runs and the attestation is `not_run` with `no_checks_applicable`, shown
+  as `No checks needed: documentation-only change (nothing run; not
+  verified)`. It is never verified, passed or failed, has no
+  `artifact_sha`, and is sent to the Platform as `not_run`. Documentation
+  means: `*.md`, `*.rst`, `*.txt`, `*.adoc` and `.gitignore` at the
+  repository root; text and images under `docs/` or `doc/`; and README,
+  LICENSE, CHANGELOG and similar files anywhere. Paths under test, fixture,
+  `.github/` or dependency folders, `requirements*.txt`, config files and any
+  other nested Markdown (it may be package data) are code, so the normal
+  selection, and its whole-suite fallback, still applies.
+* **Timeouts.** A check stopped by `--timeout` (default 600 seconds) is
+  `unknown`, and the CLI says so plainly: `<check> timed out after 600s and
+  was stopped, so the outcome is unknown (not passed, not failed). To allow
+  longer, re-run with --timeout SECONDS`.
 * **Observed commands** are re-run only on request, only when the stored
   summary is complete (not redacted, not at the 100-character cap where it
   may be truncated), and only when classified safe. Shell chaining is

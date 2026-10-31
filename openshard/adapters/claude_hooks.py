@@ -219,6 +219,7 @@ from openshard.adapters.claude_hook_checks import (
 )
 from openshard.adapters.claude_lead_models import model_roles as _model_roles
 from openshard.adapters.claude_lead_models import transcript_models as _transcript_models
+from openshard.adapters.claude_other_commits import other_agent_commit_paths
 from openshard.adapters.claude_session_fidelity import sweep_stale_buffers  # noqa: F401  (re-exported)
 from openshard.adapters.claude_transcript_usage import (  # noqa: F401  (re-exported for callers and tests)
     _count,
@@ -363,7 +364,8 @@ ATTR_AGENT_REPORTED = "agent_reported"
 ATTR_GIT_OBSERVED = "git_observed"
 ATTR_PRE_EXISTING = "pre_existing"
 ATTR_OTHER_SESSION = "other_session"
-_EXCLUDED_ATTRIBUTIONS = frozenset({ATTR_PRE_EXISTING, ATTR_OTHER_SESSION})
+ATTR_OTHER_COMMIT = "other_commit"  # changed only in another agent's marked commit (claude_other_commits)
+_EXCLUDED_ATTRIBUTIONS = frozenset({ATTR_PRE_EXISTING, ATTR_OTHER_SESSION, ATTR_OTHER_COMMIT})
 # Claude Code's shell tools (``PowerShell`` on Windows; same hook contract as Bash).
 COMMAND_TOOLS: frozenset[str] = frozenset({"Bash", "PowerShell"})
 # Read: only the path, only for the gaming checks (never an Event, a counted call or a routed path).
@@ -2589,6 +2591,7 @@ def _classify_changed_files(buf: dict, repo_root: Path, files: list[dict]) -> li
     attempted = _attempted_file_targets(buf)
     others = _other_sessions_reported_paths(repo_root, buf)
     own_committed = _own_commit_paths(buf, repo_root) if others else set()
+    other_committed = other_agent_commit_paths(buf, repo_root, profile.label)
     need_blob = [f["path"] for f in files if f.get("path") in base_paths and f.get("path") not in hook_files]
     current = _blob_ids(repo_root, need_blob) if need_blob else {}
     out: list[dict] = []
@@ -2603,6 +2606,9 @@ def _classify_changed_files(buf: dict, repo_root: Path, files: list[dict]) -> li
             summary = f"reported by {profile.label} hook"
             if pre:
                 summary += "; file already had uncommitted changes before the session"
+        elif path in other_committed:
+            attribution = ATTR_OTHER_COMMIT
+            summary = "changed only in another agent's commit; not counted as this session's work"
         elif pre:
             base_blob = base_paths.get(path)
             cur = current.get(path, "?")
@@ -3126,6 +3132,8 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
             "paths": dict(list(baseline_paths.items())[:_BASELINE_MAX_PATHS]),
         },
     }
+    if n_other_commit := sum(1 for f in excluded_files if f.get("attribution") == ATTR_OTHER_COMMIT):
+        changes_block["other_commit_excluded"] = n_other_commit  # local only: not in the sync projection
 
     ended = buf.get("ended") if isinstance(buf.get("ended"), dict) else None
     prompt_count = int(buf.get("prompt_count") or 0)

@@ -2203,9 +2203,9 @@ def last(more: bool, full: bool, as_json: bool):
     if full:
         click.echo(f"\nCapture witness: {witness_line(witness_for_entry(entries[-1]))}")
     if _post_verification is not None and _post_verification.get("verification") is not None:
-        from openshard.verification.post_session import display_line
+        from openshard.verification.post_session import display_heading, display_line
 
-        click.echo(f"\nRe-verified: {display_line(_post_verification)}")
+        click.echo(f"\n{display_heading(_post_verification)}: {display_line(_post_verification)}")
 
 
 def _echo_verification_view(entry: dict, index: int | None, post: dict | None) -> None:
@@ -2421,6 +2421,7 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         detail = result_detail(result)
         click.echo(f"  {result.check.name}: {result.status}" + (f" ({detail})" if detail else ""))
     click.echo(f"\nRe-verified: {display_line(summary)}")
+    _echo_timeout_hint(results, timeout)
     if compare_base:
         click.echo("Baseline diagnostic (does not change the verdict):")
         click.echo(json.dumps(attestation["baseline_comparison"], indent=2))
@@ -2452,6 +2453,15 @@ def _remote_request_delivery(repo_root: Path) -> None:
         request_delivery(repo_root=repo_root)
     except Exception:
         pass
+
+
+def _echo_timeout_hint(results: list, timeout: float) -> None:
+    """Say plainly when a check hit the ``--timeout`` limit (its outcome stays unknown)."""
+    from openshard.verification.post_session import timeout_hint
+
+    hint = timeout_hint(results, timeout)
+    if hint:
+        click.echo(hint)
 
 
 def _strict_verify_exit_code(results: list) -> int:
@@ -7208,12 +7218,10 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
                 agent_checks.append(("Capture verified", True, ""))
             else:
                 agent_unverified = True
-                agent_checks.append(("Capture verified", False, status.trust_blocker or _capture_unverified_detail(key, label)))
-        click.echo(f"\n{label}\n")
-        for check_label, ok, detail in agent_checks:
-            mark = "✓" if ok else "✗"
-            suffix = "" if ok else f" ({detail})"
-            click.echo(f"  {mark} {check_label}{suffix}")
+                agent_checks.append(("Capture verified", False, status.trust_blocker
+                                     or status.capture_unverified_reason
+                                     or _capture_unverified_detail(key, label)))
+        _echo_agent_doctor_block(label, agent_checks, status.hooks_review)
         if root is not None and history_writable and status.cli_available and integration_ok:
             if agent_unverified:
                 unverified_agents.append(label)
@@ -7231,7 +7239,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     if unverified_agents:
         click.echo(
             f"Configured but unverified: {', '.join(unverified_agents)} -- the integration is installed but "
-            "no session has been captured in this repository yet. Run one, then `openshard last`; "
+            "capture is not verified in this repository yet. Run one session, then `openshard last`; "
             "if nothing is captured, the agent's block above says what to check."
         )
     click.echo("")
@@ -7259,6 +7267,19 @@ _CAPTURE_UNVERIFIED_WHY: dict[str, str] = {
     ),
     "hermes": "if a completed session records nothing, Hermes has not approved the hooks or runs in safe mode",
 }
+
+
+def _echo_agent_doctor_block(label: str, checks: list[tuple[str, bool, str]], hooks_review: str | None) -> None:
+    """One agent's doctor block, plus the Codex /hooks review warning when it applies."""
+    from openshard.adapters.codex_trust import HOOKS_REVIEW_NOTE, UNREVIEWED
+
+    click.echo(f"\n{label}\n")
+    for check_label, ok, detail in checks:
+        mark = "✓" if ok else "✗"
+        suffix = "" if ok else f" ({detail})"
+        click.echo(f"  {mark} {check_label}{suffix}")
+    if hooks_review == UNREVIEWED:
+        click.echo(f"  ! {HOOKS_REVIEW_NOTE}")
 
 
 def _capture_unverified_detail(key: str, label: str) -> str:

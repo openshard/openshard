@@ -7,6 +7,7 @@ installer/setup code looks for one, ``shutil.which`` is patched.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import subprocess
@@ -818,8 +819,9 @@ class TestCli:
         assert "use Codex normally" not in human.output
         (repo / ".openshard").mkdir(exist_ok=True)
         (repo / ".openshard" / "runs.jsonl").write_text(
-            json.dumps({"timestamp": "2026-10-08T07:00:00Z", "run_id": "r1", "task": "t",
-                        "executor": "codex_hooks", "import_source": "codex"}) + "\n",
+            # Captured after the hooks were installed: only that proves the hooks in place now.
+            json.dumps({"timestamp": _dt.datetime.now(_dt.UTC).isoformat(), "run_id": "r1",
+                        "task": "t", "executor": "codex_hooks", "import_source": "codex"}) + "\n",
             encoding="utf-8",
         )
         with patch("shutil.which", side_effect=_which):

@@ -319,3 +319,82 @@ class TestCompatibility:
         rendered = render_compact_shard_receipt(receipt)
         assert "1 file" in rendered
         assert "Excluded" not in rendered
+
+
+class TestOtherAgentCommits:
+    """Another agent (Codex) committed in the same checkout during the session.
+
+    Only a commit whose message names a different agent (``Openshard-Agent``)
+    is another agent's; its paths are ``other_commit`` (excluded) unless this
+    session also reported them. Unmarked commits and uncommitted edits stay
+    ``git_observed``: without the trailer git cannot say who committed.
+    """
+
+    @staticmethod
+    def _foreign_commit(repo: Path, rel: str, text: str, trailer: str | None = "Openshard-Agent: Codex") -> None:
+        (repo / rel).write_text(text, encoding="utf-8")
+        _git(repo, "add", rel)
+        msg = "Codex change" + (f"\n\n{trailer}" if trailer else "")
+        _git(repo, "commit", "-q", "-m", msg)
+
+    def test_a_path_changed_only_in_another_agents_commit_is_excluded(self, repo):
+        _start(repo)
+        _agent_write(repo, "calc.py", "x = 1\n")
+        self._foreign_commit(repo, "codex.py", "c = 1\n")
+        entry = _finish(repo)
+        files = _by_path(entry)
+        assert files["calc.py"]["attribution"] == "agent_reported"
+        assert files["codex.py"]["attribution"] == "other_commit"
+        assert entry["files_created"] + entry["files_updated"] + entry["files_deleted"] == 1
+        assert entry["changes"]["other_commit_excluded"] == 1
+        assert entry["capture"]["receipt_scope"] == "turn"
+        changed_targets = [e["target"] for e in entry["events"] if e["event_type"] == "file.changed"]
+        assert "codex.py" not in changed_targets
+        receipt = build_shard_receipt(entry)
+        assert receipt.files_changed == 1
+        assert [f["path"] for f in receipt.files_excluded] == ["codex.py"]
+        assert "1 other-agent commit" in render_compact_shard_receipt(receipt)
+
+    def test_a_path_this_session_reported_stays_its_own_even_in_another_agents_commit(self, repo):
+        _start(repo)
+        _agent_write(repo, "shared.py", "s = 1\n")
+        self._foreign_commit(repo, "shared.py", "s = 2\n")
+        files = _by_path(_finish(repo))
+        assert files["shared.py"]["attribution"] == "agent_reported"
+
+    def test_this_sessions_own_commit_is_kept(self, repo):
+        _start(repo)
+        (repo / "mine.py").write_text("m = 1\n", encoding="utf-8")  # no success signal for this path
+        _git(repo, "add", "mine.py")
+        _git(repo, "commit", "-q", "-m", "mine\n\nOpenshard-Agent: Claude Code")
+        _run(repo, "PostToolUse", SID, tool_name="Bash", tool_input={"command": "git commit -m mine"})
+        entry = _finish(repo)
+        assert len(entry["session_commits"]["shas"]) == 1
+        assert _by_path(entry)["mine.py"]["attribution"] == "git_observed"
+
+    def test_another_agents_uncommitted_edit_stays_git_observed(self, repo):
+        _start(repo)
+        (repo / "codex.py").write_text("c = 1\n", encoding="utf-8")
+        files = _by_path(_finish(repo))
+        assert files["codex.py"]["attribution"] == "git_observed"
+
+    def test_a_path_edited_again_after_the_foreign_commit_stays_git_observed(self, repo):
+        _start(repo)
+        self._foreign_commit(repo, "codex.py", "c = 1\n")
+        (repo / "codex.py").write_text("c = 2\n", encoding="utf-8")
+        files = _by_path(_finish(repo))
+        assert files["codex.py"]["attribution"] == "git_observed"
+
+    def test_a_commit_with_no_agent_trailer_is_not_excluded(self, repo):
+        """No commit trailer hook: who committed is unknown, so nothing is hidden."""
+        _start(repo)
+        self._foreign_commit(repo, "codex.py", "c = 1\n", trailer=None)
+        entry = _finish(repo)
+        assert _by_path(entry)["codex.py"]["attribution"] == "git_observed"
+        assert "other_commit_excluded" not in entry["changes"]
+
+    def test_a_commit_naming_this_sessions_own_agent_is_not_excluded(self, repo):
+        """Same agent, unknown session: not positively another agent's."""
+        _start(repo)
+        self._foreign_commit(repo, "other.py", "o = 1\n", trailer="Openshard-Agent: Claude Code")
+        assert _by_path(_finish(repo))["other.py"]["attribution"] == "git_observed"
