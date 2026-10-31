@@ -278,7 +278,7 @@ def schedule_for_receipt(repo_root: Path, entry: dict | None, *, finalized: bool
         return False
 
 
-_NOT_THIS_TURNS = frozenset({"pre_existing", "other_session"})
+_NOT_THIS_TURNS = frozenset({"pre_existing", "other_session", "other_commit"})
 
 
 def _is_sealed_turn(entry: dict) -> bool:

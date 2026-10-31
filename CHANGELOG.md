@@ -4,6 +4,26 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- `openshard verify --commit` no longer runs the whole test suite for a
+  documentation-only commit. It runs nothing and records "No checks needed:
+  documentation-only change" (`not_run`, `no_checks_applicable`), which never
+  counts as verified or passed. A configured `verification_commands` contract
+  still runs. A check that hits the time limit now says "timed out after Ns"
+  and points to `--timeout`; its outcome stays unknown.
+- Files another agent changed and committed during a Claude Code turn (for
+  example a Codex commit) are no longer counted as that turn's work when the
+  commit carries the other agent's `Openshard-Agent` trailer.
+- `openshard doctor` no longer says Codex capture is verified because of an
+  old or imported Codex record; it needs a Codex hook capture made after the
+  hooks last changed, and it tells you to approve the hooks under `/hooks`
+  in Codex when they have not been reviewed.
+- A Claude Code Receipt whose only capture gap is how the session ended (its
+  session end was not seen, or it was sealed after an hour idle) and that ran
+  no check now reads "not run" instead of "unknown". Every hook up to the
+  seal arrived, so no check was hidden. Dropped or corrupt events and tool
+  calls that reached no hook still make it "unknown".
 ### Changed
 
 - Work an agent leaves uncommitted is now verified by default. When a

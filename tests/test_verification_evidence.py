@@ -216,6 +216,34 @@ class TestMalformedEvidence:
         assert "capture_events_lost" in r.verification["incomplete_reasons"]
         assert r.status == "Not recorded"
 
+    def test_hook_record_that_only_missed_its_session_end_and_ran_no_check_is_not_run(self):
+        entry = {
+            "timestamp": "2026-09-20T10:00:00Z", "task": "t", "executor": "claude_code_hooks",
+            "verification_attempted": False,
+            "capture": {"source": "claude_code_hooks", "completeness": {"status": "incomplete", "reasons": [
+                {"kind": "session_end_not_observed", "count": 1},
+                {"kind": "session_idle_sealed", "count": 1},
+            ]}},
+        }
+        r = build_shard_receipt(entry)
+        assert r.verification["status"] == "not_run"
+
+    @pytest.mark.parametrize("reasons", [
+        [{"kind": "session_end_not_observed", "count": 1}, {"kind": "tool_calls_without_hook", "count": 1}],
+        [{"kind": "hook_events_stopped", "count": 1}],
+        [{"kind": "something_new", "count": 1}],
+        [],
+    ])
+    def test_hook_record_with_a_gap_that_can_hide_a_check_stays_unknown(self, reasons):
+        entry = {
+            "timestamp": "2026-09-20T10:00:00Z", "task": "t", "executor": "claude_code_hooks",
+            "verification_attempted": False,
+            "capture": {"source": "claude_code_hooks", "completeness": {"status": "incomplete", "reasons": reasons}},
+        }
+        r = build_shard_receipt(entry)
+        assert r.verification["status"] == "unknown"
+        assert "capture_events_lost" in r.verification["incomplete_reasons"]
+
 
 # ---------------------------------------------------------------------------
 # Capture paths

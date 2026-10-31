@@ -248,6 +248,48 @@ def _python_checks(
 
 
 # ---------------------------------------------------------------------------
+# Documentation-only changes
+# ---------------------------------------------------------------------------
+
+# Deliberately narrow: a path counts as documentation only when nothing a check
+# runs can read it. Config, code, tests, CI and package data never qualify, and
+# anything not listed here is treated as code (the normal selection applies).
+_DOC_SUFFIXES = frozenset({".md", ".markdown", ".rst", ".txt", ".adoc"})
+_DOC_DIR_SUFFIXES = _DOC_SUFFIXES | frozenset({".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"})
+_DOC_DIRS = frozenset({"docs", "doc"})
+_ROOT_DOC_NAMES = frozenset({".gitignore"})
+_DOC_STEMS = ("readme", "changelog", "changes", "contributing", "license", "licence", "notice",
+              "copying", "authors", "code_of_conduct", "security")
+_NOT_DOC_PREFIXES = ("requirements", "constraints", "cmakelists")
+_TEST_PARTS = frozenset({"test", "tests", "__tests__", "testdata", "fixtures", "spec", "e2e"})
+
+
+def _is_doc_path(path: PurePosixPath) -> bool:
+    parts = [p.lower() for p in path.parts]
+    if not parts or set(parts) & (_TEST_PARTS | _SKIP_PARTS) or ".github" in parts:
+        return False
+    name, suffix = parts[-1], path.suffix.lower()
+    if name.startswith(_NOT_DOC_PREFIXES):
+        return False
+    if len(parts) > 1 and parts[0] in _DOC_DIRS:
+        return suffix in _DOC_DIR_SUFFIXES
+    if len(parts) == 1 and (name in _ROOT_DOC_NAMES or suffix in _DOC_SUFFIXES):
+        return True
+    # A README / LICENSE / CHANGELOG anywhere (packages/foo/README.md); other
+    # nested Markdown may be package data a program reads, so it is code here.
+    return name.split(".", 1)[0] in _DOC_STEMS and (suffix in _DOC_SUFFIXES or suffix == "")
+
+
+def docs_only(changed: list[PurePosixPath] | None) -> bool:
+    """True when *changed* is non-empty and every path is documentation (``_is_doc_path``).
+
+    Unknown is never docs-only: ``None`` (git could not tell) and an empty
+    change both return False, so the normal selection and fallback still apply.
+    """
+    return bool(changed) and all(_is_doc_path(p) for p in changed or [])
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -308,4 +350,4 @@ def is_sha(value: object) -> bool:
     return isinstance(value, str) and bool(_SHA_RE.match(value))
 
 
-__all__ = ["SelectedCheck", "changed_paths", "is_sha", "python_executable", "select_checks"]
+__all__ = ["SelectedCheck", "changed_paths", "docs_only", "is_sha", "python_executable", "select_checks"]
