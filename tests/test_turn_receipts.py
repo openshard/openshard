@@ -565,6 +565,8 @@ class TestPostSessionVerifyPerTurn:
         from openshard.verification import auto, settle
 
         monkeypatch.delenv(auto.ENV_DISABLE, raising=False)
+        (repo / ".openshard").mkdir(exist_ok=True)
+        (repo / ".openshard" / "config.yml").write_text("post_session_verify: off\n", encoding="utf-8")
         calls: list[str] = []
         monkeypatch.setattr(auto, "_spawn_detached", lambda argv, cwd: calls.append(argv) or True)
         _hook(repo, "UserPromptSubmit", prompt="add a")
@@ -572,6 +574,20 @@ class TestPostSessionVerifyPerTurn:
         _hook(repo, "Stop")
         assert settle.run_due(repo, now=time.time() + 601) == 0 and calls == []
         assert not list((repo / ".openshard").glob("verify-requests/settle-*"))
+
+    def test_by_default_a_settled_task_is_re_run_on_a_private_copy(self, repo, turn_flag, monkeypatch):
+        from openshard.verification import auto, settle
+
+        monkeypatch.delenv(auto.ENV_DISABLE, raising=False)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(auto, "_spawn_detached", lambda argv, cwd: calls.append(argv) or True)
+        _hook(repo, "UserPromptSubmit", prompt="add a")
+        _write(repo, "a.py")
+        _hook(repo, "Stop")
+        assert calls == []  # never at the Stop itself
+        assert settle.run_due(repo, now=time.time() + 601) == 1
+        assert len(calls) == 1 and "--snapshot" in calls[0] and "--auto" in calls[0]
+        assert "--approve" not in calls[0] and "--commit" not in calls[0]
 
 
 def test_settle_period_defaults_to_ten_minutes_and_ignores_bad_values(repo):

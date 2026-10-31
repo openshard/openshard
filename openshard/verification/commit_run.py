@@ -24,6 +24,7 @@ from openshard.verification.post_session import (
     build_attestation,
     check_environment,
     commit_attested,
+    docs_only_commit,
     load_attestations,
     plan_commit,
     record_attestation,
@@ -46,6 +47,7 @@ class CommitRun:
     planned: list[PlannedCheck] = field(default_factory=list)
     results: list[CheckRun] = field(default_factory=list)
     attestation: dict | None = None
+    no_checks_applicable: bool = False  # documentation-only commit: nothing planned, nothing verified
 
 
 def _now() -> str:
@@ -125,6 +127,16 @@ def _execute(repo_root: Path, sha: str, entry: dict, planned: list[PlannedCheck]
     return CommitRun(STATUS_OK, planned, results, attestation)
 
 
+def _record_no_checks(repo_root: Path, sha: str, entry: dict) -> CommitRun:
+    """A documentation-only commit: nothing to check, nothing run, no checkout made. Recorded ``not_run``."""
+    stamp = _now()
+    unseen = TreeState(head=None, dirty=None)
+    attestation = build_attestation(entry, [], before=unseen, after=unseen, started_at=stamp, completed_at=stamp,
+                                    commit=sha, no_checks_applicable=True)
+    record_attestation(repo_root, attestation)
+    return CommitRun(STATUS_OK, [], [], attestation, no_checks_applicable=True)
+
+
 def verify_commit(
     repo_root: Path,
     history_dir: Path,
@@ -154,8 +166,11 @@ def verify_commit(
         planned, truncated = plan_commit(repo_root, config, entry, sha, base if base != sha else None)
         if on_plan is not None:
             on_plan(planned)
+        no_checks = not planned and docs_only_commit(repo_root, config, sha, base if base != sha else None)
         if dry_run:
-            return CommitRun(STATUS_DRY_RUN, planned)
+            return CommitRun(STATUS_DRY_RUN, planned, no_checks_applicable=no_checks)
+        if no_checks:
+            return _record_no_checks(repo_root, sha, entry)
         # Unattended runs never share the live checkout with the session's next turn.
         return _execute(repo_root, sha, entry, planned, approve=approve and not unattended, timeout=timeout,
                         stream=stream, on_start=on_start, truncated=truncated, isolate=unattended)

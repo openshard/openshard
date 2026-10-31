@@ -2203,9 +2203,9 @@ def last(more: bool, full: bool, as_json: bool):
     if full:
         click.echo(f"\nCapture witness: {witness_line(witness_for_entry(entries[-1]))}")
     if _post_verification is not None and _post_verification.get("verification") is not None:
-        from openshard.verification.post_session import display_line
+        from openshard.verification.post_session import display_heading, display_line
 
-        click.echo(f"\nRe-verified: {display_line(_post_verification)}")
+        click.echo(f"\n{display_heading(_post_verification)}: {display_line(_post_verification)}")
 
 
 def _echo_verification_view(entry: dict, index: int | None, post: dict | None) -> None:
@@ -2292,11 +2292,14 @@ def _select_entry(entries: list[dict], ref: str | None) -> dict | None:
 @click.option("--commit", "commit_ref", default=None, metavar="SHA",
               help="Verify exactly this commit: checks are chosen from what it changed and run on that commit "
                    "(in an isolated copy when the checkout is not clean at it), so the result is bound to it.")
+@click.option("--snapshot", "snapshot", is_flag=True, default=False,
+              help="Verify the checkout's uncommitted changes on a private copy (never the checkout itself). "
+                   "Only safe checks run; the result is not bound to a commit.")
 @click.option("--auto", "unattended", is_flag=True, default=False, hidden=True,
               help="Unattended run started by capture: never approves, skips a commit already verified.")
 def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run: bool, timeout: float,
            as_json: bool, strict: bool, from_ci: bool, compare_base: str | None = None,
-           commit_ref: str | None = None, unattended: bool = False) -> None:
+           commit_ref: str | None = None, unattended: bool = False, snapshot: bool = False) -> None:
     """Re-run approved checks and record the outcome OpenShard itself observed.
 
     Picks the repository's verification contract (``verification_commands``
@@ -2332,7 +2335,7 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
     )
 
     mode = _verify_mode(from_ci=from_ci, commit_ref=commit_ref, unattended=unattended,
-                        compare_base=compare_base, from_observed=from_observed)
+                        compare_base=compare_base, from_observed=from_observed, snapshot=snapshot)
     loc = _locate_history()
     repo_root = loc.root
     # A session whose end event never arrived (closed terminal, crash) is
@@ -2356,16 +2359,9 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         sys.exit(1)
 
     receipt_label = entry.get("receipt_id") or entry.get("shard_id") or entry.get("run_id")
-    if mode == "ci":
-        from openshard.cli.verify_ci import run_verify_from_ci
-
-        run_verify_from_ci(entry, loc, receipt_label, as_json=as_json, strict=strict, dry_run=dry_run)
-        return
-    if mode == "commit":
-        from openshard.cli.verify_commit import run_verify_commit
-
-        run_verify_commit(entry, loc, str(receipt_label or ""), commit_ref or "", approve=approve and not unattended,
-                          unattended=unattended, dry_run=dry_run, timeout=timeout, as_json=as_json, strict=strict)
+    if mode is not None:
+        _run_verify_mode(mode, entry, loc, receipt_label, commit_ref=commit_ref, approve=approve,
+                         unattended=unattended, dry_run=dry_run, timeout=timeout, as_json=as_json, strict=strict)
         return
 
     config, _valid, _path = load_config_safe(cwd=repo_root)
@@ -2421,6 +2417,7 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         detail = result_detail(result)
         click.echo(f"  {result.check.name}: {result.status}" + (f" ({detail})" if detail else ""))
     click.echo(f"\nRe-verified: {display_line(summary)}")
+    _echo_timeout_hint(results, timeout)
     if compare_base:
         click.echo("Baseline diagnostic (does not change the verdict):")
         click.echo(json.dumps(attestation["baseline_comparison"], indent=2))
@@ -2433,16 +2430,39 @@ def verify(receipt_ref: str | None, from_observed: bool, approve: bool, dry_run:
         sys.exit(strict_exit)
 
 
+def _run_verify_mode(mode: str, entry: dict, loc, receipt_label, *, commit_ref: str | None, approve: bool,
+                     unattended: bool, dry_run: bool, timeout: float, as_json: bool, strict: bool) -> None:
+    """``openshard verify --ci``, ``--commit`` or ``--snapshot``: each mode lives in its own module."""
+    if mode == "ci":
+        from openshard.cli.verify_ci import run_verify_from_ci
+
+        run_verify_from_ci(entry, loc, receipt_label, as_json=as_json, strict=strict, dry_run=dry_run)
+    elif mode == "commit":
+        from openshard.cli.verify_commit import run_verify_commit
+
+        run_verify_commit(entry, loc, str(receipt_label or ""), commit_ref or "", approve=approve and not unattended,
+                          unattended=unattended, dry_run=dry_run, timeout=timeout, as_json=as_json, strict=strict)
+    elif mode == "snapshot":
+        from openshard.cli.verify_snapshot import run_verify_snapshot
+
+        if approve and not as_json:
+            click.echo("--approve is ignored with --snapshot: only safe checks run on the copy.")
+        run_verify_snapshot(entry, loc, str(receipt_label or ""), unattended=unattended, dry_run=dry_run,
+                            timeout=timeout, as_json=as_json, strict=strict)
+
+
 def _verify_mode(*, from_ci: bool, commit_ref: str | None, unattended: bool, compare_base: str | None,
-                 from_observed: bool) -> str | None:
-    """Which ``openshard verify`` mode the options select ("ci", "commit" or None), or a usage error."""
+                 from_observed: bool, snapshot: bool = False) -> str | None:
+    """Which ``openshard verify`` mode the options select ("ci", "commit", "snapshot" or None), or a usage error."""
     if from_ci and (compare_base or commit_ref):
         raise click.UsageError("--ci cannot be combined with --compare-base or --commit")
-    if unattended and not commit_ref:
-        raise click.UsageError("--auto needs --commit")
+    if snapshot and (from_ci or commit_ref or compare_base or from_observed):
+        raise click.UsageError("--snapshot cannot be combined with --ci, --commit, --compare-base or --from-observed")
+    if unattended and not (commit_ref or snapshot):
+        raise click.UsageError("--auto needs --commit or --snapshot")
     if commit_ref and (compare_base or from_observed):
         raise click.UsageError("--commit cannot be combined with --compare-base or --from-observed")
-    return "ci" if from_ci else "commit" if commit_ref else None
+    return "ci" if from_ci else "commit" if commit_ref else "snapshot" if snapshot else None
 
 def _remote_request_delivery(repo_root: Path) -> None:
     """When this environment is attached to a remote capture, have the new attestation leave it promptly."""
@@ -2452,6 +2472,15 @@ def _remote_request_delivery(repo_root: Path) -> None:
         request_delivery(repo_root=repo_root)
     except Exception:
         pass
+
+
+def _echo_timeout_hint(results: list, timeout: float) -> None:
+    """Say plainly when a check hit the ``--timeout`` limit (its outcome stays unknown)."""
+    from openshard.verification.post_session import timeout_hint
+
+    hint = timeout_hint(results, timeout)
+    if hint:
+        click.echo(hint)
 
 
 def _strict_verify_exit_code(results: list) -> int:
@@ -7208,12 +7237,10 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
                 agent_checks.append(("Capture verified", True, ""))
             else:
                 agent_unverified = True
-                agent_checks.append(("Capture verified", False, status.trust_blocker or _capture_unverified_detail(key, label)))
-        click.echo(f"\n{label}\n")
-        for check_label, ok, detail in agent_checks:
-            mark = "✓" if ok else "✗"
-            suffix = "" if ok else f" ({detail})"
-            click.echo(f"  {mark} {check_label}{suffix}")
+                agent_checks.append(("Capture verified", False, status.trust_blocker
+                                     or status.capture_unverified_reason
+                                     or _capture_unverified_detail(key, label)))
+        _echo_agent_doctor_block(label, agent_checks, status.hooks_review)
         if root is not None and history_writable and status.cli_available and integration_ok:
             if agent_unverified:
                 unverified_agents.append(label)
@@ -7231,7 +7258,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     if unverified_agents:
         click.echo(
             f"Configured but unverified: {', '.join(unverified_agents)} -- the integration is installed but "
-            "no session has been captured in this repository yet. Run one, then `openshard last`; "
+            "capture is not verified in this repository yet. Run one session, then `openshard last`; "
             "if nothing is captured, the agent's block above says what to check."
         )
     click.echo("")
@@ -7259,6 +7286,19 @@ _CAPTURE_UNVERIFIED_WHY: dict[str, str] = {
     ),
     "hermes": "if a completed session records nothing, Hermes has not approved the hooks or runs in safe mode",
 }
+
+
+def _echo_agent_doctor_block(label: str, checks: list[tuple[str, bool, str]], hooks_review: str | None) -> None:
+    """One agent's doctor block, plus the Codex /hooks review warning when it applies."""
+    from openshard.adapters.codex_trust import HOOKS_REVIEW_NOTE, UNREVIEWED
+
+    click.echo(f"\n{label}\n")
+    for check_label, ok, detail in checks:
+        mark = "✓" if ok else "✗"
+        suffix = "" if ok else f" ({detail})"
+        click.echo(f"  {mark} {check_label}{suffix}")
+    if hooks_review == UNREVIEWED:
+        click.echo(f"  ! {HOOKS_REVIEW_NOTE}")
 
 
 def _capture_unverified_detail(key: str, label: str) -> str:

@@ -92,6 +92,27 @@ VALID_REASONS = frozenset({
 })
 
 _MAX_REASONS = 8
+
+# Reasons that say how a session or turn *ended*, not that tool events within
+# its window went missing: an idle-sealed or end-less segment still received
+# every hook up to its last activity (a later hook opens a new segment), so
+# "no check command observed" there is a real "not run", not "unknown".
+# Any other reason (dropped or corrupt events, silent hooks) can hide a check.
+_LIFECYCLE_ONLY_REASONS = frozenset({REASON_SESSION_END_NOT_OBSERVED, REASON_SESSION_IDLE_SEALED})
+
+
+def may_hide_tool_events(reasons: Iterable[object]) -> bool:
+    """True when any *reasons* entry could mean a tool event in the window was not observed.
+
+    Unknown or malformed entries count as possible loss (fail closed).
+    """
+    for r in reasons:
+        kind = r.get("kind") if isinstance(r, dict) else None
+        if kind not in _LIFECYCLE_ONLY_REASONS:
+            return True
+    return False
+
+
 _MAX_DETAIL = 160
 
 
