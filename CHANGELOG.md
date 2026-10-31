@@ -19,6 +19,11 @@ All notable changes to OpenShard are documented here.
   old or imported Codex record; it needs a Codex hook capture made after the
   hooks last changed, and it tells you to approve the hooks under `/hooks`
   in Codex when they have not been reviewed.
+- A Claude Code Receipt whose only capture gap is how the session ended (its
+  session end was not seen, or it was sealed after an hour idle) and that ran
+  no check now reads "not run" instead of "unknown". Every hook up to the
+  seal arrived, so no check was hidden. Dropped or corrupt events and tool
+  calls that reached no hook still make it "unknown".
 
 ## 0.5.0 - 2026-10-25
 
