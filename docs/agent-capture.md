@@ -809,24 +809,36 @@ which is why the artifact commit must come from a clean tree OpenShard saw.
 attached. `openshard ci check` reads the current state, so a re-run or CI
 verdict counts there too (in both directions).
 
-### Post-session verification on session close (opt-in)
+### Post-session verification of uncommitted work (on by default)
+
+When a captured session changed files but made no commit, Openshard re-runs
+the checks that change calls for, by itself, and records the outcome beside
+the Receipt. It starts a detached `openshard verify --receipt <id> --snapshot --auto --json`
+at session end (or, for per-turn Receipts, once the Task settles):
+
+* git writes a snapshot of the checkout as it is: HEAD plus every tracked
+  change and every untracked file it does not ignore. A throwaway index is
+  used, so your staging area, branch and files are untouched and no ref is
+  created.
+* the checks are chosen as for a commit (your `verification_commands`, else
+  the checks the changed files call for) and only `safe` ones run, in an
+  isolated `git worktree` of the snapshot that is removed afterwards. Nothing
+  is approved.
+* the result is an OpenShard re-run (`directly_observed`, `openshard_executed`)
+  that is **not bound to a commit** (`artifact_not_bound`): nobody merges a
+  snapshot, so it never counts as commit verification for the merge gate.
+  Committed work is verified on its commit as before.
+* a session that changed no files starts nothing, and the same snapshot is
+  never run twice for the same Receipt.
 
 ```yaml
 # .openshard/config.yml
-post_session_verify: safe
-verification_commands:
-  - [python, -m, pytest, -q]
+post_session_verify: off    # no automatic re-run at all (commit verification included)
+post_session_verify: safe   # the older behaviour: run in the checkout itself
 ```
 
-With this set, the capture path starts a detached
-`openshard verify --receipt <id> --json` when a session's Receipt is
-finalised: on the session-end event, or when the stale sweep closes a
-session that never sent one. It never passes `--approve` or
-`--from-observed`, so only checks classed `safe` run; `needs_approval` and
-`blocked` checks are recorded as skipped. It is off by default, off for any
-value other than `safe`, and `OPENSHARD_NO_AUTO_VERIFY=1` disables it for a
-process. The hook does not wait for it and nothing is recorded if it cannot
-start.
+`OPENSHARD_NO_AUTO_VERIFY=1` turns it off for a process. The hook does not
+wait for it and nothing is recorded if it cannot start.
 
 ### Session finalisation
 

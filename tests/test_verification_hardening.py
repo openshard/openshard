@@ -630,14 +630,24 @@ class TestAutoPostSessionVerify:
         (repo / ".openshard").mkdir(exist_ok=True)
         (repo / ".openshard" / "config.yml").write_text(yaml.safe_dump({auto.CONFIG_KEY: value}), encoding="utf-8")
 
-    def test_off_by_default_and_off_for_any_value_but_safe(self, repo):
+    def test_on_by_default_as_a_private_copy_run_and_off_only_when_turned_off(self, repo):
         spawned: list = []
         entry = {"receipt_id": "rcpt_1"}
-        assert auto.schedule_post_session_verify(repo, entry, spawner=lambda a, c: spawned.append(a) or True) is False
-        for value in (True, "all", "approve", "off"):
+        assert auto.post_session_mode(repo, {}) == auto.MODE_SNAPSHOT
+        assert auto.schedule_post_session_verify(repo, entry, spawner=lambda a, c: spawned.append(a) or True,
+                                                 env={}) is True
+        assert spawned[0][-6:] == ["verify", "--receipt", "rcpt_1", "--snapshot", "--auto", "--json"]
+        assert "--approve" not in spawned[0] and "--from-observed" not in spawned[0]
+        for value in (True, "all", "approve", "snapshot"):
+            self._enable(repo, value)
+            assert auto.post_session_mode(repo, {}) == auto.MODE_SNAPSHOT, value
+        for value in (False, "off"):
             self._enable(repo, value)
             assert auto.auto_verify_enabled(repo, {}) is False, value
-        assert spawned == []
+        (repo / ".openshard" / "config.yml").write_text("post_session_verify: [unclosed\n", encoding="utf-8")
+        assert auto.auto_verify_enabled(repo, {}) is False  # an unreadable config starts nothing
+        self._enable(repo, "snapshot")
+        assert auto.auto_verify_enabled(repo, {auto.ENV_DISABLE: "1"}) is False
 
     def test_enabled_starts_a_safe_only_verify_for_that_receipt(self, repo):
         self._enable(repo)

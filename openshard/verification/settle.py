@@ -1,6 +1,6 @@
-"""Run the opt-in working-tree re-run once a Task settles, not after every turn.
+"""Run the post-session re-run once a Task settles, not after every turn.
 
-With ``post_session_verify: safe`` a per-turn Receipt (docs/per-turn-receipts.md)
+A per-turn Receipt (docs/per-turn-receipts.md)
 used to start ``openshard verify`` as soon as a turn that changed files
 sealed: a chat of ten small turns ran the suite ten times while the agent was
 still working. Now a sealed turn that changed files only *notes* its Receipt
@@ -96,7 +96,7 @@ def note_sealed_turn(repo_root: Path, entry: dict, *, has_commit: bool, now: flo
                      spawner: Any = None) -> bool:
     """Record a sealed turn against its session's pending re-run. Returns whether a run started now.
 
-    Called only with ``post_session_verify: safe`` on. A turn of a new Task
+    Called only while post-session verification is on (the default). A turn of a new Task
     first settles the previous Task's pending run (started now).
     """
     from openshard.verification.auto import sealed_turn_changed_files

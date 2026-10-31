@@ -24,6 +24,16 @@ All notable changes to OpenShard are documented here.
   no check now reads "not run" instead of "unknown". Every hook up to the
   seal arrived, so no check was hidden. Dropped or corrupt events and tool
   calls that reached no hook still make it "unknown".
+### Changed
+
+- Work an agent leaves uncommitted is now verified by default. When a
+  session changes files without committing, Openshard re-runs the checks the
+  change calls for on a private copy of those changes (`openshard verify
+  --snapshot`), never in your checkout, and records the result beside the
+  Receipt. Only safe checks run and nothing is approved. The result is not
+  bound to a commit, so it never counts as commit verification for the merge
+  gate. `post_session_verify: off` turns it off; `post_session_verify: safe`
+  keeps the older run in the checkout.
 
 ## 0.5.0 - 2026-10-25
 
