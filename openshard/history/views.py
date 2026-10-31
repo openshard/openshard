@@ -227,6 +227,12 @@ def receipt_to_dict(receipt: ShardReceipt, *, extended: bool = False) -> dict[st
         merge_check = (receipt.recorded_evidence or {}).get("merge_check")
         if merge_check is not None:
             d["merge_check"] = merge_check
+        # Absent on Receipts captured before steering capture: never back-filled.
+        from openshard.history.steering import sync_block
+
+        steering = sync_block((receipt.recorded_evidence or {}).get("steering"))
+        if steering is not None:
+            d["steering"] = steering
     return d
 
 

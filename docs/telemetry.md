@@ -91,6 +91,20 @@ So the following are never sent:
 `openshard telemetry sample` prints the queued events exactly as they will
 be sent, so you can check this yourself at any time.
 
+Steering capture (`docs/steering-capture.md`) adds nothing to telemetry: the
+intent of a follow-up, interrupts, permission answers and files changed
+between turns stay in the local Receipt (and the Platform, if you link it).
+No telemetry event or property carries them, and the prompt text they are
+classified from is never kept anywhere. To count and classify steering,
+OpenShard reads the agents' own local logs (Claude Code, Codex, Cursor,
+Antigravity, Grok Build, Hermes) on the machine where the agent runs; their
+text never leaves that machine.
+
+A Receipt's task text (its `task` / `task_title`, sent to a linked Platform,
+never to telemetry) comes only from the prompt that starts a task. A Receipt
+that continues the task (a later turn, a resumed session) carries the task's
+title and its turn number, never that turn's prompt.
+
 ## Installation id
 
 `installation_id` is a random uuid4 minted the first time telemetry state is

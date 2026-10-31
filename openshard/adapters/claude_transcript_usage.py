@@ -60,6 +60,11 @@ def _valid_transcript_path(
         from openshard.adapters.codex_transcript import valid_codex_transcript_path
 
         return valid_codex_transcript_path(raw, session_id)
+    if agent != AGENT_CLAUDE_CODE:
+        # Cursor, Antigravity, Grok Build: read for steering only (adapters/steering_logs.py).
+        from openshard.adapters.steering_logs import valid_log_path
+
+        return valid_log_path(agent, raw, session_id)
     if not isinstance(raw, str) or not raw or len(raw) > 2_000 or not isinstance(session_id, str) or not session_id:
         return None
     if raw.startswith(("\\\\", "//")):

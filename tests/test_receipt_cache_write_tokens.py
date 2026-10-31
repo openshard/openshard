@@ -19,7 +19,9 @@ from openshard.history.shard_contract import build_shard_receipt, render_compact
 from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE, official_rate
 from openshard.sync.envelope import receipt_payload
 from tests.test_claude_hooks import _assistant_line, _run, _runs_lines, _transcript
-from tests.test_claude_hooks import _claude_config_dir as _claude_config_dir  # noqa: F401  (autouse)
+from tests.test_claude_hooks import (
+    _claude_config_dir as _claude_config_dir,  # noqa: F401  (autouse)
+)
 from tests.test_claude_hooks import repo as repo  # noqa: F401  (fixture)
 
 _PLATFORM_SCHEMA = Path(__file__).parent / "fixtures" / "platform" / "receipt-sync-envelope.v1.json"

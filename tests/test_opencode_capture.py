@@ -45,7 +45,7 @@ from openshard.history.event import SOURCE_OPENCODE_PLUGIN, events_from_entry
 from openshard.history.query import list_shards
 from openshard.history.shard import CAPTURE_PARTIAL, ORIGIN_EXTERNAL_OBSERVED
 from openshard.history.shard_contract import build_shard_receipt, render_compact_shard_receipt
-from tests.capture_fixtures import _git, _make_repo
+from tests.capture_fixtures import _git, _make_repo, untimed_steering
 
 SID = "ses_8b1f2c3d4e5f60718293a4b5c6d7e8f9"
 SID2 = "ses_ffffffffffffffffffffffffffffffff"
@@ -425,7 +425,8 @@ def _stable(entry: dict) -> dict:
         "task": entry["task"], "executor": entry["executor"], "execution_model": entry["execution_model"],
         "estimated_cost": entry.get("estimated_cost"), "prompt_tokens": entry.get("prompt_tokens"),
         "files_detail": entry["files_detail"], "summary": entry["summary"],
-        "capture": {k: v for k, v in entry["capture"].items() if k not in volatile},
+        "capture": {k: v for k, v in entry["capture"].items() if k not in volatile | {"steering"}},
+        "steering": untimed_steering(entry["capture"].get("steering")),
         "events": [{k: e.get(k) for k in keys} for e in entry["events"]],
     }
 

@@ -5188,6 +5188,485 @@
             }
           ]
         },
+        "steering": {
+          "description": "Proposed by Core (docs/steering-capture.md): when a person steered the agent, and derived autonomy facts. Counts, enums, times and lengths only; never prompt text or paths. null/absent: not captured.",
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "const": 1
+                },
+                "intent_method": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[a-z0-9.-]{1,32}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "events": {
+                  "type": "array",
+                  "maxItems": 50,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "initial_prompt",
+                          "follow_up",
+                          "interjection",
+                          "interrupt",
+                          "permission_decision",
+                          "manual_edit"
+                        ]
+                      },
+                      "at": {
+                        "type": "string",
+                        "maxLength": 40,
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+                      },
+                      "turn_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "after": {
+                        "type": "string",
+                        "enum": [
+                          "turn_end",
+                          "failed_check",
+                          "tool_call",
+                          "permission_prompt",
+                          "none",
+                          "unknown"
+                        ]
+                      },
+                      "source": {
+                        "type": "string",
+                        "enum": [
+                          "hook",
+                          "transcript",
+                          "git",
+                          "github"
+                        ]
+                      },
+                      "intent": {
+                        "type": "string",
+                        "enum": [
+                          "correction",
+                          "redirect",
+                          "clarification",
+                          "approval",
+                          "continue",
+                          "new_task",
+                          "unknown"
+                        ]
+                      },
+                      "intent_confidence": {
+                        "type": "string",
+                        "enum": [
+                          "high",
+                          "medium",
+                          "low"
+                        ]
+                      },
+                      "intent_rule": {
+                        "type": "string",
+                        "pattern": "^[a-z_.]{1,60}$"
+                      },
+                      "prompt_chars": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "think_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 900
+                      },
+                      "think_capped": {
+                        "type": "boolean"
+                      },
+                      "from_queue": {
+                        "type": "boolean"
+                      },
+                      "decision": {
+                        "type": "string",
+                        "enum": [
+                          "allow",
+                          "deny",
+                          "always_allow"
+                        ]
+                      },
+                      "files": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "lines_added": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "lines_removed": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "lines_unknown_files": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "incomplete": {
+                        "type": "boolean"
+                      },
+                      "since": {
+                        "type": "string",
+                        "maxLength": 40,
+                        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+                      },
+                      "via": {
+                        "type": "string",
+                        "enum": [
+                          "review_changes_requested",
+                          "review_approved",
+                          "review_commented",
+                          "agent_mention"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "at",
+                      "after",
+                      "source"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "events_dropped": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "not_available": {
+                  "type": "object",
+                  "propertyNames": {
+                    "enum": [
+                      "initial_prompt",
+                      "follow_up",
+                      "interjection",
+                      "interrupt",
+                      "permission_decision",
+                      "manual_edit"
+                    ]
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "maxLength": 200
+                  }
+                },
+                "permission_prompts_asked": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "log_not_read_reason": {
+                  "type": "string",
+                  "pattern": "^[a-z_]{1,40}$"
+                },
+                "log_formats": {
+                  "description": "The agent log formats the block's transcript facts were read from (Core-detected name and version, e.g. hermes-state-db/v32; 'unversioned' when the agent marks none). Never content.",
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9./-]{1,60}$"
+                  }
+                },
+                "environment": {
+                  "type": "string",
+                  "enum": [
+                    "local_terminal",
+                    "local_ide",
+                    "cloud_agent",
+                    "cloud_workspace",
+                    "web",
+                    "ci"
+                  ],
+                  "description": "Where the steered session ran, from the Receipt's own where-it-ran evidence; web: derived from a pull request (no runtime presence)."
+                },
+                "environment_source": {
+                  "type": "string",
+                  "pattern": "^[a-z_]{1,40}$"
+                },
+                "environment_not_recorded_reason": {
+                  "type": "string",
+                  "pattern": "^[a-z_]{1,40}$"
+                },
+                "github": {
+                  "type": "object",
+                  "description": "Counts derived from a pull request (source github). Never comment text or logins.",
+                  "properties": {
+                    "review_comments": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "review_rerequests": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "bot_comments_ignored": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "commit_after_review": {
+                      "type": "boolean"
+                    },
+                    "window_from": {
+                      "type": "string",
+                      "maxLength": 40,
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+                    },
+                    "window_to": {
+                      "type": "string",
+                      "maxLength": 40,
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "autonomy": {
+                  "type": "object",
+                  "properties": {
+                    "human_inputs": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "human_inputs_by_kind": {
+                      "type": "object",
+                      "properties": {
+                        "initial_prompt": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "follow_up": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "interjection": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "interrupt": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "permission_decision": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "manual_edit": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "intents": {
+                      "type": "object",
+                      "propertyNames": {
+                        "enum": [
+                          "correction",
+                          "redirect",
+                          "clarification",
+                          "approval",
+                          "continue",
+                          "new_task",
+                          "unknown"
+                        ]
+                      },
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "interrupts": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "permission_prompts": {
+                      "type": "object",
+                      "properties": {
+                        "asked": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "allowed": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "denied": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "longest_unsupervised_seconds": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "steering_seconds": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "steering_pause_cap_seconds": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "human_inputs",
+                    "human_inputs_by_kind",
+                    "permission_prompts"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "version",
+                "events",
+                "autonomy"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "change_findings": {
           "anyOf": [
             {

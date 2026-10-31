@@ -522,7 +522,21 @@ never invented evidence.
   environment variables. Prompts are reduced to a secret-scrubbed, 300-char
   excerpt of the *first* prompt (the Shard task); commands to a scrubbed,
   100-char summary. The OpenCode plugin already truncates what it sends
-  (400 chars) and never reads tool output.
+  (400 chars, so an OpenCode prompt's recorded length is at most 400) and
+  never reads tool output.
+* **Steering** (`docs/steering-capture.md`): every human prompt, and each
+  message an agent's own log shows as sent mid-turn, is classified locally
+  into an intent; only the intent, confidence, rule id and length in
+  characters are kept, never the text. Each agent's own local log is read on
+  the machine where it runs, for steering only: the Claude Code transcript
+  (`queue-operation`, interrupt markers, tool rejections), the Codex rollout
+  (`task_started` / `user_message` / `turn_aborted`, `rejected by user`),
+  Cursor's agent transcript (`turn_ended`) and `state.vscdb`
+  (`userDecision`, read-only), Antigravity's `transcript.jsonl`
+  (`USER_INPUT` steps), Grok Build's `updates.jsonl` and Hermes' `state.db`
+  (`steer` / `_queued_prompt` rows, read-only). Files changed between turns
+  come from git (paths and counts only). Only the prompt that starts a task
+  names a Receipt; a continuing Receipt is the task's title and turn number.
 * **Session boundary**: one agent session = one Shard, attempt 1 — exactly
   the Claude rule. Sessions are never grouped by prompt text or timing, and
   two agents' sessions never merge: staging buffers and capture-service
@@ -623,11 +637,11 @@ events, also what telemetry reports) is unchanged.
 |---|---|---|---|---|---|---|
 | Claude Code | `PostToolUse` / `PostToolUseFailure`, Bash + PowerShell `tool_input.command` | `PostToolUse` is documented success-only; a non-zero exit fires `PostToolUseFailure` | `error` first line `Exit code N` (the only stable part); `is_interrupt`; timeout line | `transcript_path` (read at fold for token `usage` only) | status line `model.id`; `SessionStart.model` sometimes; no provider | foreground Bash `PostToolUse` -> `passed`; `Exit code N` -> `failed` + N; interrupt/timeout, `run_in_background`, `backgroundTaskId`, `interrupted` -> `unknown` |
 | Codex | `PostToolUse` Bash | none: `PostToolUse` fires for non-zero exits too, and `tool_response` is only the output text | none documented | `transcript_path` (documented as unstable) | `model` every event; no provider | unchanged: `unknown` |
-| Cursor | `postToolUse` / `postToolUseFailure` `Shell` | `tool_output` JSON; the reference `Shell` example carries `exitCode` | `exitCode`; `failure_type` (`error`/`timeout`/`permission_denied`); `is_interrupt` | `transcript_path` (not read) | `model` / `model_id`; no provider | `exitCode` -> `passed` / `failed`; timeout / denied / interrupt -> `unknown`; no `exitCode` -> `unknown` |
+| Cursor | `postToolUse` / `postToolUseFailure` `Shell` | `tool_output` JSON; the reference `Shell` example carries `exitCode` | `exitCode`; `failure_type` (`error`/`timeout`/`permission_denied`); `is_interrupt` | `transcript_path` (read for steering only) | `model` / `model_id`; no provider | `exitCode` -> `passed` / `failed`; timeout / denied / interrupt -> `unknown`; no `exitCode` -> `unknown` |
 | OpenCode | `tool.execute.after` `bash` | not documented (source: `output.metadata.exit`, null on timeout/abort) | not documented | not exposed to plugins | `providerID` / `modelID` on messages | unchanged: `unknown` (source-only field not relied on) |
-| Google Antigravity 2.0 | `PostToolUse` `run_command` (`CommandLine`) | `error`: "detailed runtime error message if the tool call failed. Empty if successful" | non-empty `error` only; no exit code; `exit status N` is display text | `transcriptPath` (full conversation, no schema; not read) | `modelName` every event; no provider | non-empty `error` -> `failed`; empty `error` stays `unknown` (see below) |
-| Hermes Agent | `post_tool_call` `terminal` | `status` `ok` / `error` / `blocked` / `cancelled` | `error_type` / `error_message` (text; not read); exit code only in `result` text | `~/.hermes/state.db` (not read) | `model`, `provider` on request hooks | `error` -> `failed`; `blocked` / `cancelled` -> `unknown`; `ok` stays `unknown` (not documented as exit 0) |
-| Grok Build | `PostToolUse` `run_terminal_command` | `toolResult.exit_code` (bundled hooks reference); `PostToolUse` fires even for non-zero exits | `exit_code`; `toolResultTruncated` | session files (not read) | not in hooks | `exit_code` -> `passed` / `failed`; truncated -> `unknown` |
+| Google Antigravity 2.0 | `PostToolUse` `run_command` (`CommandLine`) | `error`: "detailed runtime error message if the tool call failed. Empty if successful" | non-empty `error` only; no exit code; `exit status N` is display text | `transcriptPath` (full conversation, no schema; read for steering only) | `modelName` every event; no provider | non-empty `error` -> `failed`; empty `error` stays `unknown` (see below) |
+| Hermes Agent | `post_tool_call` `terminal` | `status` `ok` / `error` / `blocked` / `cancelled` | `error_type` / `error_message` (text; not read); exit code only in `result` text | `~/.hermes/state.db` (read for steering only) | `model`, `provider` on request hooks | `error` -> `failed`; `blocked` / `cancelled` -> `unknown`; `ok` stays `unknown` (not documented as exit 0) |
+| Grok Build | `PostToolUse` `run_terminal_command` | `toolResult.exit_code` (bundled hooks reference); `PostToolUse` fires even for non-zero exits | `exit_code`; `toolResultTruncated` | `updates.jsonl` (read for steering only) | not in hooks | `exit_code` -> `passed` / `failed`; truncated -> `unknown` |
 | Grok Bot (Cursor) | OTel shell action | none attributable: shell actions carry no exit code or output; the only shell status is a metric without correlation ids | none | none | none | unchanged: `unknown` (`outcome_not_observed`) |
 
 **Antigravity 2.0 specifically.** The current contract includes
@@ -641,7 +655,7 @@ background, so the call can complete before the command exits, and no exit
 code is documented. Also new: a `PostToolUse` document with no
 `toolCall.name` is ignored, because CLI builds before 1.1.9 fired it on
 non-tool steps. `modelName` stays verbatim (e.g. `gemini-3.6-flash-medium`,
-never split into a provider). `transcriptPath` is still never read. To get
+never split into a provider). `transcriptPath` is read for steering facts only, never for outcomes. To get
 a real outcome for Antigravity (or Codex, OpenCode, Hermes, Grok Bot), run
 `openshard verify`.
 
@@ -929,8 +943,9 @@ terse per event; see the field audit in `adapters/antigravity_hooks.py`.
   success) on `PostToolUse`; `terminationReason`, `fullyIdle` and `error` on
   `Stop`. The event name is not reliably in the payload, so each installed
   command carries `--event <Name>`.
-* **Not exposed** (so never recorded, never inferred): the user's prompt
-  (the task stays "Google Antigravity session (task not captured)"), token
+* **Not exposed** (so never recorded, never inferred): the user's prompt to
+  hooks (the task stays "Google Antigravity session (task not captured)";
+  steering reads the prompts' facts, never their text, from `transcriptPath`), token
   counts, cost, the model provider, a session end, a numeric exit code, and
   who approved a tool (Antigravity's own permission prompts are not
   visible to hooks). OpenShard does not read the transcript or artifact
@@ -1043,7 +1058,7 @@ never subscribes it and never returns a directive (every reply is `{}`).
   | Hermes hook | Openshard event | Recorded |
   |---|---|---|
   | `on_session_start` | `SessionStart` | session identity, `model` (new sessions only) |
-  | `pre_llm_call` | `UserPromptSubmit` | the turn's `user_message` (scrubbed excerpt becomes the task; text parts only for a multimodal message), `model`. Replies `{}`: no context is injected. The full `conversation_history` is never read |
+  | `pre_llm_call` | `UserPromptSubmit` | the turn's `user_message` (scrubbed excerpt becomes the task; text parts only for a multimodal message), `model`. Replies `{}`: no context is injected. The full `conversation_history` is never read (steering reads only `steer` / `_queued_prompt` user rows of `state.db`, read-only) |
   | `post_tool_call`, `status: ok` | `PostToolUse` | tool name and arguments as below, `duration_ms`, `tool_call_id`, `turn_id`, `tool_status`; a file tool becomes `passed` and hook-reported (Hermes' success signal) |
   | `post_tool_call`, `status: error`, `blocked` or `cancelled` | `PostToolUseFailure` | the same record, `failed` (`blocked` = a policy hook stopped it; it never ran). A check command with `error` is `agent_reported` failed verification; with `blocked` / `cancelled` it has no result and stays `unknown` |
   | `post_api_request` | usage observation | per-request `usage` (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`) keyed by request id, plus the `model` and `provider` Hermes called |
@@ -1154,9 +1169,12 @@ Shard.
   `target_directory` (`list_dir`); on `run_terminal_command` only the integer
   `toolResult.exit_code` (Verification v2; `agent_reported`). **Never read**:
   the rest of `toolResult` (the command output), `old_string` /
-  `new_string`, `lastAssistantMessage`, `transcriptPath`, Grok's session files
-  under `~/.grok`. **Not in any payload**: the model, provider, token counts,
-  cost, and who or what denied a permission.
+  `new_string`, `lastAssistantMessage`, Grok's session files under `~/.grok`
+  other than `updates.jsonl` (read for steering only, via `transcriptPath`).
+  `StopCancelled`'s `reason` / `cancelledBy` tell a person's interrupt or
+  declined prompt from a runtime cancel (steering). **Not in any payload**:
+  the model, provider, token counts and cost; `PermissionDenied` alone does
+  not say who or what denied.
 * **Claude compatibility -- a Grok session must never become a Claude Code
   Receipt.** Because every document is also a valid Claude payload, a user who
   has OpenShard's Claude Code hooks anywhere Grok looks (e.g. a user-level

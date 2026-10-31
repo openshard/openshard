@@ -157,6 +157,15 @@ jobs:
             fi
             response=$(cat "$response_file")
             rm -f "$response_file"
+            # steering is proposed by Core (docs/steering-capture.md): a Platform that
+            # does not accept it yet gets the same Receipt without it, never a failure.
+            if [[ "$http_status" == 400 || "$http_status" == 422 ]] && grep -q 'steering' <<<"$response" && \
+              jq -e 'has("steering")' <<<"$payload" >/dev/null 2>&1; then
+              echo "::notice::The Platform did not accept the proposed steering block; resending $sha without it."
+              payload=$(jq -c 'del(.steering)' <<<"$payload")
+              deliver_receipt
+              return $?
+            fi
             if [[ "$http_status" == 200 || "$http_status" == 201 ]] && \
               jq -e --arg id "$expected_id" '.receipt_id == $id' <<<"$response" >/dev/null; then
               echo "Captured $expected_id for $sha ($verification_status)"
@@ -229,6 +238,14 @@ jobs:
             prs=$(curl -fsSL               -H "Authorization: Bearer $GH_TOKEN"               -H "Accept: application/vnd.github+json"               "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" || echo '[]')
             pr_body=$(jq -r 'map(select(.merged_at != null)) as $merged | ($merged[0].body // .[0].body // empty)' <<<"$prs")
             pr_url=$(jq -r 'map(select(.merged_at != null)) as $merged | ($merged[0].html_url // .[0].html_url // empty)' <<<"$prs")
+            pr_number=$(jq -r 'map(select(.merged_at != null)) as $merged | ($merged[0].number // .[0].number // empty)' <<<"$prs")
+            # What a person told the agent on the pull request before this commit: reviews and
+            # @agent comments, classified here and counted; no comment text leaves this job.
+            steering="null"
+            if [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+              steering=$(python -m openshard.github.steering --commit "$sha" --pr "$pr_number" || echo null)
+              jq -e 'type == "object" or . == null' <<<"$steering" >/dev/null 2>&1 || steering="null"
+            fi
 
             metadata_value() {
               local key="$1" value
@@ -373,7 +390,7 @@ jobs:
             files_truncated=false
             [[ "$file_count" -gt 50 ]] && files_truncated=true
 
-            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --argjson attach_only "$attach_only"               --arg claude_session "$claude_session"               --argjson change_findings "${change_findings:-null}"               '{
+            payload=$(jq -cn               --arg head_sha "$sha"               --arg before_sha "$parent"               --arg created_at "$created_at"               --arg task_title "$task_title"               --arg branch "$GITHUB_REF_NAME"               --arg owner "$owner"               --arg agent "$agent"               --arg model "$model"               --arg provider "$provider"               --arg surface "$surface"               --arg pr_url "$pr_url"               --arg cost "$cost"               --arg cost_provenance "$cost_provenance"               --argjson cost_is_estimate "$cost_is_estimate"               --arg tokens_in "$tokens_in"               --arg tokens_out "$tokens_out"               --arg tokens_cache_read "$tokens_cache_read"               --arg tokens_cache_creation "$tokens_cache_creation"               --arg verify_started "$verify_started"               --arg verify_completed "$verify_completed"               --arg verification_status "$verification_status"               --argjson duration "$duration"               --argjson checks "$checks"               --argjson files "$files"               --argjson files_truncated "$files_truncated"               --argjson diff_added "$added"               --argjson diff_removed "$removed"               --argjson attach_only "$attach_only"               --arg claude_session "$claude_session"               --argjson change_findings "${change_findings:-null}"               --argjson steering "${steering:-null}"               '{
                 head_sha: $head_sha,
                 before_sha: (if $before_sha == "" then null else $before_sha end),
                 created_at: $created_at,
@@ -404,7 +421,7 @@ jobs:
                 files_truncated: $files_truncated,
                 diff_added: $diff_added,
                 diff_removed: $diff_removed
-              } + (if $attach_only then {attach_only: true} else {} end) + (if $claude_session == "" then {} else {claude_session_id: $claude_session} end) + (if $change_findings == null then {} else {change_findings: $change_findings} end)')
+              } + (if $attach_only then {attach_only: true} else {} end) + (if $claude_session == "" then {} else {claude_session_id: $claude_session} end) + (if $change_findings == null then {} else {change_findings: $change_findings} end) + (if $steering == null then {} else {steering: $steering} end)')
 
             # A cloud session's Receipt is sealed when its turn ends, which can
             # be shortly after the push. Wait a bounded time, once per run.

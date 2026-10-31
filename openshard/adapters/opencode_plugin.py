@@ -14,7 +14,8 @@ What the plugin sends (one document per observation)::
     {"event": <name>, "session_id": ..., "directory": ..., "worktree": ...,
      "parent_id": ...,                       # session.created only
      "tool": ..., "file_path": ..., "command": ...,   # tool.execute.after
-     "prompt": ...,                          # chat.message (bounded)
+     "prompt": ..., "while_busy": ...,       # chat.message (bounded; busy: a turn was running)
+     "permission": ..., "reply": ...,        # permission.asked / permission.replied (v6)
      "provider_id": ..., "model_id": ...,    # when OpenCode exposes them
      "message_id": ..., "cost": ..., "tokens": {...}}  # message.updated (assistant)
 
@@ -34,7 +35,17 @@ session.idle         SessionIdle        neutral boundary: snapshot only, never a
                                         completed turn (idle also follows aborts)
 session.deleted      SessionEnd         ``reason=deleted``
 message.updated      (usage report)     assistant message: provider/model, cost, tokens
+session.aborted      Interrupt          v6: OpenCode's ``session.error`` with
+                                        ``MessageAbortedError`` (the person aborted)
+permission.asked     ApprovalRequest    v6: the permission type only
+permission.replied   ApprovalDecision   v6: ``once`` / ``always`` / ``reject`` (-> deny);
+                                        read from the passive event bus, never the
+                                        ``permission.ask`` hook (that one decides)
 ===================  =================  =====================================
+
+``chat.message`` with ``while_busy: true`` (v6): the plugin saw OpenCode's
+``session.status`` say ``busy`` when the person sent it, so it was sent while a
+turn was running (OpenCode takes it into the running loop): an interjection.
 
 Identity: the agent is always OpenCode (``executor = opencode_plugin``);
 ``provider_id``/``model_id`` are recorded as *the provider and model
@@ -56,7 +67,10 @@ from typing import Any
 from openshard.adapters.capture_agents import AGENT_OPENCODE
 from openshard.adapters.claude_hooks import (
     _SESSION_ID_RE,
+    EVENT_APPROVAL_DECISION,
+    EVENT_APPROVAL_REQUEST,
     EVENT_FILE_EDITED,
+    EVENT_INTERRUPT,
     EVENT_POST_TOOL_USE,
     EVENT_SESSION_END,
     EVENT_SESSION_IDLE,
@@ -79,6 +93,11 @@ PLUGIN_EVENT_FILE_EDITED = "file.edited"
 PLUGIN_EVENT_SESSION_IDLE = "session.idle"
 PLUGIN_EVENT_SESSION_DELETED = "session.deleted"
 PLUGIN_EVENT_MESSAGE_UPDATED = "message.updated"
+PLUGIN_EVENT_SESSION_ABORTED = "session.aborted"
+PLUGIN_EVENT_PERMISSION_ASKED = "permission.asked"
+PLUGIN_EVENT_PERMISSION_REPLIED = "permission.replied"
+# OpenCode's permission replies -> the approval choice vocabulary the fold and steering share.
+_REPLIES = {"once": "once", "always": "always", "reject": "deny"}
 
 _LIFECYCLE: dict[str, str] = {
     PLUGIN_EVENT_SESSION_CREATED: EVENT_SESSION_START,
@@ -87,6 +106,9 @@ _LIFECYCLE: dict[str, str] = {
     PLUGIN_EVENT_FILE_EDITED: EVENT_FILE_EDITED,
     PLUGIN_EVENT_SESSION_IDLE: EVENT_SESSION_IDLE,
     PLUGIN_EVENT_SESSION_DELETED: EVENT_SESSION_END,
+    PLUGIN_EVENT_SESSION_ABORTED: EVENT_INTERRUPT,
+    PLUGIN_EVENT_PERMISSION_ASKED: EVENT_APPROVAL_REQUEST,
+    PLUGIN_EVENT_PERMISSION_REPLIED: EVENT_APPROVAL_DECISION,
 }
 SUPPORTED_PLUGIN_EVENTS: tuple[str, ...] = (*_LIFECYCLE, PLUGIN_EVENT_MESSAGE_UPDATED)
 
@@ -166,6 +188,17 @@ def extract_opencode_payload(data: Mapping[str, Any]) -> HookPayload | StatusPay
         payload.source = "startup"
     elif event == PLUGIN_EVENT_CHAT_MESSAGE:
         payload.prompt = _str_or_none(data.get("prompt"))
+        if data.get("while_busy") is True:
+            payload.attrs["while_busy"] = True
+    elif event == PLUGIN_EVENT_PERMISSION_ASKED:
+        permission = _str_or_none(data.get("permission"), 80)
+        if permission:
+            payload.attrs["pattern_key"] = permission  # OpenCode's permission type (bash, edit, ...)
+    elif event == PLUGIN_EVENT_PERMISSION_REPLIED:
+        reply = data.get("reply")
+        if not isinstance(reply, str) or reply not in _REPLIES:
+            return None  # not one of OpenCode's three answers: nothing is claimed
+        payload.attrs["choice"] = _REPLIES[reply]
     elif event == PLUGIN_EVENT_TOOL_AFTER:
         tool = _str_or_none(data.get("tool"), 80)
         payload.tool_name = tool

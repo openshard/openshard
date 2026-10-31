@@ -316,9 +316,27 @@ def normalize_title_candidate(candidate: object) -> str | None:
         return None
 
 
+# ``capture.task_source`` of a Receipt that continues a task (a later turn, a
+# resumed session): it holds no prompt text, only the task's first title and
+# the turn number (adapters/task_continuation.py).
+TASK_SOURCE_CONTINUED = "task_title_and_turn"
+
+
+def continued_title(base: object, turn: object) -> str:
+    """``"<task title> · turn N"`` (``· continued`` when N is unknown). Never raises."""
+    title = normalize_title_candidate(base) or UNTITLED
+    if isinstance(turn, int) and not isinstance(turn, bool) and turn > 0:
+        return f"{title} · turn {turn}"
+    return f"{title} · continued"
+
+
 def resolve_task_title(entry: Mapping[str, object]) -> str:
     """The display title for a stored record: its valid ``task_title``, or a
     derivation from its ``task`` (records written before titles existed)."""
+    capture = entry.get("capture")
+    if isinstance(capture, Mapping) and capture.get("task_source") == TASK_SOURCE_CONTINUED:
+        # Composed, not normalised: the turn suffix must survive the title length cap.
+        return continued_title(capture.get("task_base_title"), capture.get("task_turn"))
     stored = normalize_title_candidate(entry.get("task_title"))
     if stored:
         return stored

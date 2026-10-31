@@ -264,6 +264,14 @@ def task_edge_rows(receipt: ShardReceipt) -> list[str]:
     return [_row(label, value) for label, value in task_edge_lines((receipt.recorded_evidence or {}).get("task_edges"))]
 
 
+def steering_rows(receipt: ShardReceipt) -> list[str]:
+    """``Steering  2 corrections · 1 interrupt · you stepped in 3 times`` (history/steering.py); none before it."""
+    from openshard.history.steering import summary_line
+
+    line = summary_line((receipt.recorded_evidence or {}).get("steering"))
+    return [_row("Steering", line)] if line else []
+
+
 def _capture_rows(receipt: ShardReceipt) -> list[str]:
     """The compact ``Capture`` / ``Gaps`` rows.
 
@@ -876,6 +884,7 @@ def render_compact_shard_receipt(receipt: ShardReceipt) -> str:
     _permissions = permission_mode_label(receipt)
     if _permissions:
         lines.append(_row("Permissions", _permissions))
+    lines += steering_rows(receipt)
     lines.append(_row("Cost", receipt.cost_display))
     if receipt.tokens_input is not None or receipt.tokens_output is not None:
         lines.append(_row("Tokens", tokens_line(receipt.tokens_input, receipt.tokens_output,

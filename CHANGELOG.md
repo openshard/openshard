@@ -53,6 +53,71 @@ All notable changes to OpenShard are documented here.
   was seen directly by Openshard, confirmed against git, or reported by CI.
   Checks the agent reported itself, or with no recorded result, are listed
   under "Not proven".
+- Steering capture: each Receipt records when a person steered the agent:
+  the first prompt, follow-ups after a turn, messages sent while the agent was
+  working, interrupts (Esc), answers to permission prompts and files changed
+  between turns while the agent was not running. Follow-ups and mid-turn
+  messages get an intent (correction, redirect, clarification, approval,
+  continue, new task or unknown) from a local, rule-based classifier
+  (`rules-v1`). Prompt text is read only on your machine to classify it and is
+  never stored, synced or sent; only the kind, intent, confidence, rule and
+  length are kept. Each agent records what its hooks and local session log
+  expose; a signal an agent does not expose is listed as not available with
+  the reason, never as zero. See `docs/steering-capture.md`.
+- Autonomy facts derived from those records: how often a person stepped in,
+  the longest stretch the agent worked alone, interrupts, permission prompts
+  and think time between turns. `openshard last` prints one Steering line;
+  `history --json` and Platform sync carry an optional `steering` block (no
+  paths). A Platform that does not accept the block yet gets the Receipt
+  without it.
+- Steering in every environment: each block says where the session ran
+  (`local_terminal`, `local_ide`, `cloud_agent`, `cloud_workspace`, `ci`, or
+  `web`), from the Receipt's own where-it-ran evidence, which is now recorded
+  for every hook-captured agent (Replicas workspaces and Cursor cloud agents
+  included), not only Claude Code; when it does not say, the block says why.
+  Inside cloud agents and cloud workspaces, every steering fact streams through
+  the remote capture journal, so it survives a VM that is destroyed before its
+  Receipt is delivered. For PR-driven agents the cloud-receipts workflow
+  derives steering from each commit's pull request (reviews requesting
+  changes, approvals, review comments, `@agent` comments, re-requests and the
+  follow-up push), classified in the CI job; no comment text or login is kept.
+  `docs/steering-capture.md` has the agent x environment x signal matrix.
+- Steering from every agent's own local log: OpenShard now reads Cursor's
+  agent transcript and local store, Antigravity's `transcript.jsonl`, Grok
+  Build's `updates.jsonl` and Hermes' `state.db` on the machine where the
+  agent runs, to count and classify messages sent mid-turn, Antigravity's
+  prompts and follow-ups, and Cursor's permission answers; the text never
+  leaves the machine, and each Receipt names the log format it read
+  (`log_formats`). Grok Build interrupts and declined permission prompts come
+  from `StopCancelled`'s `reason` / `cancelledBy`; an Antigravity
+  `USER_CANCELED` stop is an interrupt; Codex denials come from its rollout.
+  The OpenCode plugin (v6) forwards aborts, permission replies and messages
+  sent while a turn runs; re-run `openshard setup` to update it. Claude Code
+  gets a non-blocking `Notification` hook (`permission_prompt`): a prompt
+  followed by that tool running is recorded as an approval (inferred), never
+  answered or blocked by OpenShard. Only Antigravity permission decisions stay
+  not available: Antigravity records none.
+
+### Changed
+
+- Only the task's first prompt names a Receipt. A Receipt that continues a
+  task (the next turn's, or a resumed session's) carries no prompt text: its
+  title is the task's title and the turn number (`Revamp website hero ·
+  turn 3`, `capture.task_source: task_title_and_turn`), and what the person
+  said is only in its steering facts. Follow-up messages no longer leave the
+  machine as a Receipt's task. Receipts sealed before this change are left as
+  they are.
+
+### Fixed
+
+- Remote capture: Events staged while a fold read the agent's session log
+  (for example a Claude Code mid-turn message or Esc) were not spooled when
+  that fold sealed the turn or ended the session, so the journal lost them.
+- Steering: a prompt Claude Code passes through its queue while no turn is
+  running (`claude -p`, `claude --continue -p`) was recorded as a message sent
+  mid-turn, so a turn opened by a single prompt said "you stepped in 1 time".
+  It is now that turn's own prompt only. Receipts sealed before this fix are
+  left as they are.
 
 ## 0.5.0 - 2026-10-25
 

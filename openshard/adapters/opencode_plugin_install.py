@@ -29,7 +29,11 @@ The plugin itself
 -----------------
 Plain JavaScript with no imports, no dependencies and no OpenShard
 business logic: it observes ``session.created`` / ``session.idle`` /
-``session.deleted`` / ``file.edited`` / ``message.updated`` events plus the
+``session.deleted`` / ``file.edited`` / ``message.updated`` events, and (v6)
+``session.status`` (busy / idle, to mark a message sent mid-turn),
+``session.error`` (only an abort is forwarded) and ``permission.asked`` /
+``permission.replied`` from the passive event bus -- never the
+``permission.ask`` hook, which answers the prompt -- plus the
 ``chat.message`` and ``tool.execute.after`` hooks, reduces each to a small
 JSON document (bounded strings, never tool output, never full messages)
 and POSTs it to ``http://127.0.0.1:<port>/hooks/opencode``. If the service
@@ -58,7 +62,7 @@ from openshard.adapters.claude_hooks_install import (
     settings_file_is_tracked,
 )
 
-PLUGIN_VERSION = 5
+PLUGIN_VERSION = 6
 PLUGIN_MARKER = "// openshard-capture-plugin"
 # The plugin ships as plain JavaScript (v0.4.5). OpenCode's CLI runs on Bun,
 # which strips TypeScript types natively, but OpenCode *Desktop* runs its
@@ -180,6 +184,8 @@ export const OpenShardCapture = async ({ directory, worktree, $ }) => {
   }
 
   const isChild = (id) => typeof id === "string" && children.has(id)
+  // Sessions OpenCode last reported busy (a turn running): a message sent then is mid-turn.
+  const busy = new Set()
 
   return {
     event: async ({ event }) => {
@@ -196,8 +202,32 @@ export const OpenShardCapture = async ({ directory, worktree, $ }) => {
         }
         case "session.idle":
           if (isChild(p.sessionID)) return
+          busy.delete(p.sessionID)
           send({ event: "session.idle", session_id: p.sessionID })
           return
+        case "session.status": {
+          if (isChild(p.sessionID) || typeof p.sessionID !== "string") return
+          if (p.status?.type === "busy") { if (busy.size < 1000) busy.add(p.sessionID) }
+          else if (p.status?.type === "idle") busy.delete(p.sessionID)
+          return
+        }
+        case "session.error":
+          // Only the person's abort; error messages are never sent.
+          if (isChild(p.sessionID) || p.error?.name !== "MessageAbortedError") return
+          send({ event: "session.aborted", session_id: p.sessionID })
+          return
+        case "permission.asked":
+        case "permission.updated":
+          if (isChild(p.sessionID)) return
+          send({ event: "permission.asked", session_id: p.sessionID, permission: clip(p.permission ?? p.type) })
+          return
+        case "permission.replied": {
+          if (isChild(p.sessionID)) return
+          const reply = p.reply ?? p.response
+          if (reply !== "once" && reply !== "always" && reply !== "reject") return
+          send({ event: "permission.replied", session_id: p.sessionID, reply })
+          return
+        }
         case "session.deleted": {
           const info = p.info ?? {}
           if (isChild(info.id)) return
@@ -232,6 +262,7 @@ export const OpenShardCapture = async ({ directory, worktree, $ }) => {
         event: "chat.message",
         session_id: input?.sessionID,
         prompt: clip(first?.text),
+        while_busy: busy.has(input?.sessionID),
         provider_id: model.providerID,
         model_id: model.modelID,
       })

@@ -174,7 +174,13 @@ from typing import Any
 
 from openshard.adapters import claude_session_fidelity as fidelity
 from openshard.adapters import claude_stop_failure as stop_failure
-from openshard.adapters import claude_subagents, merge_check
+from openshard.adapters import (
+    claude_subagents,
+    hook_approvals,
+    merge_check,
+    steering,
+    task_continuation,
+)
 from openshard.adapters import claude_turn_receipts as turns
 from openshard.adapters.agent_env import agent_host_or_none as _agent_host_or_none
 from openshard.adapters.agent_env import agent_provider_or_none as _agent_provider_or_none
@@ -311,6 +317,9 @@ EVENT_SUBAGENT_START = "SubagentStart"
 EVENT_SUBAGENT_STOP = "SubagentStop"
 EVENT_APPROVAL_REQUEST = "ApprovalRequest"
 EVENT_APPROVAL_DECISION = "ApprovalDecision"
+# Claude Code ``Notification`` ``permission_prompt`` (hook_approvals.py): observed, never answered.
+EVENT_PERMISSION_PROMPT = "PermissionPrompt"
+CLAUDE_NOTIFICATION = "Notification"
 SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_SESSION_START,
     EVENT_MODEL_SWITCH,
@@ -328,6 +337,7 @@ SUPPORTED_HOOK_EVENTS: tuple[str, ...] = (
     EVENT_SUBAGENT_STOP,
     EVENT_APPROVAL_REQUEST,
     EVENT_APPROVAL_DECISION,
+    EVENT_PERMISSION_PROMPT,
 )
 
 # Tools whose tool_input.file_path names a file Claude Code says it changed.
@@ -345,15 +355,6 @@ _ATTR_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 # Which ``HookPayload.attrs`` reach an Event's metadata, per event family
 # (``sanitize_metadata`` keeps at most ten keys, so each list is short).
 _TOOL_ATTR_KEYS: tuple[str, ...] = ("duration_ms", "tool_status", "tool_call_id", "turn_id")
-_APPROVAL_ATTR_KEYS: tuple[str, ...] = (
-    "choice", "surface", "pattern_key", "decided_by", "tool_call_id", "turn_id",
-)
-# Hermes' ``post_approval_response.choice`` values. A grant lets the command
-# run; ``deny`` / ``smart_deny`` is a refusal; the rest mean nobody answered
-# (or the prompt could not be delivered), so the command did not run and no
-# one refused it either.
-_APPROVAL_GRANTED = frozenset({"once", "session", "always", "smart_approve"})
-_APPROVAL_DENIED = frozenset({"deny", "smart_deny"})
 # v0.4.4 change attribution (see _snapshot_baseline / _classify_changed_files).
 _BASELINE_MAX_PATHS = 500  # dirty/untracked paths remembered at session start
 _GIT_DIFF_MAX_FILES = 200  # git diff rows examined at fold (pre-existing ones are then excluded)
@@ -660,12 +661,13 @@ def extract_hook_payload(data: Mapping[str, Any], *, event_override: str | None 
     event = data.get("hook_event_name")
     if not isinstance(event, str) or not event:
         event = event_override
-    if not isinstance(event, str) or event not in SUPPORTED_HOOK_EVENTS:
-        return None
-
     session_id = data.get("session_id")
     if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
         session_id = None
+    if event == CLAUDE_NOTIFICATION:
+        return hook_approvals.claude_permission_payload(data, session_id)
+    if not isinstance(event, str) or event not in SUPPORTED_HOOK_EVENTS:
+        return None
 
     tool_input = data.get("tool_input")
     if not isinstance(tool_input, dict):
@@ -911,6 +913,8 @@ def _transcript_usage(buf: dict) -> dict | None:
     cached = buf.get("transcript_usage") if isinstance(buf.get("transcript_usage"), dict) else None
     agent_raw = buf.get("agent")
     agent = agent_raw if isinstance(agent_raw, str) else AGENT_CLAUDE_CODE
+    if agent not in (AGENT_CLAUDE_CODE, AGENT_CODEX):
+        return cached  # another agent's log holds no token usage OpenShard reads (steering only)
     raw = _valid_transcript_path(buf.get("transcript_path"), buf.get("session_id"), agent=agent)
     if agent == AGENT_CODEX:
         if raw is None:
@@ -1260,7 +1264,7 @@ def _summarize_command(command: str | None, label: str) -> tuple[str, str | None
 # Optional scalar fields ``ReducedHookPayload.to_dict`` writes last, only when set,
 # so queue lines of every other event keep their shape.
 _OPTIONAL_TAIL_KEYS = ("task_id", "transcript_path", "agent_provider", "effort_level", "permission_mode",
-                       "agent_surface", "agent_cloud_session", "agent_billing_basis", "agent_host")
+                       "agent_surface", "agent_cloud_session", "agent_billing_basis", "agent_host", "prompt_facts")
 
 
 @dataclass
@@ -1320,6 +1324,7 @@ class ReducedHookPayload:
     agent_cloud_session: str | None = None  # see HookPayload.agent_cloud_session
     agent_billing_basis: str | None = None  # see HookPayload.agent_billing_basis
     agent_host: str | None = None  # see HookPayload.agent_host
+    prompt_facts: dict | None = None  # UserPromptSubmit: steering.prompt_facts (intent, never the text)
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {
@@ -1444,6 +1449,7 @@ class ReducedHookPayload:
             agent_cloud_session=_cloud_session_or_none(data.get("agent_cloud_session")),
             agent_billing_basis=billing_basis_or_none(data.get("agent_billing_basis")),
             agent_host=_agent_host_or_none(data.get("agent_host")),
+            prompt_facts=steering.valid_prompt_facts(data.get("prompt_facts")),
         )
 
 
@@ -1536,6 +1542,7 @@ def reduce_hook_payload(payload: HookPayload, repo_root: Path) -> ReducedHookPay
         reduced.attrs = {**reduced.attrs, "prompt_source": fidelity.PROMPT_SOURCE_AGENT_NOTIFICATION}
     elif payload.event == EVENT_USER_PROMPT_SUBMIT:
         reduced.task_excerpt = sanitize_task_excerpt(payload.prompt)
+        reduced.prompt_facts = steering.prompt_facts(payload.prompt)  # classified here; the text is not queued
     elif payload.event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         tool = payload.tool_name or "unknown"
         reduced.tool_name = tool
@@ -1777,7 +1784,9 @@ def _apply_prompt(buf: dict, payload: ReducedHookPayload, repo_root: Path, now: 
         return "agent notification buffered", False, False
     buf["prompt_count"] = int(buf.get("prompt_count") or 0) + 1
     buf["first_prompt_at"] = buf.get("first_prompt_at") or now
-    buf["task"] = buf.get("task") or payload.task_excerpt
+    if buf["prompt_count"] == 1 and not task_continuation.continued(buf):
+        # Only the prompt that starts a task names it; a later prompt's words never become a task.
+        buf["task"] = buf.get("task") or payload.task_excerpt
     created = buf.get("record") is None  # first prompt = real work: record it now, so an interrupted one leaves a trace
     if created:
         _ensure_record(buf, repo_root)
@@ -1785,6 +1794,7 @@ def _apply_prompt(buf: dict, payload: ReducedHookPayload, repo_root: Path, now: 
                   evidence="directly_observed", occurred_at=now,
                   metadata={"hook": payload.event, "prompt_index": buf["prompt_count"]})
     turns.mark_opened(buf, repo_root)  # a turn's opening prompt names its Receipt (the open-turn signal)
+    steering.note_prompt(buf, payload.prompt_facts, repo_root, now, while_busy=payload.attrs.get("while_busy") is True)
     return ("first prompt: record created" if created else "prompt buffered"), created, False
 
 
@@ -2190,6 +2200,8 @@ def _resumed_segment(
         buf["herdr_terminals"] = terminals
     buf["applied_ids"] = [i for i in (capture.get("applied_event_ids") or []) if isinstance(i, str)]
     turns.inherit(buf, persisted, same_receipt=False, repo_root=repo_root)
+    task_continuation.inherit(buf, persisted)  # the same task goes on: no prompt text names this Receipt
+    steering.inherit(buf, persisted)
     return buf
 
 
@@ -2236,7 +2248,9 @@ def _load_or_create_buffer(
             )
         rebuilt = _buffer_from_entry(persisted, session_id)
         if rebuilt is not None:
+            steering.restore(rebuilt, persisted)
             turns.inherit(rebuilt, persisted, same_receipt=True)
+            task_continuation.restore(rebuilt, persisted.get("capture") or {})
             return rebuilt
     return _new_buffer(
         session_id, repo_root, first_hook, now=now, agent=agent, baseline=baseline, start_head=start_head,
@@ -3365,6 +3379,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
         # version; absent (never back-filled) on records rebuilt from older history.
         entry["receipt_id"] = record["receipt_id"]
     _stamp_task_context(entry, buf)
+    task_continuation.stamp(entry, buf)  # a continuing Receipt: the task's title and the turn, no prompt text
     turns.stamp(entry, buf, repo_root)  # per-turn Receipts (flag): turn facts and session grouping
     stamp_record_correlation(entry, buf.get("correlation"), buf.get("herdr_delegated"), buf.get("herdr_terminals"))
     _stamp_cloud_session(entry, buf)
@@ -3472,6 +3487,7 @@ def build_hook_entry(buf: dict, repo_root: Path) -> dict:
     learning = captured_learning(repo_root, profile.key, str(buf.get("session_id") or ""), str(buf.get("started_at") or ""))
     if learning is not None:
         entry["learning"] = learning
+    steering.stamp(entry, buf)  # reads the session log's new lines first, so it may stage Events
     entry["events"] = [dict(e) for e in buf["events"] if isinstance(e, dict)] + file_events
     stamp_gaming_signals(entry, buf, repo_root)  # observations only; never changes the verdict
     return coerce_shard_entry(entry)
@@ -3612,6 +3628,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         # this Receipt's run instead of every run on the same cloud agent.
         buf["cursor_generation_id"] = generation_id
 
+    steering.observe(buf, payload, repo_root, now)  # turn ends, interrupts, approvals (adapters/steering.py)
     if event == EVENT_MODEL_SWITCH:
         return "session model changed", bool(buf.get("record")), False
 
@@ -3660,7 +3677,8 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
     if event == EVENT_INTERRUPT:
         _append_event(
             buf, event_type="session.activity", action="assistant turn interrupted by user",
-            status="unknown", evidence="directly_observed", metadata={"hook": event}, occurred_at=now,
+            status="unknown", evidence="directly_observed",
+            metadata={"hook": event, "steering_kind": steering.KIND_INTERRUPT}, occurred_at=now,
         )
         if buf.get("record") and _has_activity(buf):
             return "turn interrupted", True, False
@@ -3705,6 +3723,9 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
 
     if event == EVENT_USER_PROMPT_SUBMIT:
         return _apply_prompt(buf, payload, repo_root, now)
+
+    if event == EVENT_PERMISSION_PROMPT:
+        return hook_approvals.apply_permission_prompt(buf, payload, now)
 
     if event in (EVENT_POST_TOOL_USE, EVENT_POST_TOOL_USE_FAILURE):
         failed = event == EVENT_POST_TOOL_USE_FAILURE
@@ -3807,43 +3828,7 @@ def _apply(payload: ReducedHookPayload, buf: dict, repo_root: Path, *, now: str)
         return claude_subagents.apply_subagent_event(buf, event, payload.attrs, now)
 
     if event in (EVENT_APPROVAL_REQUEST, EVENT_APPROVAL_DECISION):
-        # The agent's human-approval gate (Hermes ``pre_approval_request`` /
-        # ``post_approval_response``). Observed only -- OpenShard neither
-        # raises nor answers it. Only a documented grant/deny choice becomes a
-        # granted/denied Event; a timeout, withdrawal or undeliverable prompt
-        # means nobody decided, and is recorded as exactly that.
-        counts = buf.get("approvals")
-        if not isinstance(counts, dict):
-            counts = buf["approvals"] = {}
-        meta = {"hook": event}
-        for attr_key in _APPROVAL_ATTR_KEYS:
-            if attr_key in payload.attrs:
-                meta[attr_key] = payload.attrs[attr_key]
-        command_text = payload.command_action or "command"
-        if event == EVENT_APPROVAL_REQUEST:
-            counts["requested"] = int(counts.get("requested") or 0) + 1
-            _append_event(
-                buf, event_type="approval.requested", action=f"approval requested: {command_text}",
-                target=payload.command_target, status="started", evidence="agent_reported",
-                metadata=meta, occurred_at=now,
-            )
-            return "approval requested", False, False
-        choice = payload.attrs.get("choice")
-        if choice in _APPROVAL_GRANTED:
-            counts["granted"] = int(counts.get("granted") or 0) + 1
-            event_type, status, verb = "approval.granted", "passed", f"approval granted ({choice})"
-        elif choice in _APPROVAL_DENIED:
-            counts["denied"] = int(counts.get("denied") or 0) + 1
-            event_type, status, verb = "approval.denied", "failed", f"approval denied ({choice})"
-        else:
-            counts["unanswered"] = int(counts.get("unanswered") or 0) + 1
-            event_type, status = "session.activity", "unknown"
-            verb = f"approval not decided ({choice})" if isinstance(choice, str) else "approval not decided"
-        _append_event(
-            buf, event_type=event_type, action=f"{verb}: {command_text}", target=payload.command_target,
-            status=status, evidence="agent_reported", metadata=meta, occurred_at=now,
-        )
-        return "approval decision", False, False
+        return hook_approvals.apply_approval_event(buf, event, payload, now)  # observed, never answered
 
     if event == EVENT_STOP:
         buf["turn_count"] = int(buf.get("turn_count") or 0) + 1
@@ -4054,13 +4039,6 @@ def apply_reduced_hook(
             if cloud_turn_closed or turn_sealed:
                 should_fold, should_delete = True, True
             _mark_applied(buf, dedup_id)
-            remote_events = _remote_capture_new_events(buf)
-            if remote_events is not None:
-                # Remote/connected capture names the repository from the first
-                # hook, not the first fold: cache the identity on the buffer now
-                # so the SessionStart batch already carries it (see
-                # connected.config.session_from_entry).
-                _cached_repo_identity(buf, repo_root)
             if buf.get("ended") and _has_activity(buf):
                 # An ended buffer (this SessionEnd, or a buffer an older
                 # version left behind): snapshot and drop it rather than
@@ -4075,6 +4053,14 @@ def apply_reduced_hook(
                 entry, outcome = _fold(buf, repo_root, finalize=finalize)
                 if turn_sealed:
                     turns.after_seal()
+            # After the fold: its steering Events (read from the session log) leave with this batch.
+            remote_events = _remote_capture_new_events(buf)
+            if remote_events is not None:
+                # Remote/connected capture names the repository from the first
+                # hook, not the first fold: cache the identity on the buffer now
+                # so the SessionStart batch already carries it (see
+                # connected.config.session_from_entry).
+                _cached_repo_identity(buf, repo_root)
             if should_delete:
                 try:
                     if path.exists():

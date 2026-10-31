@@ -108,6 +108,9 @@ HOOK_SPECS: tuple[HookSpec, ...] = (
     HookSpec("Stop", None, 5, TRANSPORT_HTTP),
     HookSpec("StopFailure", None, 5, TRANSPORT_HTTP),  # a turn that ended on an API error
     HookSpec("SessionEnd", None, 5, TRANSPORT_HTTP),
+    # Steering: a permission prompt was shown to the person. A Notification hook can
+    # neither answer nor block the prompt; Core only records that it was asked.
+    HookSpec("Notification", "permission_prompt", 5, TRANSPORT_HTTP),
 )
 SYNC_EVENTS: frozenset[str] = frozenset(s.event for s in HOOK_SPECS if not s.run_async)
 HTTP_EVENTS: tuple[str, ...] = tuple(s.event for s in HOOK_SPECS if s.transport == TRANSPORT_HTTP)

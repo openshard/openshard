@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -89,7 +90,10 @@ def test_opencode_plugin_hooks_only_after_the_tool_ran() -> None:
     src = opencode_plugin_install.PLUGIN_SOURCE
     assert '"tool.execute.after"' in src
     assert "tool.execute.before" not in src
-    assert "permission.ask" not in src
+    # The deciding hook (``"permission.ask"``) is never used; the passive bus events
+    # ``permission.asked`` / ``permission.replied`` are only observed.
+    assert not re.search(r"""["']permission\.ask["']""", src)
+    assert "output.status" not in src
 
 
 def _all_reply_events() -> list[str]:
