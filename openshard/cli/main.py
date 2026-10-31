@@ -7218,12 +7218,10 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
                 agent_checks.append(("Capture verified", True, ""))
             else:
                 agent_unverified = True
-                agent_checks.append(("Capture verified", False, status.trust_blocker or _capture_unverified_detail(key, label)))
-        click.echo(f"\n{label}\n")
-        for check_label, ok, detail in agent_checks:
-            mark = "✓" if ok else "✗"
-            suffix = "" if ok else f" ({detail})"
-            click.echo(f"  {mark} {check_label}{suffix}")
+                agent_checks.append(("Capture verified", False, status.trust_blocker
+                                     or status.capture_unverified_reason
+                                     or _capture_unverified_detail(key, label)))
+        _echo_agent_doctor_block(label, agent_checks, status.hooks_review)
         if root is not None and history_writable and status.cli_available and integration_ok:
             if agent_unverified:
                 unverified_agents.append(label)
@@ -7241,7 +7239,7 @@ def doctor(as_json: bool, repo_path: Path | None) -> None:
     if unverified_agents:
         click.echo(
             f"Configured but unverified: {', '.join(unverified_agents)} -- the integration is installed but "
-            "no session has been captured in this repository yet. Run one, then `openshard last`; "
+            "capture is not verified in this repository yet. Run one session, then `openshard last`; "
             "if nothing is captured, the agent's block above says what to check."
         )
     click.echo("")
@@ -7269,6 +7267,19 @@ _CAPTURE_UNVERIFIED_WHY: dict[str, str] = {
     ),
     "hermes": "if a completed session records nothing, Hermes has not approved the hooks or runs in safe mode",
 }
+
+
+def _echo_agent_doctor_block(label: str, checks: list[tuple[str, bool, str]], hooks_review: str | None) -> None:
+    """One agent's doctor block, plus the Codex /hooks review warning when it applies."""
+    from openshard.adapters.codex_trust import HOOKS_REVIEW_NOTE, UNREVIEWED
+
+    click.echo(f"\n{label}\n")
+    for check_label, ok, detail in checks:
+        mark = "✓" if ok else "✗"
+        suffix = "" if ok else f" ({detail})"
+        click.echo(f"  {mark} {check_label}{suffix}")
+    if hooks_review == UNREVIEWED:
+        click.echo(f"  ! {HOOKS_REVIEW_NOTE}")
 
 
 def _capture_unverified_detail(key: str, label: str) -> str:

@@ -15,6 +15,10 @@ All notable changes to OpenShard are documented here.
 - Files another agent changed and committed during a Claude Code turn (for
   example a Codex commit) are no longer counted as that turn's work when the
   commit carries the other agent's `Openshard-Agent` trailer.
+- `openshard doctor` no longer says Codex capture is verified because of an
+  old or imported Codex record; it needs a Codex hook capture made after the
+  hooks last changed, and it tells you to approve the hooks under `/hooks`
+  in Codex when they have not been reviewed.
 
 ## 0.5.0 - 2026-10-25
 
