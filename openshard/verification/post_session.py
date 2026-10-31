@@ -738,8 +738,8 @@ def build_attestation(
                              commit=commit, truncated=truncated, incomplete=incomplete)
     durations = [r.duration_seconds for r in results if r.duration_seconds is not None]
     ran = [r for r in results if r.status != CHECK_SKIPPED]
-    reason = (f"{NO_CHECKS_DOCS_ONLY}; OpenShard ran nothing." if no_checks_applicable and not results
-              else _reason(results, bound, before, snapshot=snapshot is not None))
+    reason = _attestation_reason(results, bound, before, snapshot=snapshot is not None,
+                                 no_checks_applicable=no_checks_applicable)
     block = build_verification(
         source=SOURCE_DIRECTLY_OBSERVED,
         observation_mode=MODE_OPENSHARD_EXECUTED,
@@ -772,11 +772,25 @@ def build_attestation(
         # The tree of the bound commit, so the result still names the content after a squash or rewrite.
         **({"tree_oid": before.tree} if bound and before.tree else {}),
         **({"checkout": checkout} if checkout else {}),
-        **({"snapshot": {k: snapshot[k] for k in ("tree", "base") if isinstance(snapshot.get(k), str)}}
-           if snapshot else {}),
+        **_snapshot_fields(snapshot),
         "raw_output_stored": False,
         "verification": block,
     }
+
+
+def _snapshot_fields(snapshot: dict | None) -> dict:
+    """The attestation's ``snapshot`` entry (its ``tree`` and ``base``) when the run checked a copy of uncommitted changes."""
+    if not snapshot:
+        return {}
+    return {"snapshot": {k: snapshot[k] for k in ("tree", "base") if isinstance(snapshot.get(k), str)}}
+
+
+def _attestation_reason(results: list[CheckRun], bound: bool, before: TreeState, *, snapshot: bool,
+                        no_checks_applicable: bool) -> str:
+    """The attestation's reason: a documentation-only commit that planned nothing says so; otherwise ``_reason``."""
+    if no_checks_applicable and not results:
+        return f"{NO_CHECKS_DOCS_ONLY}; OpenShard ran nothing."
+    return _reason(results, bound, before, snapshot=snapshot)
 
 
 def _attested_check(r: CheckRun) -> VerificationCheck:
