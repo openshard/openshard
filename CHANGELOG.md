@@ -12,6 +12,9 @@ All notable changes to OpenShard are documented here.
   counts as verified or passed. A configured `verification_commands` contract
   still runs. A check that hits the time limit now says "timed out after Ns"
   and points to `--timeout`; its outcome stays unknown.
+- Files another agent changed and committed during a Claude Code turn (for
+  example a Codex commit) are no longer counted as that turn's work when the
+  commit carries the other agent's `Openshard-Agent` trailer.
 
 ## 0.5.0 - 2026-10-25
 
