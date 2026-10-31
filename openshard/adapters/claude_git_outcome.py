@@ -341,6 +341,8 @@ def _files_attr_text(changes_block: dict) -> str:
         text += f", {changes_block['pre_existing_excluded']} pre-existing excluded"
     if changes_block.get("other_session_excluded"):
         text += f", {changes_block['other_session_excluded']} other-session excluded"
+    if changes_block.get("other_commit_excluded"):
+        text += f", {changes_block['other_commit_excluded']} other-agent-commit excluded"
     return text + "."
 
 
