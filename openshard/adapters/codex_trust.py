@@ -44,8 +44,9 @@ HOOKS_TRUST_NEXT_STEP = (
     "the first session there is not captured."
 )
 HOOKS_REVIEW_NOTE = (
-    "Codex has not recorded a /hooks review for these hooks; `codex exec` still captures, "
-    "but the interactive Codex UI may ask you to review them under /hooks."
+    "Codex has not recorded a /hooks review for the OpenShard hooks: run `/hooks` in Codex and "
+    "approve them. Interactive Codex may not run them until you do; `codex exec` in a trusted "
+    "project still captures."
 )
 
 _EVENT_KEYS = {

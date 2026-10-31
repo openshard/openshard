@@ -39,9 +39,11 @@ is ``unknown`` too, with ``verifier_setup_failed`` and the reason; when the
 runner had already reported every test passing, those counts are kept on the
 check as partial evidence (``reported_*``), and it is still ``unknown``. A skipped check
 (blocked, or needing approval that was not given) is ``skipped``. Nothing run
-at all -> ``not_run``. Command output is streamed to the terminal (or
-discarded under ``--json``) and never stored; the attestation carries only a
-path-free check label, the exit code and the duration.
+at all -> ``not_run``; a documentation-only commit is ``not_run`` with
+``no_checks_applicable`` (no check applies, nothing is verified). Command
+output is streamed to the terminal (or discarded under ``--json``) and never
+stored; the attestation carries only a path-free check label, the exit code
+and the duration.
 
 This is evidence, not policy: nothing here gates, blocks or fails anything.
 """
@@ -104,6 +106,10 @@ MAX_PLANNED_CHECKS = 8
 DEFAULT_TIMEOUT_SECONDS = 600.0
 # The project could not be set up to run a check (setup_failure.py uses the same token).
 REASON_VERIFIER_SETUP_FAILED = "verifier_setup_failed"
+# The commit changed documentation only, so no check applies and none ran. The
+# status stays ``not_run`` (never passed or verified); this token says why.
+REASON_NO_CHECKS_APPLICABLE = "no_checks_applicable"
+NO_CHECKS_DOCS_ONLY = "No checks needed: documentation-only change"
 
 ORIGIN_CONTRACT = "contract"  # the repository's configured verification contract
 ORIGIN_DETECTED = "detected"  # the test command OpenShard detects for the repository
@@ -311,8 +317,9 @@ def plan_commit_checks(
 
     The repository's configured contract still wins: when it names commands,
     those are the required checks. Otherwise the checks come from what the
-    change touched (``change_checks.select_checks``); when the change calls
-    for none (a docs-only change, an unknown stack), the repository's detected
+    change touched (``change_checks.select_checks``). A documentation-only
+    change plans nothing (``docs_only_commit``); any other change that calls
+    for no check (an unknown stack) falls back to the repository's detected
     test command. A change-selected check is OpenShard's own command built
     from a fixed script name, so it is ``safe`` unless the shared rules block
     it or the change rewrote that check's own definition (``needs_approval``).
@@ -321,6 +328,22 @@ def plan_commit_checks(
 
 
 _KEEP_FIRST = {"test": 0, "typecheck": 1, "build": 2, "lint": 3}
+
+
+def docs_only_commit(repo_root: Path, config: dict, commit: str, base: str | None) -> bool:
+    """Whether verifying *commit* needs no check: it changed documentation only and no contract is configured.
+
+    A configured contract always runs. When git cannot list the change it is
+    not docs-only, so the normal selection applies. Never raises.
+    """
+    if _contract_argvs(config):
+        return False
+    from openshard.verification.change_checks import changed_paths, docs_only
+
+    try:
+        return docs_only(changed_paths(repo_root, base, commit))
+    except Exception:
+        return False
 
 
 def plan_commit(
@@ -334,6 +357,8 @@ def plan_commit(
     """
     if _contract_argvs(config):
         return plan_checks(repo_root, config, entry), len(_contract_argvs(config)) > MAX_PLANNED_CHECKS
+    if docs_only_commit(repo_root, config, commit, base):
+        return [], False
     from openshard.verification.change_checks import select_checks
 
     try:
@@ -672,14 +697,24 @@ def build_attestation(
     commit: str | None = None,
     checkout: dict | None = None,
     truncated: bool = False,
+    snapshot: dict | None = None,
+    no_checks_applicable: bool = False,
 ) -> dict:
     """One ``verifications.jsonl`` line: what OpenShard ran, saw, and against which tree.
 
     With *commit* (``openshard verify --commit``) the result binds only when
     the tree that ran was exactly that commit; *checkout* says where it ran.
+    With *snapshot* (``snapshot_run``: a copy of uncommitted changes) the
+    result is never bound to a commit, however clean the copy was: nobody
+    merges a snapshot. Its ``tree`` and ``base`` are recorded as they are.
+    *no_checks_applicable* (a documentation-only commit, nothing planned)
+    records ``not_run`` with ``no_checks_applicable``: nothing ran, so nothing
+    is bound or verified.
     """
     checks = [_attested_check(r) for r in results]
     incomplete: list[str] = []
+    if no_checks_applicable and not results:
+        incomplete.append(REASON_NO_CHECKS_APPLICABLE)
     # Bound only when what ran was exactly a commit: no change of any kind
     # before the run (an untracked file could be under test), and afterwards
     # the same HEAD with no *tracked* change. Untracked files a check itself
@@ -691,6 +726,7 @@ def build_attestation(
         and after_tracked is False
         and after.head == before.head
         and (commit is None or before.head.startswith(commit.lower()))
+        and snapshot is None
     )
     if not bound:
         incomplete.append(REASON_ARTIFACT_NOT_BOUND)
@@ -702,7 +738,8 @@ def build_attestation(
                              commit=commit, truncated=truncated, incomplete=incomplete)
     durations = [r.duration_seconds for r in results if r.duration_seconds is not None]
     ran = [r for r in results if r.status != CHECK_SKIPPED]
-    reason = _reason(results, bound, before)
+    reason = _attestation_reason(results, bound, before, snapshot=snapshot is not None,
+                                 no_checks_applicable=no_checks_applicable)
     block = build_verification(
         source=SOURCE_DIRECTLY_OBSERVED,
         observation_mode=MODE_OPENSHARD_EXECUTED,
@@ -735,9 +772,25 @@ def build_attestation(
         # The tree of the bound commit, so the result still names the content after a squash or rewrite.
         **({"tree_oid": before.tree} if bound and before.tree else {}),
         **({"checkout": checkout} if checkout else {}),
+        **_snapshot_fields(snapshot),
         "raw_output_stored": False,
         "verification": block,
     }
+
+
+def _snapshot_fields(snapshot: dict | None) -> dict:
+    """The attestation's ``snapshot`` entry (its ``tree`` and ``base``) when the run checked a copy of uncommitted changes."""
+    if not snapshot:
+        return {}
+    return {"snapshot": {k: snapshot[k] for k in ("tree", "base") if isinstance(snapshot.get(k), str)}}
+
+
+def _attestation_reason(results: list[CheckRun], bound: bool, before: TreeState, *, snapshot: bool,
+                        no_checks_applicable: bool) -> str:
+    """The attestation's reason: a documentation-only commit that planned nothing says so; otherwise ``_reason``."""
+    if no_checks_applicable and not results:
+        return f"{NO_CHECKS_DOCS_ONLY}; OpenShard ran nothing."
+    return _reason(results, bound, before, snapshot=snapshot)
 
 
 def _attested_check(r: CheckRun) -> VerificationCheck:
@@ -800,7 +853,7 @@ def _commit_verdict(status: str, results: list[CheckRun], *, commit: str | None,
     return STATUS_PARTIAL if status == STATUS_PASSED and (truncated or skipped) else status
 
 
-def _reason(results: list[CheckRun], bound: bool, before: TreeState) -> str:
+def _reason(results: list[CheckRun], bound: bool, before: TreeState, *, snapshot: bool = False) -> str:
     if not results:
         return "OpenShard found no approved check to run."
     ran = sum(1 for r in results if r.status in (CHECK_PASSED, CHECK_FAILED))
@@ -814,6 +867,8 @@ def _reason(results: list[CheckRun], bound: bool, before: TreeState) -> str:
     parts = [f"OpenShard ran {ran} of {len(results)} check(s) and read their exit codes"]
     if bound:
         parts.append(f"on clean commit {before.head[:12] if before.head else ''}")
+    elif snapshot:
+        parts.append("on a private copy of the uncommitted changes (not bound to a commit)")
     elif before.dirty:
         parts.append("on a working tree with uncommitted changes (not bound to a commit)")
     else:
@@ -966,12 +1021,34 @@ def _setup_failed_text(reported: object, reason: object) -> str:
             f"{step} couldn't run")
 
 
+def display_heading(summary: dict | None) -> str:
+    """The label before ``display_line``: never "Re-verified" for a re-run that had nothing to check."""
+    v = (summary or {}).get("verification") or {}
+    if REASON_NO_CHECKS_APPLICABLE in (v.get("incomplete_reasons") or []):
+        return "Re-check"
+    return "Re-verified"
+
+
+def timeout_hint(results: list[CheckRun], timeout: float) -> str | None:
+    """Plain words for a check stopped by the time limit, naming ``--timeout``; None when none timed out."""
+    timed_out = [r.check.name for r in results if r.status == CHECK_UNKNOWN and r.note.startswith("timed out")]
+    if not timed_out:
+        return None
+    names = ", ".join(timed_out[:3]) + (f" and {len(timed_out) - 3} more" if len(timed_out) > 3 else "")
+    were = "were" if len(timed_out) > 1 else "was"
+    return (f"{names} timed out after {timeout:g}s and {were} stopped, so the outcome is unknown "
+            f"(not passed, not failed). To allow longer, re-run with --timeout SECONDS "
+            f"(for example --timeout {max(timeout * 3, 1800):g}).")
+
+
 def display_line(summary: dict) -> str:
     """``2/2 passed @ 1a2b3c4d5e6f (OpenShard re-run)`` -- one receipt row."""
     v = summary.get("verification") or {}
     status = v.get("status")
     attempted = v.get("checks_attempted") or 0
     passed = v.get("checks_passed") or 0
+    if status == STATUS_NOT_RUN and REASON_NO_CHECKS_APPLICABLE in (v.get("incomplete_reasons") or []):
+        return f"{NO_CHECKS_DOCS_ONLY} (nothing run; not verified)"
     if status == STATUS_NOT_RUN:
         text = "Nothing run"
     elif status == "unknown" and REASON_VERIFIER_SETUP_FAILED in (v.get("incomplete_reasons") or []):
@@ -994,12 +1071,16 @@ __all__ = [
     "KIND_POST_SESSION",
     "CheckRun",
     "PlannedCheck",
+    "NO_CHECKS_DOCS_ONLY",
+    "REASON_NO_CHECKS_APPLICABLE",
     "REASON_VERIFIER_SETUP_FAILED",
     "TreeState",
     "attestations_path",
     "build_attestation",
     "commit_tree",
+    "display_heading",
     "display_line",
+    "docs_only_commit",
     "evidence_for_entry",
     "latest_for_entry",
     "load_attestations",
@@ -1009,5 +1090,6 @@ __all__ = [
     "result_detail",
     "run_checks",
     "summarize_attestation",
+    "timeout_hint",
     "tree_state",
 ]

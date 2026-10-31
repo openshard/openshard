@@ -1189,6 +1189,34 @@ class TestRobustness:
         assert "idle_sealed_at" not in resumed["capture"]
         assert "session_idle_sealed" not in [r["kind"] for r in resumed["capture"]["completeness"]["reasons"]]
 
+    def test_an_idle_seal_alone_does_not_make_no_checks_unknown(self, repo: Path):
+        # Seen live: most "unknown" Receipts were idle-sealed sessions that simply ran
+        # no check. Every hook up to the seal arrived, so "no check" is a real "not run".
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ls"}, tool_response={})
+        path = buffer_path(repo.resolve(), SID)
+        buf = json.loads(path.read_text(encoding="utf-8"))
+        buf["last_activity_at"] = "2000-01-01T00:00:00Z"
+        path.write_text(json.dumps(buf), encoding="utf-8")
+        assert sweep_stale_buffers(repo.resolve()) == [SID]
+        sealed = _runs_lines(repo)[0]
+        assert sealed["capture"]["completeness"]["status"] == "incomplete"
+        assert sealed["verification"]["status"] == "not_run"
+        assert "capture_events_lost" not in sealed["verification"]["incomplete_reasons"]
+
+    def test_dropped_events_in_an_idle_sealed_session_still_make_no_checks_unknown(self, repo: Path):
+        _run(repo, "UserPromptSubmit", prompt="task")
+        _run(repo, "PostToolUse", tool_name="Bash", tool_input={"command": "ls"}, tool_response={})
+        path = buffer_path(repo.resolve(), SID)
+        buf = json.loads(path.read_text(encoding="utf-8"))
+        buf["last_activity_at"] = "2000-01-01T00:00:00Z"
+        buf["dropped_events"] = 3
+        path.write_text(json.dumps(buf), encoding="utf-8")
+        assert sweep_stale_buffers(repo.resolve()) == [SID]
+        sealed = _runs_lines(repo)[0]
+        assert sealed["verification"]["status"] == "unknown"
+        assert "capture_events_lost" in sealed["verification"]["incomplete_reasons"]
+
     def test_harness_notifications_are_not_prompts(self, repo: Path):
         # Seen live: a sub-agent's report arrived as UserPromptSubmit and counted as a second prompt.
         _run(repo, "UserPromptSubmit", prompt="Fix the parser")

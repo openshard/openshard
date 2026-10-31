@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +13,11 @@ from click.testing import CliRunner
 
 from openshard.adapters.agent_setup import detect_codex_integration, install_agent
 from openshard.adapters.codex_hooks_install import HOOK_EVENTS, HOOKS_RELPATH, install_codex_hooks
-from openshard.adapters.codex_trust import HOOKS_TRUST_NEXT_STEP, codex_hook_trust
+from openshard.adapters.codex_trust import (
+    HOOKS_REVIEW_NOTE,
+    HOOKS_TRUST_NEXT_STEP,
+    codex_hook_trust,
+)
 from openshard.cli.main import cli
 from tests.capture_fixtures import _make_repo
 
@@ -180,3 +185,69 @@ def test_trusted_but_unreviewed_is_not_a_blocker(repo, home, monkeypatch):
         data = CliRunner().invoke(cli, ["doctor", "--json", "--repo-path", str(repo)])
     assert HOOKS_TRUST_NEXT_STEP not in out.output
     assert '"hooks_review": "unreviewed"' in data.output
+
+
+# --- "Capture verified" needs a hook capture newer than the hooks file -----------------------
+
+
+def _write_runs(repo: Path, *entries: dict) -> None:
+    (repo / ".openshard").mkdir(exist_ok=True)
+    (repo / ".openshard" / "runs.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8"
+    )
+
+
+def _hook_record(timestamp: str) -> dict:
+    return {"timestamp": timestamp, "run_id": "r1", "task": "t",
+            "executor": "codex_hooks", "import_source": "codex"}
+
+
+def _doctor(repo: Path, home: Path, monkeypatch) -> tuple[str, dict]:
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    with patch("shutil.which", side_effect=_which):
+        out = CliRunner().invoke(cli, ["doctor", "--repo-path", str(repo)])
+        data = CliRunner().invoke(cli, ["doctor", "--json", "--repo-path", str(repo)])
+    assert out.exit_code == 0, out.output
+    return out.output, json.loads(data.output)["codex"]
+
+
+def test_record_older_than_hooks_file_is_unverified(repo, home, monkeypatch):
+    _trust_project(home, str(repo.resolve()))
+    _write_config(home, repo, HOOK_EVENTS)
+    _write_runs(repo, _hook_record("2026-01-02T03:04:05Z"))
+    out, codex = _doctor(repo, home, monkeypatch)
+    assert "✓ Capture verified" not in out
+    assert ("✗ Capture verified (last captured 2026-01-02 03:04 UTC, before the Codex hooks were "
+            "last changed; run one Codex task to re-verify)") in out
+    assert codex["capture_observed"] is False and codex["capture_verified"] is False
+    assert "Configured but unverified: Codex" in out
+
+
+def test_imported_history_only_is_unverified(repo, home, monkeypatch):
+    _trust_project(home, str(repo.resolve()))
+    _write_config(home, repo, HOOK_EVENTS)
+    now = datetime.now(UTC).isoformat()
+    _write_runs(repo, {"timestamp": now, "run_id": "hist-1", "task": "t", "executor": "codex_history_import",
+                       "origin": "historical_import", "import_source": "codex"})
+    out, codex = _doctor(repo, home, monkeypatch)
+    assert "✗ Capture verified (only imported Codex history found; run one Codex task to verify)" in out
+    assert codex["capture_verified"] is False
+
+
+def test_fresh_hook_record_is_verified(repo, home, monkeypatch):
+    _trust_project(home, str(repo.resolve()))
+    _write_config(home, repo, HOOK_EVENTS)
+    stale = _hook_record("2026-01-02T03:04:05Z")
+    _write_runs(repo, stale, _hook_record(datetime.now(UTC).isoformat()))
+    out, codex = _doctor(repo, home, monkeypatch)
+    assert "✓ Capture verified" in out and "use Codex normally" in out
+    assert codex["capture_verified"] is True and codex["capture_unverified_reason"] is None
+    assert HOOKS_REVIEW_NOTE not in out  # reviewed: no warning
+
+
+def test_unreviewed_hooks_warn_to_run_hooks_review(repo, home, monkeypatch):
+    _trust_project(home, str(repo.resolve()))
+    out, codex = _doctor(repo, home, monkeypatch)
+    assert codex["hooks_review"] == "unreviewed"
+    assert f"  ! {HOOKS_REVIEW_NOTE}" in out
+    assert "run `/hooks` in Codex and approve them" in out

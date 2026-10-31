@@ -101,7 +101,7 @@ def file_to_dict(raw: dict, *, extended: bool = False) -> dict[str, Any]:
         "path": raw.get("path"),
         "change_type": raw.get("change_type"),
         "summary": truncate_text(summary) if isinstance(summary, str) else None,
-        # v0.4.4: agent_reported | git_observed | pre_existing | other_session; None for old records.
+        # v0.4.4: agent_reported | git_observed | pre_existing | other_session | other_commit; None for old records.
         "attribution": attribution if isinstance(attribution, str) else None,
     }
     if extended:
