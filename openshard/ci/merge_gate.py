@@ -256,6 +256,70 @@ def render_receipt(receipt: dict) -> list[str]:
     return out
 
 
+# Who vouches for a check's outcome, in plain words. Only these sources can make
+# the Platform answer ``verified`` / ``failed`` (gate-verdict.ts STRONG_SOURCES).
+_PROOF_SOURCES = {
+    "directly_observed": "seen directly by Openshard",
+    "git_verified": "confirmed by Openshard against git",
+    "independently_verified": "reported by CI or another independent system",
+}
+_MAX_NAMED = 5
+
+
+def _named(names: list[str]) -> str:
+    shown = ", ".join(_cell(n) for n in names[:_MAX_NAMED])
+    return shown + (f" and {len(names) - _MAX_NAMED} more" if len(names) > _MAX_NAMED else "")
+
+
+def render_proof(receipts: list[dict]) -> list[str]:
+    """What the Receipts' checks prove for this commit, and what they do not, in plain words.
+
+    Drawn only from each check's recorded outcome and source. A check is
+    proof only when its outcome is passed or failed and its source is one the
+    Platform accepts (``_PROOF_SOURCES``); the agent's own report never is,
+    and a check with no recorded outcome is said to have none.
+    """
+    checks: list[dict] = []
+    for receipt in receipts:
+        listed = receipt.get("checks")
+        if isinstance(listed, list):
+            checks += [c for c in listed if isinstance(c, dict)]
+    proven: dict[tuple[str, str], list[str]] = {}
+    agent: list[str] = []
+    no_result: list[str] = []
+    unsourced: list[str] = []
+    for check in checks:
+        raw_name = check.get("name")
+        name: str = raw_name if isinstance(raw_name, str) and raw_name.strip() else UNKNOWN
+        outcome, source = check.get("outcome"), check.get("source")
+        if outcome not in ("passed", "failed"):
+            no_result.append(name)
+        elif source in _PROOF_SOURCES:
+            proven.setdefault((outcome, source), []).append(name)
+        elif source == "agent_reported":
+            agent.append(f"{name} ({outcome})")
+        else:
+            unsourced.append(f"{name} ({outcome})")
+    out = ["**Proven for this commit**", ""]
+    if proven:
+        for (outcome, source), names in sorted(proven.items(), key=lambda kv: (kv[0][0] != "failed", kv[0][1])):
+            out.append(f"- {len(names)} {outcome}, {_PROOF_SOURCES[source]}: {_named(names)}")
+    else:
+        out.append("- Nothing: no check outcome here comes from Openshard, git or CI.")
+    gaps = []
+    if not checks:
+        gaps.append("- No checks were recorded.")
+    if agent:
+        gaps.append(f"- {len(agent)} only the agent's own report: {_named(agent)}")
+    if unsourced:
+        gaps.append(f"- {len(unsourced)} with no recorded source: {_named(unsourced)}")
+    if no_result:
+        gaps.append(f"- {len(no_result)} with no recorded result: {_named(no_result)}")
+    if gaps:
+        out += ["", "**Not proven**", "", *gaps]
+    return out
+
+
 _NOT_GIVEN: Any = object()
 _MAX_FINDINGS = 10
 
@@ -380,6 +444,8 @@ def decide(
                           f"(queue commit `{_short(group.get('requested_sha'))}`)."]
         if answer.get("status") == "none" and isinstance(answer.get("reason"), str):
             lines += ["", f"Platform reason: {_cell(answer['reason'])}"]
+        if receipts:
+            lines += [""] + render_proof(receipts)
         for receipt in receipts[:_MAX_RECEIPTS]:
             lines += [""] + render_receipt(receipt)
         if len(receipts) > _MAX_RECEIPTS:
@@ -397,4 +463,5 @@ def decide(
     )
 
 
-__all__ = ["HUMAN_CHANGE", "STATUS_FAIL", "STATUS_PASS", "GateResult", "decide", "render_findings", "render_receipt"]
+__all__ = ["HUMAN_CHANGE", "STATUS_FAIL", "STATUS_PASS", "GateResult", "decide", "render_findings", "render_proof",
+           "render_receipt"]

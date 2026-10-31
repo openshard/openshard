@@ -456,6 +456,38 @@ class TestCli:
         assert "#### Receipt rcpt\\_1" in summary.read_text(encoding="utf-8")
         assert output.read_text(encoding="utf-8") == "openshard_gate_status=pass\nopenshard_gate_verdict=verified\n"
 
+    @pytest.mark.parametrize("platform_status, exit_code", [("verified", 0), ("failed", 1)])
+    def test_the_pr_comment_never_changes_pass_or_fail(self, repo, monkeypatch, tmp_path, platform_status, exit_code):
+        import urllib.error
+        import urllib.request
+
+        head = _commit(repo, "change")
+        _serve(monkeypatch, [(200, _verdict(platform_status, sha=head, receipts=[{**FULL_RECEIPT}]))])
+        posted: list = []
+
+        def refuse(req, timeout):
+            posted.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 403, "Resource not accessible by integration", {}, None)
+
+        monkeypatch.setattr(urllib.request, "urlopen", refuse)
+        event = {"pull_request": {"number": 7, "base": {"sha": head, "repo": {"full_name": "o/r"}},
+                                  "head": {"sha": head, "repo": {"full_name": "o/r"}}}}
+        res = _gate(repo, monkeypatch, "--commit", head, "--github-pr-comment", event=event, tmp=tmp_path,
+                    extra_env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "o/r"})
+        assert res.exit_code == exit_code and res.stdout.startswith(f"Openshard gate: {'pass' if exit_code == 0 else 'fail'}")
+        assert posted == ["https://api.github.com/repos/o/r/issues/7/comments?per_page=100&page=1"]
+        assert "pull-requests: write" in res.stderr
+
+    def test_no_pr_comment_on_a_fork_or_outside_a_pull_request(self, repo, monkeypatch, tmp_path):
+        import urllib.request
+
+        head = _commit(repo, "change")
+        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("must not call GitHub"))
+        _serve(monkeypatch, [(200, _verdict("verified", sha=head, receipts=[{**FULL_RECEIPT}]))])
+        res = _gate(repo, monkeypatch, "--commit", head, "--github-pr-comment",
+                    extra_env={"GITHUB_TOKEN": "tok", "GITHUB_REPOSITORY": "o/r"})
+        assert res.exit_code == 0 and "not a pull request event" in res.stderr
+
     def test_failed_fails(self, repo, monkeypatch):
         head = _commit(repo, "change")
         _serve(monkeypatch, [(200, _verdict("failed", sha=head))])

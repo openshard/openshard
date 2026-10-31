@@ -163,6 +163,23 @@ def _platform_verdict(api: str, sha: str, env, *, wait_minutes: float, poll_seco
                        sleep=progress.sleep if progress else time.sleep)
 
 
+def _post_pr_comment(markdown: str, event: dict, env: dict) -> None:
+    """Write the summary to the pull request as one comment. A note on stderr when it cannot; never fails the gate."""
+    from openshard.ci import gate_comment
+
+    number = gate_comment.pr_number(event)
+    if number is None:
+        click.echo("note: not a pull request event, so no pull request comment was posted.", err=True)
+        return
+    if _is_fork(event):
+        click.echo("note: a fork's token is read-only, so no pull request comment was posted.", err=True)
+        return
+    _posted, message = gate_comment.upsert(
+        markdown, repo=env.get("GITHUB_REPOSITORY", ""), number=number, token=env.get("GITHUB_TOKEN", ""),
+        api=env.get("GITHUB_API_URL") or gate_comment.DEFAULT_API)
+    click.echo(f"note: {message}", err=True)
+
+
 @click.command("gate")
 @click.option("--commit", "commit_ref", required=True, metavar="SHA",
               help="The commit to gate: for a pull request, its head commit.")
@@ -181,8 +198,11 @@ def _platform_verdict(api: str, sha: str, env, *, wait_minutes: float, poll_seco
               help="Append the gate summary to $GITHUB_STEP_SUMMARY.")
 @click.option("--github-output", "github_output", is_flag=True, default=False,
               help="Write openshard_gate_status and openshard_gate_verdict to $GITHUB_OUTPUT.")
+@click.option("--github-pr-comment", "pr_comment", is_flag=True, default=False,
+              help="Also post the summary as one pull request comment, updated in place on every run "
+                   "(uses $GITHUB_TOKEN; the job needs `pull-requests: write`). Never changes pass or fail.")
 def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes: float, poll_seconds: float,
-            strict: bool, as_json: bool, step_summary: bool, github_output: bool) -> None:
+            strict: bool, as_json: bool, step_summary: bool, github_output: bool, pr_comment: bool) -> None:
     """Gate a merge on the commit's Receipt in the Openshard Platform: pass or fail, nothing in between.
 
     Pass when the Platform says the commit was verified, or when it has no
@@ -266,6 +286,8 @@ def ci_gate(commit_ref: str, base_ref: str | None, api: str | None, wait_minutes
         {"openshard_gate_status": result.status, "openshard_gate_verdict": result.verdict}
     )[0]:
         click.echo("warning: GITHUB_OUTPUT is not set; outputs not written.", err=True)
+    if pr_comment:
+        _post_pr_comment(result.summary_markdown, event, env)
 
     if as_json:
         click.echo(json.dumps(_machine_envelope(
