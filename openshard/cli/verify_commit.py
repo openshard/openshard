@@ -57,6 +57,7 @@ def _sync_receipt_now(root, entry: dict) -> None:
 def run_verify_commit(entry: dict, loc, receipt_label: str, commit_ref: str, *, approve: bool, unattended: bool,
                       dry_run: bool, timeout: float, as_json: bool, strict: bool) -> None:
     from openshard.cli.main import (
+        _echo_timeout_hint,
         _machine_envelope,
         _remote_request_delivery,
         _strict_verify_exit_code,
@@ -66,6 +67,8 @@ def run_verify_commit(entry: dict, loc, receipt_label: str, commit_ref: str, *, 
     from openshard.history.receipt_evidence import base_commit_value
     from openshard.verification import commit_run
     from openshard.verification.post_session import (
+        NO_CHECKS_DOCS_ONLY,
+        display_heading,
         display_line,
         result_detail,
         summarize_attestation,
@@ -100,9 +103,12 @@ def run_verify_commit(entry: dict, loc, receipt_label: str, commit_ref: str, *, 
         if as_json:
             click.echo(json.dumps(_machine_envelope(
                 "verify", "dry_run", receipt=receipt_label, commit=sha,
+                no_checks_applicable=run.no_checks_applicable,
                 planned=[{"name": c.name, "kind": c.kind, "origin": c.origin, "safety": c.safety,
                           "reason": c.reason, "why": c.why, "cwd": c.cwd} for c in run.planned],
             ), indent=2))
+        elif run.no_checks_applicable:
+            click.echo(f"  {NO_CHECKS_DOCS_ONLY}. Nothing would run; the commit would not be verified.")
         return
     _remote_request_delivery(loc.root)
     if unattended:
@@ -114,14 +120,19 @@ def run_verify_commit(entry: dict, loc, receipt_label: str, commit_ref: str, *, 
         click.echo(json.dumps(_machine_envelope(
             "verify", "ok", receipt=receipt_label, commit=sha, attestation_id=attestation.get("attestation_id"),
             checks=attestation.get("checks"), checkout=attestation.get("checkout"),
-            verification=summary["verification"], strict=strict, exit_code=strict_exit,
+            verification=summary["verification"], no_checks_applicable=run.no_checks_applicable,
+            strict=strict, exit_code=strict_exit,
         ), indent=2))
+    elif run.no_checks_applicable:
+        click.echo(f"\n{NO_CHECKS_DOCS_ONLY}. Nothing was run, so this commit is not verified.")
+        click.echo("Recorded in .openshard/verifications.jsonl (no checks run).")
     else:
         click.echo("")
         for result in run.results:
             detail = result_detail(result)
             click.echo(f"  {result.check.name}: {result.status}" + (f" ({detail})" if detail else ""))
-        click.echo(f"\nRe-verified: {display_line(summary)}")
+        click.echo(f"\n{display_heading(summary)}: {display_line(summary)}")
+        _echo_timeout_hint(run.results, timeout)
         click.echo("Recorded in .openshard/verifications.jsonl (evidence: directly_observed).")
     if strict_exit:
         sys.exit(strict_exit)

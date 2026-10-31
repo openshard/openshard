@@ -357,7 +357,7 @@ def _session_test_files(entry: dict) -> list[dict]:
     return [
         f for f in (files if isinstance(files, list) else [])
         if isinstance(f, dict) and isinstance(f.get("path"), str) and is_test_path(f["path"])
-        and f.get("attribution") not in ("pre_existing", "other_session")
+        and f.get("attribution") not in ("pre_existing", "other_session", "other_commit")
     ]
 
 

@@ -138,6 +138,7 @@ classified:
 | `git_observed` | the repository changed; no agent signal; actor not established (a human, another tool, or an agent without a success signal such as Codex) | yes, labelled as git-observed |
 | `pre_existing` | already dirty/untracked at session start and content unchanged since | **no** -- listed as excluded |
 | `other_session` | reported by another live agent session in the same repository | **no** -- listed as excluded |
+| `other_commit` | changed only in commits since the session's base whose `Openshard-Agent` (or `Claude-Session`) trailer names a different agent, not reported by this session, and unchanged in the working tree since; an unmarked commit stays `git_observed` | **no** -- listed as excluded |
 
 A pre-existing file that changed again during the session is
 `git_observed` with `pre_existing: true` (never hidden); a pre-existing
@@ -689,6 +690,23 @@ external agent completes
   found, timed out) or nothing was planned, `0` otherwise. The attestation is
   recorded in every case. A future release may make strict the default
   behind a deprecation notice; until then the default stays evidence-only.
+* **`--commit <sha>`** picks checks from what the commit changed
+  (`verification/change_checks.py`); a configured `verification_commands`
+  contract always wins. When every changed path is documentation, nothing
+  runs and the attestation is `not_run` with `no_checks_applicable`, shown
+  as `No checks needed: documentation-only change (nothing run; not
+  verified)`. It is never verified, passed or failed, has no
+  `artifact_sha`, and is sent to the Platform as `not_run`. Documentation
+  means: `*.md`, `*.rst`, `*.txt`, `*.adoc` and `.gitignore` at the
+  repository root; text and images under `docs/` or `doc/`; and README,
+  LICENSE, CHANGELOG and similar files anywhere. Paths under test, fixture,
+  `.github/` or dependency folders, `requirements*.txt`, config files and any
+  other nested Markdown (it may be package data) are code, so the normal
+  selection, and its whole-suite fallback, still applies.
+* **Timeouts.** A check stopped by `--timeout` (default 600 seconds) is
+  `unknown`, and the CLI says so plainly: `<check> timed out after 600s and
+  was stopped, so the outcome is unknown (not passed, not failed). To allow
+  longer, re-run with --timeout SECONDS`.
 * **Observed commands** are re-run only on request, only when the stored
   summary is complete (not redacted, not at the 100-character cap where it
   may be truncated), and only when classified safe. Shell chaining is
@@ -791,24 +809,36 @@ which is why the artifact commit must come from a clean tree OpenShard saw.
 attached. `openshard ci check` reads the current state, so a re-run or CI
 verdict counts there too (in both directions).
 
-### Post-session verification on session close (opt-in)
+### Post-session verification of uncommitted work (on by default)
+
+When a captured session changed files but made no commit, Openshard re-runs
+the checks that change calls for, by itself, and records the outcome beside
+the Receipt. It starts a detached `openshard verify --receipt <id> --snapshot --auto --json`
+at session end (or, for per-turn Receipts, once the Task settles):
+
+* git writes a snapshot of the checkout as it is: HEAD plus every tracked
+  change and every untracked file it does not ignore. A throwaway index is
+  used, so your staging area, branch and files are untouched and no ref is
+  created.
+* the checks are chosen as for a commit (your `verification_commands`, else
+  the checks the changed files call for) and only `safe` ones run, in an
+  isolated `git worktree` of the snapshot that is removed afterwards. Nothing
+  is approved.
+* the result is an OpenShard re-run (`directly_observed`, `openshard_executed`)
+  that is **not bound to a commit** (`artifact_not_bound`): nobody merges a
+  snapshot, so it never counts as commit verification for the merge gate.
+  Committed work is verified on its commit as before.
+* a session that changed no files starts nothing, and the same snapshot is
+  never run twice for the same Receipt.
 
 ```yaml
 # .openshard/config.yml
-post_session_verify: safe
-verification_commands:
-  - [python, -m, pytest, -q]
+post_session_verify: off    # no automatic re-run at all (commit verification included)
+post_session_verify: safe   # the older behaviour: run in the checkout itself
 ```
 
-With this set, the capture path starts a detached
-`openshard verify --receipt <id> --json` when a session's Receipt is
-finalised: on the session-end event, or when the stale sweep closes a
-session that never sent one. It never passes `--approve` or
-`--from-observed`, so only checks classed `safe` run; `needs_approval` and
-`blocked` checks are recorded as skipped. It is off by default, off for any
-value other than `safe`, and `OPENSHARD_NO_AUTO_VERIFY=1` disables it for a
-process. The hook does not wait for it and nothing is recorded if it cannot
-start.
+`OPENSHARD_NO_AUTO_VERIFY=1` turns it off for a process. The hook does not
+wait for it and nothing is recorded if it cannot start.
 
 ### Session finalisation
 
