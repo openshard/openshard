@@ -308,15 +308,17 @@ def _hook_commit(repo: Path, env: dict) -> str:
 
 def test_a_cloud_commit_gets_its_usage_trailers_from_the_hook(repo, tmp_path):
     _write(_transcript(tmp_path), [_msg("m1", "2026-02-01T00:00:00Z", o=42)])
-    text = _hook_commit(repo, {"CLAUDE_CODE_REMOTE": "true"})
+    # With commit capture off, the cloud commit carries its usage as trailers instead of its own Receipt.
+    off = {"CLAUDE_CODE_REMOTE": "true", "OPENSHARD_COMMIT_CAPTURE": "off"}
+    text = _hook_commit(repo, off)
     assert "Openshard-Model: claude-opus-5-5" in text and "Openshard-Tokens-Output: 42" in text
     _commit(repo)
-    again = _hook_commit(repo, {"CLAUDE_CODE_REMOTE": "true"})
+    again = _hook_commit(repo, off)
     assert "Openshard-Tokens" not in again  # claimed by the first commit: never counted twice
 
 
 @pytest.mark.parametrize("env", [
-    {},  # a laptop session: its hook-captured Receipt already holds the usage
+    {"OPENSHARD_COMMIT_CAPTURE": "off"},  # a laptop session: its hook-captured Receipt already holds the usage
     {"CLAUDE_CODE_REMOTE": "true", "OPENSHARD_COMMIT_TRAILERS": "off"},
     {"CLAUDE_CODE_REMOTE": "true", "GIT_REFLOG_ACTION": "rebase (pick)"},
 ])

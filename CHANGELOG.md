@@ -4,6 +4,21 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Added
+
+- `openshard import claude-commit [REV]` writes a full Receipt for one commit
+  from the Claude Code session that made it, for sessions that ran without
+  Openshard's hooks (Claude Code on the web, a cloud container): agent, model,
+  owner, prompts, tool calls, tokens and list-rate cost for the work since the
+  session's previous captured commit, and the commit, files and line counts
+  from git. Synced, it is the Receipt the commit's CI checks attach to.
+- It runs by itself: in a Claude Code session Openshard's hooks did not observe,
+  the commit hook marks the commit and, once it lands, records and syncs its
+  Receipt in the background (`OPENSHARD_COMMIT_CAPTURE=off` turns it off). The
+  Receipt also says how long the work took, from the first transcript record
+  to the commit. Such a commit gets no session-window usage trailers: its own
+  Receipt carries its usage.
+
 ### Changed
 
 - The package page links to openshard.dev, the docs and the changelog, and
