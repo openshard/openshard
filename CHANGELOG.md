@@ -6,6 +6,16 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- `openshard import claude-transcript` now records the whole usage of the
+  session: input, output, cache reads and cache writes (with the 1-hour share),
+  counted once per API message across the main and subagent transcripts and
+  split per model. Cost is estimated per model at official list rates
+  (`official_rate_estimate`) and stays unknown, never $0, when a model has no
+  list rate. A session idle for 30 minutes, or imported with `--ended`, is
+  closed with "session end was not observed" so `openshard sync now` sends it.
+- The test that compares the HTTP and inline capture paths no longer fails
+  about one run in eight: it ignores steering's wall-clock times, which can
+  land either side of a second between the two runs.
 - `openshard verify --commit` no longer runs the whole test suite for a
   documentation-only commit. It runs nothing and records "No checks needed:
   documentation-only change" (`not_run`, `no_checks_applicable`), which never

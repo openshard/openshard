@@ -399,10 +399,20 @@ _STABLE_EVENT_KEYS = ("event_type", "action", "status", "evidence", "target", "a
 _ENV_STEERING_KEYS = ("environment", "environment_source", "environment_not_recorded_reason")  # from agent_host
 
 
+def _without_times(value):
+    """Steering carries wall-clock stamps to the second ("at", "last_turn_end_at"); the two
+    paths run moments apart, so a second boundary between them is not a difference."""
+    if isinstance(value, dict):
+        return {k: _without_times(v) for k, v in value.items() if k != "at" and not k.endswith("_at")}
+    if isinstance(value, list):
+        return [_without_times(v) for v in value]
+    return value
+
+
 def _stable_view(entry: dict) -> dict:
     capture = dict(entry["capture"])
     if isinstance(capture.get("steering"), dict):
-        capture["steering"] = {k: v for k, v in capture["steering"].items() if k not in _ENV_STEERING_KEYS}
+        capture["steering"] = _without_times({k: v for k, v in capture["steering"].items() if k not in _ENV_STEERING_KEYS})
     return {
         "task": entry["task"],
         "executor": entry["executor"],

@@ -216,6 +216,8 @@ def _capture_buffer_open(root: Path, entry: dict) -> bool:
         capture = entry.get("capture")
         if not isinstance(capture, dict) or capture.get("session_end_observed") is True:
             return False
+        if capture.get("status") == "reconstructed":
+            return False  # a transcript reconstruction is never held by a capture buffer
         sid, agent = capture.get("session_id"), capture.get("agent")
         if not isinstance(sid, str) or not isinstance(agent, str):
             return False

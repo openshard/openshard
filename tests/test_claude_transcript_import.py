@@ -97,15 +97,18 @@ def test_reconstruction_keeps_counts_timestamps_and_usage_and_labels_itself(tmp_
     assert capture["tool_call_count"] == 4 and capture["tool_failure_count"] == 1
     assert capture["models_seen"] == ["claude-sonnet-5-5"] and capture["model_source"] == "transcript"
     assert capture["completeness"]["status"] == "partial"
-    for reason in (cti.REASON_RECONSTRUCTED, cti.REASON_NO_GIT, cti.REASON_NO_END, cti.REASON_NO_COST):
+    for reason in (cti.REASON_RECONSTRUCTED, cti.REASON_NO_GIT, cti.REASON_NO_COST):
         assert reason in capture["completeness"]["reasons"]
+    # Idle for weeks when imported: closed the honest way, end not observed.
+    assert {"kind": cti.REASON_NO_END}.items() <= capture["completeness"]["reasons"][2].items()
     # Usage is the provider's, counted once per message (m4 streamed twice, 6 messages).
     assert entry["prompt_tokens"] == 60 and entry["completion_tokens"] == 30
     assert entry["cache_read_tokens"] == 600 and entry["cache_creation_tokens"] == 120
     assert entry["tokens_provenance"] == "provider_reported"
     # Nothing invented.
     assert entry["git_branch"] is None and entry["git_head_commit_hash"] is None
-    assert "estimated_cost" not in entry and capture["cost_not_recorded_reason"] == cti.REASON_NO_COST
+    # Cache writes without their 5m/1h split cannot be priced: unknown, never a guess.
+    assert "estimated_cost" not in entry and capture["cost_not_recorded_reason"] == cti.COST_REASON_CACHE_TTL_UNKNOWN
     assert entry["verification"]["status"] == "unknown" and entry["verification_attempted"] is False
     assert capture["reconstructed"]["branches_reported"] == ["wt-branch"]
     assert capture["reconstructed"]["checkouts"] == ["platform", "plat-wt"]
