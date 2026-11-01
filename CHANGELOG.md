@@ -16,7 +16,8 @@ All notable changes to OpenShard are documented here.
   the commit hook marks the commit and, once it lands, records and syncs its
   Receipt in the background (`OPENSHARD_COMMIT_CAPTURE=off` turns it off). The
   Receipt also says how long the work took, from the first transcript record
-  to the commit.
+  to the commit. Such a commit gets no session-window usage trailers: its own
+  Receipt carries its usage.
 
 ### Changed
 

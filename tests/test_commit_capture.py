@@ -214,3 +214,19 @@ def test_the_commit_hook_marks_and_schedules_only_unobserved_sessions_with_a_tra
     # opted out, or no transcript for the session: nothing
     assert act.schedule_commit_capture(msg, repo, {**env, "OPENSHARD_COMMIT_CAPTURE": "off"}) is False
     assert act.schedule_commit_capture(msg, repo, {**env, "CLAUDE_CODE_SESSION_ID": "deadbeef-0000"}) is False
+
+
+def test_a_scheduled_capture_adds_no_usage_trailers_to_the_message(setup, monkeypatch) -> None:
+    import openshard.adapters.commit_usage_trailers as cut
+    from openshard.adapters import agent_commit_trailer as act
+
+    repo, transcript = setup
+    monkeypatch.setattr(cut, "_transcript_roots", lambda: [transcript.parent.parent])
+    monkeypatch.setattr(act, "_spawn", lambda argv, kwargs: None)
+    msg = repo / "MSG"
+    msg.write_text("Add the parser\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    act.run_git_hook([str(msg)], {"CLAUDE_CODE_SESSION_ID": SID, "CLAUDE_CODE_REMOTE": "true",
+                                  "PATH": __import__("os").environ["PATH"]})
+    text = msg.read_text()
+    assert "Openshard-Agent: Claude Code" in text and "Openshard-Tokens" not in text

@@ -523,9 +523,10 @@ def run_git_hook(argv: list[str], env: Mapping[str, str] | None = None) -> None:
     Openshard's hooks missed, record the commit's Receipt from its transcript once it lands. Never raises."""
     if argv and argv[0]:
         mark_commit_message(Path(argv[0]), None, env)
+        if schedule_commit_capture(Path(argv[0]), None, env):
+            return  # the commit's own Receipt carries its usage; no session-window trailers on top
         add_cloud_usage_trailers(Path(argv[0]), None, env)
         add_codex_usage_trailers(Path(argv[0]), None, env)
-        schedule_commit_capture(Path(argv[0]), None, env)
 
 
 # ---------------------------------------------------------------------------
