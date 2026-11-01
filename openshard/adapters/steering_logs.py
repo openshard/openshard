@@ -487,8 +487,10 @@ def scan_hermes(buf: dict) -> None:
     floor = max(window.timestamp() if window else 0.0, after if isinstance(after, int | float) else 0.0)
     kind_col = "display_kind" if "display_kind" in names else "NULL"
     meta_col = "display_metadata" if "display_metadata" in names else "NULL"
-    rows = _sqlite_rows(database, f"SELECT content, timestamp, {kind_col}, {meta_col} FROM messages "  # noqa: S608
-                                  "WHERE session_id = ? AND role = 'user' AND timestamp > ? ORDER BY timestamp",
+    id_col = "id" if "id" in names else "NULL"  # the row's own number: two rows can share a millisecond
+    rows = _sqlite_rows(database, f"SELECT content, timestamp, {kind_col}, {meta_col}, {id_col} "  # noqa: S608
+                                  "FROM messages WHERE session_id = ? AND role = 'user' AND timestamp > ? "
+                                  f"ORDER BY timestamp, {id_col}",
                         (session, floor))
     if rows is None:
         return
@@ -496,7 +498,7 @@ def scan_hermes(buf: dict) -> None:
     number = version[0][0] if version and version[0] and isinstance(version[0][0], int) else None
     _note_format(buf, f"{FORMAT_HERMES}/v{number}" if number is not None else f"{FORMAT_HERMES}/unversioned")
     latest = floor
-    for content, stamp, display_kind, metadata in rows:
+    for content, stamp, display_kind, metadata, row in rows:
         if not isinstance(stamp, int | float) or isinstance(stamp, bool):
             continue
         latest = max(latest, float(stamp))
@@ -506,11 +508,12 @@ def scan_hermes(buf: dict) -> None:
         at = _iso(float(stamp))
         if at is None:
             continue
-        st._interjection(buf, at, _hermes_text(content))
+        marks: dict[str, Any] = {}
+        if isinstance(row, int) and not isinstance(row, bool):
+            marks["log_row"] = row
         if queued:
-            for event in st._state(buf)["events"]:
-                if event.get("kind") == st.KIND_INTERJECTION and event.get("at") == at:
-                    event["queued"] = True
+            marks["queued"] = True  # this row only: a steer in the same millisecond was not queued
+        st._interjection(buf, at, _hermes_text(content), **marks)
     state["log"] = {"path": str(database), "offset": 0, "hermes_after": latest}
     _hermes_from_queue(buf)
 
