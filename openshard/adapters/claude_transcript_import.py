@@ -12,10 +12,19 @@ worked in, under these rules:
   carries ``evidence = imported_transcript``; ``capture.completeness`` lists
   what a reconstruction cannot know.
 * **Nothing is invented.** No git HEAD, diff, commits or verification (the
-  working tree has moved on); no cost (the transcript has none); the branch
-  the agent reported is kept as a report, never as an observation. Token
-  usage is the provider's own counts from the transcript (de-duplicated per
-  message, as the hook path counts them).
+  working tree has moved on); the branch the agent reported is kept as a
+  report, never as an observation. Token usage is the provider's own counts
+  from the transcript and its ``subagents/`` transcripts (input, output,
+  cache reads and cache writes with their 5m/1h split), counted once per API
+  message id, as the hook path counts them. The transcript holds no dollars:
+  cost is the hook path's per-model official list-rate estimate
+  (``official_rate_estimate``), and stays unknown -- never $0 -- when any
+  model has no list rate or the usage is incomplete.
+* **Ended only when it plainly has.** A transcript has no SessionEnd. A
+  reconstruction idle for ``IDLE_END_SECONDS`` (or imported with
+  ``ended=True``) is stamped ``session_end_not_observed`` -- the same honest
+  close as capture's idle sweep -- so it syncs; ``session_end_observed``
+  stays False and the record says which rule closed it.
 * **Nothing sensitive is stored.** The first prompt survives only as the
   hook path's scrubbed, bounded excerpt; commands go through the hook path's
   summariser; file paths are relativised to the repository and dropped when
@@ -33,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +56,16 @@ REASON_NO_COST = "transcript_has_no_cost"
 REASON_NO_USAGE = "transcript_has_no_usage"
 REASON_NO_GIT = "git_state_not_observed"
 REASON_NO_END = "session_end_not_observed"
+REASON_USAGE_INCOMPLETE = "transcript_usage_incomplete"
+# Why a list-rate estimate could not be made (the hook path's reasons where they exist).
+COST_REASON_NO_RATE = "no_official_rate_for_usage"
+COST_REASON_INCOMPLETE = "usage_incomplete"
+COST_REASON_SURCHARGED = "usage_billed_beyond_list_rates"
+COST_REASON_CACHE_TTL_UNKNOWN = "cache_write_duration_not_reported"  # 5m vs 1h rate unknown
+# A transcript idle this long when imported is treated as an ended session.
+IDLE_END_SECONDS = 30 * 60
+ENDED_BY_IDLE = "idle_threshold"
+ENDED_BY_OPERATOR = "operator_flag"
 _FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 _COMMAND_TOOLS = frozenset({"Bash", "PowerShell"})
 _MAX_LINE_BYTES = 4_000_000
@@ -322,7 +342,105 @@ def _events(entry: dict, facts: TranscriptFacts) -> list[dict]:
     return [e.to_dict() for e in events]
 
 
-def build_transcript_import_entry(facts: TranscriptFacts, *, repo_path: Path, run_index: int | None = None) -> dict:
+def _stamp_usage(entry: dict, usage: dict | None) -> bool:
+    """Write the transcript's token counts onto *entry* (totals, per-model rows, 5m/1h split). False when there are none."""
+    from openshard.adapters.claude_hooks import (
+        TOKENS_INCOMPLETE_FILES_CAPPED,
+        TOKENS_SOURCE_TRANSCRIPT,
+    )
+
+    capture = entry["capture"]
+    totals = usage.get("totals") if isinstance(usage, dict) else None
+    if usage is None or not isinstance(totals, dict) or not any(int(v or 0) for v in totals.values()):
+        capture["tokens_not_recorded_reason"] = REASON_NO_USAGE
+        return False
+    entry["prompt_tokens"] = int(totals.get("input") or 0)
+    entry["completion_tokens"] = int(totals.get("output") or 0)
+    entry["cache_creation_tokens"] = int(totals.get("cache_creation") or 0)
+    entry["cache_read_tokens"] = int(totals.get("cache_read") or 0)
+    entry["total_tokens"] = entry["prompt_tokens"] + entry["completion_tokens"]
+    entry["tokens_provenance"] = "provider_reported"
+    capture["tokens_source"] = TOKENS_SOURCE_TRANSCRIPT
+    capture["usage_messages"] = int(usage.get("messages") or 0)
+    capture["cache_creation_split"] = {ttl: int(totals.get(f"cache_creation_{ttl}") or 0) for ttl in ("5m", "1h", "unsplit")}
+    capture["usage_by_model"] = {m: dict(row) for m, row in (usage.get("by_model") or {}).items() if isinstance(row, dict)}
+    for model in capture["usage_by_model"]:
+        if model != "unknown":
+            _add_unique(capture["models_seen"], model)
+    capture["model_source"] = "transcript" if capture["models_seen"] else None
+    if not usage.get("complete", True):
+        capture["completeness"]["reasons"].append(REASON_USAGE_INCOMPLETE)
+        capture["tokens_incomplete_reason"] = usage.get("incomplete_reason") or TOKENS_INCOMPLETE_FILES_CAPPED
+    return True
+
+
+def _stamp_cost(entry: dict, usage: dict) -> None:
+    """Price the usage per model at official list rates (the hook path's pricing); unknown stays unknown."""
+    from openshard.adapters.claude_hooks import _transcript_cost
+    from openshard.models.pricing import COST_PROVENANCE_OFFICIAL_RATE
+
+    capture = entry["capture"]
+    surcharged = bool(usage.get("surcharged"))
+    for model, row in capture["usage_by_model"].items():
+        # The model's own estimate, or None (no list rate, unsplit cache writes, surcharged): never $0.
+        row["cost_usd"] = None if surcharged else _transcript_cost({"complete": True, "by_model": {model: row}})
+    total = _transcript_cost(usage)
+    if total is None:
+        capture["cost_not_recorded_reason"] = _cost_gap_reason(usage)
+        return
+    entry["estimated_cost"] = total
+    entry["cost_provenance"] = COST_PROVENANCE_OFFICIAL_RATE
+    entry["cost_is_estimate"] = True
+    capture.pop("cost_not_recorded_reason", None)
+    capture["completeness"]["reasons"].remove(REASON_NO_COST)
+
+
+def _cost_gap_reason(usage: dict) -> str:
+    if not usage.get("complete", True):
+        return COST_REASON_INCOMPLETE
+    if usage.get("surcharged"):
+        return COST_REASON_SURCHARGED
+    rows = (usage.get("by_model") or {}).values()
+    if any(isinstance(row, dict) and int(row.get("cache_creation_unsplit") or 0) for row in rows):
+        return COST_REASON_CACHE_TTL_UNKNOWN
+    return COST_REASON_NO_RATE
+
+
+def _stamp_end(entry: dict, ended_by: str | None) -> None:
+    """Close a reconstruction the way capture's idle sweep closes a session: end not observed, so it syncs."""
+    from openshard.history.capture_completeness import REASON_SESSION_END_NOT_OBSERVED, make_reason
+
+    if ended_by is None:
+        return
+    capture = entry["capture"]
+    why = ("marked ended by the operator (--ended)" if ended_by == ENDED_BY_OPERATOR
+           else f"transcript idle {IDLE_END_SECONDS // 60}+ minutes when reconstructed")
+    reasons = capture["completeness"]["reasons"]
+    reasons[reasons.index(REASON_NO_END)] = make_reason(
+        REASON_SESSION_END_NOT_OBSERVED, detail=f"session end was not observed; {why}",
+    )
+    capture["reconstructed"]["ended_by"] = ended_by
+    if ended_by == ENDED_BY_IDLE:
+        capture["reconstructed"]["idle_end_seconds"] = IDLE_END_SECONDS
+
+
+def ended_by_rule(facts: TranscriptFacts, *, ended: bool = False, now: datetime | None = None) -> str | None:
+    """``operator_flag`` with *ended*, ``idle_threshold`` when the last activity is old enough, else None."""
+    if ended:
+        return ENDED_BY_OPERATOR
+    try:
+        last = datetime.fromisoformat(str(facts.last_activity_at or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if last.tzinfo is None:
+        return None
+    current = now if now is not None else datetime.now(UTC)
+    return ENDED_BY_IDLE if (current - last).total_seconds() >= IDLE_END_SECONDS else None
+
+
+def build_transcript_import_entry(
+    facts: TranscriptFacts, *, repo_path: Path, run_index: int | None = None, ended_by: str | None = None,
+) -> dict:
     """A coerced, content-hash-stamped Receipt entry reconstructed from *facts*. Never reads the transcript again."""
     from openshard.adapters.claude_code_import import _sanitize_task
     from openshard.history.receipt_identity import RECEIPT_ID_FIELD
@@ -334,7 +452,7 @@ def build_transcript_import_entry(facts: TranscriptFacts, *, repo_path: Path, ru
     started = facts.started_at or ""
     files = _files_detail(facts)
     failures = sum(1 for use in facts.tool_uses if use.failed)
-    reasons = [REASON_RECONSTRUCTED, REASON_NO_GIT, REASON_NO_END, REASON_NO_COST]
+    reasons: list = [REASON_RECONSTRUCTED, REASON_NO_GIT, REASON_NO_END, REASON_NO_COST]
     if facts.usage is None:
         reasons.append(REASON_NO_USAGE)
     if facts.tool_uses_truncated:
@@ -350,8 +468,8 @@ def build_transcript_import_entry(facts: TranscriptFacts, *, repo_path: Path, ru
         "import_method": IMPORT_METHOD,
         "import_note": (
             "Reconstructed from the Claude Code transcript after its hook events were lost. "
-            "Tool calls, prompts and token usage are the transcript's; git state, cost and "
-            "verification were not observed."
+            "Tool calls, prompts and token usage are the transcript's; cost, when shown, is an "
+            "estimate at official list rates; git state and verification were not observed."
         ),
         "files_source": "transcript_reported",
         "verification_attempted": False,
@@ -401,19 +519,9 @@ def build_transcript_import_entry(facts: TranscriptFacts, *, repo_path: Path, ru
             },
         },
     }
-    usage = facts.usage
-    totals = (usage or {}).get("totals") if isinstance(usage, dict) else None
-    if isinstance(totals, dict) and sum(int(v) for v in totals.values()) > 0:
-        entry["prompt_tokens"] = int(totals.get("input", 0))
-        entry["completion_tokens"] = int(totals.get("output", 0))
-        entry["cache_creation_tokens"] = int(totals.get("cache_creation", 0))
-        entry["cache_read_tokens"] = int(totals.get("cache_read", 0))
-        entry["total_tokens"] = entry["prompt_tokens"] + entry["completion_tokens"]
-        entry["tokens_provenance"] = "provider_reported"
-        if usage is not None and not usage.get("complete", True):
-            entry["capture"]["completeness"]["reasons"].append("transcript_usage_incomplete")
-    else:
-        entry["capture"]["tokens_not_recorded_reason"] = REASON_NO_USAGE
+    if _stamp_usage(entry, facts.usage) and facts.usage is not None:
+        _stamp_cost(entry, facts.usage)
+    _stamp_end(entry, ended_by)
     try:
         from openshard.history.repo_identity import REPO_IDENTITY_FIELD, capture_repo_identity
 
@@ -475,8 +583,14 @@ class ImportReport:
         return out
 
 
-def import_transcript(path: Path, *, repo_path: Path, write: bool = False) -> ImportReport:
-    """Reconstruct the Receipt of *path* for *repo_path*; write it only with *write*. Never raises."""
+def import_transcript(
+    path: Path, *, repo_path: Path, write: bool = False, ended: bool = False, now: datetime | None = None,
+) -> ImportReport:
+    """Reconstruct the Receipt of *path* for *repo_path*; write it only with *write*. Never raises.
+
+    The session is closed (end not observed) when *ended*, or when its last
+    activity is ``IDLE_END_SECONDS`` before *now*; otherwise it stays open.
+    """
     facts = read_transcript(Path(path), repo_path=Path(repo_path))
     if facts is None:
         return ImportReport(status="not_a_transcript")
@@ -489,7 +603,9 @@ def import_transcript(path: Path, *, repo_path: Path, write: bool = False) -> Im
         run_index = sum(1 for _ in runs_path.open(encoding="utf-8")) if runs_path.exists() else 0
     except OSError:
         run_index = None
-    entry = build_transcript_import_entry(facts, repo_path=Path(repo_path), run_index=run_index)
+    entry = build_transcript_import_entry(
+        facts, repo_path=Path(repo_path), run_index=run_index, ended_by=ended_by_rule(facts, ended=ended, now=now),
+    )
     if not write:
         return ImportReport(status="dry_run", receipt_id=receipt_id, session_id=facts.session_id, entry=entry)
     from openshard.adapters.claude_code_import import write_import_entry
