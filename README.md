@@ -19,6 +19,10 @@
 </p>
 
 <p align="center">
+  <sub>An audit trail, merge gate and policy layer for AI coding agents, neutral across vendors.</sub>
+</p>
+
+<p align="center">
   <a href="https://pypi.org/project/openshard/"><img src="https://img.shields.io/pypi/v/openshard?label=PyPI" alt="PyPI"></a>
   <a href="https://github.com/openshard/openshard/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache 2.0"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB" alt="Python 3.11+">

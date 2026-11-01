@@ -4,6 +4,12 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Changed
+
+- The package page links to openshard.dev, the docs and the changelog, and
+  lists keywords for what Openshard is: an audit trail, merge gate and policy
+  layer for AI coding agents.
+
 ### Fixed
 
 - `openshard import claude-transcript` now records the whole usage of the
