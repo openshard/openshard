@@ -513,7 +513,7 @@ def schedule_commit_capture(msg_file: Path, repo: Path | None = None, env: Mappi
         _spawn([sys.executable, "-m", "openshard.cli.entrypoint", "hooks", "claude-commit-capture",
                 str(repo), old_head, session_id], kwargs)
         return True
-    except Exception:
+    except (OSError, ValueError, subprocess.SubprocessError, ImportError, RuntimeError):
         return False
 
 
