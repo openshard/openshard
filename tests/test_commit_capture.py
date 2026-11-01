@@ -107,6 +107,7 @@ def test_commit_receipt_carries_the_agents_work_and_gits_view_of_the_commit(setu
     assert [f["path"] for f in entry["files_detail"]] == ["parser.py"]
     assert entry["files_detail"][0]["attribution"] == "git_observed"
     assert (entry["lines_added"], entry["lines_removed"]) == (2, 0)
+    assert entry["duration_seconds"] == 60.0  # first record 10:00:00 to the commit at 10:01:00
     assert entry["verification"]["status"] != "passed"  # verification is the CI's to give, never claimed here
     stored = [e for e in load_history(repo / ".openshard" / "runs.jsonl", coerce=False) if e.get("receipt_id") == report.receipt_id]
     assert len(stored) == 1
@@ -169,3 +170,47 @@ def test_a_prompt_in_the_starting_second_is_inside_the_window(setup) -> None:
     _commit(repo, "parser.py", "a = 1\n", "2026-11-01T10:01:00Z", "Add the parser")
     entry = cc.capture_commit(repo, transcript=transcript, since="2026-11-01T09:59:59.500Z").entry
     assert entry["capture"]["prompt_count"] == 1
+
+
+def test_after_commit_records_the_commit_that_landed_on_the_old_head(setup) -> None:
+    repo, transcript = setup
+    old = _git(repo, "rev-parse", "HEAD")
+    sha = _commit(repo, "parser.py", "a = 1\n", "2026-11-01T10:01:00Z", "Add the parser")
+    import os
+    os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+    # the transcript is found by session id under ~/.claude/projects: point the roots at the fixture
+    import openshard.adapters.commit_usage_trailers as cut
+    original = cut._transcript_roots
+    cut._transcript_roots = lambda: [transcript.parent.parent]
+    try:
+        rid = cc.run_after_commit(repo, old, SID, wait=1, sync=False)
+    finally:
+        cut._transcript_roots = original
+    assert rid == cc.receipt_id_for_commit(SID, sha)
+    assert rid in (repo / ".openshard" / "runs.jsonl").read_text()
+
+
+def test_after_commit_records_nothing_when_the_commit_never_landed(setup) -> None:
+    repo, _ = setup
+    old = _git(repo, "rev-parse", "HEAD")
+    assert cc.run_after_commit(repo, old, SID, wait=0.6, sync=False) is None
+    assert not (repo / ".openshard" / "runs.jsonl").exists()
+
+
+def test_the_commit_hook_marks_and_schedules_only_unobserved_sessions_with_a_transcript(setup, monkeypatch) -> None:
+    import openshard.adapters.commit_usage_trailers as cut
+    from openshard.adapters import agent_commit_trailer as act
+
+    repo, transcript = setup
+    monkeypatch.setattr(cut, "_transcript_roots", lambda: [transcript.parent.parent])
+    started: list = []
+    monkeypatch.setattr(act, "_spawn", lambda argv, kwargs: started.append(argv))
+    msg = repo / "MSG"
+    msg.write_text("Add the parser\n", encoding="utf-8")
+    env = {"CLAUDE_CODE_SESSION_ID": SID, "PATH": __import__("os").environ["PATH"]}
+    assert act.schedule_commit_capture(msg, repo, env) is True
+    assert "Openshard-Agent: Claude Code" in msg.read_text()
+    assert started and started[0][-4:-2] == ["claude-commit-capture", str(repo)] and started[0][-1] == SID
+    # opted out, or no transcript for the session: nothing
+    assert act.schedule_commit_capture(msg, repo, {**env, "OPENSHARD_COMMIT_CAPTURE": "off"}) is False
+    assert act.schedule_commit_capture(msg, repo, {**env, "CLAUDE_CODE_SESSION_ID": "deadbeef-0000"}) is False

@@ -271,6 +271,15 @@ def build_commit_entry(facts: TranscriptFacts, commit: CommitFacts, *, repo_path
     entry["files_updated"] = len(commit.files) - entry["files_created"] - entry["files_deleted"]
     if commit.added is not None and commit.removed is not None:
         entry["lines_added"], entry["lines_removed"] = commit.added, commit.removed
+    # How long the work took: from the window's first transcript record to the commit (both observed times).
+    if facts.started_at:
+        try:
+            seconds = (_instant(commit.committed_at) - _instant(facts.started_at)).total_seconds()
+        except ValueError:
+            seconds = -1
+        if seconds >= 0:
+            entry["duration_seconds"] = round(seconds, 3)
+            capture["duration_source"] = "transcript_to_commit"
     capture["reconstructed"]["ended_by"] = ENDED_BY_COMMIT
     capture["reconstructed"]["window"] = {"since": since, "until": commit.committed_at, "commit": commit.sha}
     capture["ended_at"] = commit.committed_at
@@ -319,3 +328,63 @@ def capture_commit(repo_path: Path, *, rev: str = "HEAD", session_id: str | None
     write_import_entry(entry, repo_path)
     _save_until(sid, commit.committed_at, commit.sha)
     return CommitCaptureReport("written", rid, commit.sha, sid, window, entry)
+
+
+# ---------------------------------------------------------------------------
+# Automatic: the commit hook schedules this for sessions Openshard's hooks missed
+# ---------------------------------------------------------------------------
+
+DISABLE_ENV = "OPENSHARD_COMMIT_CAPTURE"
+WAIT_SECONDS = 120.0
+_POLL_SECONDS = 0.5
+
+
+def _log(line: str) -> None:
+    try:
+        path = _openshard_home() / "commit-capture" / "capture.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')} {line}\n")
+    except OSError:
+        pass
+
+
+def run_after_commit(repo: Path, old_head: str, session_id: str, *, wait: float = WAIT_SECONDS,
+                     sync: bool = True) -> str | None:
+    """Wait for the commit the hook saw being made to land, then record and sync its Receipt.
+
+    *old_head* is HEAD before the commit (``-`` for a repository's first). The
+    commit is the new HEAD whose parent is *old_head*; anything else (the
+    commit was aborted, HEAD moved some other way) records nothing. Returns
+    the receipt id, or None. Never raises.
+    """
+    import time
+
+    try:
+        repo = Path(repo)
+        deadline = time.monotonic() + wait
+        sha: str | None = None
+        while time.monotonic() < deadline:
+            head = _git(repo, "rev-parse", "--verify", "--quiet", "HEAD")
+            if head and head != old_head:
+                parent = _git(repo, "rev-parse", "--verify", "--quiet", f"{head}^")
+                if (old_head == "-" and not parent) or parent == old_head:
+                    sha = head
+                break
+            time.sleep(_POLL_SECONDS)
+        if sha is None:
+            _log(f"{repo}: no new commit on {old_head[:7]}; nothing recorded")
+            return None
+        report = capture_commit(repo, rev=sha, session_id=session_id, write=True)
+        _log(f"{repo}: {report.status} {report.receipt_id} for {sha[:7]}")
+        if sync and report.status == "written":
+            from openshard.sync.client import flush
+
+            result = flush(repo)
+            _log(f"{repo}: sync sent {getattr(result, 'sent', '?')} ({getattr(result, 'stopped', None) or 'ok'})")
+        return report.receipt_id
+    except CaptureUnavailable as exc:
+        _log(f"{repo}: not recorded: {exc}")
+    except Exception as exc:  # never let a background capture surface anywhere
+        _log(f"{repo}: capture failed: {type(exc).__name__}")
+    return None

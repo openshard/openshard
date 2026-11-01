@@ -469,13 +469,63 @@ def add_codex_usage_trailers(msg_file: Path, repo: Path | None = None, env: Mapp
         return False
 
 
+def _spawn(argv: list[str], kwargs: dict) -> None:
+    subprocess.Popen(argv, **kwargs)  # noqa: S603 - fixed argv: our own interpreter and module
+
+
+def schedule_commit_capture(msg_file: Path, repo: Path | None = None, env: Mapping[str, str] | None = None) -> bool:
+    """In a Claude Code session Openshard's hooks did not observe, record this commit's Receipt from the
+    session's transcript once the commit lands (``adapters/commit_capture.py``); True when scheduled.
+
+    The transcript is the evidence: the commit is marked with ``Openshard-Agent`` only when the session's
+    own transcript exists on this machine, and the capture runs detached so the commit is never slowed.
+    Opt out with ``OPENSHARD_COMMIT_CAPTURE=off`` (or the commit trailer opt-out). Never raises.
+    """
+    env = os.environ if env is None else env
+    repo = repo if repo is not None else Path.cwd()
+    try:
+        session_id = str(env.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+        if not _SESSION_RE.match(session_id) or str(env.get("OPENSHARD_COMMIT_CAPTURE") or "").strip().lower() in _FALSE:
+            return False
+        if opted_out(repo, env) or _replaying(repo, env) or observed_session(repo, env) is not None:
+            return False
+        from openshard.adapters.commit_usage_trailers import UsageUnavailable, session_transcript
+
+        try:
+            session_transcript(session_id, None)
+        except UsageUnavailable:
+            return False
+        if not _TRAILER_RE.search(msg_file.read_text(encoding="utf-8", errors="replace")):
+            subprocess.run(
+                ["git", "interpret-trailers", "--in-place", "--if-exists", "doNothing", "--trailer",
+                 f"{TRAILER_KEY}: Claude Code", str(msg_file)],
+                cwd=str(repo), capture_output=True, text=True, timeout=10,
+            )
+        old_head = (run_git(repo, ["rev-parse", "--verify", "--quiet", "HEAD"]) or "").strip() or "-"
+        import sys
+
+        kwargs: dict = {"cwd": str(repo), "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                        "stderr": subprocess.DEVNULL, "env": dict(env)}
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            kwargs["start_new_session"] = True
+        _spawn([sys.executable, "-m", "openshard.cli.entrypoint", "hooks", "claude-commit-capture",
+                str(repo), old_head, session_id], kwargs)
+        return True
+    except Exception:
+        return False
+
+
 def run_git_hook(argv: list[str], env: Mapping[str, str] | None = None) -> None:
     """``openshard hooks git-commit-msg <file> [source] [sha]``: mark the message if the evidence holds,
-    and in a cloud session or an uncaptured Codex thread add its usage trailers. Never raises."""
+    in a cloud session or an uncaptured Codex thread add its usage trailers, and in a Claude Code session
+    Openshard's hooks missed, record the commit's Receipt from its transcript once it lands. Never raises."""
     if argv and argv[0]:
         mark_commit_message(Path(argv[0]), None, env)
         add_cloud_usage_trailers(Path(argv[0]), None, env)
         add_codex_usage_trailers(Path(argv[0]), None, env)
+        schedule_commit_capture(Path(argv[0]), None, env)
 
 
 # ---------------------------------------------------------------------------

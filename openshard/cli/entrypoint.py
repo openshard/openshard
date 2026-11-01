@@ -267,6 +267,18 @@ def _try_git_hook(argv: list[str]) -> bool:
     return True
 
 
+def _try_commit_capture(argv: list[str]) -> bool:
+    """``hooks claude-commit-capture <repo> <old head> <session>``: the detached step the commit hook starts."""
+    if argv[:2] != ["hooks", "claude-commit-capture"] or len(argv) != 5:
+        return False
+    from pathlib import Path
+
+    from openshard.adapters.commit_capture import run_after_commit
+
+    run_after_commit(Path(argv[2]), argv[3], argv[4])
+    return True
+
+
 def main() -> None:
     _harden_stdio_encoding()
     if sys.argv[1:] == ["--version"]:
@@ -276,7 +288,7 @@ def main() -> None:
 
         sys.stdout.write(f"openshard, version {__version__}\n")
         return
-    if _try_fast_path(sys.argv[1:]) or _try_git_hook(sys.argv[1:]):
+    if _try_fast_path(sys.argv[1:]) or _try_git_hook(sys.argv[1:]) or _try_commit_capture(sys.argv[1:]):
         return
     from openshard.cli.main import cli
 
