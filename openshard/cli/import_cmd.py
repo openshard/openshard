@@ -212,3 +212,54 @@ def _transcript_session_line(capture: dict) -> str:
     return "may still be running (active in the last 30 minutes; pass --ended once it has finished)"
 
 
+
+
+@import_group.command("claude-commit")
+@click.argument("rev", required=False, default="HEAD")
+@click.option("--transcript", type=click.Path(path_type=Path, dir_okay=False), default=None,
+              help="The committing agent's transcript (default: found from $CLAUDE_CODE_SESSION_ID).")
+@click.option("--session", "session_id", default=None, help="Claude Code session id (default: $CLAUDE_CODE_SESSION_ID).")
+@click.option("--since", default=None, metavar="COMMIT|TIME",
+              help="Start of the work (default: where the session's previous captured commit ended).")
+@click.option("--repo", "repo_path", type=click.Path(exists=True, file_okay=False), default=None,
+              help="Repository the commit is in (default: current directory).")
+@click.option("--write", is_flag=True, default=False, help="Record the Receipt; the default is a dry run.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def import_claude_commit(rev: str, transcript: Path | None, session_id: str | None, since: str | None,
+                         repo_path: str | None, write: bool, as_json: bool) -> None:
+    """A Receipt for one commit, rebuilt from the Claude Code session that made it.
+
+    For sessions that ran without Openshard's hooks (Claude Code on the web,
+    a cloud container): the agent, model, owner, prompts, tool calls, tokens
+    and their list-rate cost come from the transcript for the work since the
+    session's previous captured commit; the commit, its files and line counts
+    from git. Synced, it is the Receipt the commit's CI checks attach to.
+    """
+    from openshard.adapters.commit_capture import CaptureUnavailable, capture_commit
+
+    cwd = Path(repo_path) if repo_path else Path.cwd()
+    try:
+        report = capture_commit(cwd, rev=rev, session_id=session_id, transcript=transcript, since=since, write=write)
+    except CaptureUnavailable as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    if report.status == "already_recorded":
+        click.echo(f"Commit {report.commit[:7]} already has its Receipt here ({report.receipt_id}). Nothing written.")
+        return
+    entry = report.entry or {}
+    capture = entry.get("capture") or {}
+    click.echo(f"{'Wrote' if write else 'Would write'} Receipt {report.receipt_id} for commit {report.commit[:7]} "
+               f"(session {report.session_id}).")
+    click.echo(f"  task: {entry.get('task_title')}")
+    click.echo(f"  owner: {entry.get('owner') or 'not recorded'}  model: {entry.get('execution_model')}  "
+               f"prompts: {capture.get('prompt_count')}  tool calls: {capture.get('tool_call_count')} "
+               f"({capture.get('tool_failure_count')} failed)")
+    for line in _transcript_usage_lines(entry):
+        click.echo(line)
+    click.echo(f"  files: {len(entry.get('files_detail') or [])}  lines: +{entry.get('lines_added')} "
+               f"-{entry.get('lines_removed')}  window: {report.window.get('since') or 'session start'} to "
+               f"{report.window.get('until')}")
+    if not write:
+        click.echo("Dry run: re-run with --write to record it, then `openshard sync now`.")
