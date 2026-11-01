@@ -349,11 +349,13 @@ def _add(buf: dict, event: dict) -> bool:
 
     Hook events are never de-duplicated here (the hook path's own ``dedup_id``
     does that, and two answers in one second are two answers); a log line can
-    be read twice when a rebuilt buffer starts the log again from the top.
+    be read twice when a rebuilt buffer starts the log again from the top. A
+    log that numbers its rows (``log_row``) tells two of them apart even when
+    they share a stamp: two messages written in one millisecond are two.
     """
     state = _state(buf)
     if event["source"] == SOURCE_TRANSCRIPT:
-        same = ("kind", "source", "at", "decision")
+        same = ("kind", "source", "at", "decision", "log_row")
         if any(all(seen.get(k) == event.get(k) for k in same) for seen in state["events"]):
             return False
     if len(state["events"]) >= _MAX_EVENTS:
@@ -1091,10 +1093,11 @@ def _codex_rejection(buf: dict, payload: Mapping[str, Any], stamp: object, windo
                         {"steering_kind": KIND_PERMISSION, "decision": "deny"}, at, "agent_reported")
 
 
-def _interjection(buf: dict, at: str, text: str | None) -> None:
+def _interjection(buf: dict, at: str, text: str | None, **marks: Any) -> None:
+    """One message sent mid-turn, read from a log. *marks* (``log_row``, ``queued``) stay local to this machine."""
     facts = prompt_facts(text)  # classified here, on this machine; the text goes no further
     event: dict[str, Any] = {"at": at, "turn_index": _turn_index_at(buf, at), "kind": KIND_INTERJECTION,
-                             "after": _after_activity(buf, at), "source": SOURCE_TRANSCRIPT}
+                             "after": _after_activity(buf, at), "source": SOURCE_TRANSCRIPT, **marks}
     if facts is not None:
         event.update(intent=facts["intent"], intent_confidence=facts["confidence"], intent_rule=facts["rule"],
                      prompt_chars=facts["chars"])

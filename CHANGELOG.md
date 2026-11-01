@@ -6,6 +6,10 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- Hermes steering: two messages Hermes wrote to `state.db` in the same
+  millisecond (a steer and a queued message, say) are now two interjections.
+  One was dropped as a repeat of the other, and the steer could be marked as
+  queued.
 - `openshard verify --commit` no longer runs the whole test suite for a
   documentation-only commit. It runs nothing and records "No checks needed:
   documentation-only change" (`not_run`, `no_checks_applicable`), which never

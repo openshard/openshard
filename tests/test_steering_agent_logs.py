@@ -336,14 +336,17 @@ def _hermes_db(tmp_path: Path, monkeypatch) -> Path:
 
 
 def _hermes_row(path: Path, role: str, content: str, *, kind: str | None = None, meta: dict | None = None,
-                active: int = 1, session: str = SID) -> None:
+                active: int = 1, session: str = SID, at: float | None = None) -> None:
     with sqlite3.connect(path) as db:
         db.execute("INSERT INTO messages (session_id, role, content, timestamp, display_kind, display_metadata, "
                    "active) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                   (session, role, content, time.time(), kind, json.dumps(meta) if meta else None, active))
+                   (session, role, content, time.time() if at is None else at, kind,
+                    json.dumps(meta) if meta else None, active))
 
 
-def _hermes_session(repo: Path, db: Path) -> None:
+def _hermes_session(repo: Path, db: Path, *, one_millisecond: bool = False) -> None:
+    """A steered turn, then the queued message delivered as the next. *one_millisecond*: Hermes wrote the
+    steer and the queued row with the same stamp (a fast disk does), which must still be two messages."""
     (repo / ".openshard").mkdir(exist_ok=True)
 
     def hook(event: str, **extra):
@@ -355,10 +358,11 @@ def _hermes_session(repo: Path, db: Path) -> None:
     hook("pre_llm_call", user_message="deploy the staging stack", model="m")
     _wait_next_second()
     _hermes_row(db, "assistant", "running terraform")
+    shared = time.time() if one_millisecond else None
     _hermes_row(db, "user", "[OUT-OF-BAND USER MESSAGE — sent while you were working]\n"
                             f"actually use the blue cluster {PHRASES['hermes']}\n[/OUT-OF-BAND USER MESSAGE]",
-                kind="steer")
-    _hermes_row(db, "user", "also run the smoke tests", meta={"_queued_prompt": True}, active=0)
+                kind="steer", at=shared)
+    _hermes_row(db, "user", "also run the smoke tests", meta={"_queued_prompt": True}, active=0, at=shared)
     _hermes_row(db, "user", f"another session's steer {PHRASES['hermes']}", kind="steer", session="other")
     hook("on_session_end", completed=True, interrupted=False)
     _wait_next_second()
@@ -368,11 +372,15 @@ def _hermes_session(repo: Path, db: Path) -> None:
 
 
 class TestHermes:
-    def test_steered_and_queued_messages_from_state_db_are_interjections_counted_once(self, repo, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("one_millisecond", [False, True], ids=["apart", "same_millisecond"])
+    def test_steered_and_queued_messages_from_state_db_are_interjections_counted_once(self, repo, tmp_path, monkeypatch,
+                                                                                      one_millisecond):
         db = _hermes_db(tmp_path, monkeypatch)
-        _hermes_session(repo, db)
+        _hermes_session(repo, db, one_millisecond=one_millisecond)
         (entry,) = _entries(repo)
         assert _kinds(entry) == ["initial_prompt", "interjection", "interjection", "follow_up"]
+        raw = [e for e in entry["capture"]["steering"]["events"] if e["kind"] == "interjection"]
+        assert [e.get("queued") for e in raw] == [None, True]  # only the queued row, not a steer sharing its stamp
         steer, queued = [e for e in _block(entry)["events"] if e["kind"] == "interjection"]
         assert (steer["intent"], steer["source"]) == ("redirect", "transcript")
         assert queued["intent"] == "new_task"
