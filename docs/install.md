@@ -138,6 +138,34 @@ Or run the TUI:
 openshard tui
 ```
 
+## Capture every repository at once (Claude Code)
+
+To have every Claude Code session get Receipts, in whichever repository it
+works in, with no per-repository setup, install once for your user account:
+
+```sh
+openshard capture install claude --global
+openshard login        # once, so Receipts from every repository reach the Platform
+```
+
+This writes Openshard's hooks into Claude Code's user settings
+(`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`), which
+Claude Code loads for every session wherever it starts. Your other settings
+and hooks are left as they were. Restart open Claude Code sessions to pick it
+up. What it records, and what it leaves alone:
+
+| Where the session starts | What happens |
+| --- | --- |
+| Inside any git repository, set up or not | Receipts are recorded in that repository's `.openshard/`. |
+| A repository with its own Openshard hooks (`openshard setup`, `setup --repo`) | Its own hooks capture it; the user-level hook stands aside, so nothing is recorded twice. If those hooks cannot find `openshard`, the user-level hook captures instead. |
+| A folder that is not a git repository (including a folder that holds several repositories) | Nothing is recorded and no `.openshard/` is created. Start the session inside the repository to capture it. |
+| Your home directory | Never captured, even if it is a git repository. |
+
+`openshard capture uninstall claude --global` removes only these hooks;
+recorded history is never deleted. Cloud sessions (Claude Code on the web)
+do not read your computer's user settings: see
+[claude-cloud-prelaunch.md](claude-cloud-prelaunch.md).
+
 ## Upgrade
 
 ```sh

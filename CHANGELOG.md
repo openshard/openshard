@@ -4,6 +4,15 @@ All notable changes to OpenShard are documented here.
 
 ## Unreleased
 
+### Added
+
+- `openshard capture install claude --global` turns on Claude Code capture for
+  every git repository at once, with no per-repository setup: it writes
+  Openshard's hooks into Claude Code's user settings. Repositories with their
+  own Openshard hooks keep using them, so nothing is recorded twice; a session
+  in a folder that is not a git repository records nothing. `capture
+  uninstall claude --global` removes only these hooks.
+
 ### Changed
 
 - The package page links to openshard.dev, the docs and the changelog, and

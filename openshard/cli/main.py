@@ -3286,7 +3286,15 @@ def hooks_group() -> None:
     default=None,
     help="Hook event name to assume when the payload carries no hook_event_name.",
 )
-def hooks_claude(event_override: str | None) -> None:
+@click.option(
+    "--scope",
+    type=click.Choice(["repo", "user"]),
+    default="repo",
+    show_default=True,
+    help="user: the hook comes from Claude Code's user settings (`capture install claude --global`); "
+         "events outside a git repository, or in a repository with its own Openshard hooks, are not delivered.",
+)
+def hooks_claude(event_override: str | None, scope: str) -> None:
     """Claude Code hook entrypoint: read one hook payload (JSON) from stdin and record it.
 
     Observational only. Never prompts, never blocks Claude Code, never
@@ -3295,6 +3303,13 @@ def hooks_claude(event_override: str | None) -> None:
     Evidence lands in this repository's .openshard/runs.jsonl as normal
     Shard records readable via `openshard last`, `openshard mcp serve`, etc.
     """
+    if scope == "user":
+        from openshard.adapters.claude_user_hooks import run_user_scope_hook
+
+        outcome = run_user_scope_hook(sys.stdin, env=os.environ, event_override=event_override)
+        if os.environ.get("OPENSHARD_HOOK_DEBUG"):
+            click.echo(f"openshard: user-level hook: {outcome}", err=True)
+        return
     from openshard.adapters.claude_capture_client import run_hook_via_service
 
     run_hook_via_service(sys.stdin, env=os.environ, event_override=event_override)
@@ -3674,8 +3689,12 @@ def _render_agent_result(result, *, verb: str) -> None:
 @click.option("--learn", "learn", is_flag=True, default=False,
               help="claude/codex: also install the hosted prompt-learning hook (`openshard learn hook <agent> --hosted`), "
                    "so each prompt receives bounded verified check history for this repository before the agent starts.")
+@click.option("--global", "global_scope", is_flag=True, default=False,
+              help="claude only: install once in Claude Code's user settings, so every git repository Claude Code "
+                   "works in is captured with no per-repository setup.")
 def capture_install(
     agent: str, repo_path: Path | None, as_json: bool, defer_service: bool, workspace: Path | None, learn: bool,
+    global_scope: bool,
 ) -> None:
     """Configure passive capture without requiring the agent CLI on PATH.
 
@@ -3710,6 +3729,16 @@ def capture_install(
 
     if learn and agent.lower() not in ("claude", "codex"):
         raise click.ClickException("--learn is supported for claude and codex only.")
+
+    if global_scope:
+        if agent.lower() != "claude":
+            raise click.ClickException("--global is supported for claude only.")
+        if workspace is not None or repo_path is not None or learn:
+            raise click.ClickException("--global cannot be combined with --workspace, --repo-path or --learn.")
+        from openshard.cli.capture_global import run as capture_global
+
+        capture_global(install=True, as_json=as_json)
+        return
 
     if workspace is not None:
         if agent.lower() != "claude":
@@ -3799,7 +3828,9 @@ def _render_hosted_learning(learning: dict | None) -> None:
     help="Repository to remove the configuration from (default: current directory).",
 )
 @click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
-def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool) -> None:
+@click.option("--global", "global_scope", is_flag=True, default=False,
+              help="claude only: remove the hooks `capture install claude --global` put in Claude Code's user settings.")
+def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool, global_scope: bool) -> None:
     """Remove OpenShard's Claude, Codex, OpenCode, Cursor, Antigravity, Hermes or Grok Build capture integration.
 
     Only OpenShard's own entries/files are removed; unrelated hooks, plugins
@@ -3811,6 +3842,15 @@ def capture_uninstall(agent: str, repo_path: Path | None, as_json: bool) -> None
     from openshard.adapters.agent_setup import uninstall_agent
     from openshard.adapters.claude_mcp_install import find_repo_root
 
+    if global_scope:
+        if agent.lower() != "claude":
+            raise click.ClickException("--global is supported for claude only.")
+        if repo_path is not None:
+            raise click.ClickException("--global cannot be combined with --repo-path.")
+        from openshard.cli.capture_global import run as capture_global
+
+        capture_global(install=False, as_json=as_json)
+        return
     root = find_repo_root(repo_path)
     if root is None and agent.lower() != "hermes":
         raise click.ClickException("Not inside a git repository. Run this from within a repository.")
