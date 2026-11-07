@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from openshard.verification import dependency_age as da
 
@@ -76,8 +76,10 @@ def test_the_finding_counts_recent_and_unknown_packages(monkeypatch):
 
     files = [pf.ChangedFile(path="requirements.txt", status="M", added=2, removed=0)]
     texts = {("base", "requirements.txt"): "click\n", ("head", "requirements.txt"): "click\nnewpkg\nmystery\n"}
+    # added_dependencies uses the real clock, so "recent" must be relative to now, not a fixed date.
+    two_days_ago = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     monkeypatch.setattr(da, "fetch_json",
-                        lambda url, timeout=5.0: _pypi("2026-10-21T00:00:00Z") if "newpkg" in url else None)
+                        lambda url, timeout=5.0: _pypi(two_days_ago) if "newpkg" in url else None)
     finding = pf.added_dependencies(files, lambda rev, path: texts.get((rev, path)), "base", "head",
                                     registry_lookup=True)
     assert finding is not None

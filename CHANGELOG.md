@@ -12,6 +12,9 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- The test for the "recent dependency" finding no longer fails once its
+  hard-coded package date is more than 14 days old; the date is now relative
+  to today.
 - `openshard import claude-transcript` now records the whole usage of the
   session: input, output, cache reads and cache writes (with the 1-hour share),
   counted once per API message across the main and subagent transcripts and
