@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from openshard.analysis.repo import RepoFacts
@@ -122,6 +123,22 @@ def _make_manager_mock():
     m.get_inventory.return_value = inv
     m.providers = {"openrouter": MagicMock()}
     return m
+
+
+@pytest.fixture(autouse=True)
+def _no_real_worktrees(tmp_path, monkeypatch):
+    """Keep every test in this file off the real repository.
+
+    The pipeline calls create_run_sandbox(Path.cwd(), ...). Without this, each
+    pipeline test left a real ``osn/run-*`` branch and git worktree in whatever
+    repository the tests were run from (45 per run).
+    """
+    from openshard.native.context import NativeSandboxMeta
+
+    meta = NativeSandboxMeta(sandbox_enabled=True, sandbox_type="temp", fallback_reason="test")
+    monkeypatch.setattr(
+        "openshard.native.sandbox.create_run_sandbox", lambda repo_root, run_id: (tmp_path, meta)
+    )
 
 
 class TestNativeRunMeta(unittest.TestCase):
