@@ -12,6 +12,9 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- Running the test suite no longer leaves 45 `osn/run-*` branches and git
+  worktrees in the repository it is run from: `tests/test_native_executor.py`
+  now gives every test a temporary sandbox instead of creating a real one.
 - The test for the "recent dependency" finding no longer fails once its
   hard-coded package date is more than 14 days old; the date is now relative
   to today.
