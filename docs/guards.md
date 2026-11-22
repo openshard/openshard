@@ -45,6 +45,21 @@ check:
 - `openshard guard list` shows the guards, and any file that is not a valid
   guard and why.
 
+## Finding corrections
+
+```
+openshard guard suggest
+```
+
+lists recent commits where a person changed or removed lines an agent commit
+wrote shortly before (14 days by default). Each is a candidate guard: the
+agent's commit is the `--bad` side and the correction the `--good` side of
+`guard qualify`. Agent commits are the ones marked in git: an
+`Openshard-Agent` trailer (observed by Openshard), or a `Claude-Session` or
+agent `Co-Authored-By` trailer (declared by the agent). Any other commit is
+treated as a person's, so a squash merge that drops an agent's trailers shows
+up as a correction; check each one before writing a guard.
+
 ## Proving a guard works
 
 A guard that passes on the code it was written against proves nothing. Before
@@ -98,7 +113,6 @@ committed; `openshard guard list` says so. Use these lines instead:
 
 ## Not yet
 
-- `openshard guard suggest` and `guard draft`: finding corrections and
-  drafting guards from them.
+- `openshard guard draft`: drafting the guard's test from a correction.
 - Per-guard timeouts (`check.timeout_s` is read and stored but not enforced
   yet; the run's `--timeout` applies).

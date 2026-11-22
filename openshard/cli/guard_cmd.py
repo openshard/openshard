@@ -226,3 +226,39 @@ def guard_qualify(guard_id: str, bad_ref: str, good_ref: str, runs: int, activat
         elif result.verdict != COULD_NOT_RUN:
             click.echo(f"Result written to {guard.source_path}.")
     sys.exit(0 if result.verdict == QUALIFIED else 2 if result.verdict == COULD_NOT_RUN else 1)
+
+
+@guard_group.command("suggest")
+@click.option("--scan", default=150, show_default=True, type=click.IntRange(1, 2000),
+              help="How many recent commits (first parent) to read.")
+@click.option("--window-days", default=14.0, show_default=True, type=click.FloatRange(min=0.1),
+              help="How long after an agent commit a person's change still counts as a correction.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def guard_suggest(scan: int, window_days: float, as_json: bool) -> None:
+    """List recent corrections: a person's commit that changed lines an agent commit wrote.
+
+    Each one is a candidate guard. Agent commits are the ones marked in git
+    (Openshard-Agent, Claude-Session, or an agent's Co-Authored-By). Reads git
+    only; records nothing.
+    """
+    from openshard.guards.suggest import find_corrections
+
+    root = _repo_root()
+    found = find_corrections(root, scan=scan, window_days=window_days)
+    if as_json:
+        click.echo(json.dumps({"schema": "openshard.guard_suggest.v1",
+                               "corrections": [c.to_dict() for c in found]}, indent=2))
+        return
+    if not found:
+        click.echo(f"No corrections found in the last {scan} commits (a person's commit changing lines an "
+                   f"agent commit wrote within {window_days:g} days).")
+        return
+    click.echo(f"{len(found)} correction(s) that could become guards:\n")
+    for c in found:
+        click.echo(f"  {c.good[:12]}  {c.subject}")
+        click.echo(f"      fixed {c.lines_changed} line(s) from {c.agent} commit {c.bad[:12]} "
+                   f"({c.evidence}), {c.days_after:.1f} days later")
+        click.echo(f"      files: {', '.join(c.files[:5])}" + (" ..." if len(c.files) > 5 else ""))
+    click.echo("\nTo turn one into a guard: write a test that fails on the agent's version, add "
+               ".openshard/guards/<id>.yml, then\n  openshard guard qualify <id> --bad <agent commit> "
+               "--good <correction> --activate")
