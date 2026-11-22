@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC
 from pathlib import Path, PurePosixPath
 
 import click
@@ -161,3 +162,67 @@ def guard_run(guard_ids: tuple[str, ...], base_ref: str, run_all: bool, approve:
         sys.exit(1)
     if not_run:
         sys.exit(2)
+
+
+@guard_group.command("qualify")
+@click.argument("guard_id")
+@click.option("--bad", "bad_ref", required=True, metavar="REF",
+              help="The commit with the mistake (usually the agent's commit). The guard must fail here.")
+@click.option("--good", "good_ref", required=True, metavar="REF",
+              help="The commit with the correction. The guard must pass here.")
+@click.option("--runs", default=3, show_default=True, type=click.IntRange(1, 10),
+              help="Times it must pass on the working tree, to catch a flaky guard.")
+@click.option("--activate", is_flag=True, default=False,
+              help="When qualified, also set 'status: active' in the guard file.")
+@click.option("--approve", is_flag=True, default=False, help="Also run a guard command that needs approval.")
+@click.option("--timeout", default=600.0, show_default=True, type=click.FloatRange(min=1.0),
+              help="Seconds before one run is stopped (its outcome is then unknown).")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Machine-readable output.")
+def guard_qualify(guard_id: str, bad_ref: str, good_ref: str, runs: int, activate: bool, approve: bool,
+                  timeout: float, as_json: bool) -> None:
+    """Prove a guard catches the mistake: fails on --bad, passes on --good, stable on the working tree.
+
+    Writes the result into the guard file's 'qualification' block (commit it
+    with the guard). Exit 0 when qualified, 1 when it is not, 2 when it could
+    not run.
+    """
+    from datetime import datetime
+
+    from openshard.cli.gate_cmd import _resolve
+    from openshard.guards.model import load_guards
+    from openshard.guards.qualify import (
+        COULD_NOT_RUN,
+        QUALIFIED,
+        qualify_guard,
+        write_qualification,
+    )
+
+    root = _repo_root()
+    guard = load_guards(root).by_id().get(guard_id)
+    if guard is None:
+        click.echo(f"No valid guard '{guard_id}' in .openshard/guards/ (see `openshard guard list`).", err=True)
+        sys.exit(2)
+    bad, good = _resolve(root, bad_ref), _resolve(root, good_ref)
+    if not bad or not good:
+        click.echo(f"Could not resolve {bad_ref if not bad else good_ref} to a commit.", err=True)
+        sys.exit(2)
+    if not as_json:
+        click.echo(f"Qualifying guard {guard.id}: must fail on {bad[:12]}, pass on {good[:12]}, "
+                   f"then pass {runs} times on the working tree.")
+    result = qualify_guard(root, guard, bad, good, runs=runs, approve=approve, timeout=timeout)
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if result.verdict != COULD_NOT_RUN:
+        write_qualification(root / guard.source_path, result.to_record(at=stamp),
+                            activate=activate and result.verdict == QUALIFIED)
+    if as_json:
+        click.echo(json.dumps({"schema": "openshard.guard_qualify.v1", **result.to_dict()}, indent=2))
+    else:
+        for r in result.runs:
+            click.echo(f"  {r.where}: {r.status}" + (f" (exit {r.exit_code})" if r.exit_code is not None else "")
+                       + (f" -- {r.note}" if r.note else ""))
+        click.echo(f"\n{result.verdict}: {result.reason}")
+        if result.verdict == QUALIFIED and not activate and guard.status != "active":
+            click.echo("Set 'status: active' (or re-run with --activate) and commit the guard file to turn it on.")
+        elif result.verdict != COULD_NOT_RUN:
+            click.echo(f"Result written to {guard.source_path}.")
+    sys.exit(0 if result.verdict == QUALIFIED else 2 if result.verdict == COULD_NOT_RUN else 1)

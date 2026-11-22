@@ -15,6 +15,11 @@ All notable changes to OpenShard are documented here.
   the test it runs, does not get that guard run unattended. `openshard guard
   list` and `openshard guard run` show and run guards locally. See
   `docs/guards.md`.
+- `openshard guard qualify <id> --bad <commit> --good <commit>` proves a guard
+  catches the mistake before it is turned on: it must fail on an isolated copy
+  of the bad commit, pass on the fix, and pass every time on the working tree.
+  A pytest guard that only fails because the code it imports is missing is
+  not qualified. The result is written into the guard file.
 - `openshard capture install claude --global` turns on Claude Code capture for
   every git repository at once, with no per-repository setup: it writes
   Openshard's hooks into Claude Code's user settings. Repositories with their

@@ -45,6 +45,30 @@ check:
 - `openshard guard list` shows the guards, and any file that is not a valid
   guard and why.
 
+## Proving a guard works
+
+A guard that passes on the code it was written against proves nothing. Before
+turning one on, qualify it:
+
+```
+openshard guard qualify add-is-int --bad <agent's commit> --good <the fix> --activate
+```
+
+It runs the guard on an isolated copy of each commit, with the guard's own
+test files copied in, then on your working tree:
+
+| Result | Meaning |
+| --- | --- |
+| `qualified` | failed on `--bad`, passed on `--good`, passed every run on the working tree (`--runs`, default 3) |
+| `passes_on_bad` | it does not catch the mistake |
+| `cannot_load_on_bad` | pytest could not collect or import it on `--bad`: the code is new, which is not the same as catching the mistake |
+| `fails_on_good` | it fails on the fix too |
+| `flaky` | it failed at least once on the working tree |
+| `could_not_run` | a run was blocked, needs `--approve`, timed out, or a copy could not be made |
+
+The result is written into the guard file's `qualification` block; commit it
+with the guard. `--activate` also sets `status: active`, only when qualified.
+
 ## Rules that keep guards honest
 
 - **Guards are read as they were before the change.** The work being checked
@@ -76,8 +100,5 @@ committed; `openshard guard list` says so. Use these lines instead:
 
 - `openshard guard suggest` and `guard draft`: finding corrections and
   drafting guards from them.
-- `openshard guard qualify`: proving a guard fails on the agent's commit and
-  passes on the fix before it becomes `active`. Until then, a person sets
-  `status: active` after checking that.
 - Per-guard timeouts (`check.timeout_s` is read and stored but not enforced
   yet; the run's `--timeout` applies).
