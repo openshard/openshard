@@ -21,6 +21,11 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- A plain `pipx install openshard` now includes the MCP server. Before, `openshard
+  setup` registered the server with Claude Code even though the package it
+  needs was only in the optional `mcp` extra, so every new install showed a
+  failed `openshard` MCP server until `openshard[mcp]` was installed. The
+  `[mcp]` extra still works.
 - Running the test suite no longer leaves 45 `osn/run-*` branches and git
   worktrees in the repository it is run from: `tests/test_native_executor.py`
   now gives every test a temporary sandbox instead of creating a real one.

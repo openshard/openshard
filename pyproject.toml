@@ -22,11 +22,15 @@ dependencies = [
     "textual>=0.70",
     "duckdb>=1.5.6,<2",
     "cryptography>=42",
+    # The MCP server ships with every install: `openshard setup` registers it with
+    # Claude Code, so a plain `pipx install openshard` must be able to start it.
+    "mcp>=2.0,<3",
 ]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
 openai = ["openai>=1.0"]
+# Kept so existing `pip install 'openshard[mcp]'` commands still work; mcp is now a core dependency.
 mcp = ["mcp>=2.0,<3"]
 dev = [
     "pytest>=8.0",
