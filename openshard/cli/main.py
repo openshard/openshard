@@ -188,7 +188,7 @@ def _telemetry_status_for_agents() -> dict:
 
 _HELP_SECTIONS: list[tuple[str, tuple[str, ...]]] = [
     ("Getting Started", ("login", "connect", "setup", "doctor")),
-    ("Receipts", ("last", "history", "usage", "report", "context", "learn", "insights")),
+    ("Receipts", ("last", "history", "usage", "report", "context", "learn", "insights", "guard")),
     ("Diagnostics", ("env", "stats", "trust", "proof")),
     ("Integrations", ("mcp", "capture", "sync", "remote", "import", "ingest", "wrap", "adapters", "telemetry")),
     # Everything else (run, plan, models, roster, eval, packs, ...) falls
@@ -8442,6 +8442,10 @@ from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
 cli.add_command(workflow_group)
 cli.add_command(keys_group)
 cli.add_command(verdict_cmd)
+
+from openshard.cli.guard_cmd import guard_group  # noqa: E402
+
+cli.add_command(guard_group)
 register_ci_commands(ci_group)
 
 if __name__ == "__main__":

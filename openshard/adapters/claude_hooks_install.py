@@ -583,7 +583,7 @@ def ensure_local_settings_ignored(
         return f"Could not update .git/info/exclude; add {rel} to your gitignore."
 
 
-HISTORY_EXCLUDE_LINES: tuple[str, ...] = (".openshard/*", "!.openshard/config.yml")
+HISTORY_EXCLUDE_LINES: tuple[str, ...] = (".openshard/*", "!.openshard/config.yml", "!.openshard/guards/")
 
 
 def _unconfirmed(warning: str) -> dict:
@@ -600,7 +600,8 @@ def history_ignore_state(repo_root: Path, *, note: str = "added by openshard set
     showing ``?? .openshard/`` and a ``git add .`` would publish their
     Receipts. The rule lives in ``.git/info/exclude`` (documented git, never
     committed) so nothing of the user's is changed; ``.openshard/config.yml``
-    (the verification contract a team may share) is re-included. Files git
+    (the verification contract a team may share) and ``.openshard/guards/``
+    (the team's guards) are re-included. Files git
     already tracks are unaffected. Returns ``{"status", "warning"}``:
     ``already_ignored`` (git already ignores it, e.g. through the user's own
     .gitignore; nothing written), ``added`` (the rule was appended to
@@ -616,6 +617,7 @@ def history_ignore_state(repo_root: Path, *, note: str = "added by openshard set
     except Exception:
         return _unconfirmed(f"Could not run git to confirm {probe} is ignored; make sure .openshard/ is not committed.")
     if check.returncode == 0:
+        _add_missing_reincludes(repo_root, note)
         return {"status": "already_ignored", "warning": None}
     if check.returncode != 1:
         return _unconfirmed(f"Could not confirm {probe} is git-ignored; make sure .openshard/ is not committed.")
@@ -643,6 +645,41 @@ def history_ignore_state(repo_root: Path, *, note: str = "added by openshard set
         return {"status": "added", "warning": None}
     except Exception:
         return _unconfirmed("Could not update .git/info/exclude; add .openshard/ to your gitignore.")
+
+
+def _add_missing_reincludes(repo_root: Path, note: str) -> None:
+    """Bring an older setup's ``.git/info/exclude`` rule up to date. Never raises.
+
+    Only when that file already holds this rule's ``.openshard/*`` line (an
+    earlier ``openshard setup`` wrote it) are the newer re-include lines, such
+    as ``!.openshard/guards/``, appended. A user's own ignore rules are never
+    touched.
+    """
+    try:
+        where = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=str(repo_root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=_GIT_TIMEOUT_SECONDS,
+        )
+        if where.returncode != 0 or not where.stdout.strip():
+            return
+        exclude_path = Path(where.stdout.strip())
+        if not exclude_path.is_absolute():
+            exclude_path = repo_root / exclude_path
+        if not exclude_path.is_file():
+            return
+        existing = exclude_path.read_text(encoding="utf-8")
+        present = {ln.strip() for ln in existing.splitlines()}
+        if HISTORY_EXCLUDE_LINES[0] not in present:
+            return
+        missing = [line for line in HISTORY_EXCLUDE_LINES[1:] if line not in present]
+        if missing:
+            with exclude_path.open("a", encoding="utf-8") as fh:
+                if not existing.endswith("\n"):
+                    fh.write("\n")
+                fh.write(f"# {note}\n" + "".join(f"{line}\n" for line in missing))
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return
 
 
 def ensure_history_state_ignored(repo_root: Path, *, note: str = "added by openshard setup") -> str | None:

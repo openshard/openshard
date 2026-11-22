@@ -6,6 +6,15 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- Guards: checks your team adds after correcting an agent. A guard is a file
+  in `.openshard/guards/<id>.yml` naming the paths it protects and the check
+  to run. `openshard verify --commit` (and the automatic re-run after each
+  agent commit) runs the guards a change touches, alongside its own checks,
+  and records each result as a check Openshard ran itself. Guards are read as
+  committed before the change, and a change that edits or deletes a guard, or
+  the test it runs, does not get that guard run unattended. `openshard guard
+  list` and `openshard guard run` show and run guards locally. See
+  `docs/guards.md`.
 - `openshard capture install claude --global` turns on Claude Code capture for
   every git repository at once, with no per-repository setup: it writes
   Openshard's hooks into Claude Code's user settings. Repositories with their

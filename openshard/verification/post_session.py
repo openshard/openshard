@@ -115,6 +115,7 @@ ORIGIN_CONTRACT = "contract"  # the repository's configured verification contrac
 ORIGIN_DETECTED = "detected"  # the test command OpenShard detects for the repository
 ORIGIN_OBSERVED = "observed"  # a check command the agent was observed running (opt-in)
 ORIGIN_CHANGE = "change"  # selected from what the verified commit changed (verification/change_checks.py)
+ORIGIN_GUARD = "guard"  # a team guard whose scope the change touched (openshard/guards/)
 
 # Read-only checkers a contract may name without extra approval. The shared
 # plan.py allowlist is left untouched (it also governs native runs); these
@@ -355,10 +356,12 @@ def plan_commit(
     then typecheck, build and lint, so a cap can never leave a change
     "verified" by lint alone; the caller records the run as incomplete.
     """
+    guards, guards_incomplete = _guard_checks(repo_root, commit, base)
     if _contract_argvs(config):
-        return plan_checks(repo_root, config, entry), len(_contract_argvs(config)) > MAX_PLANNED_CHECKS
+        return (plan_checks(repo_root, config, entry) + guards,
+                len(_contract_argvs(config)) > MAX_PLANNED_CHECKS or guards_incomplete)
     if docs_only_commit(repo_root, config, commit, base):
-        return [], False
+        return guards, guards_incomplete
     from openshard.verification.change_checks import select_checks
 
     try:
@@ -383,7 +386,27 @@ def plan_commit(
             name=check.label, argv=argv, kind=check.kind, origin=ORIGIN_CHANGE, safety=safety,
             reason=reason, cwd=check.cwd, why=check.why,
         ))
-    return (planned, truncated) if planned else (plan_checks(repo_root, {}, entry), False)
+    if not planned:
+        planned = plan_checks(repo_root, {}, entry)
+    return planned + guards, truncated or guards_incomplete
+
+
+def _guard_checks(repo_root: Path, commit: str, base: str | None) -> tuple[list[PlannedCheck], bool]:
+    """The team guards *commit* calls for (``openshard/guards``), and whether that list is incomplete.
+
+    Guards run in addition to the contract or change-selected checks, never
+    instead of them. When guards exist but could not all be planned, the run
+    is recorded as incomplete rather than verified without them.
+    """
+    from openshard.guards.plan import plan_guard_checks
+    from openshard.verification.change_checks import changed_paths
+
+    try:
+        changed = changed_paths(repo_root, base, commit)
+    except Exception:
+        changed = None
+    plan = plan_guard_checks(repo_root, commit, base, changed)
+    return plan.checks, plan.truncated or plan.failed
 
 
 # ---------------------------------------------------------------------------
