@@ -158,13 +158,14 @@ up. What it records, and what it leaves alone:
 | --- | --- |
 | Inside any git repository, set up or not | Receipts are recorded in that repository's `.openshard/`. |
 | A repository with its own Openshard hooks (`openshard setup`, `setup --repo`) | Its own hooks capture it; the user-level hook stands aside, so nothing is recorded twice. If those hooks cannot find `openshard`, the user-level hook captures instead. |
-| A folder that is not a git repository (including a folder that holds several repositories) | Nothing is recorded and no `.openshard/` is created. Start the session inside the repository to capture it. |
+| A folder that is not a git repository (a folder holding several repositories, a scratch folder) | The session is followed into the repositories it works in: the first file it edits there, or the first shell command that `cd`s (or `git -C`s) into one, starts a Receipt in that repository. The session start and earlier prompts are held briefly and delivered then. A file it only reads starts nothing. A session that never works in a repository records nothing, and no `.openshard/` is created outside a repository. |
 | Your home directory | Never captured, even if it is a git repository. |
 
 `openshard capture uninstall claude --global` removes only these hooks;
-recorded history is never deleted. Cloud sessions (Claude Code on the web)
-do not read your computer's user settings: see
-[claude-cloud-prelaunch.md](claude-cloud-prelaunch.md).
+recorded history is never deleted. Cloud sessions (Claude chats that write
+code, Claude Code on the web) do not read your computer's user settings: add
+the Openshard plugin to your Claude account ([claude-plugin.md](claude-plugin.md)),
+or see [claude-cloud-prelaunch.md](claude-cloud-prelaunch.md).
 
 ## Upgrade
 

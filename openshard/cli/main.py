@@ -8442,6 +8442,10 @@ from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
 cli.add_command(workflow_group)
 cli.add_command(keys_group)
 cli.add_command(verdict_cmd)
+
+from openshard.cli.plugin_cmd import plugin_group  # noqa: E402
+
+cli.add_command(plugin_group)
 register_ci_commands(ci_group)
 
 if __name__ == "__main__":

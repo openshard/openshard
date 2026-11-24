@@ -134,12 +134,6 @@ def test_a_folder_that_is_not_a_repository_is_skipped(tmp_path):
     assert reason == "not inside a git repository"
 
 
-def test_a_parent_folder_of_several_repositories_is_skipped_even_when_cwd_is_inside_one(tmp_path):
-    parent = tmp_path / "code"
-    alpha = _git_repo(parent / "alpha")
-    _git_repo(parent / "beta")
-    reason = uh.user_scope_skip_reason(_payload("PostToolUse", alpha), {"CLAUDE_PROJECT_DIR": str(parent)})
-    assert reason == "not inside a git repository"
 
 
 def test_the_home_directory_is_never_captured(tmp_path, monkeypatch):
@@ -236,16 +230,131 @@ def test_every_unset_up_repository_gets_its_own_receipt(tmp_path, monkeypatch, n
     assert _receipt_tasks(repo) == [f"task in {name}"]
 
 
-def test_a_skipped_session_writes_nothing_anywhere(tmp_path):
+def test_a_session_that_never_works_in_a_repository_writes_nothing_anywhere(tmp_path):
     import os
 
     parent = tmp_path / "code"
     alpha = _git_repo(parent / "alpha")
     env = {**os.environ, "CLAUDE_PROJECT_DIR": str(parent)}
-    outcomes = _run_session(parent, alpha / "m.py", env)
-    assert all(o == "skipped: not inside a git repository" for o in outcomes), outcomes
+    outcomes = _run_session(parent, parent / "notes" / "m.py", env)
+    assert all(o.startswith("skipped") for o in outcomes), outcomes
     assert not (parent / ".openshard").exists()
     assert not (alpha / ".openshard").exists()
+    assert not list((Path(os.environ["OPENSHARD_HOME"]) / uh.FOLLOW_DIRNAME).glob("*.json"))
+
+
+# --- sessions that move ------------------------------------------------------------
+
+
+def _event(event: str, cwd: Path, session: str = "s-move", **extra: object) -> bytes:
+    return json.dumps({"hook_event_name": event, "session_id": session, "cwd": str(cwd), **extra}).encode()
+
+
+def _move(env: dict[str, str], *events: bytes) -> list[str]:
+    return [uh.run_user_scope_hook(io.BytesIO(e), env=env) for e in events]
+
+
+@pytest.fixture
+def scratch(tmp_path, monkeypatch):
+    """A session started in a folder that is no repository (a cloud chat's scratch folder, a home folder)."""
+    import os
+
+    folder = tmp_path / "scratch"
+    folder.mkdir()
+    monkeypatch.chdir(folder)
+    return folder, {**os.environ, "CLAUDE_PROJECT_DIR": str(folder)}
+
+
+def test_a_session_started_outside_follows_an_edit_into_a_repository(tmp_path, scratch):
+    folder, env = scratch
+    alpha = _git_repo(tmp_path / "code" / "alpha")
+    beta = _git_repo(tmp_path / "code" / "beta")
+    (alpha / "m.py").write_text("changed\n", encoding="utf-8")
+    outcomes = _move(
+        env,
+        _event("SessionStart", folder, source="startup"),
+        _event("UserPromptSubmit", folder, prompt="fix alpha"),
+        _event("PostToolUse", folder, tool_name="Edit", tool_input={"file_path": str(alpha / "m.py")},
+               tool_response={"success": True}),
+        _event("Stop", folder),
+        _event("SessionEnd", folder, reason="exit"),
+    )
+    assert outcomes[:2] == ["skipped: held until the session works in a repository"] * 2
+    assert all(o.startswith("followed") for o in outcomes[2:]), outcomes
+    assert _receipt_tasks(alpha) == ["fix alpha"]
+    assert not (beta / ".openshard").exists() and not (folder / ".openshard").exists()
+
+
+def test_a_shell_cd_binds_the_session_and_a_read_does_not(tmp_path, scratch):
+    folder, env = scratch
+    alpha = _git_repo(tmp_path / "alpha")
+    gamma = _git_repo(tmp_path / "gamma")
+    (gamma / "r.md").write_text("read me\n", encoding="utf-8")
+    (alpha / "n.py").write_text("x = 2\n", encoding="utf-8")
+    outcomes = _move(
+        env,
+        _event("UserPromptSubmit", folder, prompt="run alpha's tests"),
+        _event("PostToolUse", folder, tool_name="Read", tool_input={"file_path": str(gamma / "r.md")}),
+        _event("PostToolUse", folder, tool_name="Bash",
+               tool_input={"command": f'cd "{alpha}" && python -m pytest -q'}, tool_response={"stdout": ""}),
+        _event("Stop", folder),
+        _event("SessionEnd", folder, reason="exit"),
+    )
+    assert outcomes[1] == "skipped: not inside a git repository"
+    assert _receipt_tasks(alpha) == ["run alpha's tests"]
+    assert not (gamma / ".openshard").exists()
+
+
+def test_a_session_that_works_in_two_repositories_gives_each_its_own_receipt(tmp_path, scratch):
+    folder, env = scratch
+    alpha, beta = _git_repo(tmp_path / "alpha"), _git_repo(tmp_path / "beta")
+    for repo in (alpha, beta):
+        (repo / "m.py").write_text("y = 1\n", encoding="utf-8")
+    _move(
+        env,
+        _event("UserPromptSubmit", folder, prompt="change both"),
+        _event("PostToolUse", folder, tool_name="Write", tool_input={"file_path": str(alpha / "m.py")},
+               tool_response={"success": True}),
+        _event("PostToolUse", folder, tool_name="Bash", tool_input={"command": f"git -C {beta} status"},
+               tool_response={"stdout": ""}),
+        _event("Stop", folder),
+        _event("SessionEnd", folder, reason="exit"),
+    )
+    assert _receipt_tasks(alpha) == ["change both"]
+    # Bound after the prompt was already delivered to alpha: beta's Receipt has no prompt of its own.
+    assert len(_receipt_tasks(beta)) == 1
+
+
+def test_the_home_directory_never_binds_a_session(tmp_path, scratch, monkeypatch):
+    folder, env = scratch
+    home = _git_repo(tmp_path / "home")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    env = {**env, "HOME": str(home)}
+    (home / "x.txt").write_text("1\n", encoding="utf-8")
+    outcomes = _move(env, _event("PostToolUse", folder, tool_name="Write",
+                                 tool_input={"file_path": str(home / "x.txt")}, tool_response={"success": True}))
+    assert outcomes == ["skipped: not inside a git repository"]
+    assert not (home / ".openshard").exists()
+
+
+def test_only_a_few_early_events_are_held(tmp_path, scratch):
+    import os
+
+    folder, env = scratch
+    for i in range(20):
+        uh.run_user_scope_hook(io.BytesIO(_event("UserPromptSubmit", folder, prompt=f"p{i}")), env=env)
+    (state,) = (Path(os.environ["OPENSHARD_HOME"]) / uh.FOLLOW_DIRNAME).glob("*.json")
+    assert len(json.loads(state.read_text(encoding="utf-8"))["held"]) == 8
+
+
+@pytest.mark.parametrize(("command", "expected"), [
+    ("cd {r} && ls", True), ("cd '{r}'; make", True), ("pushd {r} | cat", True),
+    ("echo cd {r}", False), ("ls {r}", False), ("git -C {r} log", True),
+])
+def test_which_shell_commands_name_a_place(tmp_path, command, expected):
+    repo = _git_repo(tmp_path / "r")
+    data = {"tool_name": "Bash", "tool_input": {"command": command.format(r=repo)}, "cwd": str(tmp_path)}
+    assert (repo.resolve() in uh._work_repos(data)) is expected
 
 
 # --- CLI ----------------------------------------------------------------------
