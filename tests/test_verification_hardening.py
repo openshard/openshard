@@ -803,6 +803,44 @@ class TestCliFlow:
         truth = self._last()["verification_truth"]
         assert (truth["state"], truth["authority"]) == ("verified_failed", "independently_verified")
 
+    def test_the_gates_own_failure_and_ignored_checks_are_not_evidence(self, session, monkeypatch):
+        """The gate reads this verdict, so its own red check must not feed back into it (a loop)."""
+        import yaml
+
+        head = self._head(session)
+        cfg = session / ".openshard" / "config.yml"
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        cfg.write_text(yaml.safe_dump({**data, "ci": {"ignore_checks": ["PR Hygiene"]}}), encoding="utf-8")
+        runs = _ci_runs(head, "success", "success")
+        runs += [{"name": n, "head_sha": head, "status": "completed", "conclusion": "failure",
+                  "started_at": "2026-09-30T11:09:00Z"} for n in ("Openshard gate", "pr hygiene")]
+        self._patch_ci(monkeypatch, runs)
+        result = CliRunner().invoke(cli, ["verify", "--ci", "--strict"])
+        assert result.exit_code == 0, result.output
+        assert "2 passed, 0 failed" in result.output
+        assert ("Not counted: Openshard gate (the merge gate's own verdict); "
+                "pr hygiene (ignored in the repository's Openshard config).") in result.output
+        att = [json.loads(line) for line in (session / ".openshard" / ps.ATTESTATIONS_FILENAME)
+               .read_text(encoding="utf-8").splitlines()][-1]
+        assert att["ci"]["outcome"] == "passed" and att["ci"]["runs_total"] == 2
+        assert att["ci"]["excluded_checks"] == [
+            {"name": "Openshard gate", "reason": ci.EXCLUDE_GATE},
+            {"name": "pr hygiene", "reason": ci.EXCLUDE_CONFIGURED},
+        ]
+        assert [c["name"] for c in att["verification"]["checks"]] == ["job-0", "job-1"]
+        truth = self._last()["verification_truth"]
+        assert (truth["state"], truth["authority"]) == ("verified_passed", "independently_verified")
+
+    def test_only_excluded_runs_records_nothing(self, session, monkeypatch):
+        head = self._head(session)
+        self._patch_ci(monkeypatch, [{"name": "Openshard gate", "head_sha": head, "status": "completed",
+                                      "conclusion": "failure", "started_at": "2026-09-30T11:00:00Z"}])
+        result = CliRunner().invoke(cli, ["verify", "--ci", "--json"])
+        payload = json.loads(result.output)
+        assert payload["status"] == "ci_unavailable"
+        assert payload["excluded"] == [{"name": "Openshard gate", "reason": ci.EXCLUDE_GATE}]
+        assert not (session / ".openshard" / ps.ATTESTATIONS_FILENAME).exists()
+
     def test_ci_from_a_different_commit_is_not_attached(self, session, monkeypatch):
         self._patch_ci(monkeypatch, _ci_runs(SHA_B, "success", "success"))
         result = CliRunner().invoke(cli, ["verify", "--ci", "--json", "--strict"])
@@ -860,3 +898,43 @@ class TestCliFlow:
         (failed,) = last["verification_view"]["verification"]["failed_checks"]
         assert failed.startswith("python -m pytest -q") and str(session) not in failed  # path-free label
         assert CliRunner().invoke(cli, ["ci", "check", "--json"]).exit_code == 1
+
+
+class TestIgnoredCheckNames:
+    @pytest.mark.parametrize("text", [
+        None, "", "not: [valid", "ci: 3", "ci:\n  ignore_checks: PR Hygiene", "- a list\n",
+    ])
+    def test_missing_or_malformed_config_ignores_nothing(self, tmp_path, text):
+        if text is not None:
+            (tmp_path / ".openshard").mkdir()
+            (tmp_path / ".openshard" / "config.yml").write_text(text, encoding="utf-8")
+        assert ci.ignored_check_names(tmp_path) == []
+
+    def test_names_are_read_and_blank_or_odd_entries_dropped(self, tmp_path):
+        (tmp_path / ".openshard").mkdir()
+        (tmp_path / ".openshard" / "config.yml").write_text(
+            "ci:\n  ignore_checks: [' PR Hygiene ', '', 7, Labels]\n", encoding="utf-8")
+        assert ci.ignored_check_names(tmp_path) == ["PR Hygiene", "Labels"]
+
+    def test_root_config_is_read_when_there_is_no_hidden_config(self, tmp_path):
+        (tmp_path / "config.yml").write_text("ci:\n  ignore_checks: [PR Hygiene]\n", encoding="utf-8")
+        assert ci.ignored_check_names(tmp_path) == ["PR Hygiene"]
+        (tmp_path / ".openshard").mkdir()
+        (tmp_path / ".openshard" / "config.yml").write_text("model_tiers: []\n", encoding="utf-8")
+        assert ci.ignored_check_names(tmp_path) == []
+
+    def test_gate_run_is_never_counted_even_without_config(self):
+        runs = _ci_runs(SHA_A, "success") + [{"name": "OPENSHARD GATE", "head_sha": SHA_A, "status": "completed",
+                                              "conclusion": "failure", "started_at": "2026-09-30T11:05:00Z"}]
+        result = ci.classify_check_runs(runs, SHA_A)
+        assert result.outcome == ci.OUTCOME_PASSED
+        assert result.excluded == [("OPENSHARD GATE", ci.EXCLUDE_GATE)]
+
+    def test_a_pending_gate_does_not_hold_the_verdict_back(self):
+        runs = _ci_runs(SHA_A, "success") + [{"name": "Openshard gate", "head_sha": SHA_A, "status": "in_progress",
+                                              "conclusion": None, "started_at": "2026-09-30T11:05:00Z"}]
+        assert ci.classify_check_runs(runs, SHA_A).outcome == ci.OUTCOME_PASSED
+
+    def test_a_real_failure_still_fails(self):
+        runs = _ci_runs(SHA_A, "success", "failure")
+        assert ci.classify_check_runs(runs, SHA_A, ignore=["PR Hygiene"]).outcome == ci.OUTCOME_FAILED

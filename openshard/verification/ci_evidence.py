@@ -32,6 +32,19 @@ as ``unknown`` with ``ci_cancelled``). ``pending`` and ``unavailable`` are
 reported to the caller and recorded nowhere: nothing was observed yet. The
 attestation carries run names and conclusions, no logs, no URLs.
 
+Which runs are not evidence
+---------------------------
+Openshard's own merge gate reports a check run too. Its verdict is read
+*from* this evidence, so counting it here would be circular: a gate that
+failed for "no Receipt" would make the Receipt's CI verdict fail, which
+would fail the gate again. The gate's run (``Openshard gate``, the job name
+docs/merge-gate.md tells teams to keep stable) is therefore never counted.
+A repository can name other runs that say nothing about the code (a PR
+description lint, a label check) under ``ci: ignore_checks:`` in
+the repository's Openshard config (``.openshard/config.yml``, else
+``config.yml``, the same file ``load_config`` would pick). Every run left out is named in the attestation
+(``ci.excluded_checks``) and in the command output, never dropped silently.
+
 The Receipt is never modified. This is evidence, not policy.
 """
 
@@ -107,6 +120,13 @@ _FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required", "sta
 _SKIPPED_CONCLUSIONS = frozenset({"skipped", "neutral"})
 _MAX_RUNS = 200
 
+# The merge gate's own check run: its verdict is read from this evidence, so it is never evidence itself.
+GATE_CHECK_NAME = "Openshard gate"
+EXCLUDE_GATE = "openshard_gate"
+EXCLUDE_CONFIGURED = "repository_config"
+_MAX_IGNORED = 50
+_MAX_EXCLUDED_RECORDED = 20
+
 
 @dataclass
 class CIRun:
@@ -120,6 +140,8 @@ class CIResult:
     sha: str
     runs: list[CIRun] = field(default_factory=list)
     detail: str = ""
+    # Runs reported for this commit that were left out of the verdict: (name, why).
+    excluded: list[tuple[str, str]] = field(default_factory=list)
 
     def count(self, state: str) -> int:
         return sum(1 for r in self.runs if r.state == state)
@@ -222,12 +244,36 @@ def _run_state(run: dict) -> str:
     return "unknown"  # ``stale`` or a conclusion this version does not know
 
 
-def classify_check_runs(check_runs: object, sha: str) -> CIResult:
+def ignored_check_names(repo_root: Path) -> list[str]:
+    """Check-run names the repository's config says are not evidence about the code. Never raises.
+
+    ``ci: ignore_checks: [PR Hygiene, ...]`` in ``.openshard/config.yml``, or in ``config.yml`` when
+    that file is absent (the order ``load_config`` uses). Anything unreadable or malformed gives
+    ``[]``: an unreadable list never widens what is left out.
+    """
+    hidden = repo_root / ".openshard" / "config.yml"
+    path = hidden if hidden.is_file() else repo_root / "config.yml"
+    try:
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - optional file; any failure means "nothing ignored"
+        return []
+    ci_cfg = data.get("ci") if isinstance(data, dict) else None
+    names = ci_cfg.get("ignore_checks") if isinstance(ci_cfg, dict) else None
+    if not isinstance(names, list):
+        return []
+    return [n.strip() for n in names[:_MAX_IGNORED] if isinstance(n, str) and n.strip()]
+
+
+def classify_check_runs(check_runs: object, sha: str, *, ignore: list[str] | tuple[str, ...] = ()) -> CIResult:
     """Turn a forge's check-run list into a verdict for *sha*. Pure; never raises.
 
     A run whose ``head_sha`` is not exactly *sha* is dropped: CI for another
     commit says nothing about this one. When a check was re-run, only its
-    newest run counts.
+    newest run counts. The merge gate's own run, and any run named in
+    *ignore* (case-insensitive), is left out of the verdict and listed in
+    ``excluded``.
     """
     latest: dict[str, tuple[str, dict]] = {}
     foreign = 0
@@ -244,10 +290,22 @@ def classify_check_runs(check_runs: object, sha: str) -> CIResult:
         key = name.strip()
         if key not in latest or stamp >= latest[key][0]:
             latest[key] = (stamp, run)
-    runs = [CIRun(name=name, state=_run_state(run)) for name, (_, run) in latest.items()]
-    result = CIResult(outcome=OUTCOME_UNAVAILABLE, sha=sha, runs=runs)
+    ignored = {n.strip().casefold() for n in ignore if isinstance(n, str) and n.strip()}
+    runs: list[CIRun] = []
+    excluded: list[tuple[str, str]] = []
+    for name, (_, run) in latest.items():
+        folded = name.casefold()
+        if folded == GATE_CHECK_NAME.casefold():
+            excluded.append((name, EXCLUDE_GATE))
+        elif folded in ignored:
+            excluded.append((name, EXCLUDE_CONFIGURED))
+        else:
+            runs.append(CIRun(name=name, state=_run_state(run)))
+    result = CIResult(outcome=OUTCOME_UNAVAILABLE, sha=sha, runs=runs, excluded=sorted(excluded))
     if not runs:
         result.detail = (
+            "every check run for this commit is the merge gate's or is ignored in the repository's Openshard config"
+            if excluded else
             "the forge reported check runs only for other commits" if foreign
             else "no check run is reported for this commit"
         )
@@ -376,6 +434,8 @@ def build_ci_attestation(
             "binding": target.binding,
             "outcome": result.outcome,
             "runs_total": len(result.runs),
+            # Reported for this commit but not counted: the gate's own run, or ignored by repository config.
+            "excluded_checks": [{"name": n, "reason": why} for n, why in result.excluded[:_MAX_EXCLUDED_RECORDED]],
             "head_moved": target.head_moved,
             # None: no pull request known. False: the PR has moved past this commit.
             "pr_head_matches": (pr_head == target.sha) if pr_head else None,
@@ -392,6 +452,9 @@ __all__ = [
     "BINDING_RERUN",
     "CIResult",
     "CIRun",
+    "EXCLUDE_CONFIGURED",
+    "EXCLUDE_GATE",
+    "GATE_CHECK_NAME",
     "CITarget",
     "OUTCOME_CANCELLED",
     "OUTCOME_FAILED",
@@ -410,5 +473,6 @@ __all__ = [
     "fetch_github_check_runs",
     "fetch_github_pr_head",
     "git_is_ancestor",
+    "ignored_check_names",
     "resolve_ci_target",
 ]

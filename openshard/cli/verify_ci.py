@@ -59,13 +59,18 @@ def run_verify_from_ci(entry: dict, loc, receipt_label, *, as_json: bool, strict
         finish("ci_unavailable", f"CI unavailable for commit {target.sha[:12]}: {error}. Nothing recorded.{note}",
                2, commit=target.sha, outcome=ci.OUTCOME_UNAVAILABLE)
         return
-    result = ci.classify_check_runs(runs, target.sha)
+    result = ci.classify_check_runs(runs, target.sha, ignore=ci.ignored_check_names(repo_root))
+    why = {ci.EXCLUDE_GATE: "the merge gate's own verdict", ci.EXCLUDE_CONFIGURED: "ignored in the repository's Openshard config"}
+    excluded_note = ("Not counted: " + "; ".join(f"{n} ({why.get(r, r)})" for n, r in result.excluded[:5]) + "."
+                     if result.excluded else "")
     counts = {state: result.count(state) for state in ("passed", "failed", "pending", "cancelled", "skipped")}
     if result.outcome not in ci.RECORDED_OUTCOMES:
         finish(
             f"ci_{result.outcome}",
-            f"CI {result.outcome} for commit {target.sha[:12]}: {result.detail}. Nothing recorded.{note}",
+            f"CI {result.outcome} for commit {target.sha[:12]}: {result.detail}. Nothing recorded.{note}"
+            + (f"\n{excluded_note}" if excluded_note else ""),
             2, commit=target.sha, outcome=result.outcome, runs=counts,
+            excluded=[{"name": n, "reason": r} for n, r in result.excluded],
         )
         return
     pr_head = ci.fetch_github_pr_head(repo_root)
@@ -90,6 +95,8 @@ def run_verify_from_ci(entry: dict, loc, receipt_label, *, as_json: bool, strict
     failed_names = [r.name for r in result.runs if r.state == "failed"][:5]
     if failed_names:
         lines.append("Failed: " + "; ".join(failed_names))
+    if excluded_note:
+        lines.append(excluded_note)
     lines.append(
         "Recorded in .openshard/verifications.jsonl (evidence: independently_verified). "
         "The Receipt and earlier evidence are unchanged." + note
@@ -97,6 +104,7 @@ def run_verify_from_ci(entry: dict, loc, receipt_label, *, as_json: bool, strict
     exit_code = {ci.OUTCOME_PASSED: 0, ci.OUTCOME_FAILED: 1}.get(result.outcome, 2)
     finish("ok", "\n".join(lines), exit_code, commit=target.sha, binding=target.binding,
            outcome=result.outcome, runs=counts, attestation_id=attestation["attestation_id"],
+           excluded=[{"name": n, "reason": r} for n, r in result.excluded],
            verification=attestation["verification"])
 
 

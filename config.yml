@@ -45,3 +45,10 @@ executor: direct
 #   - python
 #   - -m
 #   - pytest
+
+# Check runs that say nothing about whether the code works. A CI verdict for a
+# Receipt (`openshard verify --ci`) does not count them; the merge gate's own
+# run is never counted.
+ci:
+  ignore_checks:
+    - PR Hygiene
