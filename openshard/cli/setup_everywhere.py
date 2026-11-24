@@ -20,6 +20,33 @@ from urllib.parse import urlsplit, urlunsplit
 import click
 
 
+def everywhere_options(fn):
+    """The ``setup --everywhere`` options, and the click context they need."""
+    options = [
+        click.option("--everywhere", is_flag=True, default=False,
+                     help="Set up capture for every place you use Claude: this computer, the Platform link, "
+                          "and a plugin for Claude chats that write code (docs/claude-plugin.md)."),
+        click.option("--token-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
+                     help="With --everywhere: a file holding a connected-capture credential (osc_...)."),
+        click.option("--plugin-path", type=click.Path(dir_okay=False, path_type=Path), default=None,
+                     help="With --everywhere: where to write openshard.plugin (default: Desktop, else here)."),
+        click.option("--install-spec", default=None,
+                     help="With --everywhere: what the plugin installs on a new cloud machine."),
+        click.option("--no-cloud", is_flag=True, default=False, help="With --everywhere: skip the Claude chats plugin."),
+    ]
+    for option in reversed(options):
+        fn = option(fn)
+    return click.pass_context(fn)
+
+
+def run_from_setup(ctx: click.Context, *, conflicting: bool, token_file: Path | None, plugin_path: Path | None,
+                   install_spec: str | None, no_cloud: bool) -> None:
+    """``setup --everywhere``, as the ``setup`` command calls it."""
+    if conflicting:
+        raise click.UsageError("--everywhere cannot be combined with --agent, --json or --repo.")
+    run(ctx, token_file=token_file, plugin_path=plugin_path, install_spec=install_spec, skip_cloud=no_cloud)
+
+
 def agents_page(endpoint: str) -> str | None:
     """The Platform web page that creates a connected-capture credential, when it can be told. Never raises."""
     try:

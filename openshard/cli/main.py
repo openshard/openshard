@@ -10,6 +10,7 @@ import click
 
 from openshard import __version__
 from openshard.adapters import agent_commit_trailer as _commit_trailers
+from openshard.cli.plugin_cmd import plugin_group
 from openshard.cli.run_output import (
     _PUBLIC_MODE_LABEL,
     _RATIONALE_SHORT,
@@ -55,6 +56,8 @@ from openshard.cli.run_output import (
 from openshard.cli.run_output import (
     _Spinner as _Spinner,
 )
+from openshard.cli.setup_everywhere import everywhere_options
+from openshard.cli.setup_everywhere import run_from_setup as run_everywhere
 from openshard.cli.setup_output import configured_agent_names as _configured_agent_names
 from openshard.cli.setup_output import render_components as _render_setup_components
 from openshard.cli.signing_cmd import signature_mode as _signature_mode
@@ -520,21 +523,11 @@ def env_cmd() -> None:
 @click.option("--agents", default=None, help="With --repo: claude,cursor,copilot,openhands,devcontainer (default) "
               "or devin,amp,replicas,boat (printed snippets).")
 @click.option("--no-commit-trailers", is_flag=True, help="Don't mark agent commits (docs/commit-trailers.md).")
-@click.option("--everywhere", is_flag=True, default=False,
-              help="Set up capture for every place you use Claude: this computer, the Platform link, "
-                   "and a plugin for Claude chats that write code (docs/claude-plugin.md).")
-@click.option("--token-file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None,
-              help="With --everywhere: a file holding a connected-capture credential (osc_...).")
-@click.option("--plugin-path", type=click.Path(dir_okay=False, path_type=Path), default=None,
-              help="With --everywhere: where to write openshard.plugin (default: Desktop, else here).")
-@click.option("--install-spec", default=None, help="With --everywhere: what the plugin installs on a new cloud machine.")
-@click.option("--no-cloud", is_flag=True, default=False, help="With --everywhere: skip the Claude chats plugin.")
-@click.pass_context
+@everywhere_options
 @_telemetry_command("setup")
 def setup_cmd(ctx: click.Context, as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path | None,
               repo_level: bool, dry_run: bool, agents: str | None, no_commit_trailers: bool = False,
-              everywhere: bool = False, token_file: Path | None = None, plugin_path: Path | None = None,
-              install_spec: str | None = None, no_cloud: bool = False) -> None:
+              **everywhere) -> None:
     """Set up OpenShard for this repository: the one command a new user needs.
 
     Detects the environment, configures Claude Code capture for this
@@ -546,14 +539,8 @@ def setup_cmd(ctx: click.Context, as_agent: bool, as_json: bool, assume_yes: boo
     """
     from openshard.config import onboarding as ob
 
-    if everywhere:
-        if as_agent or as_json or repo_level:
-            raise click.UsageError("--everywhere cannot be combined with --agent, --json or --repo.")
-        from openshard.cli.setup_everywhere import run as run_everywhere
-
-        run_everywhere(ctx, token_file=token_file, plugin_path=plugin_path, install_spec=install_spec,
-                       skip_cloud=no_cloud)
-        return
+    if everywhere.pop("everywhere", False):
+        return run_everywhere(ctx, conflicting=as_agent or as_json or repo_level, **everywhere)
     if repo_level:
         from openshard.adapters.repo_setup import run_cli
         raise SystemExit(run_cli(repo_path, agents, dry_run, click.echo))
@@ -8462,8 +8449,6 @@ from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
 cli.add_command(workflow_group)
 cli.add_command(keys_group)
 cli.add_command(verdict_cmd)
-
-from openshard.cli.plugin_cmd import plugin_group  # noqa: E402
 
 cli.add_command(plugin_group)
 register_ci_commands(ci_group)
