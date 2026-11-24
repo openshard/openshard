@@ -6,25 +6,6 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
-- `openshard setup --everywhere`: one setup for every place you use Claude.
-  It turns on capture for every Claude Code session on this computer, links
-  it to the Platform if needed, and writes the Claude plugin for chats that
-  write code, asking for the connected-capture credential and naming the
-  Platform page that creates it. It ends with what is still yours to do.
-- `openshard plugin claude` writes a Claude plugin that brings capture to every
-  Claude session, including chats on desktop, web and phone, which run on a
-  fresh cloud machine each time. On a new machine it keeps the first events,
-  installs Openshard in the background and delivers them in order; built with
-  `--token-file`, it sends Receipts to the Platform before the machine is
-  deleted. It stands aside where `capture install claude --global` already
-  runs. See docs/claude-plugin.md.
-- Capture follows a Claude Code session into the repositories it works in when
-  it started somewhere else (a folder holding several repositories, a home
-  folder, a cloud chat's scratch folder). The first file it edits in a
-  repository, or the first shell command that `cd`s or `git -C`s into one,
-  starts that repository's Receipt; the session start and earlier prompts are
-  held and delivered then, in order. A file only read starts nothing. Before,
-  such sessions recorded nothing.
 - `openshard capture install claude --global` turns on Claude Code capture for
   every git repository at once, with no per-repository setup: it writes
   Openshard's hooks into Claude Code's user settings. Repositories with their
@@ -32,6 +13,25 @@ All notable changes to OpenShard are documented here.
   in a folder that is not a git repository is followed into the repositories it
   edits (see below). `capture
   uninstall claude --global` removes only these hooks.
+- Capture follows a Claude Code session into the repositories it works in when
+  it started somewhere else (a folder holding several repositories, a home
+  folder, a cloud chat's scratch folder). The first file it edits in a
+  repository, or the first shell command that `cd`s or `git -C`s into one,
+  starts that repository's Receipt; the session start and earlier prompts are
+  held and delivered then, in order. A file only read starts nothing. Before,
+  such sessions recorded nothing.
+- `openshard plugin claude` writes a Claude plugin that brings capture to every
+  Claude session, including chats on desktop, web and phone, which run on a
+  fresh cloud machine each time. On a new machine it keeps the first events,
+  installs Openshard in the background and delivers them in order; built with
+  `--token-file`, it sends Receipts to the Platform before the machine is
+  deleted. It stands aside where `capture install claude --global` already
+  runs. See docs/claude-plugin.md.
+- `openshard setup --everywhere`: one setup for every place you use Claude.
+  It turns on capture for every Claude Code session on this computer, links
+  it to the Platform if needed, and writes the Claude plugin for chats that
+  write code, asking for the connected-capture credential and naming the
+  Platform page that creates it. It ends with what is still yours to do.
 
 ### Changed
 

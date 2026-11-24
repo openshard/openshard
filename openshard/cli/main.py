@@ -10,7 +10,6 @@ import click
 
 from openshard import __version__
 from openshard.adapters import agent_commit_trailer as _commit_trailers
-from openshard.cli.plugin_cmd import plugin_group
 from openshard.cli.run_output import (
     _PUBLIC_MODE_LABEL,
     _RATIONALE_SHORT,
@@ -8442,15 +8441,15 @@ cli.add_command(usage_group)
 cli.add_command(login_cmd)
 
 from openshard.cli.ci_commands import register_ci_commands  # noqa: E402
+from openshard.cli.plugin_cmd import plugin_group  # noqa: E402
 from openshard.cli.signing_cmd import keys_group  # noqa: E402
 from openshard.cli.verdict_cmd import verdict_cmd  # noqa: E402
 from openshard.cli.workflow_cmd import workflow_group  # noqa: E402
 
+cli.add_command(plugin_group)
 cli.add_command(workflow_group)
 cli.add_command(keys_group)
 cli.add_command(verdict_cmd)
-
-cli.add_command(plugin_group)
 register_ci_commands(ci_group)
 
 if __name__ == "__main__":
