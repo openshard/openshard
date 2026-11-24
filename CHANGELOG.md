@@ -21,6 +21,13 @@ All notable changes to OpenShard are documented here.
 
 ### Fixed
 
+- A Receipt's CI verdict (`openshard verify --ci`) no longer counts the merge
+  gate's own check run. The gate reads that verdict, so counting it made a loop:
+  a gate that failed for "no Receipt" made the Receipt fail, which failed the
+  gate again. Runs that say nothing about the code (a PR description lint) can
+  be left out too, under `ci: ignore_checks:` in the repository's Openshard
+  config. Every run left out is named in the output and in the attestation
+  (`ci.excluded_checks`), never dropped silently.
 - Running the test suite no longer leaves 45 `osn/run-*` branches and git
   worktrees in the repository it is run from: `tests/test_native_executor.py`
   now gives every test a temporary sandbox instead of creating a real one.
