@@ -55,6 +55,8 @@ from openshard.cli.run_output import (
 from openshard.cli.run_output import (
     _Spinner as _Spinner,
 )
+from openshard.cli.setup_everywhere import everywhere_options
+from openshard.cli.setup_everywhere import run_from_setup as run_everywhere
 from openshard.cli.setup_output import configured_agent_names as _configured_agent_names
 from openshard.cli.setup_output import render_components as _render_setup_components
 from openshard.cli.signing_cmd import signature_mode as _signature_mode
@@ -520,9 +522,11 @@ def env_cmd() -> None:
 @click.option("--agents", default=None, help="With --repo: claude,cursor,copilot,openhands,devcontainer (default) "
               "or devin,amp,replicas,boat (printed snippets).")
 @click.option("--no-commit-trailers", is_flag=True, help="Don't mark agent commits (docs/commit-trailers.md).")
+@everywhere_options
 @_telemetry_command("setup")
-def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path | None,
-              repo_level: bool, dry_run: bool, agents: str | None, no_commit_trailers: bool = False) -> None:
+def setup_cmd(ctx: click.Context, as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path | None,
+              repo_level: bool, dry_run: bool, agents: str | None, no_commit_trailers: bool = False,
+              **everywhere) -> None:
     """Set up OpenShard for this repository: the one command a new user needs.
 
     Detects the environment, configures Claude Code capture for this
@@ -534,6 +538,8 @@ def setup_cmd(as_agent: bool, as_json: bool, assume_yes: bool, repo_path: Path |
     """
     from openshard.config import onboarding as ob
 
+    if everywhere.pop("everywhere", False):
+        return run_everywhere(ctx, conflicting=as_agent or as_json or repo_level, **everywhere)
     if repo_level:
         from openshard.adapters.repo_setup import run_cli
         raise SystemExit(run_cli(repo_path, agents, dry_run, click.echo))

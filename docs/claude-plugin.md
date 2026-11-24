@@ -17,6 +17,14 @@ nothing is recorded twice.
 
 ## Set it up
 
+One command does every step below and tells you what is left:
+
+```sh
+openshard setup --everywhere
+```
+
+Or by hand:
+
 1. On the Platform, create a connected-capture credential: **Settings -> Agents**.
    Save it to a file (not your shell history), for example `~/osc.txt`.
 2. Write your plugin:

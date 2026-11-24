@@ -27,6 +27,11 @@ All notable changes to OpenShard are documented here.
   `--token-file`, it sends Receipts to the Platform before the machine is
   deleted. It stands aside where `capture install claude --global` already
   runs. See docs/claude-plugin.md.
+- `openshard setup --everywhere`: one setup for every place you use Claude.
+  It turns on capture for every Claude Code session on this computer, links
+  it to the Platform if needed, and writes the Claude plugin for chats that
+  write code, asking for the connected-capture credential and naming the
+  Platform page that creates it. It ends with what is still yours to do.
 
 ### Changed
 

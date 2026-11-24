@@ -57,6 +57,8 @@ When the agent commits, Openshard re-runs your checks on that exact commit by it
 No account, no API key, nothing to configure. Receipts stay in your repo.
 Stuck? `openshard doctor` shows what's working, agent by agent.
 
+**Using Claude everywhere?** `openshard setup --everywhere` sets up every Claude Code session on this computer (any repository, terminal or desktop app), links it to the Platform, and writes a plugin for your Claude account so chats that write code on desktop, web or phone get Receipts too. See [docs/claude-plugin.md](docs/claude-plugin.md).
+
 ## What you get
 
 Here is a real receipt for a Claude Code change (trimmed to the key rows). First, what the agent claimed:
@@ -102,6 +104,7 @@ The gate uses the hosted dashboard, so it needs a Pro or Team plan. Setup takes 
 | Claude Code, Codex, Cursor, OpenCode | Set up automatically by `openshard setup` |
 | Google Antigravity, Grok Build | Their own hooks, set up by `openshard setup` (Grok Build asks you to trust the folder once) |
 | Hermes Agent | Shell hooks, after a one-time approval in Hermes |
+| Claude chats that write code (desktop, web, phone) | [The Openshard plugin](docs/claude-plugin.md) for your Claude account |
 | Cloud agents (Claude Code on the web, Codex cloud, CI) | [Remote capture](docs/remote-capture.md) |
 | GitHub | The Openshard GitHub App shows receipts on pull requests and runs the merge gate |
 
