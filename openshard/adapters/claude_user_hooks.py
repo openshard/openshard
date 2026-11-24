@@ -11,9 +11,10 @@ path as a repository hook: this module decides only *whether* a user-level
 event is delivered, never what is recorded. Before delivering, it requires:
 
 * a git repository: the session's project directory (else the payload's
-  ``cwd``) must be inside one. A session in a folder that is not a
-  repository, including a folder that holds several repositories, records
-  nothing, and no ``.openshard/`` directory is created there;
+  ``cwd``) must be inside one. A session started in a folder that is not a
+  repository (a home folder, a folder holding several repositories, a cloud
+  chat's scratch folder) is *followed* instead: see "Sessions that move"
+  below. No ``.openshard/`` directory is ever created outside a repository;
 * not the home directory: a home directory kept as a git repository is
   refused, exactly as the capture path itself refuses it;
 * no repository hooks: a repository with its own Openshard hooks
@@ -21,15 +22,40 @@ event is delivered, never what is recorded. Before delivering, it requires:
   ``.claude/settings.local.json`` from ``openshard setup``) captures through
   those, so the user-level hook stands aside and nothing is recorded twice.
 
+Sessions that move
+------------------
+A session started outside any repository may still work inside one: it edits
+``~/code/alpha/app.py``, or runs ``cd ~/code/alpha && pytest``. Each event's own
+evidence names where it worked: the file an edit tool wrote, the directory a
+shell command ``cd``-ed into (or ``git -C``), or the payload's ``cwd`` once
+that is inside a repository. The first such event *binds* the session to that
+repository; later events with no place of their own (a prompt, the end of a
+turn, the end of the session) go to every repository the session is bound to,
+so each gets its own Receipt. The session start and any prompts that came
+before the first binding are held (a few, briefly) and delivered to a
+repository when the session first binds to it, in their original order:
+they are the session's real events, delivered late, never invented.
+
+A file merely *read* never binds a session: reading a repository is not work
+in it. The binding lives in ``~/.openshard/sessions-followed/`` (``OPENSHARD_HOME``
+applies) and is deleted
+at ``SessionEnd``. A repository's own hooks never fired for such a session
+(Claude Code loads project hooks only from the folder the session started
+in), so here the user-level hook does not stand aside for them.
+
 Nothing here invents an event, a repository or an agent; a skipped event is
 simply not delivered.
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
+import re
 import shutil
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -233,6 +259,186 @@ def user_scope_skip_reason(raw: bytes, env: Mapping[str, str]) -> str | None:
         return f"could not check the project ({type(exc).__name__})"
 
 
+# --- sessions that move ---------------------------------------------------------
+
+FOLLOW_DIRNAME = "sessions-followed"
+_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+_SHELL_TOOLS = frozenset({"Bash", "PowerShell"})
+_HELD_EVENTS = frozenset({"SessionStart", "UserPromptSubmit"})
+_MAX_HELD = 8
+_MAX_REPOS = 10
+_STALE_SECONDS = 7 * 24 * 3600
+_ARG = r"""(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))"""
+_CD_RE = re.compile(r"^\s*(?:cd|pushd|Set-Location)\s+" + _ARG + r"\s*(?:&&|;|\||$)")
+_GIT_C_RE = re.compile(r"\bgit\s+-C\s+" + _ARG)
+
+
+def _follow_dir(env: Mapping[str, str]) -> Path:
+    from openshard.util.home import openshard_home
+
+    return Path(openshard_home(dict(env))) / FOLLOW_DIRNAME
+
+
+def _state_path(env: Mapping[str, str], session_id: str) -> Path:
+    return _follow_dir(env) / (hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32] + ".json")
+
+
+def _load_state(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"repos": [], "held": []}
+    repos = [r for r in data.get("repos") or [] if isinstance(r, str)][:_MAX_REPOS]
+    held = [h for h in data.get("held") or [] if isinstance(h, str)][:_MAX_HELD]
+    return {"repos": repos, "held": held}
+
+
+def _save_state(path: Path, state: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _sweep_stale(folder: Path) -> None:
+    """Delete bindings of sessions that never sent ``SessionEnd``. Best effort."""
+    try:
+        cutoff = time.time() - _STALE_SECONDS
+        for item in folder.glob("*.json"):
+            if item.stat().st_mtime < cutoff:
+                item.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _arg(match: re.Match[str]) -> str:
+    return next(g for g in match.groups() if g)
+
+
+def _work_places(data: Mapping[str, object]) -> list[Path]:
+    """Where this event did work, from the event's own evidence. Never raises."""
+    places: list[str] = []
+    raw_cwd = data.get("cwd")
+    cwd = raw_cwd.strip() if isinstance(raw_cwd, str) else ""
+    tool = data.get("tool_name")
+    raw_input = data.get("tool_input")
+    tool_input: Mapping[str, object] = raw_input if isinstance(raw_input, dict) else {}
+    if tool in _EDIT_TOOLS:
+        target = tool_input.get("file_path") or tool_input.get("notebook_path")
+        if isinstance(target, str) and target.strip():
+            places.append(target)
+    elif tool in _SHELL_TOOLS:
+        command = tool_input.get("command")
+        if isinstance(command, str):
+            first = _CD_RE.match(command)
+            if first:
+                places.append(_arg(first))
+            places += [_arg(m) for m in _GIT_C_RE.finditer(command)][:3]
+    if cwd:
+        places.append(cwd)
+    out: list[Path] = []
+    for raw in places:
+        try:
+            path = Path(raw).expanduser()
+            if not path.is_absolute():
+                if not cwd:
+                    continue
+                path = Path(cwd) / path
+            out.append(path if path.is_dir() else path.parent)
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return out
+
+
+def _work_repos(data: Mapping[str, object]) -> list[Path]:
+    """The capturable repositories this event worked in, first seen first. Never raises."""
+    from openshard.adapters.claude_hooks import _is_forbidden_capture_root
+    from openshard.adapters.claude_mcp_install import find_repo_root
+
+    repos: list[Path] = []
+    for place in _work_places(data):
+        try:
+            if not place.is_dir():
+                continue
+            root = find_repo_root(place)
+            if root is None or _is_forbidden_capture_root(root):
+                continue
+            root = root.resolve()
+            if root not in repos:
+                repos.append(root)
+        except (OSError, ValueError):
+            continue
+    return repos
+
+
+def follow_session(raw: bytes, env: Mapping[str, str]) -> tuple[list[tuple[Path, bytes]], str]:
+    """For a session started outside any repository: which ``(repository, event)`` pairs to deliver now.
+
+    Returns the deliveries and a short note for the hook's outcome label. Never raises.
+    """
+    from openshard.adapters.claude_hooks import parse_hook_payload
+
+    try:
+        data = parse_hook_payload(raw)
+        if data is None:
+            return [], "empty or malformed payload"
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return [], "not inside a git repository"
+        event = data.get("hook_event_name")
+        path = _state_path(env, session_id.strip())
+        state = _load_state(path)
+        deliveries: list[tuple[Path, bytes]] = []
+        here = _work_repos(data)
+        for repo in here:
+            if str(repo) in state["repos"] or len(state["repos"]) >= _MAX_REPOS:
+                continue
+            state["repos"].append(str(repo))
+            deliveries += [(repo, held.encode("utf-8")) for held in state["held"]]
+        targets = here or [Path(r) for r in state["repos"]]
+        if not targets:
+            if event in _HELD_EVENTS and len(state["held"]) < _MAX_HELD:
+                state["held"].append(raw.decode("utf-8", "replace"))
+                _save_state(path, state)
+                return [], "held until the session works in a repository"
+            if event == "SessionEnd":
+                path.unlink(missing_ok=True)
+            return [], "not inside a git repository"
+        deliveries += [(repo, raw) for repo in targets if str(repo) in state["repos"]]
+        if event == "SessionEnd":
+            path.unlink(missing_ok=True)
+            _sweep_stale(path.parent)
+        else:
+            if state["repos"]:
+                state["held"] = []
+            _save_state(path, state)
+        return deliveries, "followed"
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return [], f"could not follow the session ({type(exc).__name__})"
+
+
+def _session_started_in_a_repo(raw: bytes, env: Mapping[str, str]) -> bool:
+    """Whether the session's own project folder is a capturable repository (the original rule). Never raises."""
+    from openshard.adapters.claude_hooks import _is_forbidden_capture_root, parse_hook_payload
+    from openshard.adapters.claude_mcp_install import find_repo_root
+
+    try:
+        project = (env.get("CLAUDE_PROJECT_DIR") or "").strip()
+        if not project:
+            data = parse_hook_payload(raw) or {}
+            cwd = data.get("cwd")
+            project = cwd.strip() if isinstance(cwd, str) else ""
+        if not project or not Path(project).is_dir():
+            return False
+        root = find_repo_root(Path(project))
+        return root is not None and not _is_forbidden_capture_root(root)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def run_user_scope_hook(
     stream: object, *, env: Mapping[str, str] | None = None, event_override: str | None = None
 ) -> str:
@@ -241,15 +447,26 @@ def run_user_scope_hook(
 
     env = os.environ if env is None else env
     raw = _read_all(stream)
-    reason = user_scope_skip_reason(raw, env)
-    if reason is not None:
-        return f"skipped: {reason}"
-    return run_hook_via_service(io.BytesIO(raw), env=dict(env), event_override=event_override)
+    if _session_started_in_a_repo(raw, env):
+        reason = user_scope_skip_reason(raw, env)
+        if reason is not None:
+            return f"skipped: {reason}"
+        return run_hook_via_service(io.BytesIO(raw), env=dict(env), event_override=event_override)
+    deliveries, note = follow_session(raw, env)
+    if not deliveries:
+        return f"skipped: {note}"
+    outcomes = []
+    for repo, payload in deliveries:
+        # The repository this event belongs to, exactly as a hook started there would name it.
+        outcomes.append(run_hook_via_service(io.BytesIO(payload), env={**env, "CLAUDE_PROJECT_DIR": str(repo)},
+                                             event_override=event_override))
+    return f"followed: {', '.join(outcomes)}"
 
 
 __all__ = [
     "USER_HOOK_SPECS",
     "USER_SCOPE_ARGS",
+    "follow_session",
     "install_user_hooks",
     "is_user_hook",
     "project_has_openshard_hooks",

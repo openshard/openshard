@@ -10,8 +10,23 @@ All notable changes to OpenShard are documented here.
   every git repository at once, with no per-repository setup: it writes
   Openshard's hooks into Claude Code's user settings. Repositories with their
   own Openshard hooks keep using them, so nothing is recorded twice; a session
-  in a folder that is not a git repository records nothing. `capture
+  in a folder that is not a git repository is followed into the repositories it
+  edits (see below). `capture
   uninstall claude --global` removes only these hooks.
+- Capture follows a Claude Code session into the repositories it works in when
+  it started somewhere else (a folder holding several repositories, a home
+  folder, a cloud chat's scratch folder). The first file it edits in a
+  repository, or the first shell command that `cd`s or `git -C`s into one,
+  starts that repository's Receipt; the session start and earlier prompts are
+  held and delivered then, in order. A file only read starts nothing. Before,
+  such sessions recorded nothing.
+- `openshard plugin claude` writes a Claude plugin that brings capture to every
+  Claude session, including chats on desktop, web and phone, which run on a
+  fresh cloud machine each time. On a new machine it keeps the first events,
+  installs Openshard in the background and delivers them in order; built with
+  `--token-file`, it sends Receipts to the Platform before the machine is
+  deleted. It stands aside where `capture install claude --global` already
+  runs. See docs/claude-plugin.md.
 
 ### Changed
 

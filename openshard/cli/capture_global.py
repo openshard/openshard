@@ -29,7 +29,7 @@ def run(*, install: bool, as_json: bool) -> None:
         if install and result.status != "error":
             click.echo("  Every git repository Claude Code works in now gets Receipts, with no per-repository setup.")
             click.echo("  Repositories with their own Openshard hooks keep using them; nothing is recorded twice.")
-            click.echo("  A session started in a folder that is not a git repository records nothing.")
+            click.echo("  A session started outside a repository is followed into the repositories it edits.")
             click.echo("  Restart open Claude Code sessions to pick this up.")
             if not linked:
                 click.echo("  Receipts stay on this computer until you run `openshard login` (once, for every repository).")
