@@ -6,6 +6,11 @@ All notable changes to OpenShard are documented here.
 
 ### Added
 
+- `openshard setup --everywhere`: one setup for every place you use Claude.
+  It turns on capture for every Claude Code session on this computer, links
+  it to the Platform if needed, and writes the Claude plugin for chats that
+  write code, asking for the connected-capture credential and naming the
+  Platform page that creates it. It ends with what is still yours to do.
 - `openshard plugin claude` writes a Claude plugin that brings capture to every
   Claude session, including chats on desktop, web and phone, which run on a
   fresh cloud machine each time. On a new machine it keeps the first events,
